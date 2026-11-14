@@ -1,11 +1,9 @@
-use crate::{DisconnectMarker, DisconnectPhase, InMemoryUndoStore, StorageError, UndoStore};
+use super::*;
+use crate::InMemoryUndoStore;
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, LockTime, OutPoint,
     Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
-
-use super::*;
-use crate::utxo::stats::CoinStats;
 
 use crate::utxo::test_support::{TestError, TestResult};
 
@@ -109,44 +107,12 @@ impl SpentOutputLookup for NoSpend {
     }
 }
 
-fn connected() -> Result<(UtxoSet, CoinStatsListener, State, UndoBatch), UtxoError> {
-    let mut utxo = UtxoSet::new();
-    let coin_stats = CoinStatsListener::new(CoinStats::new());
-    utxo.track_coin_stats(coin_stats.clone());
-    let mut seed = BlockChanges::default();
-    seed.add(UtxoAdd::new(FUNDED, coin(900), false, 1));
-    commit_block_changes(&utxo, &seed, &Hash256::from_le_bytes(&[0x01; 32]))?;
-    coin_stats.finish_block(1, 1);
-    let before = observe(&utxo, &coin_stats)?;
-
-    let mut changes = BlockChanges::default();
-    changes.remove(FUNDED);
-    changes.add(UtxoAdd::new(CREATED, coin(850), false, HEIGHT));
-    commit_block_changes(&utxo, &changes, &HASH)?;
-    coin_stats.finish_block(HEIGHT, 2);
+fn sample_undo() -> UndoBatch {
     let mut undo = UndoBatch::empty();
     undo.restore(UtxoAdd::new(FUNDED, coin(900), false, 1));
     undo.remove(CREATED);
-    Ok((utxo, coin_stats, before, undo))
+    undo
 }
-
-type State = (Hash256, Hash256, [u64; 5]);
-
-fn observe(utxo: &UtxoSet, coin_stats: &CoinStatsListener) -> Result<State, UtxoError> {
-    let s = coin_stats.snapshot();
-    Ok((
-        utxo.lock_stable_view().hash_serialized_3()?,
-        s.muhash.finalize_hash(),
-        [
-            s.height.into(),
-            s.total_amount,
-            s.bogo_size,
-            s.tx_count,
-            s.utxo_count,
-        ],
-    ))
-}
-
 #[test]
 fn persisted_record_survives_reopening_the_store() -> TestResult {
     use std::sync::Arc;
@@ -154,7 +120,7 @@ fn persisted_record_survives_reopening_the_store() -> TestResult {
     use crate::{KvUndoStore, RocksDbStore};
 
     let dir = tempfile::tempdir()?;
-    let (.., undo) = connected()?;
+    let undo = sample_undo();
     persist_block_undo(
         &KvUndoStore::new(Arc::new(RocksDbStore::open(dir.path())?)),
         HEIGHT,
@@ -188,7 +154,7 @@ fn missing_and_foreign_records_are_refused() -> TestResult {
 
 #[test]
 fn persisted_record_bytes_decode_back_to_the_batch() -> TestResult {
-    let (.., undo) = connected()?;
+    let undo = sample_undo();
     let store = InMemoryUndoStore::default();
     let record = persist_block_undo(&store, HEIGHT, HASH, &undo)?;
     assert_eq!(decode_undo_record(record.as_bytes(), HASH)?, undo);
@@ -196,333 +162,78 @@ fn persisted_record_bytes_decode_back_to_the_batch() -> TestResult {
     Ok(())
 }
 
-// ARCH-07a
 #[test]
-fn rollback_restores_the_exact_prior_state() -> TestResult {
-    let (utxo, coin_stats, before, undo) = connected()?;
-    let store = InMemoryUndoStore::default();
+fn populate_block_changes_applies_adds_and_spends_to_coin_store() -> TestResult {
+    use crate::{CoinKey, CoinStore, MemoryKvStore};
+    use std::sync::Arc;
+    let store = Arc::new(MemoryKvStore::new());
+    let coin_store = CoinStore::open(store, 64 * 1024 * 1024);
 
-    let receipt = rollback_block(&store, &utxo, &coin_stats, HASH, HEIGHT, 1, 2, &undo)?;
+    let mut block1 = BlockChanges::default();
+    block1.add(UtxoAdd::new(FUNDED, coin(900), false, 1));
+    let untouched = OutPoint::new(FUNDED.txid, 3);
+    block1.add(UtxoAdd::new(untouched, coin(125), true, 2));
+    let spent = OutPoint::new(FUNDED.txid, 1);
+    block1.add(UtxoAdd::new(spent, coin(200), false, 2));
+    populate_block_changes(&coin_store, &block1)?;
 
-    assert!(utxo.get_entry(&CREATED).is_none());
-    assert_eq!(
-        utxo.get_entry(&FUNDED).map(|e| (e.txout, e.height)),
-        Some((coin(900), 1))
-    );
-    assert_eq!(observe(&utxo, &coin_stats)?, before);
-    assert_eq!(receipt.restored_parents, vec![FUNDED.txid]);
-    let marker = store
-        .load_disconnect_marker()?
-        .ok_or(TestError::Missing("marker missing"))?;
-    assert_eq!(
-        (marker.phase, marker.height, marker.hash),
-        (DisconnectPhase::RolledBack, HEIGHT, HASH)
-    );
-    Ok(())
-}
+    let key_funded = CoinKey(FUNDED.txid.0.to_le_bytes());
+    let coin1 = coin_store
+        .get(&key_funded)?
+        .ok_or(TestError::Missing("funded exists"))?;
+    let record1 = crate::utxo::record::UtxoRecord::from_encoded(coin1.to_vec().into_boxed_slice())?;
+    assert_eq!(record1.find_output(FUNDED.vout).map(|o| o.value), Some(900));
 
-#[test]
-fn in_flight_marker_refuses_before_arming() -> TestResult {
-    let (utxo, coin_stats, _, undo) = connected()?;
-    let connected_state = observe(&utxo, &coin_stats)?;
-    let store = InMemoryUndoStore::default();
-    let torn = Hash256::from_le_bytes(&[0x77; 32]);
-    store.arm_disconnect(HEIGHT - 1, torn)?;
-
-    let outcome = rollback_block(&store, &utxo, &coin_stats, HASH, HEIGHT, 1, 2, &undo);
-
-    assert!(
-        matches!(outcome, Err(RollbackError::Refused(_))),
-        "{outcome:?}"
-    );
-    assert_eq!(observe(&utxo, &coin_stats)?, connected_state);
-    let marker = store
-        .load_disconnect_marker()?
-        .ok_or(TestError::Missing("marker missing"))?;
-    assert_eq!(
-        (marker.phase, marker.height, marker.hash),
-        (DisconnectPhase::InFlight, HEIGHT - 1, torn)
-    );
-    Ok(())
-}
-
-#[test]
-fn recovery_rewind_preserves_the_surviving_marker() -> TestResult {
-    let (utxo, coin_stats, before, undo) = connected()?;
-    let store = InMemoryUndoStore::default();
-    let torn = Hash256::from_le_bytes(&[0x77; 32]);
-    store.arm_disconnect(HEIGHT - 1, torn)?;
-
-    rollback_block_recovery(&utxo, &coin_stats, HEIGHT, 1, 2, &undo)?;
-
-    assert_eq!(observe(&utxo, &coin_stats)?, before);
-    let marker = store
-        .load_disconnect_marker()?
-        .ok_or(TestError::Missing("marker missing"))?;
-    assert_eq!(
-        (marker.phase, marker.height, marker.hash),
-        (DisconnectPhase::InFlight, HEIGHT - 1, torn)
-    );
-    Ok(())
-}
-
-#[test]
-fn rolled_back_marker_carries_into_the_next_disconnect() -> TestResult {
-    let (utxo, coin_stats, before, undo) = connected()?;
-    let store = InMemoryUndoStore::default();
-    let prior = Hash256::from_le_bytes(&[0x66; 32]);
-    store.arm_disconnect(HEIGHT - 1, prior)?;
-    store.complete_disconnect(HEIGHT - 1, prior)?;
-
-    let receipt = rollback_block(&store, &utxo, &coin_stats, HASH, HEIGHT, 1, 2, &undo)?;
-
-    assert_eq!(observe(&utxo, &coin_stats)?, before);
-    assert_eq!(receipt.restored_parents, vec![FUNDED.txid]);
-    let marker = store
-        .load_disconnect_marker()?
-        .ok_or(TestError::Missing("marker missing"))?;
-    assert_eq!(
-        (marker.phase, marker.height, marker.hash),
-        (DisconnectPhase::RolledBack, HEIGHT, HASH)
-    );
-    Ok(())
-}
-
-#[derive(Default)]
-struct MarkerFails {
-    inner: InMemoryUndoStore,
-    at: Option<DisconnectPhase>,
-}
-
-impl UndoStore for MarkerFails {
-    fn persist_undo(&self, h: u32, hash: Hash256, r: &[u8]) -> Result<(), StorageError> {
-        self.inner.persist_undo(h, hash, r)
-    }
-    fn load_undo(&self, h: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
-        self.inner.load_undo(h, hash)
-    }
-    fn arm_disconnect(&self, h: u32, hash: Hash256) -> Result<(), StorageError> {
-        if self.at == Some(DisconnectPhase::InFlight) {
-            return Err(StorageError::Backend("injected".into()));
-        }
-        self.inner.arm_disconnect(h, hash)
-    }
-    fn complete_disconnect(&self, h: u32, hash: Hash256) -> Result<(), StorageError> {
-        if self.at == Some(DisconnectPhase::RolledBack) {
-            return Err(StorageError::Backend("injected".into()));
-        }
-        self.inner.complete_disconnect(h, hash)
-    }
-    fn disarm_disconnect(&self) -> Result<(), StorageError> {
-        self.inner.disarm_disconnect()
-    }
-    fn retire_disconnect_marker(&self) -> Result<(), StorageError> {
-        self.inner.retire_disconnect_marker()
-    }
-    fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError> {
-        self.inner.load_disconnect_marker()
-    }
-}
-
-#[test]
-fn arm_failure_refuses_before_any_mutation() -> TestResult {
-    let (utxo, coin_stats, _, undo) = connected()?;
-    let connected_state = observe(&utxo, &coin_stats)?;
-    let store = MarkerFails {
-        at: Some(DisconnectPhase::InFlight),
-        ..MarkerFails::default()
-    };
-    let outcome = rollback_block(&store, &utxo, &coin_stats, HASH, HEIGHT, 1, 2, &undo);
-    assert!(
-        matches!(outcome, Err(RollbackError::Refused(_))),
-        "{outcome:?}"
-    );
-    assert_eq!(observe(&utxo, &coin_stats)?, connected_state);
-    assert_eq!(store.load_disconnect_marker()?, None);
-    Ok(())
-}
-
-#[test]
-fn completion_failure_is_fatal_and_leaves_the_marker_in_flight() -> TestResult {
-    let (utxo, coin_stats, _, undo) = connected()?;
-    let store = MarkerFails {
-        at: Some(DisconnectPhase::RolledBack),
-        ..MarkerFails::default()
-    };
-    let outcome = rollback_block(&store, &utxo, &coin_stats, HASH, HEIGHT, 1, 2, &undo);
-    assert!(
-        matches!(outcome, Err(RollbackError::Marker(_))),
-        "{outcome:?}"
-    );
-    let marker = store
-        .load_disconnect_marker()?
-        .ok_or(TestError::Missing("marker missing"))?;
-    assert_eq!(marker.phase, DisconnectPhase::InFlight);
-    Ok(())
-}
-
-#[test]
-fn coinstats_refusal_precedes_the_undo() -> TestResult {
-    let (utxo, coin_stats, _, undo) = connected()?;
-    let connected_state = observe(&utxo, &coin_stats)?;
-    let store = InMemoryUndoStore::default();
-    let outcome = rollback_block(&store, &utxo, &coin_stats, HASH, HEIGHT + 1, 1, 2, &undo);
-    assert!(
-        matches!(outcome, Err(RollbackError::CoinStats(_))),
-        "{outcome:?}"
-    );
-    assert_eq!(observe(&utxo, &coin_stats)?, connected_state);
-    Ok(())
-}
-
-fn undo_txid(seed: u64) -> Hash256 {
-    let mut bytes = [0_u8; 32];
-    bytes[..8].copy_from_slice(&seed.to_le_bytes());
-    bytes[8..16].copy_from_slice(&seed.rotate_left(9).to_le_bytes());
-    bytes[16..24].copy_from_slice(&seed.wrapping_mul(0xd6e8_feb8_6659_fd93).to_le_bytes());
-    bytes[24..32].copy_from_slice(&seed.wrapping_add(0xfeed_face_cafe_beef).to_le_bytes());
-    Hash256::from_le_bytes(&bytes)
-}
-
-fn undo_txout(seed: u64) -> TxOut {
-    let mut script = Vec::with_capacity(10);
-    script.extend_from_slice(&[0x00, 0x08]);
-    script.extend_from_slice(&seed.to_le_bytes());
-    TxOut {
-        value: Amount::from_sat(50_000 + seed),
-        script_pubkey: script.into(),
-    }
-}
-
-fn build_undo_blocks() -> Result<Vec<(BlockChanges, UndoBatch)>, TestError> {
-    let mut live: Vec<UtxoAdd> = Vec::new();
-    let mut blocks = Vec::with_capacity(10);
-
-    for height in 1_u32..=10 {
-        let mut changes = BlockChanges::default();
-        let mut undo = UndoBatch::empty();
-
-        let remove_count = live.len().min(50);
-        for _ in 0..remove_count {
-            let add = live.remove(0);
-            changes.remove(add.outpoint);
-            undo.restore(add);
-        }
-
-        for n in 0_u64..100 {
-            let seed = u64::from(height) * 1_000 + n;
-            let outpoint = OutPoint::new(undo_txid(seed).into(), u32::try_from(n % 3)?);
-            let txout = undo_txout(seed);
-            let add = UtxoAdd::new(outpoint, txout, height == 1, height);
-            live.push(add.clone());
-            changes.add(add);
-            undo.remove(outpoint);
-        }
-
-        blocks.push((changes, undo));
-    }
-
-    Ok(blocks)
-}
-
-#[test]
-fn undoing_last_five_blocks_matches_first_five_only_state() -> TestResult {
-    let blocks = build_undo_blocks()?;
-    let full = UtxoSet::new();
-
-    for (height, (changes, _undo)) in (1_u64..=10).zip(&blocks) {
-        commit_block_changes(&full, changes, &undo_txid(height))?;
-    }
-    for (_changes, undo) in blocks.iter().rev().take(5) {
-        full.undo_block(undo)?;
-    }
-
-    let first_five = UtxoSet::new();
-    for (height, (changes, _undo)) in (1_u64..=5).zip(&blocks) {
-        commit_block_changes(&first_five, changes, &undo_txid(height))?;
-    }
-
-    assert_eq!(
-        full.lock_stable_view().hash_serialized_3()?,
-        first_five.lock_stable_view().hash_serialized_3()?
-    );
-    assert_eq!(full.len(), first_five.len());
-
-    Ok(())
-}
-
-fn listener_set() -> (UtxoSet, CoinStatsListener) {
-    let listener = CoinStatsListener::new(CoinStats::new());
-    let mut set = UtxoSet::new();
-    set.track_coin_stats(listener.clone());
-    (set, listener)
-}
-
-fn first_undo_test_block(
-    coinbase_outpoint: OutPoint,
-    coinbase_txout: TxOut,
-    kept_outpoint: OutPoint,
-    kept_txout: TxOut,
-) -> BlockChanges {
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(coinbase_outpoint, coinbase_txout, true, 1));
-    changes.add(UtxoAdd::new(kept_outpoint, kept_txout, false, 1));
-    changes
-}
-
-#[test]
-fn listener_undo_restores_muhash_and_accounting() -> TestResult {
-    let (full, full_listener) = listener_set();
-    let coinbase_outpoint = OutPoint::new(undo_txid(40).into(), 0);
-    let coinbase_txout = undo_txout(40);
-    let kept_outpoint = OutPoint::new(undo_txid(41).into(), 0);
-    let kept_txout = undo_txout(41);
-    let replacement_outpoint = OutPoint::new(undo_txid(42).into(), 0);
-    let replacement_txout = undo_txout(42);
-
-    let first = first_undo_test_block(
-        coinbase_outpoint,
-        coinbase_txout.clone(),
-        kept_outpoint,
-        kept_txout.clone(),
-    );
-    commit_block_changes(&full, &first, &undo_txid(140))?;
-
-    let mut second = BlockChanges::default();
-    second.remove(coinbase_outpoint);
-    second.add(UtxoAdd::new(
-        replacement_outpoint,
-        replacement_txout,
-        false,
-        2,
-    ));
-    let mut undo = UndoBatch::empty();
-    undo.restore(UtxoAdd::new(
-        coinbase_outpoint,
-        coinbase_txout.clone(),
+    let mut block2 = BlockChanges::default();
+    block2.remove(FUNDED);
+    block2.remove(spent);
+    block2.add(UtxoAdd::new(FUNDED, coin(700), false, 3));
+    block2.add(UtxoAdd::new(
+        FUNDED,
+        TxOut {
+            value: Amount::from_sat(650),
+            script_pubkey: Script::from_bytes(vec![0x52, 0x53]),
+        },
         true,
-        1,
+        4,
     ));
-    undo.remove(replacement_outpoint);
+    block2.add(UtxoAdd::new(CREATED, coin(850), false, HEIGHT));
+    populate_block_changes(&coin_store, &block2)?;
 
-    commit_block_changes(&full, &second, &undo_txid(141))?;
-    full.undo_block(&undo)?;
-
-    let (first_only, first_only_listener) = listener_set();
-    commit_block_changes(&first_only, &first, &undo_txid(140))?;
-
-    assert_eq!(full.get(&coinbase_outpoint), Some(coinbase_txout));
-    assert_eq!(full.get(&kept_outpoint), Some(kept_txout));
-    assert_eq!(full.get(&replacement_outpoint), None);
-    assert_eq!(full.len(), first_only.len());
+    let funded = coin_store.get(&key_funded)?.ok_or(TestError::Missing(
+        "replacement and untouched outputs exist",
+    ))?;
+    let funded_record =
+        crate::utxo::record::UtxoRecord::from_encoded(funded.to_vec().into_boxed_slice())?;
+    let funded_outputs: Vec<_> = funded_record
+        .outputs()
+        .map(|out| {
+            (
+                out.vout,
+                out.value,
+                out.script_pubkey.to_vec(),
+                out.coinbase,
+                out.height,
+            )
+        })
+        .collect();
     assert_eq!(
-        observe(&full, &full_listener)?,
-        observe(&first_only, &first_only_listener)?
+        funded_outputs,
+        vec![
+            (0, 650, vec![0x52, 0x53], true, 4),
+            (3, 125, vec![0x51], true, 2),
+        ]
     );
+    let key_created = CoinKey(CREATED.txid.0.to_le_bytes());
+    let coin2 = coin_store
+        .get(&key_created)?
+        .ok_or(TestError::Missing("created exists"))?;
+    let record2 = crate::utxo::record::UtxoRecord::from_encoded(coin2.to_vec().into_boxed_slice())?;
     assert_eq!(
-        full_listener.snapshot().muhash.finalize(),
-        first_only_listener.snapshot().muhash.finalize()
+        record2.find_output(CREATED.vout).map(|o| o.value),
+        Some(850)
     );
+
     Ok(())
 }
 
@@ -565,7 +276,6 @@ fn a_short_txid_list_is_refused_at_every_height() {
                 same_block_spent: None,
                 add_capacity: 4,
                 remove_capacity: 4,
-                overwritten: None,
                 max_script_size: 64,
             },
             &NoSpend,
@@ -736,5 +446,41 @@ fn every_undo_truncation_and_flip_is_refused_or_canonical() -> TestResult {
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn coin_stats_feed_tracks_utxo_accounting_through_populate() -> TestResult {
+    use crate::utxo::stats::{CoinStats, CoinStatsListener};
+    use crate::{CoinStore, MemoryKvStore};
+    use std::sync::Arc;
+    let store = Arc::new(MemoryKvStore::new());
+    let coin_store = CoinStore::open(store, 64 * 1024 * 1024);
+    let listener = CoinStatsListener::new(CoinStats::new());
+    coin_store.track_coin_stats(listener.clone());
+
+    let mut block1 = BlockChanges::default();
+    block1.add(UtxoAdd::new(FUNDED, coin(900), false, 1));
+    block1.add(UtxoAdd::new(CREATED, coin(700), true, 1));
+    populate_block_changes(&coin_store, &block1)?;
+    listener.finish_block(1, 2);
+
+    let mut expected = CoinStats::new();
+    expected.insert_utxo(&FUNDED, &coin(900), 1, false);
+    expected.insert_utxo(&CREATED, &coin(700), 1, true);
+    expected.finish_block(1, 2);
+    assert_eq!(listener.snapshot(), expected);
+
+    let mut block2 = BlockChanges::default();
+    block2.remove(CREATED);
+    block2.add(UtxoAdd::new(FUNDED, coin(800), false, 2));
+    populate_block_changes(&coin_store, &block2)?;
+    listener.finish_block(2, 1);
+
+    expected.remove_utxo(&CREATED, &coin(700), 1, true);
+    expected.remove_utxo(&FUNDED, &coin(900), 1, false);
+    expected.insert_utxo(&FUNDED, &coin(800), 2, false);
+    expected.finish_block(2, 1);
+    assert_eq!(listener.snapshot(), expected);
     Ok(())
 }

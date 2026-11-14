@@ -68,7 +68,6 @@ fn settle_window_failure(
     error
 }
 
-#[expect(clippy::result_large_err)]
 fn settle_window_success(
     transition: bitcoin_rs_execution::ChainTransition<'_>,
     mempool_change: Option<bitcoin_rs_mempool::ChainChangeGuard>,
@@ -91,7 +90,7 @@ fn settle_window_success(
             Err(bitcoin_rs_execution::WindowApplyError {
                 applied,
                 committed,
-                source: finish_source,
+                source: Box::new(finish_source),
                 disposition: bitcoin_rs_execution::WindowApplyDisposition::Fatal,
                 invalidated: Box::default(),
             })
@@ -254,7 +253,7 @@ impl SyncChain for NodeSyncChain {
             applied: error.applied,
             disposition: error.disposition,
             invalidated: error.invalidated,
-            source: error.source.into(),
+            source: (*error.source).into(),
         })
     }
 

@@ -410,6 +410,9 @@ impl MdbxStore {
             }
             Ok(())
         })?;
+        let directory = cap_std::fs::Dir::open_ambient_dir(dir, cap_std::ambient_authority())
+            .map_err(StorageError::Io)?;
+        crate::checkpoint::fs::sync_dir(&directory).map_err(StorageError::Io)?;
         Ok(())
     }
 

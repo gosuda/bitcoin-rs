@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 
 use super::{ApplyError, AssumeValidGate, Chainstate, WindowApplyDisposition, WindowApplyError};
 use crate::test_fixtures::{
-    StagedFire, TestError, TestResult, handles, seed_genesis, staging_recorder,
+    StagedFire, TestError, TestResult, handles, seed_durable_head, seed_genesis, staging_recorder,
 };
 
 fn empty_child(prev_blockhash: BlockHash, height: u32) -> TestResult<Block> {
@@ -113,11 +113,11 @@ fn a_64_byte_transaction_in_a_coinbase_less_body_leaves_its_header_valid() -> Te
     let (error, before, after, applied) = deliver_coinbase_less_body(4)?;
     assert!(
         matches!(
-            error.source,
+            *error.source,
             ApplyError::Consensus(ConsensusError::SixtyFourByteMutation)
         ),
         "got {:?}",
-        error.source
+        *error.source
     );
     assert_eq!(error.disposition, WindowApplyDisposition::BodyMutated);
     assert!(
@@ -147,11 +147,11 @@ fn a_coinbase_less_body_of_another_size_still_poisons_its_header() -> TestResult
     let (error, _, status, _) = deliver_coinbase_less_body(0)?;
     assert!(
         matches!(
-            error.source,
+            *error.source,
             ApplyError::Consensus(ConsensusError::MissingCoinbase)
         ),
         "got {:?}",
-        error.source
+        *error.source
     );
     assert_eq!(error.disposition, WindowApplyDisposition::Permanent);
     assert_eq!(error.invalidated.len(), 1);
@@ -205,9 +205,9 @@ fn a_failing_window_stages_only_its_last_successful_block() -> TestResult {
     let genesis_hash = Hash256::from(genesis.block_hash());
     let chainstate: Chainstate = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     seed_genesis(&chainstate)?;
-    chainstate.durable_head.commit(
-        None,
-        &bitcoin_rs_storage::DurableHead {
+    seed_durable_head(
+        &chainstate,
+        bitcoin_rs_storage::DurableHead {
             assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: 1,
             height: 0,
@@ -216,7 +216,6 @@ fn a_failing_window_stages_only_its_last_successful_block() -> TestResult {
             body_extent: None,
             undo_extent: None,
         },
-        &bitcoin_rs_storage::CommitRecords::default(),
     )?;
 
     let first = mined_child(genesis.block_hash(), 1)?;
@@ -252,11 +251,11 @@ fn a_failing_window_stages_only_its_last_successful_block() -> TestResult {
         ))?;
     assert!(
         matches!(
-            error.source,
+            *error.source,
             ApplyError::Consensus(ConsensusError::BlockBaseSize { .. })
         ),
         "got {:?}",
-        error.source
+        *error.source
     );
     assert_eq!(error.disposition, WindowApplyDisposition::Permanent);
     assert_eq!(error.applied, 2, "two blocks committed before the failure");

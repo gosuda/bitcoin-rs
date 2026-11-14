@@ -176,7 +176,7 @@ fn publication_selects_applied_ancestry_and_forgets_competing_fork() -> TestResu
 }
 
 #[test]
-fn unsupported_utxo_codec_requires_explicit_resync() -> TestResult {
+fn utxo_payload_generation_is_refused_and_names_the_converter() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
@@ -189,43 +189,27 @@ fn unsupported_utxo_codec_requires_explicit_resync() -> TestResult {
         Some(&applied_tip),
     )?;
     mutate_authenticated_manifest(dir.path(), |manifest| {
-        manifest.utxo.codec = "unsupported-codec".to_owned();
+        manifest.utxo = Some(bitcoin_rs_storage::checkpoint::UtxoArtifactV1 {
+            file: "utxo-snapshot.dat".to_owned(),
+            codec: bitcoin_rs_storage::checkpoint::UTXO_CODEC.to_owned(),
+            version: bitcoin_rs_storage::checkpoint::UTXO_VERSION,
+            bytes: 0,
+            sha256: "00".repeat(32),
+            record_count: 0,
+            output_count: 0,
+            muhash_trailer_sha256: "00".repeat(32),
+        });
     })?;
 
     let Err(error) = load_checkpoint(dir.path(), config()) else {
         return Err(TestError::UnexpectedSuccess(
-            "unsupported UTXO codec unexpectedly loaded",
+            "a generation carrying a utxo payload unexpectedly loaded",
         ));
     };
     assert!(
-        matches!(error, CheckpointLoadError::Corrupt(_)),
-        "unexpected checkpoint load error: {error}"
+        error.to_string().contains("bitcoin-rs-storage-convert"),
+        "the refusal must name the converter, got: {error}"
     );
-    Ok(())
-}
-
-#[test]
-fn unsupported_utxo_snapshot_version_requires_explicit_resync() -> TestResult {
-    let dir = tempfile::tempdir()?;
-    let (tree, _, applied) = chain_with_applied_height(1, 0)?;
-    let applied_tip = tip_snapshot(&tree, applied)?;
-    super::super::write_checkpoint(
-        dir.path(),
-        config(),
-        &RwLock::new(tree),
-        &UtxoSet::new(),
-        &CoinStatsListener::new(CoinStats::new()),
-        Some(&applied_tip),
-    )?;
-    mutate_authenticated_manifest(dir.path(), |manifest| {
-        manifest.utxo.version = 3;
-    })?;
-
-    let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
-        return Err(TestError::UnexpectedSuccess(
-            "unsupported UTXO snapshot unexpectedly loaded",
-        ));
-    };
     Ok(())
 }
 
@@ -252,12 +236,12 @@ fn semantic_utxo_trailing_byte_with_rebound_hashes_requires_resync() -> TestResu
     let generation = root.join(&current.directory);
     let manifest_path = generation.join(MANIFEST_FILE);
     let mut manifest: CheckpointManifestV1 = sonic_rs::from_slice(&fs::read(&manifest_path)?)?;
-    let utxo_path = generation.join(UTXO_FILE);
-    let mut utxo_bytes = fs::read(&utxo_path)?;
-    utxo_bytes.push(0x5a);
-    fs::write(&utxo_path, &utxo_bytes)?;
-    manifest.utxo.bytes = u64::try_from(utxo_bytes.len())?;
-    manifest.utxo.sha256 = super::super::hex_encode(&Sha256::digest(&utxo_bytes));
+    let headers_path = generation.join(HEADERS_FILE);
+    let mut headers_bytes = fs::read(&headers_path)?;
+    headers_bytes.push(0x5a);
+    fs::write(&headers_path, &headers_bytes)?;
+    manifest.headers.bytes = u64::try_from(headers_bytes.len())?;
+    manifest.headers.sha256 = super::super::hex_encode(&Sha256::digest(&headers_bytes));
     let manifest_bytes = sonic_rs::to_vec(&manifest)?;
     fs::write(&manifest_path, &manifest_bytes)?;
     current.manifest_sha256 = super::super::hex_encode(&Sha256::digest(&manifest_bytes));

@@ -37,6 +37,16 @@ fn operational_failures_are_not_block_rejections() {
                 head: Hash256::default(),
                 prev: Hash256::from_le_bytes(&[1; 32]),
             },
+            ApplyError::WindowWorkspaceIncomplete {
+                staged: 2,
+                covered: 1,
+            },
+            ApplyError::RecoveryCoinStats(Box::new(
+                bitcoin_rs_execution::recovery::RecoveryError::Storage(
+                    StorageError::InvalidOperation("recovery coin statistics read failed"),
+                ),
+            )),
+            ApplyError::CoinStoreRead(StorageError::InvalidOperation("coin read failed")),
             ApplyError::Consensus(ConsensusError::Kernel("verifier unavailable".to_owned())),
             ApplyError::Consensus(ConsensusError::PrevoutMatrixSize {
                 expected: 1,
@@ -68,19 +78,6 @@ fn rejected(error: ApplyError) -> CompactString {
     }
 }
 
-#[test]
-fn journal_backpressure_is_operational() {
-    assert!(matches!(
-        map_apply_error(ApplyError::JournalBackpressure(Box::new(
-            bitcoin_rs_storage::chainstate_journal::JournalWriterError::RetentionLimit {
-                bytes: 1,
-                limit: 1,
-            }
-        ))),
-        Ok(BlockValidationResult::Inconclusive)
-    ));
-}
-
 // API-30
 #[test]
 fn generateblock_validity_wraps_bip22_reason() {
@@ -103,15 +100,6 @@ fn generateblock_validity_wraps_bip22_reason() {
 fn generateblock_validity_keeps_shutdown_operational() {
     assert!(matches!(
         test_block_validity_error(&ApplyError::Shutdown),
-        MiningControlError::Unavailable(_)
-    ));
-    assert!(matches!(
-        test_block_validity_error(&ApplyError::JournalBackpressure(Box::new(
-            bitcoin_rs_storage::chainstate_journal::JournalWriterError::RetentionLimit {
-                bytes: 1,
-                limit: 1,
-            }
-        ))),
         MiningControlError::Unavailable(_)
     ));
 }

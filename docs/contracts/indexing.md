@@ -220,7 +220,7 @@ Owners:
 - `IndexRowCounts.funding` counts distinct occurrence rows, not occurrences.
 - Pinned tests in `crates/projection/tests/index_roundtrip.rs` and `crates/projection/tests/script_history_occurrences.rs` own these cardinalities.
 - `NodeState::open` restores the authenticated checkpoint.
-- When enabled, it replays the committed suffix of the journal (`docs/contracts/recovery.md`).
+- It then replays the certified committed suffix from canonical block files and undo records (`docs/contracts/recovery.md`).
 - This replay finishes before `NodeState::start_index_workers()` spawns worker threads in `crates/node/src/run.rs`.
 - Index workers therefore reconcile against a restored active chainstate.
 

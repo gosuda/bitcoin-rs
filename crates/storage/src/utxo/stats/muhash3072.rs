@@ -214,11 +214,6 @@ impl MuHash3072 {
         self.numerator.multiply(&other.numerator);
     }
 
-    #[inline(always)]
-    pub(crate) fn combine_denominator(&mut self, other: &Self) {
-        self.denominator.multiply(&other.denominator);
-    }
-
     /// Finalizes to the 3072-bit group element, serialized big-endian.
     #[must_use]
     pub fn finalize(&self) -> [u8; BYTE_LEN] {

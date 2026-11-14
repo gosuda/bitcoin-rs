@@ -21,7 +21,6 @@ use bitcoin_rs_execution::events::{
 };
 use bitcoin_rs_execution::recovery::{
     InitialChainstate, RecoveryError, ResumeSource, STALE_RESTORE_ERROR_THRESHOLD,
-    open_journal_dir, prepare_initial_chainstate,
 };
 use bitcoin_rs_execution::verify::{
     CheckLevel, STARTUP_VERIFY_DEPTH, VerifyError, VerifyOutcome, VerifyRequest,
@@ -60,8 +59,6 @@ pub enum NodeOpenError {
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
     CheckpointSetup(#[from] bitcoin_rs_execution::CheckpointSetupError),
-    #[error(transparent)]
-    JournalWriter(#[from] bitcoin_rs_storage::chainstate_journal::JournalWriterError),
     #[cfg(feature = "zmq")]
     #[error(transparent)]
     ZmqBind(#[from] bitcoin_rs_serving::zmq::ZmqBindError),
@@ -221,8 +218,9 @@ impl NodeState {
         };
         let chainstate_cache_bytes = cache_shares[0].bytes;
         let txindex_cache_bytes = cache_shares[1].bytes;
-        let (storage, block_files) =
-            NodeStorage::open(&config, chainstate_cache_bytes, &data_dir_guard)?;
+        let cache_allocation =
+            bitcoin_rs_storage::split_chainstate_cache_budget(chainstate_cache_bytes);
+        let (storage, block_files) = NodeStorage::open(&config, cache_allocation, &data_dir_guard)?;
         let undo_store = storage.undo_store();
         let durable_head = storage.durable_head();
 
@@ -240,16 +238,8 @@ impl NodeState {
             let _ = &zmq_endpoints;
             Arc::new(crate::NoOpZmqPublisher)
         };
-        let InitialChainstate {
-            utxo: mut utxo_set,
-            coin_stats: initial_coin_stats,
-            tree: block_tree_value,
-            applied_tip: restored_applied_tip,
-            resume_source,
-            journal_bootstrap,
-            script_live_seed,
-        } = {
-            let head = durable_head.load()?;
+        let head = durable_head.load()?;
+        let bitcoin_rs_execution::recovery::RestoredState { initial, engine } = {
             bitcoin_rs_execution::recovery::require_full_script_attestation(
                 &config.data_dir,
                 config.validation.mode,
@@ -259,13 +249,31 @@ impl NodeState {
                     .stored_prune_height()
                     .is_some_and(|height| height > 0),
             )?;
-            prepare_initial_chainstate(
+            bitcoin_rs_execution::recovery::prepare_initial_state_with_engine(
                 &config.data_dir,
                 config.network,
-                config.chainstate_journal,
                 head.as_ref(),
             )?
         };
+        let InitialChainstate {
+            utxo: mut utxo_set,
+            coin_stats: initial_coin_stats,
+            tree: mut block_tree_value,
+            applied_tip: restored_applied_tip,
+            resume_source,
+            script_live_seed,
+        } = initial;
+        if block_tree_value.is_empty() {
+            let genesis = config.network.genesis_block();
+            block_tree_value
+                .insert_header(
+                    genesis.header,
+                    bitcoin_rs_execution::chain::NodeStatus::HeaderValid,
+                )
+                .map_err(|error| {
+                    NodeOpenError::Apply(Box::new(bitcoin_rs_execution::ApplyError::Chain(error)))
+                })?;
+        }
         if resume_source == ResumeSource::Checkpoint {
             tracing::info!(
                 height = restored_applied_tip.as_ref().map_or(0, |tip| tip.height),
@@ -301,7 +309,6 @@ impl NodeState {
                     ResumeSource::Snapshot => "snapshot",
                     ResumeSource::Cold => "cold",
                     ResumeSource::Checkpoint => "checkpoint",
-                    ResumeSource::Journal => "journal",
                 };
                 recovery_reporter
                     .0
@@ -326,7 +333,7 @@ impl NodeState {
                         gap,
                         threshold = STALE_RESTORE_ERROR_THRESHOLD,
                         "stale checkpoint restore: chainstate is {gap} blocks behind \
-                         the last durable applied-tip witness — no committed journal \
+                         the last durable applied-tip witness — no committed block \
                          suffix covers the gap, so the node is proceeding with a valid \
                          but far-behind tip and the sync layer must re-fetch it"
                     );
@@ -344,14 +351,9 @@ impl NodeState {
         let coin_stats_listener =
             bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(initial_coin_stats);
         utxo_set.track_coin_stats(coin_stats_listener.clone());
-        let journal = match journal_bootstrap {
-            Some(bootstrap) => Some(
-                storage
-                    .deferred
-                    .journal_writer(open_journal_dir(&config.data_dir)?, bootstrap)?,
-            ),
-            None => None,
-        };
+        storage
+            .coins()
+            .track_coin_stats(coin_stats_listener.clone());
         let utxo = Arc::new(utxo_set);
         let coin_stats = Arc::new(coin_stats_listener);
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
@@ -372,12 +374,13 @@ impl NodeState {
             block_body_store: Some(Arc::clone(&block_body_store)),
             undo_store,
             durable_head,
+            coins: storage.coins(),
+            commit_authority: storage.commit_authority(),
             chain_transition: transition.authority(),
             assume_valid_height: config.validation.assume_valid_height,
             validation_mode: config.validation.mode,
             validation_engine: config.validation.engine,
             script_cache: script_cache.clone(),
-            journal,
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: storage.mandatory_retention(),
@@ -409,7 +412,10 @@ impl NodeState {
         }
         let derived_index_parts = match derived_index_open_spec {
             Some(mut spec) => {
-                spec.utxo = Some(bitcoin_rs_storage::utxo::UtxoReader::new(Arc::clone(&utxo)));
+                spec.utxo = Some(bitcoin_rs_storage::utxo::UtxoReader::with_coin_store(
+                    Arc::clone(&utxo),
+                    storage.coins(),
+                ));
                 spec.chain_transition = Some(transition.stable_read());
                 let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                 let runtime = Arc::new(bitcoin_rs_projection::runtime::DerivedIndexRuntime::new(
@@ -567,11 +573,18 @@ impl NodeState {
                 .as_ref()
                 .map_or(0, |tip| tip.height),
         ));
-        chainstate.configure_checkpointing(
-            &config.data_dir,
-            Arc::clone(&durable_tip_height),
-            seed_offer.clone(),
-        )?;
+        chainstate.configure_checkpointing(&config.data_dir, Arc::clone(&durable_tip_height))?;
+        bitcoin_rs_execution::recover_snapshot_activation(&chainstate).map_err(|error| {
+            NodeOpenError::AssumeUtxoOpen {
+                error: Box::new(error),
+            }
+        })?;
+        if engine.is_some() || resume_source == ResumeSource::Cold {
+            bitcoin_rs_execution::recovery::install_engine_checkpoint(
+                &chainstate,
+                engine.as_ref(),
+            )?;
+        }
         match bitcoin_rs_execution::recover_disconnect_marker(&chainstate) {
             Ok(()) => {}
             Err(error @ bitcoin_rs_execution::ApplyError::DurableHeadGapUnrecoverable { .. }) => {

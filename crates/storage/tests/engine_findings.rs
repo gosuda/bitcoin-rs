@@ -50,7 +50,7 @@ fn eng_01_concurrent_ingest_and_write_durable_if() -> TestResult<()> {
     std::fs::create_dir_all(&scratch_path)?;
 
     let store = Arc::new(RocksDbStore::open(&db_path)?);
-    let cf = ColumnFamily::CoinRecords;
+    let cf = ColumnFamily::Coins;
 
     let mut batch = BufferedWriteBatch::default();
     batch.put(cf, b"k", b"v0");
@@ -154,7 +154,7 @@ fn eng_02_surrealkv_iter_prefix_paged_streaming() -> TestResult<()> {
     let db_path = temp.path().join("db");
 
     let store = SurrealKvStore::open_with_cache(&db_path, 64 * 1024 * 1024)?;
-    let cf = ColumnFamily::CoinRecords;
+    let cf = ColumnFamily::Coins;
 
     let mut oracle = BTreeMap::new();
     let mut batch = BufferedWriteBatch::default();
@@ -205,7 +205,7 @@ fn eng_03_surrealkv_concurrent_close_barrier() -> TestResult<()> {
         let db_path = temp.path().join("db");
 
         let store = SurrealKvStore::open_with_cache(&db_path, 64 * 1024 * 1024)?;
-        let cf = ColumnFamily::CoinRecords;
+        let cf = ColumnFamily::Coins;
 
         let mut batch = BufferedWriteBatch::default();
         let key = format!("close_key_{i}").into_bytes();

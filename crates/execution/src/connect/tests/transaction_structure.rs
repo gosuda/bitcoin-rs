@@ -30,7 +30,7 @@ fn zero_output_coinbase_never_publishes_under_any_script_policy() -> TestResult 
                     seed_genesis(&chain)?;
                     let parent = apply_regtest_chain_to_height(&chain, height - 1)?;
                     let funding = OutPoint::new(coinbase(1).txid(), 0);
-                    let funding_before = chain.utxo.get(&funding);
+                    let funding_before = chain.utxo_reader().get(&funding)?;
                     let mut block = mined_child(parent, height)?;
                     block.txs[0].outputs.clear();
                     if spends > 0 {
@@ -84,7 +84,7 @@ fn zero_output_coinbase_never_publishes_under_any_script_policy() -> TestResult 
                                         WindowApplyDisposition::Permanent
                                     );
                                     assert!(error.invalidated.contains(&hash));
-                                    error.source
+                                    *error.source
                                 })
                         }
                     };
@@ -103,9 +103,9 @@ fn zero_output_coinbase_never_publishes_under_any_script_policy() -> TestResult 
                     assert_eq!(chain.durable_head.load()?, head);
                     assert_eq!(chain.coin_stats.snapshot().to_bytes(), stats);
                     assert_eq!(chain.utxo.len(), utxo_len);
-                    assert_eq!(chain.utxo.get(&funding), funding_before);
+                    assert_eq!(chain.utxo_reader().get(&funding)?, funding_before);
                     for outpoint in outputs {
-                        assert!(chain.utxo.get(&outpoint).is_none());
+                        assert!(chain.utxo_reader().get(&outpoint)?.is_none());
                     }
                     assert!(chain.undo_store.load_undo(height, hash)?.is_none());
                 }

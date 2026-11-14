@@ -11,9 +11,9 @@ use bitcoin_rs_consensus::primitives::{
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::utxo::contract::{
-    BlockChanges, UndoCodecError, UndoLoadError, UtxoAdd, commit_block_changes,
+    BlockChanges, UndoCodecError, UndoLoadError, UtxoAdd, populate_block_changes,
 };
-use bitcoin_rs_storage::{InMemoryUndoStore, MandatoryRetention, RetentionRegistry, UndoStore};
+use bitcoin_rs_storage::{KvUndoStore, MandatoryRetention, RetentionRegistry, UndoStore};
 
 use super::Chainstate;
 use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
@@ -53,13 +53,13 @@ fn spend(funding: OutPoint, value: u64) -> Tx {
 struct Fixture {
     chain: Chainstate,
     blocks: Vec<Block>,
-    undo: Arc<InMemoryUndoStore>,
+    undo: Arc<KvUndoStore<dyn bitcoin_rs_storage::KvStore>>,
     retention: Arc<RetentionRegistry>,
 }
 
 fn chain_to(height: u32) -> TestResult<Fixture> {
     let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
-    let undo = Arc::new(InMemoryUndoStore::default());
+    let undo = Arc::new(KvUndoStore::new(Arc::clone(chain.commit_authority.store())));
     let retention = Arc::new(RetentionRegistry::new());
     let undo_store: Arc<dyn bitcoin_rs_storage::UndoStore> = undo.clone();
     chain.undo_store = undo_store;
@@ -96,7 +96,11 @@ fn coinbase_outpoint(block: &Block) -> OutPoint {
     OutPoint::new(block.txs[0].txid(), 0)
 }
 
-fn undo_record(undo: &InMemoryUndoStore, height: u32, block: &Block) -> TestResult<Vec<u8>> {
+fn undo_record(
+    undo: &KvUndoStore<dyn bitcoin_rs_storage::KvStore>,
+    height: u32,
+    block: &Block,
+) -> TestResult<Vec<u8>> {
     undo.load_undo(height, Hash256::from(block.block_hash()))?
         .ok_or(TestError::Missing("persisted undo record"))
 }
@@ -128,8 +132,8 @@ fn coinbase_maturity_refuses_depth_99_and_accepts_depth_100() -> TestResult {
     assert!(
         refused
             .chain
-            .utxo
-            .get(&OutPoint::new(spend_tx.txid(), 0))
+            .utxo_reader()
+            .get(&OutPoint::new(spend_tx.txid(), 0))?
             .is_none(),
         "a refused coinbase spend must not enter the UTXO set"
     );
@@ -155,8 +159,8 @@ fn coinbase_maturity_refuses_depth_99_and_accepts_depth_100() -> TestResult {
     assert!(
         accepted
             .chain
-            .utxo
-            .get(&OutPoint::new(spend_tx.txid(), 0))
+            .utxo_reader()
+            .get(&OutPoint::new(spend_tx.txid(), 0))?
             .is_some(),
         "depth 100 coinbase spend must enter the UTXO set"
     );
@@ -212,7 +216,11 @@ fn disconnect_refuses_undo_whose_removed_outpoint_differs_from_the_block() -> Te
         "a refused disconnect must not move the tip"
     );
     assert!(
-        fixture.chain.utxo.get(&coinbase_outpoint(block)).is_some(),
+        fixture
+            .chain
+            .utxo_reader()
+            .get(&coinbase_outpoint(block))?
+            .is_some(),
         "a refused disconnect must not drop block coins"
     );
     assert_eq!(
@@ -241,7 +249,7 @@ fn disconnect_refuses_missing_or_truncated_undo_and_keeps_state() -> TestResult 
                 .undo
                 .persist_undo(2, hash, &record[..record.len() - 1])?;
         } else {
-            fixture.undo.remove_archived(2, hash);
+            fixture.undo.remove_archived(2, hash)?;
         }
 
         let outcome = fixture.chain.disconnect_block(block);
@@ -270,7 +278,11 @@ fn disconnect_refuses_missing_or_truncated_undo_and_keeps_state() -> TestResult 
             "truncated={truncated}: a refused disconnect must not move the tip"
         );
         assert!(
-            fixture.chain.utxo.get(&coinbase_outpoint(block)).is_some(),
+            fixture
+                .chain
+                .utxo_reader()
+                .get(&coinbase_outpoint(block))?
+                .is_some(),
             "truncated={truncated}: a refused disconnect must not drop block coins"
         );
     }
@@ -291,11 +303,7 @@ fn a_block_with_a_duplicate_live_txid_is_refused_at_any_height() -> TestResult {
         false,
         0,
     ));
-    commit_block_changes(
-        &fixture.chain.utxo,
-        &seed,
-        &Hash256::from_le_bytes(&[0xB0; 32]),
-    )?;
+    populate_block_changes(&fixture.chain.coins, &seed)?;
     let spend_tx = spend(funding, 900);
     let mut live = BlockChanges::default();
     live.add(UtxoAdd::new(
@@ -307,11 +315,7 @@ fn a_block_with_a_duplicate_live_txid_is_refused_at_any_height() -> TestResult {
         false,
         0,
     ));
-    commit_block_changes(
-        &fixture.chain.utxo,
-        &live,
-        &Hash256::from_le_bytes(&[0xB1; 32]),
-    )?;
+    populate_block_changes(&fixture.chain.coins, &live)?;
 
     let block = mined_block_with_prev_hash(
         fixture.blocks[2].block_hash(),
@@ -473,11 +477,7 @@ fn seed_payable_coin(fixture: &Fixture, marker: u8, value: u64) -> TestResult<Ou
         false,
         0,
     ));
-    commit_block_changes(
-        &fixture.chain.utxo,
-        &seed,
-        &Hash256::from_le_bytes(&[marker.wrapping_add(1); 32]),
-    )?;
+    populate_block_changes(&fixture.chain.coins, &seed)?;
     Ok(outpoint)
 }
 
@@ -505,14 +505,14 @@ fn a_block_may_spend_a_same_block_output_only_in_creation_order() -> TestResult 
         "a forward same-block spend must be refused, got {outcome:?}"
     );
     assert!(
-        forward_fixture.chain.utxo.get(&funding).is_some(),
+        forward_fixture.chain.utxo_reader().get(&funding)?.is_some(),
         "a refused forward spend must leave the funding coin"
     );
     assert!(
         forward_fixture
             .chain
-            .utxo
-            .get(&OutPoint::new(child.txid(), 0))
+            .utxo_reader()
+            .get(&OutPoint::new(child.txid(), 0))?
             .is_none(),
         "a refused forward spend must not create its output"
     );
@@ -532,18 +532,17 @@ fn a_block_may_spend_a_same_block_output_only_in_creation_order() -> TestResult 
     assert!(
         ordered_fixture
             .chain
-            .utxo
-            .get(&OutPoint::new(child.txid(), 0))
+            .utxo_reader()
+            .get(&OutPoint::new(child.txid(), 0))?
             .is_some(),
         "an in-order same-block spend must create its output"
     );
     assert!(
         ordered_fixture
             .chain
-            .utxo
-            .get(&OutPoint::new(parent.txid(), 0))
+            .utxo_reader()
+            .get(&OutPoint::new(parent.txid(), 0))?
             .is_none(),
-        "an in-order same-block spend must not retain the parent output"
     );
     Ok(())
 }
@@ -570,15 +569,15 @@ fn a_block_cannot_spend_one_coin_twice() -> TestResult {
         "a repeated same-block spend must be refused, got {outcome:?}"
     );
     assert!(
-        fixture.chain.utxo.get(&funding).is_some(),
+        fixture.chain.utxo_reader().get(&funding)?.is_some(),
         "a refused double spend must leave the funding coin"
     );
     for tx in [&first, &second] {
         assert!(
             fixture
                 .chain
-                .utxo
-                .get(&OutPoint::new(tx.txid(), 0))
+                .utxo_reader()
+                .get(&OutPoint::new(tx.txid(), 0))?
                 .is_none(),
             "a refused double spend must not create outputs"
         );

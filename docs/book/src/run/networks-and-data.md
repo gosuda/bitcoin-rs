@@ -29,12 +29,12 @@ $DATA
 ├── blocks/
 │   └── blk00000.dat
 ├── chainstate/
-│   ├── 0.jnl
-│   ├── lock
-│   ├── version
-│   └── keyspaces/
-├── chainstate-journal/
-│   └── head.json
+│   ├── CURRENT
+│   ├── LOCK
+│   ├── LOG
+│   ├── MANIFEST-*
+│   ├── OPTIONS-*
+│   └── ...
 └── process-epoch
 ```
 
@@ -44,17 +44,15 @@ A clean shutdown adds the checkpoint and the owner-local files:
 ├── applied-tip-witness.json
 ├── chainstate-checkpoints/
 │   └── CURRENT
-├── chainstate-journal/
-│   └── segment-0000000000.log
 ├── fee-estimator-history.dat
 └── mempool-snapshot.dat
 ```
 
-`CURRENT_SCHEMA` holds the datadir format epoch. For this commit the file contains `2` followed by a newline. It is written and synced before any authoritative store opens.
+`CURRENT_SCHEMA` holds the datadir format epoch. For this commit the file contains `4` followed by a newline. It is written and synced before any authoritative store opens.
 
 `.lock` is the data-directory lock. `process-epoch` is a monotonically increasing number written at startup, and `.process-epoch.lock` guards it. A corrupt `process-epoch` refuses startup instead of reusing an epoch.
 
-`chainstate/` is the authoritative chainstate store. With the default `rocksdb` backend it contains a lock, a version file, and column families. `blocks/` holds block body files with `BRSB` framing. `chainstate-journal/` is a derived journal that may lag the durable head, never lead it.
+`chainstate/` is the authoritative chainstate store. With the default `rocksdb` backend it holds native RocksDB files. The exact file set varies with the RocksDB version; `CURRENT` marks the set. Coins live in the `coins` keyspace (`ColumnFamily::Coins`). `blocks/` holds block body files with `BRSB` framing.
 
 `.cookie` is generated with mode `0600` and rotated before each listener starts. `applied-tip-witness.json` records the published applied tip. `chainstate-checkpoints/` holds published checkpoints, and `CURRENT` names the active generation.
 
@@ -70,7 +68,7 @@ Stop the node first. Then:
 
 `mempool-snapshot.dat` is owner-local. Deleting it starts the next run with an empty pool. It has no effect on chainstate, and the node logs `no mempool snapshot; starting with an empty pool` when it is absent.
 
-`chainstate/`, `blocks/`, `chainstate-checkpoints/`, `chainstate-journal/`, `CURRENT_SCHEMA`, and `process-epoch` are not independent caches. Removing one of them can leave a durable head that references missing bytes. The node then fails closed with `incompatible_schema` or a recovery error; it does not rebuild, reset, or repair in place.
+`chainstate/`, `blocks/`, `chainstate-checkpoints/`, `CURRENT_SCHEMA`, and `process-epoch` are not independent caches. Removing one of them can leave a durable head that references missing bytes. The node then fails closed with `incompatible_schema` or a recovery error; it does not rebuild, reset, or repair in place.
 
 > **Warning** Do not delete `chainstate` or `blocks` to clear a startup error. Read the error, check `CURRENT_SCHEMA`, and follow the [datadir format policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/db-migration.md). A full reset means moving the whole data directory aside, not deleting parts of it.
 

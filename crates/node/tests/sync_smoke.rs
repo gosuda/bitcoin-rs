@@ -29,15 +29,16 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestErr
     let peer_table = Arc::new(bitcoin_rs_wire::PeerTable::new());
     let (inbound_headers_tx, inbound_headers_rx) = unbounded::<bitcoin_rs_wire::InboundHeaders>();
     let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_wire::InboundBlock>();
-    let (handles, coin_stats) = apply_handles_with_coin_stats(
+    let (handles, _coin_stats) = apply_handles_with_coin_stats(
         Network::Regtest,
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
     );
+    let handles = Arc::new(handles);
     let ibd = handles.ibd_latch();
     let sync = bitcoin_rs_node::sync::block_sync(
-        Arc::new(handles),
+        Arc::clone(&handles),
         bitcoin_rs_node::ChainFollowers::noop(),
         Arc::clone(&peer_table),
         inbound_headers_rx,
@@ -67,10 +68,8 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestErr
         .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
     assert_eq!(applied.height, 2);
     assert_eq!(applied.hash, block_two.block_hash().0);
-    assert_eq!(
-        coin_stats.snapshot(),
-        expected_coin_stats(&[&genesis, &block_one, &block_two])?
-    );
+    let expected_stats = expected_coin_stats(&[&genesis, &block_one, &block_two])?;
+    assert_engine_coin_stats(&handles, &expected_stats)?;
     assert_eq!(block_tree.read().len(), 3);
     Ok(())
 }
@@ -90,7 +89,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
     let applied_tip = Arc::new(ArcSwapOption::empty());
     let (inbound_headers_tx, inbound_headers_rx) = unbounded();
     let (inbound_blocks_tx, inbound_blocks_rx) = unbounded();
-    let (handles, coin_stats, utxo) = apply_handles_with_coin_stats_and_utxo(
+    let (handles, _coin_stats, _utxo) = apply_handles_with_coin_stats_and_utxo(
         Network::Regtest,
         chain_tip,
         applied_tip,
@@ -139,8 +138,18 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
             .ok_or_else(|| TestError::message("missing applied tip"))?;
         assert_eq!((applied.height, applied.hash), (0, genesis.block_hash().0));
         assert_eq!(handles.chain_snapshot(), before);
-        assert_eq!(coin_stats.snapshot(), genesis_stats);
-        assert!(utxo.is_empty(), "unapplied bodies must not create coins");
+        assert_engine_coin_stats(&handles, &genesis_stats)?;
+        assert!(
+            handles
+                .utxo_reader()
+                .get(&OutPoint::new(block_one.txs[0].txid(), 0))?
+                .is_none()
+                && handles
+                    .utxo_reader()
+                    .get(&OutPoint::new(block_two.txs[0].txid(), 0))?
+                    .is_none(),
+            "unapplied bodies must not create coins",
+        );
         let log = block_log.read();
         assert_eq!(log.len(), 1, "unapplied blocks must not reach the RPC log");
         assert_eq!(log[0].hash, genesis.block_hash());
@@ -184,15 +193,16 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
     );
     assert_eq!(after.epoch, before.epoch);
     assert_eq!(after.sequence, before.sequence + 2);
-    assert_eq!(
-        coin_stats.snapshot(),
-        expected_coin_stats(&[&genesis, &block_one, &block_two])?
-    );
-    assert_eq!(utxo.len(), 2);
-    for block in [&block_one, &block_two] {
+    let expected_stats = expected_coin_stats(&[&genesis, &block_one, &block_two])?;
+    assert_engine_coin_stats(&handles, &expected_stats)?;
+    for (height, block) in [&block_one, &block_two].iter().enumerate() {
         assert_eq!(
-            utxo.get(&OutPoint::new(block.txs[0].txid(), 0)),
-            Some(block.txs[0].outputs[0].clone())
+            handles
+                .utxo_reader()
+                .get(&OutPoint::new(block.txs[0].txid(), 0))?,
+            Some(block.txs[0].outputs[0].clone()),
+            "coinbase output at height {} must be live in the engine coin store",
+            height + 1,
         );
     }
     let log = block_log.read();
@@ -219,15 +229,16 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats() -> Result<()
     let peer_table = Arc::new(bitcoin_rs_wire::PeerTable::new());
     let (inbound_headers_tx, inbound_headers_rx) = unbounded::<bitcoin_rs_wire::InboundHeaders>();
     let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_wire::InboundBlock>();
-    let (handles, coin_stats, utxo) = apply_handles_with_coin_stats_and_utxo(
+    let (handles, _coin_stats, _utxo) = apply_handles_with_coin_stats_and_utxo(
         Network::Regtest,
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
     );
+    let handles = Arc::new(handles);
     let ibd = handles.ibd_latch();
     let sync = bitcoin_rs_node::sync::block_sync(
-        Arc::new(handles),
+        Arc::clone(&handles),
         bitcoin_rs_node::ChainFollowers::noop(),
         Arc::clone(&peer_table),
         inbound_headers_rx,
@@ -265,20 +276,30 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats() -> Result<()
             .0
     );
     assert!(
-        utxo.get(&fixture.mature_coinbase_outpoint).is_none(),
+        handles
+            .utxo_reader()
+            .get(&fixture.mature_coinbase_outpoint)?
+            .is_none(),
         "mature coinbase prevout must be removed by the height-101 spend",
     );
     assert!(
-        utxo.get(&fixture.funding_outpoint).is_none(),
+        handles
+            .utxo_reader()
+            .get(&fixture.funding_outpoint)?
+            .is_none(),
         "funding prevout must be removed by the height-102 spend",
     );
     assert!(
-        utxo.get(&fixture.spend_outpoint).is_some(),
+        handles
+            .utxo_reader()
+            .get(&fixture.spend_outpoint)?
+            .is_some(),
         "height-102 spend output must remain live",
     );
 
     let block_refs: Vec<&Block> = fixture.blocks.iter().collect();
-    assert_eq!(coin_stats.snapshot(), expected_coin_stats(&block_refs)?);
+    let expected_stats = expected_coin_stats(&block_refs)?;
+    assert_engine_coin_stats(&handles, &expected_stats)?;
     Ok(())
 }
 
@@ -370,6 +391,46 @@ fn expected_coin_stats(blocks: &[&Block]) -> Result<CoinStats, TestError> {
         stats.finish_block(height, u64::try_from(block.txs.len())?);
     }
     Ok(stats)
+}
+
+/// Asserts coin statistics from the engine coin store, the coin authority
+/// under the storage engine, against an independently computed expectation.
+/// MuHash accumulators compare through `finalize_hash`, the canonical
+/// coinstats identity: `scan_coin_stats` and incremental insert/remove
+/// bookkeeping carry removals in different internal accumulator fields, so
+/// raw-struct equality is not the identity.
+fn assert_engine_coin_stats(handles: &Chainstate, expected: &CoinStats) -> Result<(), TestError> {
+    let reader = handles.utxo_reader();
+    let snapshot = reader.scan_coin_snapshot()?;
+    let coins = UtxoSet::new();
+    for row in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
+        let (_key, value) = row?;
+        coins.insert_parsed_record(
+            bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
+                .map_err(TestError::Utxo)?,
+        );
+    }
+    let scanned = coins.with_stable_view(|view| {
+        bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, expected.height, true)
+    })?;
+    assert_eq!(
+        handles
+            .applied_tip_snapshot()
+            .ok_or_else(|| TestError::message("missing applied tip"))?
+            .chain_tx_count
+            .to_wire(),
+        expected.tx_count,
+    );
+    assert_eq!(scanned.height, expected.height);
+    assert_eq!(scanned.total_amount, expected.total_amount);
+    assert_eq!(scanned.bogo_size, expected.bogo_size);
+    assert_eq!(scanned.utxo_count, expected.utxo_count);
+    assert_eq!(
+        scanned.muhash.finalize_hash(),
+        expected.muhash.finalize_hash(),
+        "engine coin set must match the independently computed set",
+    );
+    Ok(())
 }
 
 fn apply_handles_with_coin_stats(

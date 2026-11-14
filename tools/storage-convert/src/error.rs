@@ -50,4 +50,32 @@ pub(crate) enum ConvertError {
 
     #[error("invalid operation: {0}")]
     InvalidOperation(String),
+
+    #[error("missing complete chainstate checkpoint; resync into a new datadir is required")]
+    MissingCheckpoint,
+
+    #[error("missing block or undo data at height {height}; resync into a new datadir is required")]
+    MissingBlockData { height: u32 },
+
+    #[error(
+        "replayed chain does not match the copied durable head: {field} expected {expected}, found {found}"
+    )]
+    ReplayMismatch {
+        field: &'static str,
+        expected: String,
+        found: String,
+    },
+
+    #[error("checkpoint artifact '{file}' does not match the manifest digest")]
+    CheckpointDigestMismatch { file: &'static str },
+
+    #[error("checkpoint does not match its manifest: {field} expected {expected}, found {found}")]
+    CheckpointMismatch {
+        field: &'static str,
+        expected: String,
+        found: String,
+    },
+
+    #[error("checkpoint publication at the durable head failed: {0}")]
+    CheckpointPublish(#[source] bitcoin_rs_execution::recovery::ConvertedCheckpointError),
 }

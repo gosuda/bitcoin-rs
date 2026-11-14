@@ -125,7 +125,7 @@ fn assert_rejected_unchanged(
         tip_before
     );
     assert!(
-        chain.utxo.get(funding).is_some(),
+        chain.utxo_reader().get(funding)?.is_some(),
         "the funding coin must stay unspent"
     );
     Ok(())

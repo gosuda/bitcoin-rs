@@ -57,7 +57,7 @@ The accepted path, relay wake, mining wake, orphan retry, and package handling a
 
 ## Metrics endpoint
 
-With `--metrics-bind`, `MetricsServer::bind` (`crates/node/src/metrics.rs:271`) installs one Prometheus recorder for the process and spawns `bitcoin-rs-metrics` to serve scrapes. The recorder is pinned to an `EvidenceIdentity` (`metrics.rs:83`): the binary SHA-256, the config digest, backend, journal durability, and CPU model. A second bind with a different identity fails with `MetricsIdentityMismatch` instead of silently reporting numbers from two configurations under one name. The scrape handler reads one 1 KiB request buffer, renders `text/plain; version=0.0.4`, closes the connection, and enforces 2 second socket timeouts (`serve_scrape`, `metrics.rs:361-373`). Shutdown cannot hang the accept loop: the latch handler self-connects to the listener address so `accept` returns (`metrics.rs:340-343`). A readiness sampler thread samples the txindex capability once per second into `node.capability.txindex_readiness` with one label per state (`spawn_readiness_sampler`, `metrics.rs:386-404`).
+With `--metrics-bind`, `MetricsServer::bind` (`crates/node/src/metrics.rs:271`) installs one Prometheus recorder for the process and spawns `bitcoin-rs-metrics` to serve scrapes. The recorder is pinned to an `EvidenceIdentity` (`metrics.rs:83`): the binary SHA-256, the config digest, backend, durability, and CPU model. A second bind with a different identity fails with `MetricsIdentityMismatch` instead of silently reporting numbers from two configurations under one name. The scrape handler reads one 1 KiB request buffer, renders `text/plain; version=0.0.4`, closes the connection, and enforces 2 second socket timeouts (`serve_scrape`, `metrics.rs:361-373`). Shutdown cannot hang the accept loop: the latch handler self-connects to the listener address so `accept` returns (`metrics.rs:340-343`). A readiness sampler thread samples the txindex capability once per second into `node.capability.txindex_readiness` with one label per state (`spawn_readiness_sampler`, `metrics.rs:386-404`).
 
 `describe_node_metrics` (`metrics.rs:113-183`) declares the metric families. Scraped from the trace node (names as rendered, dots become underscores):
 
@@ -143,7 +143,7 @@ From the same run, the lines that show the runtime working, with boot noise remo
 20:17:06.477694 INFO opened storage backend with effective cache capacities backend="rocksdb"
     chainstate_cache_bytes=377487360 txindex_cache_bytes=94371840
 20:17:06.477874 INFO bitcoin-rs node booting config=NodeConfig { ... esplora_max_queries: 2,
-    rest: true, max_connections: 128, chainstate_journal: { blocks: 500, seconds: 5 } }
+    rest: true, max_connections: 128 }
 20:17:15.755125 INFO rpc listener bound addr=127.0.0.1:44895 surface=Shared
 20:17:15.761234 INFO p2p listener bound addr=0.0.0.0:18444
 20:18:15.819201 INFO sync progress applied_height=0 header_height=0 gap=0 peers=0 ibd=true

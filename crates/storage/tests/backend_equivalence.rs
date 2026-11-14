@@ -833,15 +833,15 @@ macro_rules! engine_tests {
                 let temp = tempfile::TempDir::new()?;
                 let store = ($open)(temp.path())?;
 
-                let empty = store.multi_get(ColumnFamily::CoinRecords, &[])?;
+                let empty = store.multi_get(ColumnFamily::Coins, &[])?;
                 assert!(empty.is_empty());
 
-                store.put(ColumnFamily::CoinRecords, b"apple", b"val_apple")?;
-                store.put(ColumnFamily::CoinRecords, b"banana", b"val_banana")?;
-                store.put(ColumnFamily::CoinRecords, b"cherry", b"val_cherry")?;
+                store.put(ColumnFamily::Coins, b"apple", b"val_apple")?;
+                store.put(ColumnFamily::Coins, b"banana", b"val_banana")?;
+                store.put(ColumnFamily::Coins, b"cherry", b"val_cherry")?;
 
                 let sorted_keys: &[&[u8]] = &[b"apple", b"banana", b"cherry"];
-                let sorted_res = store.multi_get(ColumnFamily::CoinRecords, sorted_keys)?;
+                let sorted_res = store.multi_get(ColumnFamily::Coins, sorted_keys)?;
                 assert_eq!(
                     sorted_res,
                     vec![
@@ -852,7 +852,7 @@ macro_rules! engine_tests {
                 );
 
                 let unsorted_keys: &[&[u8]] = &[b"cherry", b"apple", b"date", b"banana", b"apple"];
-                let unsorted_res = store.multi_get(ColumnFamily::CoinRecords, unsorted_keys)?;
+                let unsorted_res = store.multi_get(ColumnFamily::Coins, unsorted_keys)?;
                 assert_eq!(
                     unsorted_res,
                     vec![
@@ -875,11 +875,8 @@ macro_rules! engine_tests {
 
                 let empty_rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
                 let mut empty_iter = empty_rows.into_iter();
-                let count = store.ingest_sorted(
-                    ColumnFamily::CoinRecords,
-                    &mut empty_iter,
-                    &scratch_path,
-                )?;
+                let count =
+                    store.ingest_sorted(ColumnFamily::Coins, &mut empty_iter, &scratch_path)?;
                 assert_eq!(count, 0);
 
                 let rows: Vec<(Vec<u8>, Vec<u8>)> = (0..500u32)
@@ -892,16 +889,16 @@ macro_rules! engine_tests {
 
                 let mut row_iter = rows.into_iter();
                 let count =
-                    store.ingest_sorted(ColumnFamily::CoinRecords, &mut row_iter, &scratch_path)?;
+                    store.ingest_sorted(ColumnFamily::Coins, &mut row_iter, &scratch_path)?;
                 assert_eq!(count, 500);
 
                 let val = store
-                    .get(ColumnFamily::CoinRecords, b"k_000042")?
+                    .get(ColumnFamily::Coins, b"k_000042")?
                     .expect("key must be present");
                 assert_eq!(val, b"v_000042");
 
                 let keys: &[&[u8]] = &[b"k_000499", b"k_000000", b"k_000250"];
-                let multi = store.multi_get(ColumnFamily::CoinRecords, keys)?;
+                let multi = store.multi_get(ColumnFamily::Coins, keys)?;
                 assert_eq!(
                     multi,
                     vec![
@@ -927,7 +924,7 @@ macro_rules! engine_tests {
                 ];
                 let mut iter = unsorted_rows.into_iter();
                 let err = store
-                    .ingest_sorted(ColumnFamily::CoinRecords, &mut iter, &scratch_path)
+                    .ingest_sorted(ColumnFamily::Coins, &mut iter, &scratch_path)
                     .unwrap_err();
                 assert!(matches!(
                     err,
@@ -940,7 +937,7 @@ macro_rules! engine_tests {
                 ];
                 let mut iter2 = equal_rows.into_iter();
                 let err2 = store
-                    .ingest_sorted(ColumnFamily::CoinRecords, &mut iter2, &scratch_path)
+                    .ingest_sorted(ColumnFamily::Coins, &mut iter2, &scratch_path)
                     .unwrap_err();
                 assert!(matches!(
                     err2,
@@ -969,22 +966,22 @@ macro_rules! engine_tests {
                 ]
                 .into_iter();
                 let count = store.ingest_sorted(
-                    ColumnFamily::CoinRecords,
+                    ColumnFamily::Coins,
                     &mut oversize_stream,
                     &scratch_path,
                 )?;
                 assert_eq!(count, 3);
                 assert_eq!(
-                    store.get(ColumnFamily::CoinRecords, b"row1")?,
+                    store.get(ColumnFamily::Coins, b"row1")?,
                     Some(b"val1".to_vec())
                 );
                 let r2 = store
-                    .get(ColumnFamily::CoinRecords, b"row2")?
+                    .get(ColumnFamily::Coins, b"row2")?
                     .expect("oversize row must be present");
                 assert_eq!(r2.len(), oversize_target);
                 assert_eq!(r2[0], 0xaa);
                 assert_eq!(
-                    store.get(ColumnFamily::CoinRecords, b"row3")?,
+                    store.get(ColumnFamily::Coins, b"row3")?,
                     Some(b"val3".to_vec())
                 );
                 Ok(())
@@ -998,14 +995,14 @@ macro_rules! engine_tests {
                 for i in 0..10u8 {
                     let key = [b'k', i];
                     let val = [b'v', i];
-                    store.put(ColumnFamily::CoinRecords, &key, &val)?;
+                    store.put(ColumnFamily::Coins, &key, &val)?;
                 }
 
-                store.delete_range(ColumnFamily::CoinRecords, &[b'k', 3], &[b'k', 7])?;
+                store.delete_range(ColumnFamily::Coins, &[b'k', 3], &[b'k', 7])?;
 
                 for i in 0..10u8 {
                     let key = [b'k', i];
-                    let val = store.get(ColumnFamily::CoinRecords, &key)?;
+                    let val = store.get(ColumnFamily::Coins, &key)?;
                     if (3..7).contains(&i) {
                         assert_eq!(val, None, "key k{i} should be deleted");
                     } else {
@@ -1022,23 +1019,20 @@ macro_rules! engine_tests {
                 let checkpoint_dir = temp.path().join("checkpoint");
 
                 let store = ($open)(&original_dir)?;
-                store.put(ColumnFamily::CoinRecords, b"cp_key", b"cp_value")?;
+                store.put(ColumnFamily::Coins, b"cp_key", b"cp_value")?;
                 store.flush()?;
 
                 store.checkpoint(&checkpoint_dir)?;
 
-                store.put(ColumnFamily::CoinRecords, b"post_cp_key", b"post_cp_value")?;
+                store.put(ColumnFamily::Coins, b"post_cp_key", b"post_cp_value")?;
                 store.flush()?;
 
                 let reopened = ($open)(&checkpoint_dir)?;
                 assert_eq!(
-                    reopened.get(ColumnFamily::CoinRecords, b"cp_key")?,
+                    reopened.get(ColumnFamily::Coins, b"cp_key")?,
                     Some(b"cp_value".to_vec())
                 );
-                assert_eq!(
-                    reopened.get(ColumnFamily::CoinRecords, b"post_cp_key")?,
-                    None
-                );
+                assert_eq!(reopened.get(ColumnFamily::Coins, b"post_cp_key")?, None);
                 Ok(())
             }
 
@@ -1050,7 +1044,7 @@ macro_rules! engine_tests {
                 for i in 0..100u32 {
                     let key = format!("k_{i:04}").into_bytes();
                     let val = vec![0xaa; 1024];
-                    store.put(ColumnFamily::CoinRecords, &key, &val)?;
+                    store.put(ColumnFamily::Coins, &key, &val)?;
                 }
 
                 let cache_bytes = store.engine_cache_bytes();

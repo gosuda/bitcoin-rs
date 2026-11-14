@@ -37,8 +37,6 @@ pub enum ApplyError {
     BlockBodyPersistence(#[source] bitcoin_rs_storage::StorageError),
     #[error("undo persistence: {0}")]
     UndoPersistence(#[source] bitcoin_rs_storage::StorageError),
-    #[error("chainstate journal backpressure stopped block apply: {0}")]
-    JournalBackpressure(#[source] Box<bitcoin_rs_storage::chainstate_journal::JournalWriterError>),
     #[error("undo record cannot restore spent output {txid}:{vout}")]
     UndoPrevoutMissing {
         txid: bitcoin_rs_consensus::primitives::Txid,
@@ -81,6 +79,8 @@ pub enum ApplyError {
     },
     #[error("recovery checkpoint publication failed: {0}")]
     RecoveryPublication(#[source] Box<crate::checkpoint::CheckpointError>),
+    #[error("recovery coin statistics: {0}")]
+    RecoveryCoinStats(#[source] Box<crate::recovery::RecoveryError>),
     #[error("coinstats rewind: {0}")]
     CoinStatsRewind(#[source] bitcoin_rs_storage::utxo::stats::CoinStatsRewindError),
     #[error(
@@ -101,6 +101,12 @@ pub enum ApplyError {
         expected: bitcoin_rs_consensus::primitives::Hash256,
         found: bitcoin_rs_consensus::primitives::Hash256,
     },
+    #[error(
+        "window prefix of {staged} block(s) is not covered by its coin workspace ({covered} block(s)); refusing a coin-less commit"
+    )]
+    WindowWorkspaceIncomplete { staged: usize, covered: usize },
+    #[error("coin store read: {0}")]
+    CoinStoreRead(#[source] bitcoin_rs_storage::StorageError),
 }
 
 #[derive(Debug, thiserror::Error)]

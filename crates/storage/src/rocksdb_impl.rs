@@ -12,8 +12,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
 
 const DEFAULT_BLOCK_SIZE: usize = 4 * 1024 * 1024;
-const COIN_RECORDS_BLOCK_SIZE: usize = 64 * 1024;
+const COINS_BLOCK_SIZE: usize = 64 * 1024;
 pub const ROCKSDB_DEFAULT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+const LEGACY_COLUMN_FAMILIES: [&str; 1] = ["coin_records"];
 const BLOOM_BITS_PER_KEY: f64 = 10.0;
 const WRITE_BUFFER_SIZE: usize = 128 << 20;
 
@@ -97,15 +98,24 @@ impl RocksDbStore {
             cf_options
         };
         let default_cf_options = cf_options_for(DEFAULT_BLOCK_SIZE);
-        let coin_records_cf_options = cf_options_for(COIN_RECORDS_BLOCK_SIZE);
+        let coins_cf_options = cf_options_for(COINS_BLOCK_SIZE);
 
-        let descriptors = ColumnFamily::ALL.iter().copied().map(|cf| {
-            let options = match cf {
-                ColumnFamily::CoinRecords => coin_records_cf_options.clone(),
-                _ => default_cf_options.clone(),
-            };
-            ColumnFamilyDescriptor::new(cf.name(), options)
-        });
+        let on_disk = rust_rocksdb::DB::list_cf(&db_options, path.as_ref()).unwrap_or_default();
+        let legacy = LEGACY_COLUMN_FAMILIES
+            .iter()
+            .filter(|name| on_disk.iter().any(|found| found == *name))
+            .map(|name| ColumnFamilyDescriptor::new(*name, default_cf_options.clone()));
+        let descriptors = ColumnFamily::ALL
+            .iter()
+            .copied()
+            .map(|cf| {
+                let options = match cf {
+                    ColumnFamily::Coins => coins_cf_options.clone(),
+                    _ => default_cf_options.clone(),
+                };
+                ColumnFamilyDescriptor::new(cf.name(), options)
+            })
+            .chain(legacy);
         let db = rust_rocksdb::DB::open_cf_descriptors(&db_options, path, descriptors)
             .map_err(StorageError::backend)?;
         Ok(Self {

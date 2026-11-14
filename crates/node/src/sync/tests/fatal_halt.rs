@@ -1,58 +1,23 @@
+#![allow(clippy::expect_used)]
+
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256, Network};
+use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network};
 use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, regtest_fixture};
+use bitcoin_rs_storage::memory_kv::MemoryKvStore;
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
-use bitcoin_rs_storage::undo::InMemoryUndoStore;
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::{
-    DisconnectMarker, InMemoryDurableHeadStore, MandatoryRetention, RetentionRegistry,
-    StorageError, UndoStore,
+    CoinStore, CommitAuthority, KvDurableHeadStore, KvStore, KvUndoStore, MandatoryRetention,
+    PersistFault, RetentionRegistry,
 };
 use crossbeam_channel::{bounded, unbounded};
 
 use crate::event_loop::EventLoop;
 use crate::test_support::TestError;
 
-struct PoisonedUndoStore {
-    inner: InMemoryUndoStore,
-}
-
-impl UndoStore for PoisonedUndoStore {
-    fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError> {
-        if height == 0 {
-            return self.inner.persist_undo(height, hash, record);
-        }
-        Err(StorageError::backend("RocksDbError: Poisoned"))
-    }
-
-    fn load_undo(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
-        self.inner.load_undo(height, hash)
-    }
-
-    fn arm_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
-        self.inner.arm_disconnect(height, hash)
-    }
-
-    fn complete_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
-        self.inner.complete_disconnect(height, hash)
-    }
-
-    fn disarm_disconnect(&self) -> Result<(), StorageError> {
-        self.inner.disarm_disconnect()
-    }
-
-    fn retire_disconnect_marker(&self) -> Result<(), StorageError> {
-        self.inner.retire_disconnect_marker()
-    }
-
-    fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError> {
-        self.inner.load_disconnect_marker()
-    }
-}
-
-fn poisoned_chain(
+fn failing_commit_chain(
     depth: u32,
 ) -> Result<(Arc<bitcoin_rs_execution::Chainstate>, Vec<Block>), TestError> {
     use bitcoin_rs_execution::{Chainstate, ChainstateParts, ChainstateRole, ValidationMode};
@@ -73,6 +38,12 @@ fn poisoned_chain(
         blocks.push(block);
     }
     let retention = Arc::new(RetentionRegistry::new());
+    let mem_store = Arc::new(MemoryKvStore::default());
+    let durable_head = Arc::new(KvDurableHeadStore::new(Arc::clone(&mem_store)));
+    let undo_store = Arc::new(KvUndoStore::new(Arc::clone(&mem_store)));
+    let dyn_store: Arc<dyn KvStore> = mem_store.clone();
+    let coins = Arc::new(CoinStore::open(Arc::clone(&dyn_store), 64 * 1024 * 1024));
+    let commit_authority = Arc::new(CommitAuthority::new(dyn_store, Arc::clone(&coins)));
     let handles = Arc::new(Chainstate::from_parts(ChainstateParts {
         network: Network::Regtest,
         block_tree: tree,
@@ -85,16 +56,15 @@ fn poisoned_chain(
             0,
         )),
         block_body_store: None,
-        undo_store: Arc::new(PoisonedUndoStore {
-            inner: InMemoryUndoStore::default(),
-        }),
-        durable_head: Arc::new(InMemoryDurableHeadStore::new()),
+        undo_store,
+        durable_head,
+        coins,
+        commit_authority,
         chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new().authority(),
         assume_valid_height: 0,
         validation_mode: ValidationMode::AssumeValid,
         validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
         script_cache: None,
-        journal: None,
         capture_rawtx: false,
         capture_block_bytes: false,
         retention: MandatoryRetention::new(Arc::clone(&retention)),
@@ -104,13 +74,14 @@ fn poisoned_chain(
     handles
         .apply_block(&BlockImage::from_local(genesis))
         .map_err(|error| TestError::Apply(Box::new(error)))?;
+    mem_store.arm_persist_fault(PersistFault::FailApply);
     Ok((handles, blocks))
 }
 
 // SYNC-04, SYNC-06
 #[test]
-fn poisoned_undo_store_halts_apply_and_trips_the_shutdown_latch() -> Result<(), TestError> {
-    let (handles, blocks) = poisoned_chain(2)?;
+fn failed_durable_commit_halts_apply_and_trips_the_shutdown_latch() -> Result<(), TestError> {
+    let (handles, blocks) = failing_commit_chain(2)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
     let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx) = unbounded();
@@ -135,7 +106,7 @@ fn poisoned_undo_store_halts_apply_and_trips_the_shutdown_latch() -> Result<(), 
     sync.tick();
     assert!(
         handles.is_closed_for_recovery(),
-        "a poisoned undo store must settle fatal and close the chainstate for recovery"
+        "a failed durable commit must settle fatal and close the chainstate for recovery"
     );
     assert_eq!(
         handles.applied_tip_snapshot().map(|tip| tip.height),

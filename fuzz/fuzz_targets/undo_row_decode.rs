@@ -1,7 +1,6 @@
 #![no_main]
 
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_storage::chainstate_journal::{decode_record, encode_record};
 use bitcoin_rs_storage::{DisconnectMarker, InMemoryUndoStore, UndoStore};
 use bitcoin_rs_storage::utxo::contract::{decode_undo_record, encode_undo_record};
 use libfuzzer_sys::fuzz_target;
@@ -11,7 +10,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let selector = data[0] % 4;
+    let selector = data[0] % 3;
     let payload = &data[1..];
 
     let hash = payload
@@ -33,17 +32,6 @@ fuzz_target!(|data: &[u8]| {
             }
         }
         1 => {
-            let mut frame = payload.to_vec();
-            repair_journal_crc(&mut frame);
-            if let Ok(record) = decode_record(&frame) {
-                if let Ok(encoded) = encode_record(&record) {
-                    let roundtripped =
-                        decode_record(&encoded).expect("encoded journal record must decode");
-                    assert_eq!(record, roundtripped);
-                }
-            }
-        }
-        2 => {
             if let Ok(batch) = decode_undo_record(payload, hash) {
                 let encoded = encode_undo_record(&batch, hash);
                 let roundtripped = decode_undo_record(&encoded, hash)
@@ -67,37 +55,3 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 });
-
-fn crc32c(bytes: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0x82f6_3b78 & mask);
-        }
-    }
-    !crc
-}
-
-fn repair_journal_crc(frame: &mut [u8]) {
-    const HEADER: usize = 9;
-    const TRAILER: usize = 4;
-    if frame.len() < HEADER + TRAILER || frame[..4] != *b"JRNL" || frame[4] != 1 {
-        return;
-    }
-    let Ok(len_bytes) = <[u8; 4]>::try_from(&frame[5..HEADER]) else {
-        return;
-    };
-    let Some(declared) = usize::try_from(u32::from_le_bytes(len_bytes)).ok() else {
-        return;
-    };
-    let Some(end) = HEADER.checked_add(declared) else {
-        return;
-    };
-    if end.checked_add(TRAILER) != Some(frame.len()) {
-        return;
-    }
-    let crc = crc32c(&frame[HEADER..end]);
-    frame[end..end + TRAILER].copy_from_slice(&crc.to_le_bytes());
-}

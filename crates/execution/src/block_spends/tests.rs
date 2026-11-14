@@ -11,7 +11,7 @@ use bitcoin_rs_storage::utxo::{
     UtxoSet,
     contract::{BlockSpendsError, BlockUndoSource, UndoReadError},
 };
-use bitcoin_rs_storage::{CommitRecords, InMemoryUndoStore, StorageError, UndoStore};
+use bitcoin_rs_storage::{KvUndoStore, StorageError, UndoStore};
 use parking_lot::Mutex;
 
 use crate::{
@@ -63,16 +63,16 @@ impl BlockBodyStore for Bodies {
     }
 }
 struct Fixture {
-    chain: Chainstate,
     bodies: Arc<Bodies>,
-    undo: Arc<InMemoryUndoStore>,
+    chain: Chainstate,
+    undo: Arc<KvUndoStore<dyn bitcoin_rs_storage::KvStore>>,
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     blocks: Vec<Block>,
 }
 fn fixture(count: u32) -> TestResult<Fixture> {
     let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let bodies = Arc::new(Bodies::default());
-    let undo = Arc::new(InMemoryUndoStore::default());
+    let undo = Arc::new(KvUndoStore::new(Arc::clone(chain.commit_authority.store())));
     let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
     chain.block_body_store = Some(bodies.clone());
     chain.undo_store = undo.clone();
@@ -160,8 +160,16 @@ fn snapshot_prefix_needs_archived_progress_even_when_rows_exist() -> TestResult 
         checkpoint: None,
     };
     f.chain
-        .durable_head
-        .commit(Some(&prior), &next, &CommitRecords::default())?;
+        .commit_authority
+        .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+            expected_head: Some(prior),
+            next_head: next,
+            undo_rows: Vec::new(),
+            body_rows: Vec::new(),
+            attestation: None,
+            coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+        })
+        .map_err(StorageError::backend)?;
     let queried = hash(&f.blocks[1]);
     assert!(matches!(
         f.chain.block_spends(queried, tip(&f.chain)?)?.spent,
@@ -179,13 +187,21 @@ fn snapshot_prefix_needs_archived_progress_even_when_rows_exist() -> TestResult 
     }
     next.commit_id += 1;
     f.chain
-        .durable_head
-        .commit(Some(&prior), &next, &CommitRecords::default())?;
+        .commit_authority
+        .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+            expected_head: Some(prior),
+            next_head: next,
+            undo_rows: Vec::new(),
+            body_rows: Vec::new(),
+            attestation: None,
+            coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+        })
+        .map_err(StorageError::backend)?;
     assert_eq!(
         f.chain.block_spends(queried, tip(&f.chain)?)?.spent?,
         vec![vec![]]
     );
-    let head = Arc::clone(&f.chain.durable_head);
+    let head = Arc::clone(f.chain.commit_authority());
     *f.bodies.hook.lock() = Some(Box::new(move || {
         let mut advanced = next;
         advanced.commit_id += 1;
@@ -199,8 +215,15 @@ fn snapshot_prefix_needs_archived_progress_even_when_rows_exist() -> TestResult 
             *historical_hash = next.tip;
         }
         assert!(
-            head.commit(Some(&next), &advanced, &CommitRecords::default())
-                .is_ok()
+            head.commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                expected_head: Some(next),
+                next_head: advanced,
+                undo_rows: Vec::new(),
+                body_rows: Vec::new(),
+                attestation: None,
+                coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+            })
+            .is_ok()
         );
     }));
     assert!(matches!(
@@ -248,7 +271,7 @@ fn pruning_reservations_and_expired_leases_keep_typed_failures() -> TestResult {
 fn missing_and_corrupt_expected_undo_are_not_empty_success() -> TestResult {
     let f = fixture(1)?;
     let queried = hash(&f.blocks[1]);
-    f.undo.remove_archived(1, queried);
+    f.undo.remove_archived(1, queried)?;
     assert!(matches!(
         f.chain.block_spends(queried, tip(&f.chain)?),
         Err(BlockSpendsError::Undo(UndoReadError::Missing { block, height }))
@@ -271,7 +294,7 @@ fn missing_and_corrupt_expected_undo_are_not_empty_success() -> TestResult {
 fn genesis_skips_undo_but_never_fabricates_missing_body() -> TestResult {
     let mut f = fixture(1)?;
     let genesis = hash(&f.blocks[0]);
-    f.undo.remove_archived(0, genesis);
+    f.undo.remove_archived(0, genesis)?;
     assert_eq!(
         f.chain.block_spends(genesis, tip(&f.chain)?)?.spent?,
         vec![vec![]]

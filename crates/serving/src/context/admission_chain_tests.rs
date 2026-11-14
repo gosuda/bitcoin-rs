@@ -79,11 +79,7 @@ fn stable_chainstate_reader_does_not_block_transaction_admission() -> TestResult
         false,
         0,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )?;
+    ctx.populate_fixture_coins(&changes)?;
 
     let accepted = ctx
         .chain
@@ -110,11 +106,7 @@ fn unconfirmed_transaction_is_admitted_from_a_peer() -> TestResult {
         false,
         0,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )?;
+    ctx.populate_fixture_coins(&changes)?;
     assert!(
         !ctx.chain
             .admission_chain()
@@ -150,11 +142,7 @@ fn confirmed_hint_requires_live_chain_outputs() -> TestResult {
     let output = OutPoint::new(tx.txid(), 0);
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(output, tx.outputs[0].clone(), false, 0));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )?;
+    ctx.populate_fixture_coins(&changes)?;
     assert!(
         ctx.chain
             .admission_chain()
@@ -179,9 +167,7 @@ fn admission_chain_uses_current_handles_and_one_applied_tip() -> TestResult {
         []
     );
 
-    ctx.chain.utxo = bitcoin_rs_storage::utxo::UtxoReader::new(Arc::new(
-        bitcoin_rs_storage::utxo::UtxoSet::new(),
-    ));
+    ctx.chain.utxo = bitcoin_rs_storage::utxo::UtxoReader::fixture_new();
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
         outpoint,
@@ -192,11 +178,7 @@ fn admission_chain_uses_current_handles_and_one_applied_tip() -> TestResult {
         false,
         0,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )?;
+    ctx.populate_fixture_coins(&changes)?;
     publish_tip(&ctx, 100)?;
     publish_tip(&ctx, 200)?;
     let snapshot = ctx
@@ -213,6 +195,21 @@ fn admission_chain_uses_current_handles_and_one_applied_tip() -> TestResult {
         !snapshot.confirmed,
         "an input UTXO is not evidence that the spending transaction is confirmed"
     );
+    Ok(())
+}
+
+// MPL-04
+#[test]
+fn unreadable_coin_withholds_the_admission_snapshot() -> TestResult {
+    let unreadable = Hash256::from_le_bytes(&[0xD4; 32]);
+    let tx = spending(OutPoint::new(Txid::from(unreadable), 0));
+    let mut ctx = Context::new();
+
+    ctx.chain.utxo = crate::test_coins::utxo_reader_with_undecodable_coin(&unreadable)?;
+    assert!(ctx.chain.admission_chain().snapshot(&tx).is_none());
+
+    ctx.chain.utxo = crate::test_coins::utxo_reader_with_undecodable_coin(&tx.txid().0)?;
+    assert!(ctx.chain.admission_chain().snapshot(&tx).is_none());
     Ok(())
 }
 
@@ -239,11 +236,7 @@ fn admission_envelopes_share_gateway_outcomes() -> TestResult {
     ));
 
     let rpc_ctx = Arc::new(Context::new());
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &rpc_ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )?;
+    rpc_ctx.populate_fixture_coins(&changes)?;
     let accepted = tx::sendrawtransaction(&rpc_ctx, &json!([raw]))?;
     assert_eq!(accepted.as_str(), Some(spend.txid().to_string()).as_deref());
     assert!(rpc_ctx.mempool.gateway.read().contains_txid(&spend.txid()));
@@ -259,11 +252,7 @@ fn admission_envelopes_share_gateway_outcomes() -> TestResult {
     assert!(!rpc_ctx.mempool.gateway.read().contains_txid(&orphan.txid()));
 
     let preview_ctx = Arc::new(Context::new());
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &preview_ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )?;
+    preview_ctx.populate_fixture_coins(&changes)?;
     let rows = tx::testmempoolaccept(&preview_ctx, &json!([[raw]]))?;
     assert_eq!(
         rows.get(0)
@@ -388,11 +377,7 @@ fn sendrawtransaction_publishes_hashtx_once_per_admission() -> TestResult {
             .map(|seen| seen.clone())
             .unwrap_or_default()
     };
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &rpc_ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )?;
+    rpc_ctx.populate_fixture_coins(&changes)?;
 
     tx::sendrawtransaction(&rpc_ctx, &json!([raw]))?;
     assert_eq!(
@@ -474,11 +459,7 @@ fn submitpackage_publishes_hashtx_only_for_newly_admitted() -> TestResult {
             .map(|seen| seen.clone())
             .unwrap_or_default()
     };
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &rpc_ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )?;
+    rpc_ctx.populate_fixture_coins(&changes)?;
 
     submitpackage(&rpc_ctx, &json!([[raws[0].clone(), raws[1].clone()]]))?;
     assert_eq!(

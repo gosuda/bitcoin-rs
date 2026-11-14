@@ -1,9 +1,9 @@
 use std::io::Cursor;
 
-use crate::support::utxo::TestResult;
+use crate::support::utxo::{TestError, TestResult};
 use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
-use bitcoin_rs_storage::utxo::{UtxoSet, read_snapshot_strict_v4, write_snapshot_observed};
+use bitcoin_rs_storage::utxo::read_snapshot_strict_v4;
 
 fn make_txid(prefix: [u8; 8], suffix_byte: u8) -> Hash256 {
     let mut bytes = [suffix_byte; 32];
@@ -21,7 +21,14 @@ fn sample_txout(value: u64, tag: u8) -> TxOut {
 // RCV-01, RCV-03
 #[test]
 fn recovers_from_key_prefix_collisions_in_utxo_set_and_snapshot() -> TestResult {
-    let set = UtxoSet::new();
+    use bitcoin_rs_storage::utxo::UtxoReader;
+    use bitcoin_rs_storage::utxo::contract::populate_block_changes;
+    use bitcoin_rs_storage::{CoinStore, MemoryKvStore};
+    use std::sync::Arc;
+
+    let store = Arc::new(MemoryKvStore::new());
+    let coin_store = Arc::new(CoinStore::open(store, 64 * 1024 * 1024));
+    let reader = UtxoReader::from_coin_store(coin_store.clone());
     let prefix = [0x42, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
     let txid_a = make_txid(prefix, 0xaa);
     let txid_b = make_txid(prefix, 0xbb);
@@ -42,80 +49,112 @@ fn recovers_from_key_prefix_collisions_in_utxo_set_and_snapshot() -> TestResult 
     block1.add(UtxoAdd::new(op_a1, txout_a1.clone(), true, 100));
     block1.add(UtxoAdd::new(op_b0, txout_b0.clone(), false, 101));
     block1.add(UtxoAdd::new(op_b2, txout_b2.clone(), false, 101));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &set,
-        &block1,
-        &Hash256::from_le_bytes(&[1; 32]),
-    )?;
+    populate_block_changes(&coin_store, &block1)?;
 
-    assert!(set.has_live_outputs_for_txid(&txid_a));
-    assert!(set.has_live_outputs_for_txid(&txid_b));
-    assert_eq!(set.get(&op_a0), Some(txout_a0));
-    assert_eq!(set.get(&op_a1), Some(txout_a1.clone()));
-    assert_eq!(set.get(&op_b0), Some(txout_b0.clone()));
-    assert_eq!(set.get(&op_b2), Some(txout_b2.clone()));
-    assert_eq!(set.len(), 4);
-    assert_eq!(set.record_count(), 2);
+    assert!(reader.has_live_outputs_for_txid(&txid_a)?);
+    assert!(reader.has_live_outputs_for_txid(&txid_b)?);
+    assert_eq!(reader.get(&op_a0)?, Some(txout_a0));
+    assert_eq!(reader.get(&op_a1)?, Some(txout_a1.clone()));
+    assert_eq!(reader.get(&op_b0)?, Some(txout_b0.clone()));
+    assert_eq!(reader.get(&op_b2)?, Some(txout_b2.clone()));
 
     let mut block2 = BlockChanges::<TxOut>::default();
     block2.remove(op_a0);
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &set,
-        &block2,
-        &Hash256::from_le_bytes(&[2; 32]),
-    )?;
+    populate_block_changes(&coin_store, &block2)?;
 
-    assert!(set.has_live_outputs_for_txid(&txid_a));
-    assert!(set.has_live_outputs_for_txid(&txid_b));
-    assert_eq!(set.get(&op_a0), None);
-    assert_eq!(set.get(&op_a1), Some(txout_a1));
-    assert_eq!(set.get(&op_b0), Some(txout_b0.clone()));
-    assert_eq!(set.get(&op_b2), Some(txout_b2.clone()));
-    assert_eq!(set.len(), 3);
-    assert_eq!(set.record_count(), 2);
+    assert!(reader.has_live_outputs_for_txid(&txid_a)?);
+    assert!(reader.has_live_outputs_for_txid(&txid_b)?);
+    assert_eq!(reader.get(&op_a0)?, None);
+    assert_eq!(reader.get(&op_a1)?, Some(txout_a1));
+    assert_eq!(reader.get(&op_b0)?, Some(txout_b0.clone()));
+    assert_eq!(reader.get(&op_b2)?, Some(txout_b2.clone()));
 
     let mut block3 = BlockChanges::<TxOut>::default();
     block3.remove(op_a1);
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &set,
-        &block3,
-        &Hash256::from_le_bytes(&[3; 32]),
-    )?;
+    populate_block_changes(&coin_store, &block3)?;
 
-    assert!(!set.has_live_outputs_for_txid(&txid_a));
-    assert!(set.has_live_outputs_for_txid(&txid_b));
-    assert_eq!(set.get(&op_a1), None);
-    assert_eq!(set.get(&op_b0), Some(txout_b0.clone()));
-    assert_eq!(set.get(&op_b2), Some(txout_b2.clone()));
-    assert_eq!(set.len(), 2);
-    assert_eq!(set.record_count(), 1);
+    assert!(!reader.has_live_outputs_for_txid(&txid_a)?);
+    assert!(reader.has_live_outputs_for_txid(&txid_b)?);
+    assert_eq!(reader.get(&op_a1)?, None);
+    assert_eq!(reader.get(&op_b0)?, Some(txout_b0.clone()));
+    assert_eq!(reader.get(&op_b2)?, Some(txout_b2.clone()));
 
     let mut block4 = BlockChanges::default();
     let op_a5 = OutPoint::new(Txid::from(txid_a), 5);
     let txout_a5 = sample_txout(5_000, 0xa5);
     block4.add(UtxoAdd::new(op_a5, txout_a5.clone(), false, 104));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &set,
-        &block4,
-        &Hash256::from_le_bytes(&[4; 32]),
-    )?;
+    populate_block_changes(&coin_store, &block4)?;
 
-    assert!(set.has_live_outputs_for_txid(&txid_a));
-    assert!(set.has_live_outputs_for_txid(&txid_b));
-    assert_eq!(set.get(&op_a5), Some(txout_a5));
-    assert_eq!(set.get(&op_b0), Some(txout_b0));
-    assert_eq!(set.get(&op_b2), Some(txout_b2));
-    assert_eq!(set.len(), 3);
-    assert_eq!(set.record_count(), 2);
+    assert!(reader.has_live_outputs_for_txid(&txid_a)?);
+    assert!(reader.has_live_outputs_for_txid(&txid_b)?);
+    assert_eq!(reader.get(&op_a5)?, Some(txout_a5.clone()));
+    assert_eq!(reader.get(&op_b0)?, Some(txout_b0.clone()));
+
+    let expected = [
+        (op_a5, txout_a5, false, 104),
+        (op_b0, txout_b0, false, 101),
+        (op_b2, txout_b2, false, 101),
+    ];
+    let view = reader.lock_stable_view()?;
+    let mut remaining: std::collections::HashSet<_> =
+        expected.iter().map(|(outpoint, ..)| *outpoint).collect();
+    let mut first_error: Option<TestError> = None;
+    view.for_each_all(|outpoint, script| {
+        assert!(
+            remaining.remove(outpoint),
+            "unexpected or duplicate output {outpoint:?}"
+        );
+        if first_error.is_some() {
+            return;
+        }
+        let Some((_, txout, coinbase, height)) = expected
+            .iter()
+            .find(|(expected_outpoint, ..)| expected_outpoint == outpoint)
+        else {
+            first_error = Some(TestError::Missing(
+                "scanned output must belong to the supplied inputs",
+            ));
+            return;
+        };
+        assert_eq!(script, txout.script_pubkey.as_slice());
+        let Some(coin) = view.get_entry(outpoint) else {
+            first_error = Some(TestError::Missing("scanned coin must be live"));
+            return;
+        };
+        assert_eq!(
+            (&coin.txout, coin.coinbase, coin.height),
+            (txout, *coinbase, *height)
+        );
+    });
+    assert!(remaining.is_empty());
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    assert!(view.get_entry(&op_a0).is_none());
+    assert!(view.get_entry(&op_a1).is_none());
+    assert_eq!(view.len(), 3);
+    assert_eq!(view.record_count(), 2);
 
     let mut snapshot_bytes = Vec::new();
     let tip = Hash256::from_le_bytes(&[5; 32]);
-    write_snapshot_observed(&set, &tip, 104, &mut snapshot_bytes, ())?;
+    view.write_snapshot_observed(&tip, 104, &mut snapshot_bytes, ())?;
     let loaded = read_snapshot_strict_v4(&mut Cursor::new(&snapshot_bytes))?;
     assert_eq!(loaded.set.len(), 3);
     assert_eq!(loaded.set.record_count(), 2);
     assert!(loaded.set.has_live_outputs_for_txid(&txid_a));
     assert!(loaded.set.has_live_outputs_for_txid(&txid_b));
+    assert!(loaded.set.get_entry(&op_a0).is_none());
+    assert!(loaded.set.get_entry(&op_a1).is_none());
+    for (outpoint, txout, coinbase, height) in &expected {
+        let coin = loaded
+            .set
+            .get_entry(outpoint)
+            .ok_or(TestError::Missing("snapshot coin must be live"))?;
+        assert_eq!(
+            (&coin.txout, coin.coinbase, coin.height),
+            (txout, *coinbase, *height)
+        );
+    }
 
     Ok(())
 }

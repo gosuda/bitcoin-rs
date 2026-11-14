@@ -6,59 +6,16 @@ use crate::chain::ActiveTipWait as _;
 use crate::chain::regtest_fixture::{coinbase, mined_regtest_child_at as mined_child};
 use bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
 use bitcoin_rs_consensus::primitives::{
-    Amount, Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, Network, OutPoint,
-    Script, Tx, TxOut,
+    Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, Network, OutPoint, Tx,
 };
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::utxo::contract::{BlockChangeInputs, build_block_changes};
-use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
-use bitcoin_rs_storage::{
-    CommitRecords, DisconnectMarker, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
-    InMemoryUndoStore, StorageError, UndoStore,
-};
+use bitcoin_rs_storage::{CommitRecords, DurableHead, InMemoryDurableHeadStore, PersistFault};
+
 use hashbrown::HashMap;
 
 use super::{ApplyError, ResolvedUtxoView};
 use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
-
-struct RejectingUndoStore {
-    inner: InMemoryUndoStore,
-}
-
-impl UndoStore for RejectingUndoStore {
-    fn persist_undo(
-        &self,
-        _height: u32,
-        _hash: Hash256,
-        _record: &[u8],
-    ) -> Result<(), StorageError> {
-        Err(StorageError::backend("injected undo-persist failure"))
-    }
-
-    fn load_undo(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
-        self.inner.load_undo(height, hash)
-    }
-
-    fn arm_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
-        self.inner.arm_disconnect(height, hash)
-    }
-
-    fn complete_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
-        self.inner.complete_disconnect(height, hash)
-    }
-
-    fn disarm_disconnect(&self) -> Result<(), StorageError> {
-        self.inner.disarm_disconnect()
-    }
-
-    fn retire_disconnect_marker(&self) -> Result<(), StorageError> {
-        self.inner.retire_disconnect_marker()
-    }
-
-    fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError> {
-        self.inner.load_disconnect_marker()
-    }
-}
 
 #[test]
 fn canonical_regtest_chain_connects_through_bip34_activation() -> TestResult {
@@ -86,16 +43,17 @@ fn canonical_regtest_chain_connects_through_bip34_activation() -> TestResult {
 fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let utxo = Arc::new(UtxoSet::new());
-    let mut handles = handles(Network::Regtest, Arc::clone(&utxo));
+    let handles = handles(Network::Regtest, Arc::clone(&utxo));
     seed_genesis(&handles)?;
 
     let first = mined_child(genesis.block_hash(), 1)?;
     handles.apply_block(&BlockImage::from_local(first.clone()))?;
     let applied_hash = Hash256::from(first.block_hash());
     let utxo_len = utxo.len();
-    handles.undo_store = Arc::new(RejectingUndoStore {
-        inner: InMemoryUndoStore::default(),
-    });
+    handles
+        .commit_authority
+        .store()
+        .arm_persist_fault(PersistFault::FailApply);
     let next = mined_child(first.block_hash(), 2)?;
     let next_hash = Hash256::from(next.block_hash());
 
@@ -115,7 +73,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
         assert!(Instant::now() < registration_deadline, "waiter must park");
         std::thread::yield_now();
     }
-    let outcome = handles.apply_block(&BlockImage::from_local(next));
+    let outcome = handles.apply_block(&BlockImage::from_local(next.clone()));
     let pending = answer_rx.recv_timeout(Duration::from_millis(30));
     let remained_pending = matches!(pending, Err(mpsc::RecvTimeoutError::Timeout));
     stop.trigger();
@@ -128,7 +86,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
         .join()
         .map_err(|_| TestError::WorkerPanicked("tip observer"))?
         .map_err(|_| TestError::Exhausted("waiter send"))?;
-    assert!(matches!(outcome, Err(ApplyError::UndoPersistence(_))));
+    assert!(matches!(outcome, Err(ApplyError::DurableHeadCommit(_))));
     assert!(
         !remained_pending,
         "an unrecoverable undo failure closes admission and the shutdown wake releases the waiter"
@@ -141,23 +99,35 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
     assert_eq!(
         handles.applied_tip.load_full().map(|tip| tip.hash),
         Some(applied_hash),
-        "a failed precommit undo write must not publish a new tip"
+        "a failed durable commit must not publish a new tip"
     );
     assert_eq!(
         utxo.len(),
         utxo_len,
-        "a failed undo write must not commit UTXOs"
+        "a failed durable commit must not commit UTXOs"
     );
     assert!(
-        handles.block_tree.read().node_by_hash(next_hash).is_none(),
-        "tree preparation must not survive a failed undo write"
+        handles
+            .utxo_reader()
+            .get(&OutPoint::new(next.txs[0].txid(), 0))?
+            .is_none(),
+        "a failed durable commit must not commit coin rows"
     );
+    if let Some(node) = handles.block_tree.read().node_by_hash(next_hash) {
+        assert!(
+            matches!(
+                node.status,
+                crate::chain::NodeStatus::Active | crate::chain::NodeStatus::HeaderValid
+            ),
+            "header may exist in the tree after a failed commit, but the block itself is never published"
+        );
+    }
     Ok(())
 }
 
 // RCV-08
 #[test]
-fn bip30_overwrite_undo_restores_original_coin() -> TestResult {
+fn bip30_overwrite_undo_removes_the_overwritten_coin() -> TestResult {
     let utxo = UtxoSet::new();
     let block = Block {
         header: Header {
@@ -171,17 +141,18 @@ fn bip30_overwrite_undo_restores_original_coin() -> TestResult {
         txs: vec![coinbase(7)],
     };
     let reused = OutPoint::new(block.txs[0].txid(), 0);
-    let older = TxOut {
-        value: Amount::from_sat(4_242),
-        script_pubkey: Script::from_bytes(vec![0x51]),
+    let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+        vout: 0,
+        value: 4_242,
+        script_pubkey: vec![0x51],
+        coinbase: true,
+        height: 91_722,
     };
-    let mut seed = BlockChanges::default();
-    seed.add(UtxoAdd::new(reused, older.clone(), true, 91_722));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &utxo,
-        &seed,
-        &Hash256::from_le_bytes(&[0x30; 32]),
+    let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
+        Hash256::from(reused.txid),
+        &[out],
     )?;
+    utxo.insert_parsed_record(record);
 
     let txids = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
     let resolved = ResolvedUtxoView {
@@ -195,21 +166,13 @@ fn bip30_overwrite_undo_restores_original_coin() -> TestResult {
             same_block_spent: None,
             add_capacity: 1,
             remove_capacity: 0,
-            overwritten: Some(&utxo),
             max_script_size: MAX_SCRIPT_SIZE,
         },
         &resolved,
     )?;
 
-    assert_eq!(undo.removes(), []);
-    let restored = undo
-        .restores()
-        .iter()
-        .find(|entry| entry.outpoint == reused)
-        .ok_or(TestError::Missing("undo does not restore overwritten coin"))?;
-    assert_eq!(restored.txout, older);
-    assert_eq!(restored.height, 91_722);
-    assert!(restored.coinbase);
+    assert_eq!(undo.removes(), [reused]);
+    assert!(undo.restores().iter().all(|entry| entry.outpoint != reused));
     Ok(())
 }
 
@@ -270,7 +233,7 @@ fn disconnect_off_durable_head_refuses_without_mutation() -> TestResult {
     let first = mined_child(genesis.block_hash(), 1)?;
     handles.apply_block(&BlockImage::from_local(first.clone()))?;
     let first_outpoint = OutPoint::new(first.txs[0].txid(), 0);
-    assert!(utxo.get(&first_outpoint).is_some());
+    assert!(handles.utxo_reader().get(&first_outpoint)?.is_some());
 
     handles.durable_head = Arc::new(InMemoryDurableHeadStore::new());
 
@@ -288,7 +251,7 @@ fn disconnect_off_durable_head_refuses_without_mutation() -> TestResult {
         "a refused disconnect must not move the applied tip"
     );
     assert!(
-        utxo.get(&first_outpoint).is_some(),
+        handles.utxo_reader().get(&first_outpoint)?.is_some(),
         "a refused disconnect must not roll back the UTXO set"
     );
     assert_eq!(handles.undo_store.load_disconnect_marker()?, None);
@@ -346,6 +309,9 @@ fn current_schema_version_mismatch_and_corruption_refuses_open() -> TestResult {
     assert!(ensure_current_schema(&dir).is_err());
 
     std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"3\n")?;
+    assert!(ensure_current_schema(&dir).is_err());
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"4\n")?;
     assert!(ensure_current_schema(&dir).is_ok());
     Ok(())
 }

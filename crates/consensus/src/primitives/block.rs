@@ -68,33 +68,80 @@ pub struct BlockImage {
 }
 
 #[cfg(any(test, feature = "test-seam"))]
-static BLOCK_IMAGE_MATERIALIZATIONS: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+static BLOCK_IMAGE_MATERIALIZATIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<usize, usize>>,
+> = std::sync::LazyLock::new(Default::default);
 
 #[cfg(any(test, feature = "test-seam"))]
-static TRANSACTION_VIEW_MATERIALIZATIONS: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+static TRANSACTION_VIEW_MATERIALIZATIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<usize, usize>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(any(test, feature = "test-seam"))]
+fn count_materialization(
+    counts: &std::sync::Mutex<std::collections::HashMap<usize, usize>>,
+    buffer: &[u8],
+) {
+    let mut counts = counts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(count) = counts.get_mut(&buffer.as_ptr().addr()) {
+        *count += 1;
+    }
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+fn materializations_of(
+    counts: &std::sync::Mutex<std::collections::HashMap<usize, usize>>,
+    image: &BlockImage,
+) -> usize {
+    let counts = counts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    counts
+        .get(&image.bytes.as_ptr().addr())
+        .copied()
+        .unwrap_or(0)
+}
 
 #[cfg(any(test, feature = "test-seam"))]
 #[must_use]
-pub fn block_image_materialize_call_count() -> usize {
-    BLOCK_IMAGE_MATERIALIZATIONS.load(core::sync::atomic::Ordering::SeqCst)
-}
-
-#[cfg(any(test, feature = "test-seam"))]
-pub fn reset_block_image_materialize_call_count() {
-    BLOCK_IMAGE_MATERIALIZATIONS.store(0, core::sync::atomic::Ordering::SeqCst);
+pub fn block_image_materialize_call_count(image: &BlockImage) -> usize {
+    materializations_of(&BLOCK_IMAGE_MATERIALIZATIONS, image)
 }
 
 #[cfg(any(test, feature = "test-seam"))]
 #[must_use]
-pub fn transaction_view_materialize_call_count() -> usize {
-    TRANSACTION_VIEW_MATERIALIZATIONS.load(core::sync::atomic::Ordering::SeqCst)
+pub fn transaction_view_materialize_call_count(image: &BlockImage) -> usize {
+    materializations_of(&TRANSACTION_VIEW_MATERIALIZATIONS, image)
 }
 
 #[cfg(any(test, feature = "test-seam"))]
-pub fn reset_transaction_view_materialize_call_count() {
-    TRANSACTION_VIEW_MATERIALIZATIONS.store(0, core::sync::atomic::Ordering::SeqCst);
+pub fn watch_materializations(image: &BlockImage) {
+    let key = image.bytes.as_ptr().addr();
+    for counts in [
+        &BLOCK_IMAGE_MATERIALIZATIONS,
+        &TRANSACTION_VIEW_MATERIALIZATIONS,
+    ] {
+        counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, 0);
+    }
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+pub fn unwatch_materializations(image: &BlockImage) {
+    let key = image.bytes.as_ptr().addr();
+    for counts in [
+        &BLOCK_IMAGE_MATERIALIZATIONS,
+        &TRANSACTION_VIEW_MATERIALIZATIONS,
+    ] {
+        counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
+    }
 }
 
 impl BlockImage {
@@ -200,7 +247,7 @@ impl BlockImage {
     #[must_use]
     pub fn materialize(&self) -> Block {
         #[cfg(any(test, feature = "test-seam"))]
-        BLOCK_IMAGE_MATERIALIZATIONS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        count_materialization(&BLOCK_IMAGE_MATERIALIZATIONS, &self.bytes);
         Block {
             header: self.header(),
             txs: (0..self.tx_count())
@@ -386,7 +433,7 @@ impl<'a> TransactionView<'a> {
     #[must_use]
     pub fn materialize(&self) -> Tx {
         #[cfg(any(test, feature = "test-seam"))]
-        TRANSACTION_VIEW_MATERIALIZATIONS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        count_materialization(&TRANSACTION_VIEW_MATERIALIZATIONS, self.bytes);
         let version = self.version();
         let lock_time = self.lock_time();
 

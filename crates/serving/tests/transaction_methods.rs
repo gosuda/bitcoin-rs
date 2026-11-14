@@ -66,12 +66,7 @@ fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64) -> OutPoint {
         false,
         1,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::from_le_bytes(&[0xaa; 32]),
-    )
-    .expect("commit_block");
+    ctx.populate_fixture_coins(&changes).expect("commit_block");
     outpoint
 }
 

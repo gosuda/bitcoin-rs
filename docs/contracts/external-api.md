@@ -98,7 +98,7 @@ wallet interoperability remain unverified.
 - Bare P2PK/multisig keeps Core syntactic key handling.
 - This is an input and work limit, not a response-size limit.
 - Pinned matrix: `overhaul_process_harness::script_decode_cases` (classes, encodings, wrappers, checksums, params, networks, shared projections).
-- `gettxoutproof` without `blockhash` finds the block from the UTXO set: it answers `has_live_outputs_for_txid` once per requested txid in ascending txid order (an absent txid costs one lookup), checks the request latch before each txid, and answers from the first txid that holds a live output (`MAX_OUTPUTS_PER_BLOCK` vouts per txid).
+- `gettxoutproof` without `blockhash` finds the block from the UTXO set. It reads and decodes at most one `CoinStore` record per requested txid in ascending txid order, checks the request latch before each txid, and answers from the first txid with a live output below `MAX_OUTPUTS_PER_BLOCK`. Within that record, it uses the lowest qualifying vout.
 - Missing block data answers Core `-1` (`Block not available (pruned data)` on a pruned node, `Block not available (not fully downloaded)` otherwise); a body that does not decode answers Core `-32603` (`Can't read block from disk`); an empty txid list answers Core `-8`, a duplicated txid answers Core `-8` naming the raw input, and a non-string `blockhash` answers a Core `-3` type error.
 - With no unspent coin, it consults the txindex about the first txid only.
 - With neither source, it answers Core `-5` (`Transaction not yet in block`) and reads no block body.
@@ -106,10 +106,11 @@ wallet interoperability remain unverified.
 - With `blockhash`, it reads only that block.
 - Both forms take the request latch and poll it. Neither holds a blocking-quota slot (`API-34`).
 - The registry declares `Interruptible`.
+- `gettxout` and `gettxoutproof` answer Core `-32603` when the coin store cannot read or decode a coin row. They never answer `null` for that coin and never fall back to the txindex.
 
 #### Retained block inputs
 
-- `getblock` verbosity 2/3, `getrawtransaction` verbosity 2 and `/rest/spenttxouts` share one read-only `utxo::contract::BlockUndoSource` implemented by the chainstate owner.
+- `getblock` verbosity 2/3, `getrawtransaction` verbosity 2 and `/rest/spenttxouts` share one read-only `BlockUndoSource` (defined in `crates/consensus/src/undo.rs`, re-exported by `bitcoin_rs_storage::utxo::contract`) and implemented by `bitcoin_rs_execution::Chainstate` in `crates/execution/src/block_spends.rs`.
 - RPC captures one `AppliedView` for confirmations/next-block linkage and passes its hash.
 - A moved applied hash, durable receipt (including archive-only commits), or expired retention lease refuses the response.
 - An in-flight prune reservation provisional error requires consumers to wait and retry instead of rebuilding.
@@ -117,7 +118,7 @@ wallet interoperability remain unverified.
 - Successful undo is complete and input-ordered.
 - Same-block inputs come from earlier transactions in the authenticated body.
 - External inputs come from native net undo.
-- BIP30 overwritten-output restores are not input rows.
+- BIP30 overwritten outputs are undo removes, not restores; disconnect drops them without recovering the replaced coin, as Bitcoin Core.
 - The implementation uses no present-day UTXO lookup and no invented coin.
 - The native version-1 undo format is unchanged.
 - A retained body with uncertified or pruned undo MAY omit fee and prevout fields in `getblock` and `getrawtransaction`.
@@ -261,6 +262,7 @@ wallet interoperability remain unverified.
 - JSON bodies, mixed input sources, malformed or trailing data, and oversized requests fail with HTTP 400.
 - Empty serialized vectors are valid; URI requests still require outpoints.
 - Plain coin reads capture tip and coins under the stable chain read role.
+- A coin store read or decode error returns HTTP 500 for `/rest/getutxos`, never a bitmap miss.
 - Mixed reads retain one pool view and reject a changed or odd chain generation.
 - Rendering happens after guards are dropped.
 - Pool-created outputs use Core REST `MEMPOOL_HEIGHT` (2147483647).
@@ -500,7 +502,7 @@ wallet interoperability remain unverified.
 
 - Owner: `bip22_reject_reason` in `crates/node/src/mining.rs` for `ApplyError` arms, delegating to `consensus_reject_reason` and `chain_reject_reason` in `crates/serving/src/mining/bip22.rs`.
 - Proposal and `submitblock` project apply and consensus failures as Core `GetRejectReason` strings (`bad-cb-missing`, `bad-txnmrklroot`, `bad-cb-amount`, `high-hash`, `time-too-old`, ...).
-- Operational refusals (`Shutdown`, journal backpressure) stay `inconclusive`.
+- Operational refusals (`Shutdown`, a closed-for-recovery chainstate) stay `inconclusive`.
 - The first failing check names the reason.
 - Context-free checks run in Core `CheckBlock` order: merkle root and mutation, size limits, coinbase placement, transaction checks, then legacy sigops.
 - Witness malleation and block weight run after them, in Core `ContextualCheckBlock` order.
@@ -614,7 +616,7 @@ wallet interoperability remain unverified.
 - An ordered candidate refused by the mining sigop preflight also returns this `-25` (`bad-blk-sigops`), not an operational `Failed`.
 - `generatetoaddress` (`Mempool`) matches Core `generateBlocks` and skips it.
 - The check calls `apply::validate_block` directly (`ApplyIntent::Propose` already skips hash-meets-target), not GBT `propose` (`API-18` vocabulary).
-- Shutdown and journal backpressure stay `Unavailable`, not `TestBlockValidity`.
+- Shutdown and a closed-for-recovery chainstate stay `Unavailable`, not `TestBlockValidity`.
 ### `API-31`: `generateblock` multipath, ranged, and Expand errors
 
 - Owner: `generateblock_payout_script` in `crates/serving/src/handlers/util.rs`.
@@ -819,7 +821,7 @@ wallet interoperability remain unverified.
 - A valid range on a non-wildcard descriptor is checked and ignored, including fixed multipath.
 - Private keys, private-requiring derivation, Taproot trees, and other descriptors are refused as explicit Core deviations.
 - Repeated alternatives within one multipath specifier are rejected with `-5` like Core (implementation-specific diagnostic).
-- One transient reservation belongs to the authoritative `UtxoSet`; a second start returns `-8`.
+- One transient reservation belongs to the resident `UtxoSet` scan image; a second start returns `-8`.
 - Status is null when idle, else approximate progress.
 - Abort requests cancellation and returns whether a reservation exists.
 - Abort yields `success: false` with actual visited `txouts` plus only fully projected unspents.

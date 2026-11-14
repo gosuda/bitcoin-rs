@@ -6,15 +6,16 @@ The whole path lives in `crates/execution/src`: `window.rs` owns the apply windo
 
 ## The apply window
 
-The sync layer hands the chainstate a batch of consecutive blocks, not one at a time. `apply_window_admitted` (`window.rs:189`) walks the batch and stages each validated block in a `WindowGroup` (`window.rs:40`). Staging means: the block is fully validated, its undo record and journal record are built, but nothing is on disk and no reader sees the new tip.
+The sync layer hands the chainstate a batch of consecutive blocks, not one at a time. `apply_window_admitted` (`window.rs`) walks the batch and stages each validated block in a `WindowGroup`. Staging builds the undo record and accumulates coin effects in the window workspace; block bodies are appended, but the durable head and published applied tip do not advance. The final `WindowDelta` is built at flush.
 
 A group flushes when it holds 64 blocks (`DURABLE_HEAD_GROUP_BLOCKS`, `window.rs:16`) or 8 MiB of staged block bytes (`DURABLE_HEAD_GROUP_MAX_BYTES`, `window.rs:18`). `flush` (`window.rs:77`) then does one group commit:
 
 ```
-staged blocks 1..n  --sync_appended_blocks-->  bodies durable
-undo rows + body rows + attestation --commit_connect_head--> one receipt
-receipt.commit_id backfilled into every ConnectOutcome
-journal records emitted, then tips published per block
+staged blocks 1..n  --sync_appended_blocks-->  appended bodies durable
+window workspace  --build_flush_delta-->  final coin replacements
+undo rows + body locator rows + attestation + coin replacements + head
+  --commit_prefix--> durable batch, then coin-cache and stats-feed installation, then receipt
+receipt.commit_id backfilled into every ConnectOutcome, then tips published per block
 ```
 
 Each block in the group must continue the previous one: `WindowGroup::predecessor` (`window.rs:46`) returns the last staged tip as the parent and rejects a `prev_hash` mismatch with `PrevHashMismatch { tip, prev }`. This lets validation chain block N+1 against block N's in-memory tip without a storage round trip.
@@ -28,12 +29,11 @@ The log line for a group flush is `durable_head: group commit` with `blocks`, `s
 1. Locate the predecessor: `application_predecessor` (`connect.rs:62`) resolves the parent tip and height, from the staged group when grouped.
 2. Historical-target guard (`connect.rs:79`): under the assumeutxo historical role, blocks past `base_height` fail with `ConnectPastHistoricalTarget` and a height-equal mismatch fails with `HistoricalTargetHashMismatch`.
 3. Contextual header check (`connect.rs:106`): median-time-past, nbits, version gates, reusing `validate_contextual_header` from the execution chain module (`crates/execution/src/chain/header_sync.rs`) (see the next chapter).
-4. Journal preparation (`connect.rs:125`).
-5. Self proof of work (`connect.rs:146`).
-6. `BlockRules::check` (`connect.rs:252`): block rules from `verify_block_rules_precomputed` (merkle roots, size, weight, coinbase structure), signet solution, block finality (`check_block_finality`, `connect.rs:1310`), an early BIP34 check, the optional pow-valid announce hook, and the combined BIP30/BIP34 scan (`check_bip30_and_bip34`, `connect.rs:1262`).
-7. Script verification (`ScriptVerification::run`, `connect.rs:314`), possibly skipped under assume-valid; see [how/validation.md](validation.md) and clause `VAL-02` of `docs/contracts/validation-default.md`.
-8. Budget checks (`BudgetChecks::run`, invoked at `connect.rs:824`): sigop cost (`check_block_sigops`, `connect.rs:1079`), coinbase maturity, BIP68 sequence locks, coinbase value.
-9. Commit (`commit_application`, `connect.rs:859`): build UTXO changes and the undo record (`build_block_changes_checked`), check the coinbase value against subsidy and fees, persist the body, then publish via the mode picked by the caller.
+4. Self proof of work (`connect.rs:146`).
+5. `BlockRules::check` (`connect.rs:252`): block rules from `verify_block_rules_precomputed` (merkle roots, size, weight, coinbase structure), signet solution, block finality (`check_block_finality`, `connect.rs:1310`), an early BIP34 check, the optional pow-valid announce hook, and the combined BIP30/BIP34 scan (`check_bip30_and_bip34`, `connect.rs:1262`).
+6. Script verification (`ScriptVerification::run`, `connect.rs:314`), possibly skipped under assume-valid; see [how/validation.md](validation.md) and clause `VAL-02` of `docs/contracts/validation-default.md`.
+7. Budget checks (`BudgetChecks::run`, invoked at `connect.rs:824`): sigop cost (`check_block_sigops`, `connect.rs:1079`), coinbase maturity, BIP68 sequence locks, coinbase value.
+8. Commit (`commit_application`, `connect.rs:859`): build UTXO changes and the undo record (`build_block_changes_checked`), check the coinbase value against subsidy and fees, persist the body, then publish via the mode picked by the caller.
 
 The timing breakdown lines `apply_block: profile`, `apply_block: tail begin`, and `apply_block: publish profile` from a real regtest run are shown in [how/architecture.md](architecture.md); the `bip30_bip34_us` field in that profile times step 6's combined scan. Single-block RPC applies take the same path; a window commit from the p2p sync layer instead logs one `durable_head: group commit` line per flush, not per block.
 
@@ -71,10 +71,10 @@ A reorg is a planned disconnect-then-connect. `plan_reorg` (`crates/execution/sr
 |---|---|---|
 | `Permanent` | consensus-invalid block: bad merkle root, `SigopsLimit`, `CoinbaseAmount`, `ProofOfWork`, `NbitsMismatch` | invalidate the block's subtree (`invalidate_permanent_failure`, `window.rs:317`) and return the list of invalidated hashes |
 | `BodyMutated` | witness or merkle mutation of a staged body | same as `Operational` for the window; the peer that sent the mutated body is at fault |
-| `Operational` | transient or local: journal backpressure (`ApplyError::JournalBackpressure(error) if error.is_backpressure()`), `Shutdown`, `ConcurrentChainChange`, disconnect mismatches, missing bodies | stop the window, keep already-committed blocks, let the caller retry |
-| `Fatal` | storage engine failures: `UtxoCommit`, `DurableHeadCommit`, `BlockBodyPersistence`, `UndoPersistence`, non-backpressure journal errors, group flush failure | abandon the group, latch recovery, no retry |
+| `Operational` | transient or local: `Shutdown`, `ConcurrentChainChange`, disconnect mismatches, missing bodies | stop the window, keep already-committed blocks, let the caller retry |
+| `Fatal` | storage engine failures: `UtxoCommit`, `DurableHeadCommit`, `BlockBodyPersistence`, `UndoPersistence`, group flush failure | abandon the group, latch recovery, no retry |
 
-The window treats them asymmetrically (`apply_window_admitted`, `window.rs:189`): a `Fatal` error abandons the staged group and returns immediately; a `Permanent` error first invalidates the offending subtree, then flushes what is still committable; an `Operational` error flushes the staged prefix and reports how many blocks landed in `WindowApplyError.applied`. A flush failure is inherently ambiguous (the durable head may or may not name the batch), so `flush_group` (`window.rs:272`) always converts it to `Fatal`.
+The window treats them asymmetrically (`apply_window_admitted`, `window.rs:240`): a `Fatal` error abandons the staged group and returns immediately; a `Permanent` error first invalidates the offending subtree, then flushes what is still committable; an `Operational` error flushes the staged prefix and reports how many blocks landed in `WindowApplyError.applied`. A flush failure is inherently ambiguous (the durable head may or may not name the batch), so `flush_group` (`window.rs:346`) always converts it to `Fatal`.
 
 `ReorgError::requires_recovery` (`reorg.rs:265`) maps the same rule: `Fatal`, `RestorationFailed`, `TransitionSettlement`, and a `ConnectFailed` whose inner disposition is `Fatal` latch the chainstate closed via `fail_closed_for_recovery`; everything else leaves the node retryable. This is the code side of clause `SYNC-04` in `docs/contracts/synchronization.md`: failed undo, body, UTXO, or durable-head writes settle `Fatal` and the event loop shuts the node down; transient failures hand over to the caller.
 
@@ -101,7 +101,7 @@ Contract clauses named: `SYNC-02`, `SYNC-04`, `SYNC-05`, `RCV-04` to `RCV-08`, `
 
 ## Difference from Bitcoin Core
 
-Bitcoin Core flushes coins and connects blocks inside `CoinsViews`/`ApplyChainState` with per-block batch commits and an undo file per block; here the durable head is a single named record advanced by `commit_connect_head` once per group of up to 64 blocks, and the journal plus checkpoint chain replays to it on restart. See [how/state-and-storage.md](state-and-storage.md) for the on-disk side and `docs/contracts/synchronization.md` clause `SYNC-05` for the commit-before-publish guarantee.
+Bitcoin Core flushes coins and connects blocks inside `CoinsViews`/`ApplyChainState` with per-block batch commits and an undo file per block; here the durable head is a single named record advanced by `CommitAuthority::commit_prefix` once per group of up to 64 blocks, and the coin writes in the same batch are the only coin authority. A restart replays any gap between the newest checkpoint and that head. See [how/state-and-storage.md](state-and-storage.md) for the on-disk side and `docs/contracts/synchronization.md` clause `SYNC-05` for the commit-before-publish guarantee.
 
 ## Limits
 

@@ -346,8 +346,13 @@ impl AdmissionChain for ChainAdmissionView {
         let mut prevout_meta: HashMap<OutPoint, PrevoutMeta> = HashMap::new();
         let mut prevouts = Vec::new();
         for input in &tx.inputs {
-            let Some(coin) = self.utxo.get_entry(&input.previous_output) else {
-                continue;
+            let coin = match self.utxo.get_entry(&input.previous_output) {
+                Ok(Some(coin)) => coin,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::error!(%error, "admission snapshot unavailable: coin read failed");
+                    return None;
+                }
             };
             let mtp = *mtp_cache.entry(coin.height).or_insert_with(|| {
                 tip_node
@@ -369,9 +374,16 @@ impl AdmissionChain for ChainAdmissionView {
             );
             prevouts.push((input.previous_output, coin.txout));
         }
-        let confirmed = self
+        let confirmed = match self
             .utxo
-            .has_live_outputs_for_txid(&Hash256::from(tx.txid()));
+            .has_live_outputs_for_txid(&Hash256::from(tx.txid()))
+        {
+            Ok(confirmed) => confirmed,
+            Err(error) => {
+                tracing::error!(%error, "admission snapshot unavailable: coin read failed");
+                return None;
+            }
+        };
         Some(ChainAdmissionSnapshot {
             prevouts,
             prevout_meta,
@@ -521,8 +533,9 @@ impl ChainHandles {
         let coin_stats_listener = bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
             bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         );
-        let mut utxo = bitcoin_rs_storage::utxo::UtxoSet::new();
-        utxo.track_coin_stats(coin_stats_listener.clone());
+        let utxo = bitcoin_rs_storage::utxo::UtxoReader::fixture_new();
+        utxo.fixture_coin_store()
+            .track_coin_stats(coin_stats_listener.clone());
         let chain_tip = TipReader::new(Arc::new(ArcSwapOption::empty()));
         let applied_tip = TipReader::new(Arc::new(ArcSwapOption::empty()));
         let block_tree = BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(
@@ -544,7 +557,7 @@ impl ChainHandles {
             progress,
             closed_for_recovery: bitcoin_rs_execution::chain::LatchWriter::new().reader(),
             blocks: BlockLogReader::fixture_empty(),
-            utxo: bitcoin_rs_storage::utxo::UtxoReader::new(Arc::new(utxo)),
+            utxo,
             coin_stats: Arc::new(coin_stats_listener),
             block_tree,
             chain_network: Network::Mainnet,
@@ -639,6 +652,15 @@ impl Context {
             },
             ..ContextHandles::default()
         })
+    }
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn populate_fixture_coins<
+        T: std::borrow::Borrow<bitcoin_rs_consensus::primitives::TxOut>,
+    >(
+        &self,
+        changes: &bitcoin_rs_storage::utxo::contract::BlockChanges<T>,
+    ) -> Result<(), bitcoin_rs_storage::utxo::UtxoError> {
+        self.chain.utxo.populate_fixture_coins(changes)
     }
 
     #[must_use]
@@ -956,7 +978,11 @@ impl<'ctx> RpcPrevoutResolver<'ctx> {
         &mut self,
         outpoint: &OutPoint,
     ) -> Result<Option<ResolvedPrevout>, LookupError> {
-        if let Some(coin) = self.ctx.chain.utxo.get_entry(outpoint) {
+        let coin = self.ctx.chain.utxo.get_entry(outpoint).map_err(|error| {
+            tracing::error!(%error, "prevout coin read failed");
+            LookupError::CoinReadFailed
+        })?;
+        if let Some(coin) = coin {
             return Ok(Some(ResolvedPrevout {
                 txout: coin.txout,
                 confirmed_height: Some(coin.height),

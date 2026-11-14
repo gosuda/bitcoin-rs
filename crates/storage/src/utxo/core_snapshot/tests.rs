@@ -53,7 +53,7 @@ fn body(bytes: &[u8], count: u64) -> Result<crate::utxo::UtxoSet, SnapshotError>
     )?;
     let set = crate::utxo::UtxoSet::new();
     for record in records {
-        set.insert_snapshot_record(record);
+        set.insert_parsed_record(record);
     }
     Ok(set)
 }
@@ -493,7 +493,7 @@ fn forged_collision_families_never_enter_the_utxo_hash_table() {
             }
             bytes.extend(record);
         }
-        let before = crate::utxo::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get);
+        let before = crate::utxo::set::PARSED_RECORD_INSERTIONS.with(std::cell::Cell::get);
         assert!(matches!(
             read_and_verify(
                 &mut Cursor::new(&bytes),
@@ -503,11 +503,11 @@ fn forged_collision_families_never_enter_the_utxo_hash_table() {
             Err(SnapshotError::CommitmentMismatch { .. })
         ));
         assert_eq!(
-            crate::utxo::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get),
+            crate::utxo::set::PARSED_RECORD_INSERTIONS.with(std::cell::Cell::get),
             before
         );
     }
-    let before = crate::utxo::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get);
+    let before = crate::utxo::set::PARSED_RECORD_INSERTIONS.with(std::cell::Cell::get);
     assert!(
         read_and_verify(
             &mut Cursor::new(CORE),
@@ -517,7 +517,7 @@ fn forged_collision_families_never_enter_the_utxo_hash_table() {
         .is_ok()
     );
     assert_eq!(
-        crate::utxo::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get),
+        crate::utxo::set::PARSED_RECORD_INSERTIONS.with(std::cell::Cell::get),
         before + 200
     );
 }
@@ -543,7 +543,7 @@ fn staged_records_sort_vouts_and_move_their_payloads_without_copying() {
         .as_ptr();
     let set = crate::utxo::UtxoSet::new();
     for record in records {
-        set.insert_snapshot_record(record);
+        set.insert_parsed_record(record);
     }
     set.with_stable_view(|view| {
         assert_eq!(view.hash_serialized_3().expect("stable-view hash"), hash);
@@ -644,7 +644,7 @@ fn writer_script_compression_encodes_odd_even_y_and_offcurve_fallback() {
         let txid = Hash256::from_le_bytes(&txid_bytes);
         let out = OwnedUtxoOut::new(0, 50_000_000, script.clone(), false, 1);
         let record = UtxoRecord::from_owned_outputs(txid, &[out]).expect("record");
-        set.insert_snapshot_record(record);
+        set.insert_parsed_record(record);
     }
 
     let mut written = Vec::new();
@@ -714,7 +714,7 @@ fn writer_cancellation_polls_every_5000_coins() {
         let txid = Hash256::from_le_bytes(&txid_bytes);
         let out = OwnedUtxoOut::new(0, 1000, vec![0x51], false, 1);
         let record = UtxoRecord::from_owned_outputs(txid, &[out]).expect("record");
-        large_set.insert_snapshot_record(record);
+        large_set.insert_parsed_record(record);
     }
 
     let poll_called = std::cell::Cell::new(false);
@@ -873,7 +873,7 @@ fn writer_rejects_output_with_max_vout_as_invalid_outpoint() {
     let out = OwnedUtxoOut::new(u32::MAX, 50_000_000, vec![0x51], false, 1);
     let record =
         UtxoRecord::from_owned_outputs(txid, &[out]).expect("UtxoRecord admits u32::MAX vout");
-    set.insert_snapshot_record(record);
+    set.insert_parsed_record(record);
 
     let mut written = Vec::new();
     let base_hash = Hash256::from_le_bytes(&[0x42; 32]);
@@ -911,7 +911,7 @@ fn writer_encodes_highest_encodable_height_for_both_coinbase_variants() {
         let out = OwnedUtxoOut::new(0, 50_000_000, vec![0x51], coinbase, max_height);
         let record = UtxoRecord::from_owned_outputs(txid, &[out])
             .expect("UtxoRecord admits valid max height");
-        set.insert_snapshot_record(record);
+        set.insert_parsed_record(record);
 
         let mut written = Vec::new();
         let report = set
@@ -957,7 +957,7 @@ fn writer_rejects_next_height_as_varint_overflow_for_both_coinbase_variants() {
         let out = OwnedUtxoOut::new(0, 50_000_000, vec![0x51], coinbase, overflow_height);
         let record = UtxoRecord::from_owned_outputs(txid, &[out])
             .expect("UtxoRecord admits height with bit 31 set");
-        set.insert_snapshot_record(record);
+        set.insert_parsed_record(record);
 
         let mut written = Vec::new();
         let res = set.with_stable_view(|view| {
@@ -994,7 +994,7 @@ fn writer_preserves_invalid_height_precedence_over_varint_overflow() {
     let out = OwnedUtxoOut::new(0, 50_000_000, vec![0x51], false, overflow_height);
     let record = UtxoRecord::from_owned_outputs(txid, &[out])
         .expect("UtxoRecord admits height with bit 31 set");
-    set.insert_snapshot_record(record);
+    set.insert_parsed_record(record);
 
     let mut written = Vec::new();
     let res = set.with_stable_view(|view| {
@@ -1076,7 +1076,7 @@ fn core_file_cursor_order_and_hash_numeric_order_diverge_at_16512() {
     let low = OwnedUtxoOut::new(16_511, 5_000_000_000, vec![0x51], true, 1);
     let high = OwnedUtxoOut::new(16_512, 5_000_000_000, vec![0x51], true, 1);
     let record = UtxoRecord::from_owned_outputs(txid, &[low, high]).expect("record");
-    set.insert_snapshot_record(record);
+    set.insert_parsed_record(record);
     let base_hash = Hash256::from_le_bytes(&[0x77; 32]);
     let mut written = Vec::new();
     let report = set

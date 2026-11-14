@@ -1,5 +1,6 @@
 use bitcoin_rs_consensus::primitives::Hash256;
 use smallvec::SmallVec;
+use std::sync::Arc;
 
 use crate::utxo::{UtxoError, UtxoKey};
 
@@ -7,7 +8,8 @@ const TXID_LEN: usize = 32;
 const OUTPUT_COUNT_OFFSET: usize = TXID_LEN;
 const INLINE_LEN_OFFSET: usize = OUTPUT_COUNT_OFFSET + core::mem::size_of::<u32>();
 const RECORD_HEADER_LEN: usize = INLINE_LEN_OFFSET + core::mem::size_of::<u8>();
-const PAYLOAD_PROLOGUE_MAX_LEN: usize = crate::utxo::compress::VARINT_MAX_LEN + 8 + 5;
+const PAYLOAD_PROLOGUE_MAX_LEN: usize =
+    crate::utxo::compress::VARINT_MAX_LEN + 8 + 5 + crate::utxo::compress::VARINT_MAX_LEN;
 
 const WIDTHS_OFFSET: usize = RECORD_HEADER_LEN;
 const V5_BODY_OFFSET: usize = WIDTHS_OFFSET + 1;
@@ -100,10 +102,33 @@ fn pack_widths(vout_width: usize, len_width: usize) -> Result<u8, UtxoError> {
     let len = u8::try_from(len_width).map_err(|_| UtxoError::CorruptRecord)?;
     Ok((len << 4) | vout)
 }
+
 const INLINE_CAPACITY: usize = 8;
 
-/// Sentinel amount varint meaning "the next 8 bytes are a raw little-endian
-/// value".
+/// Discriminator bit on the inline_len byte (offset 36).
+///
+/// Invariant: byte 36 (`INLINE_LEN_OFFSET`) discriminates the record framing:
+/// - If bit 7 (`0x80`) is 0: plain v5 snapshot framing. The byte directly encodes
+///   `inline_len` in `0..=INLINE_CAPACITY` (`0..=8`).
+/// - If bit 7 (`0x80`) is 1: b-value framing with Core-compressed txouts. The lower 7
+///   bits (`byte & 0x7f`) encode `inline_len` in `0..=INLINE_CAPACITY` (`0..=8`).
+/// - Any byte with `(byte & 0x7f) > INLINE_CAPACITY` or `(byte & 0x7f) > output_count`,
+///   or any record with corrupted/forged discriminator or invalid Core script encoding,
+///   is rejected with `CorruptRecord`.
+pub const B_FRAMING_FLAG: u8 = 0x80;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RecordFraming {
+    V5Plain,
+    B,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DecompressedScripts {
+    pub(crate) spans: Box<[(u32, u32)]>,
+    pub(crate) data: Box<[u8]>,
+}
+
 const AMOUNT_ESCAPE: u64 = u64::MAX;
 
 fn pack_height(height: u32, coinbase: bool) -> u64 {
@@ -119,16 +144,34 @@ pub struct OneUtxoOut<'a> {
     pub height: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct UtxoRecord {
     buf: Box<[u8]>,
+    decompressed: Option<Arc<DecompressedScripts>>,
 }
+
+impl PartialEq for UtxoRecord {
+    fn eq(&self, other: &Self) -> bool {
+        self.txid() == other.txid()
+            && self.output_count() == other.output_count()
+            && self.outputs().eq(other.outputs())
+    }
+}
+
+impl Eq for UtxoRecord {}
 
 #[derive(Copy, Clone)]
 struct RecordHeader {
+    #[cfg(test)]
     txid: Hash256,
+    #[cfg(not(test))]
+    _txid: Hash256,
     output_count: usize,
+    #[cfg(test)]
     inline_len: usize,
+    #[cfg(not(test))]
+    _inline_len: usize,
+    framing: RecordFraming,
 }
 
 pub struct UtxoOutputIter<'a> {
@@ -136,6 +179,8 @@ pub struct UtxoOutputIter<'a> {
     layout: V5Layout,
     index: usize,
     payload: usize,
+    framing: RecordFraming,
+    decompressed: Option<&'a DecompressedScripts>,
 }
 
 impl<'a> Iterator for UtxoOutputIter<'a> {
@@ -145,13 +190,19 @@ impl<'a> Iterator for UtxoOutputIter<'a> {
         if self.index >= self.layout.count {
             return None;
         }
-        let (output, next) =
-            match decode_output_at(self.bytes, &self.layout, self.index, self.payload) {
-                Ok(decoded) => decoded,
-                Err(error) => {
-                    panic!("validated UTXO record output must remain decodable: {error:?}")
-                }
-            };
+        let (output, next) = match decode_output_at(
+            self.bytes,
+            &self.layout,
+            self.index,
+            self.payload,
+            self.framing,
+            self.decompressed,
+        ) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                panic!("validated UTXO record output must remain decodable: {error:?}")
+            }
+        };
         self.payload = next;
         self.index += 1;
         Some(output)
@@ -167,8 +218,8 @@ impl ExactSizeIterator for UtxoOutputIter<'_> {}
 
 impl UtxoRecord {
     pub fn from_encoded(buf: Box<[u8]>) -> Result<Self, UtxoError> {
-        validate_encoded(&buf)?;
-        Ok(Self { buf })
+        let (_header, decompressed) = validate_encoded(&buf)?;
+        Ok(Self { buf, decompressed })
     }
 
     #[must_use]
@@ -176,13 +227,27 @@ impl UtxoRecord {
         &self.buf
     }
 
-    pub fn from_owned_outputs(txid: Hash256, outputs: &[OwnedUtxoOut]) -> Result<Self, UtxoError> {
+    #[must_use]
+    pub fn framing(&self) -> RecordFraming {
+        self.header().framing
+    }
+
+    pub fn from_owned_outputs_with_framing(
+        txid: Hash256,
+        outputs: &[OwnedUtxoOut],
+        framing: RecordFraming,
+    ) -> Result<Self, UtxoError> {
         let buf = encode_record(
             txid,
             outputs.len().min(INLINE_CAPACITY),
             &owned_parts(outputs),
+            framing,
         )?;
         Self::from_encoded(buf)
+    }
+
+    pub fn from_owned_outputs(txid: Hash256, outputs: &[OwnedUtxoOut]) -> Result<Self, UtxoError> {
+        Self::from_owned_outputs_with_framing(txid, outputs, RecordFraming::B)
     }
 
     pub(crate) fn key(&self) -> UtxoKey {
@@ -211,21 +276,32 @@ impl UtxoRecord {
             Ok(layout) => layout,
             Err(error) => panic!("UtxoRecord is validated at construction: {error:?}"),
         };
+        let framing = self.header().framing;
         UtxoOutputIter {
             bytes,
-            payload: layout.payloads,
             layout,
             index: 0,
+            payload: layout.payloads,
+            framing,
+            decompressed: self.decompressed.as_deref(),
         }
     }
 
     pub fn find_output(&self, vout: u32) -> Option<OneUtxoOut<'_>> {
         let bytes = self.bytes();
         let layout = self.layout().ok()?;
+        let framing = self.header().framing;
         let index = (0..layout.count)
             .find(|index| layout.vout_at(bytes, *index).is_ok_and(|c| c == vout))?;
         let payload = payload_offset(bytes, &layout, index).ok()?;
-        match decode_output_at(bytes, &layout, index, payload) {
+        match decode_output_at(
+            bytes,
+            &layout,
+            index,
+            payload,
+            framing,
+            self.decompressed.as_deref(),
+        ) {
             Ok((output, _)) => Some(output),
             Err(error) => panic!("validated UTXO record output must remain decodable: {error:?}"),
         }
@@ -239,6 +315,7 @@ impl UtxoRecord {
             .max()
     }
 
+    #[cfg(test)]
     pub(crate) fn add_run_replacement<'p>(
         existing: Option<&Self>,
         txid: Hash256,
@@ -255,18 +332,21 @@ impl UtxoRecord {
         }
     }
 
+    #[cfg(test)]
     fn append_run<'p>(
         existing: Option<&Self>,
         txid: Hash256,
         additions: &'p [OutputParts<'p>],
         overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
     ) -> Result<Self, UtxoError> {
+        let framing = existing.map_or(RecordFraming::B, |r| r.framing());
         let appended = match existing {
             Some(record) => record.append_unique_run(additions)?,
             None => Some(Self::from_output_parts(
                 txid,
                 additions.len().min(INLINE_CAPACITY),
                 additions,
+                framing,
             )?),
         };
         if let Some(record) = appended {
@@ -283,19 +363,21 @@ impl UtxoRecord {
             .is_some()
             .then(|| Vec::with_capacity(additions.len()));
         append_parts(&mut parts, &mut inline_len, additions, staged.as_mut());
-        let record = Self::from_output_parts(txid, inline_len, &parts)?;
+        let record = Self::from_output_parts(txid, inline_len, &parts, framing)?;
         if let (Some(sink), Some(events)) = (overwritten, staged) {
             sink.extend(events);
         }
         Ok(record)
     }
 
+    #[cfg(test)]
     fn overwrite_run<'p>(
         existing: Option<&Self>,
         txid: Hash256,
         additions: &'p [OutputParts<'p>],
         overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
     ) -> Result<Self, UtxoError> {
+        let framing = existing.map_or(RecordFraming::B, |r| r.framing());
         let (mut parts, mut inline_len) = match existing {
             Some(record) => (record.output_parts(), record.header().inline_len),
             None => (Vec::with_capacity(additions.len()), 0),
@@ -304,13 +386,14 @@ impl UtxoRecord {
             .is_some()
             .then(|| Vec::with_capacity(additions.len()));
         overwrite_parts(&mut parts, &mut inline_len, additions, staged.as_mut());
-        let record = Self::from_output_parts(txid, inline_len, &parts)?;
+        let record = Self::from_output_parts(txid, inline_len, &parts, framing)?;
         if let (Some(sink), Some(events)) = (overwritten, staged) {
             sink.extend(events);
         }
         Ok(record)
     }
 
+    #[cfg(test)]
     fn append_unique_run(&self, additions: &[OutputParts<'_>]) -> Result<Option<Self>, UtxoError> {
         let header = self.header();
         let appends_at_end =
@@ -320,6 +403,7 @@ impl UtxoRecord {
         }
         let old = self.layout()?;
         let bytes = self.bytes();
+        let framing = header.framing;
 
         let new_count =
             header
@@ -332,10 +416,14 @@ impl UtxoRecord {
             u32::try_from(new_count).map_err(|_| UtxoError::RecordTooLarge { len: new_count })?;
         let inline_len = (header.inline_len + additions.len()).min(INLINE_CAPACITY);
         let inline_len_u8 = u8::try_from(inline_len).map_err(|_| UtxoError::CorruptRecord)?;
+        let inline_byte = match framing {
+            RecordFraming::V5Plain => inline_len_u8,
+            RecordFraming::B => inline_len_u8 | B_FRAMING_FLAG,
+        };
 
         let mut additions_len = 0_usize;
         for addition in additions {
-            let payload_len = addition.payload_len()?;
+            let payload_len = addition.payload_len(framing)?;
             if width_for(u64::from(addition.vout)) > old.vout_width
                 || width_for(u64::try_from(payload_len).unwrap_or(u64::MAX)) > old.len_width
             {
@@ -365,7 +453,7 @@ impl UtxoRecord {
         let mut buf = Vec::with_capacity(payload_len);
         buf.extend_from_slice(&header.txid.to_le_bytes());
         buf.extend_from_slice(&output_count.to_le_bytes());
-        buf.push(inline_len_u8);
+        buf.push(inline_byte);
         buf.push(pack_widths(old.vout_width, old.len_width)?);
 
         buf.extend_from_slice(region(old.vout_dir, old.len_dir)?);
@@ -374,26 +462,26 @@ impl UtxoRecord {
         }
         buf.extend_from_slice(region(old.len_dir, old.payloads)?);
         for addition in additions {
-            let len = u64::try_from(addition.payload_len()?).unwrap_or(u64::MAX);
+            let len = u64::try_from(addition.payload_len(framing)?).unwrap_or(u64::MAX);
             push_dir_entry(&mut buf, len, old.len_width)?;
         }
         buf.extend_from_slice(region(old.payloads, bytes.len())?);
         for addition in additions {
-            write_payload(&mut buf, addition)?;
+            write_payload(&mut buf, addition, framing)?;
         }
         if buf.len() != payload_len {
             return Err(UtxoError::CorruptRecord);
         }
-        Ok(Some(Self {
-            buf: buf.into_boxed_slice(),
-        }))
+        Self::from_encoded(buf.into_boxed_slice()).map(Some)
     }
 
+    #[cfg(test)]
     pub(crate) fn remove_run_replacement(
         &self,
         vouts: &[u32],
         mut removed: Option<&mut Vec<Option<OwnedUtxoOut>>>,
     ) -> Result<RemovedRecord, UtxoError> {
+        let framing = self.framing();
         if let Some(outputs) = self.full_removal_outputs(vouts) {
             if let Some(sink) = removed.as_deref_mut() {
                 for output in &outputs {
@@ -425,19 +513,27 @@ impl UtxoRecord {
             self.txid(),
             inline_len,
             &parts,
+            framing,
         )?))
     }
 
+    #[cfg(test)]
     pub(crate) fn edit_replacement<'a>(
         &'a self,
         vouts: &[u32],
         additions: &'a [OutputParts<'a>],
     ) -> Result<RemovedRecord, UtxoError> {
+        let framing = self.framing();
         if self.is_full_removal(vouts) {
             if additions.is_empty() {
                 return Ok(RemovedRecord::Emptied);
             }
-            let record = Self::add_run_replacement(None, self.txid(), additions, None)?;
+            let record = Self::from_output_parts(
+                self.txid(),
+                additions.len().min(INLINE_CAPACITY),
+                additions,
+                framing,
+            )?;
             return Ok(RemovedRecord::Replaced(record));
         }
         let mut parts = self.output_parts();
@@ -459,10 +555,11 @@ impl UtxoRecord {
         if parts.is_empty() {
             return Ok(RemovedRecord::Emptied);
         }
-        let replacement = Self::from_output_parts(self.txid(), inline_len, &parts)?;
+        let replacement = Self::from_output_parts(self.txid(), inline_len, &parts, framing)?;
         Ok(RemovedRecord::Replaced(replacement))
     }
 
+    #[cfg(test)]
     fn is_full_removal(&self, vouts: &[u32]) -> bool {
         if self.output_count() != vouts.len() {
             return false;
@@ -475,6 +572,7 @@ impl UtxoRecord {
         true
     }
 
+    #[cfg(test)]
     fn full_removal_outputs(&self, vouts: &[u32]) -> Option<Vec<OneUtxoOut<'_>>> {
         if self.output_count() != vouts.len() {
             return None;
@@ -504,19 +602,22 @@ impl UtxoRecord {
         }
     }
 
+    #[cfg(test)]
     fn output_parts(&self) -> Vec<OutputParts<'_>> {
         let mut parts = Vec::with_capacity(self.header().output_count);
         parts.extend(self.outputs().map(|output| OutputParts::from_view(&output)));
         parts
     }
 
+    #[cfg(test)]
     fn from_output_parts(
         txid: Hash256,
         inline_len: usize,
         outputs: &[OutputParts<'_>],
+        framing: RecordFraming,
     ) -> Result<Self, UtxoError> {
-        let buf = encode_record(txid, inline_len, outputs)?;
-        Ok(Self { buf })
+        let buf = encode_record(txid, inline_len, outputs, framing)?;
+        Self::from_encoded(buf)
     }
 }
 
@@ -556,6 +657,7 @@ impl<'a> OutputParts<'a> {
         )
     }
 
+    #[cfg(test)]
     fn from_view(output: &OneUtxoOut<'a>) -> Self {
         Self::new(
             output.vout,
@@ -566,6 +668,7 @@ impl<'a> OutputParts<'a> {
         )
     }
 
+    #[cfg(test)]
     fn into_owned(self) -> OwnedUtxoOut {
         OwnedUtxoOut::new(
             self.vout,
@@ -576,7 +679,7 @@ impl<'a> OutputParts<'a> {
         )
     }
 
-    fn payload_len(&self) -> Result<usize, UtxoError> {
+    fn payload_len(&self, framing: RecordFraming) -> Result<usize, UtxoError> {
         use crate::utxo::compress::varint_len;
 
         let script_len = self.script.len();
@@ -585,12 +688,33 @@ impl<'a> OutputParts<'a> {
         let prologue = varint_len(amount)
             + usize::from(escaped) * core::mem::size_of::<u64>()
             + varint_len(pack_height(self.height, self.coinbase));
-        prologue
-            .checked_add(script_len)
-            .ok_or(UtxoError::RecordTooLarge { len: script_len })
+
+        match framing {
+            RecordFraming::V5Plain => prologue
+                .checked_add(script_len)
+                .ok_or(UtxoError::RecordTooLarge { len: script_len }),
+            RecordFraming::B => {
+                let script_encoded_len = match crate::utxo::compress::compress_script(self.script) {
+                    Some((tag, special_data)) => varint_len(tag) + special_data.len(),
+                    None => {
+                        let tag = u64::try_from(script_len)
+                            .map_err(|_| UtxoError::CorruptRecord)?
+                            .checked_add(crate::utxo::compress::SCRIPT_SPECIAL_SCRIPTS_COUNT)
+                            .ok_or(UtxoError::CorruptRecord)?;
+                        varint_len(tag) + script_len
+                    }
+                };
+                prologue
+                    .checked_add(script_encoded_len)
+                    .ok_or(UtxoError::RecordTooLarge {
+                        len: script_encoded_len,
+                    })
+            }
+        }
     }
 }
 
+#[cfg(test)]
 pub(crate) enum RemovedRecord {
     Unchanged,
     Emptied,
@@ -601,6 +725,7 @@ fn owned_parts(outputs: &[OwnedUtxoOut]) -> Vec<OutputParts<'_>> {
     outputs.iter().map(OutputParts::from_owned).collect()
 }
 
+#[cfg(test)]
 fn append_parts<'a>(
     parts: &mut Vec<OutputParts<'a>>,
     inline_len: &mut usize,
@@ -616,6 +741,7 @@ fn append_parts<'a>(
     }
 }
 
+#[cfg(test)]
 fn overwrite_parts<'a>(
     parts: &mut Vec<OutputParts<'a>>,
     inline_len: &mut usize,
@@ -636,6 +762,7 @@ fn overwrite_parts<'a>(
     }
 }
 
+#[cfg(test)]
 fn push_part<'a>(parts: &mut Vec<OutputParts<'a>>, inline_len: &mut usize, part: OutputParts<'a>) {
     if *inline_len < INLINE_CAPACITY {
         parts.insert(*inline_len, part);
@@ -645,6 +772,7 @@ fn push_part<'a>(parts: &mut Vec<OutputParts<'a>>, inline_len: &mut usize, part:
     }
 }
 
+#[cfg(test)]
 fn remove_part_at<'a>(
     parts: &mut Vec<OutputParts<'a>>,
     inline_len: &mut usize,
@@ -660,6 +788,7 @@ fn remove_part_at<'a>(
     }
 }
 
+#[cfg(test)]
 fn vouts_are_strictly_increasing(
     previous: Option<u32>,
     vouts: impl IntoIterator<Item = u32>,
@@ -684,6 +813,7 @@ fn encode_record(
     txid: Hash256,
     inline_len: usize,
     outputs: &[OutputParts<'_>],
+    framing: RecordFraming,
 ) -> Result<Box<[u8]>, UtxoError> {
     let output_count = u32::try_from(outputs.len())
         .map_err(|_| UtxoError::RecordTooLarge { len: outputs.len() })?;
@@ -696,7 +826,7 @@ fn encode_record(
     let mut max_vout = 0_u64;
     let mut max_len = 0_u64;
     for output in outputs {
-        let len = output.payload_len()?;
+        let len = output.payload_len(framing)?;
         payload_total = payload_total
             .checked_add(len)
             .ok_or(UtxoError::RecordTooLarge { len: payload_total })?;
@@ -717,10 +847,15 @@ fn encode_record(
     }
 
     let inline_len_u8 = u8::try_from(inline_len).map_err(|_| UtxoError::CorruptRecord)?;
+    let inline_byte = match framing {
+        RecordFraming::V5Plain => inline_len_u8,
+        RecordFraming::B => inline_len_u8 | B_FRAMING_FLAG,
+    };
+
     let mut buf = Vec::with_capacity(payload_len);
     buf.extend_from_slice(&txid.to_le_bytes());
     buf.extend_from_slice(&output_count.to_le_bytes());
-    buf.push(inline_len_u8);
+    buf.push(inline_byte);
     buf.push(pack_widths(vout_width, len_width)?);
     for output in outputs {
         push_dir_entry(&mut buf, u64::from(output.vout), vout_width)?;
@@ -729,7 +864,7 @@ fn encode_record(
         push_dir_entry(&mut buf, u64::from(*len), len_width)?;
     }
     for output in outputs {
-        write_payload(&mut buf, output)?;
+        write_payload(&mut buf, output, framing)?;
     }
     if buf.len() != payload_len {
         return Err(UtxoError::CorruptRecord);
@@ -744,9 +879,11 @@ fn amount_parts(value: u64) -> (u64, bool) {
     }
 }
 
-/// Appends one output's v5 payload:
-/// `varint(amount) [|| raw amount] || varint(height << 1 | coinbase) || script`.
-fn write_payload(buf: &mut Vec<u8>, output: &OutputParts<'_>) -> Result<(), UtxoError> {
+fn write_payload(
+    buf: &mut Vec<u8>,
+    output: &OutputParts<'_>,
+    framing: RecordFraming,
+) -> Result<(), UtxoError> {
     use crate::utxo::compress::write_varint_at;
 
     let script_len = output.script.len();
@@ -773,14 +910,41 @@ fn write_payload(buf: &mut Vec<u8>, output: &OutputParts<'_>) -> Result<(), Utxo
     .ok_or(UtxoError::CorruptRecord)?;
 
     buf.extend_from_slice(prologue.get(..at).ok_or(UtxoError::CorruptRecord)?);
-    buf.extend_from_slice(output.script);
+
+    match framing {
+        RecordFraming::V5Plain => {
+            buf.extend_from_slice(output.script);
+        }
+        RecordFraming::B => {
+            let mut script_varint = [0_u8; crate::utxo::compress::VARINT_MAX_LEN];
+            match crate::utxo::compress::compress_script(output.script) {
+                Some((tag, special_data)) => {
+                    let len = write_varint_at(tag, &mut script_varint, 0)
+                        .ok_or(UtxoError::CorruptRecord)?;
+                    buf.extend_from_slice(&script_varint[..len]);
+                    buf.extend_from_slice(special_data);
+                }
+                None => {
+                    let tag = u64::try_from(script_len)
+                        .map_err(|_| UtxoError::CorruptRecord)?
+                        .checked_add(crate::utxo::compress::SCRIPT_SPECIAL_SCRIPTS_COUNT)
+                        .ok_or(UtxoError::CorruptRecord)?;
+                    let len = write_varint_at(tag, &mut script_varint, 0)
+                        .ok_or(UtxoError::CorruptRecord)?;
+                    buf.extend_from_slice(&script_varint[..len]);
+                    buf.extend_from_slice(output.script);
+                }
+            }
+        }
+    }
     Ok(())
 }
 
-fn validate_encoded(bytes: &[u8]) -> Result<RecordHeader, UtxoError> {
+fn validate_encoded(
+    bytes: &[u8],
+) -> Result<(RecordHeader, Option<Arc<DecompressedScripts>>), UtxoError> {
     let header = decode_header(bytes)?;
     let layout = V5Layout::read(bytes, header.output_count)?;
-
     let mut max_vout = 0_u64;
     let mut max_len = 0_u64;
     let mut cursor = layout.payloads;
@@ -789,6 +953,11 @@ fn validate_encoded(bytes: &[u8]) -> Result<RecordHeader, UtxoError> {
     } else {
         None
     };
+
+    let mut spans = Vec::with_capacity(layout.count);
+    let mut decompressed_data = Vec::new();
+    let mut has_special_script = false;
+
     for index in 0..layout.count {
         let vout = layout.vout_at(bytes, index)?;
         if let Some(set) = seen.as_mut() {
@@ -805,7 +974,34 @@ fn validate_encoded(bytes: &[u8]) -> Result<RecordHeader, UtxoError> {
         max_vout = max_vout.max(u64::from(vout));
         let len = layout.payload_len_at(bytes, index)?;
         max_len = max_len.max(u64::try_from(len).unwrap_or(u64::MAX));
-        let (_, next) = decode_output_at(bytes, &layout, index, cursor)?;
+
+        let next = cursor.checked_add(len).ok_or(UtxoError::CorruptRecord)?;
+        let body = bytes.get(cursor..next).ok_or(UtxoError::CorruptRecord)?;
+
+        let parsed = parse_output_payload(body, header.framing)?;
+        match parsed.script {
+            EncodedScript::Plain(_) => {}
+            EncodedScript::Core {
+                tag,
+                data: script_data,
+            } => {
+                let offset = decompressed_data.len();
+                crate::utxo::compress::decompress_script_into(
+                    tag,
+                    script_data,
+                    &mut decompressed_data,
+                )?;
+                let script_len = decompressed_data.len() - offset;
+                u16::try_from(script_len).map_err(|_| UtxoError::CorruptRecord)?;
+                spans.push((
+                    u32::try_from(offset).map_err(|_| UtxoError::CorruptRecord)?,
+                    u32::try_from(script_len).map_err(|_| UtxoError::CorruptRecord)?,
+                ));
+                if tag < crate::utxo::compress::SCRIPT_SPECIAL_SCRIPTS_COUNT {
+                    has_special_script = true;
+                }
+            }
+        }
         cursor = next;
     }
     if width_for(max_vout) != layout.vout_width || width_for(max_len) != layout.len_width {
@@ -814,7 +1010,17 @@ fn validate_encoded(bytes: &[u8]) -> Result<RecordHeader, UtxoError> {
     if cursor != bytes.len() {
         return Err(UtxoError::CorruptRecord);
     }
-    Ok(header)
+
+    let decompressed = if has_special_script {
+        Some(Arc::new(DecompressedScripts {
+            spans: spans.into_boxed_slice(),
+            data: decompressed_data.into_boxed_slice(),
+        }))
+    } else {
+        None
+    };
+
+    Ok((header, decompressed))
 }
 
 fn decode_header(bytes: &[u8]) -> Result<RecordHeader, UtxoError> {
@@ -824,18 +1030,29 @@ fn decode_header(bytes: &[u8]) -> Result<RecordHeader, UtxoError> {
     let output_count =
         usize::try_from(read_u32(bytes, OUTPUT_COUNT_OFFSET).ok_or(UtxoError::CorruptRecord)?)
             .map_err(|_| UtxoError::RecordTooLarge { len: usize::MAX })?;
-    let inline_len = usize::from(
-        *bytes
-            .get(INLINE_LEN_OFFSET)
-            .ok_or(UtxoError::CorruptRecord)?,
-    );
+    let raw_inline = *bytes
+        .get(INLINE_LEN_OFFSET)
+        .ok_or(UtxoError::CorruptRecord)?;
+    let framing = if raw_inline & B_FRAMING_FLAG != 0 {
+        RecordFraming::B
+    } else {
+        RecordFraming::V5Plain
+    };
+    let inline_len = usize::from(raw_inline & 0x7f);
     if inline_len > INLINE_CAPACITY || inline_len > output_count {
         return Err(UtxoError::CorruptRecord);
     }
     Ok(RecordHeader {
+        #[cfg(test)]
         txid: Hash256::from_le_bytes(&txid),
+        #[cfg(not(test))]
+        _txid: Hash256::from_le_bytes(&txid),
         output_count,
+        #[cfg(test)]
         inline_len,
+        #[cfg(not(test))]
+        _inline_len: inline_len,
+        framing,
     })
 }
 
@@ -854,12 +1071,67 @@ fn decode_output_at<'a>(
     layout: &V5Layout,
     index: usize,
     payload: usize,
+    framing: RecordFraming,
+    decompressed: Option<&'a DecompressedScripts>,
 ) -> Result<(OneUtxoOut<'a>, usize), UtxoError> {
     let vout = layout.vout_at(bytes, index)?;
     let len = layout.payload_len_at(bytes, index)?;
     let next = payload.checked_add(len).ok_or(UtxoError::CorruptRecord)?;
     let body = bytes.get(payload..next).ok_or(UtxoError::CorruptRecord)?;
 
+    let parsed = parse_output_payload(body, framing)?;
+
+    let script_pubkey: &'a [u8] = match decompressed {
+        Some(dec) => {
+            let &(offset, script_len) = dec.spans.get(index).ok_or(UtxoError::CorruptRecord)?;
+            let offset_usize = usize::try_from(offset).map_err(|_| UtxoError::CorruptRecord)?;
+            let len_usize = usize::try_from(script_len).map_err(|_| UtxoError::CorruptRecord)?;
+            let end = offset_usize
+                .checked_add(len_usize)
+                .ok_or(UtxoError::CorruptRecord)?;
+            dec.data
+                .get(offset_usize..end)
+                .ok_or(UtxoError::CorruptRecord)?
+        }
+        None => match parsed.script {
+            EncodedScript::Plain(script) => script,
+            EncodedScript::Core { tag, data }
+                if tag >= crate::utxo::compress::SCRIPT_SPECIAL_SCRIPTS_COUNT =>
+            {
+                data
+            }
+            EncodedScript::Core { .. } => return Err(UtxoError::CorruptRecord),
+        },
+    };
+
+    Ok((
+        OneUtxoOut {
+            vout,
+            value: parsed.value,
+            script_pubkey,
+            coinbase: parsed.coinbase,
+            height: parsed.height,
+        },
+        next,
+    ))
+}
+
+enum EncodedScript<'a> {
+    Plain(&'a [u8]),
+    Core { tag: u64, data: &'a [u8] },
+}
+
+struct OutputPayload<'a> {
+    value: u64,
+    height: u32,
+    coinbase: bool,
+    script: EncodedScript<'a>,
+}
+
+fn parse_output_payload(
+    body: &[u8],
+    framing: RecordFraming,
+) -> Result<OutputPayload<'_>, UtxoError> {
     let (amount, cursor) = crate::utxo::compress::read_varint(body, 0)?;
     let (value, cursor) = if amount == AMOUNT_ESCAPE {
         let end = cursor
@@ -881,24 +1153,35 @@ fn decode_output_at<'a>(
             cursor,
         )
     };
-
     let (packed, cursor) = crate::utxo::compress::read_varint(body, cursor)?;
     let height = u32::try_from(packed >> 1).map_err(|_| UtxoError::CorruptRecord)?;
-    let coinbase = packed & 1 == 1;
-
-    let script_pubkey = body.get(cursor..).ok_or(UtxoError::CorruptRecord)?;
-    u16::try_from(script_pubkey.len()).map_err(|_| UtxoError::CorruptRecord)?;
-
-    Ok((
-        OneUtxoOut {
-            vout,
-            value,
-            script_pubkey,
-            coinbase,
-            height,
-        },
-        next,
-    ))
+    let script = match framing {
+        RecordFraming::V5Plain => {
+            let script = body.get(cursor..).ok_or(UtxoError::CorruptRecord)?;
+            u16::try_from(script.len()).map_err(|_| UtxoError::CorruptRecord)?;
+            EncodedScript::Plain(script)
+        }
+        RecordFraming::B => {
+            let (tag, cursor) = crate::utxo::compress::read_varint(body, cursor)?;
+            let data = body.get(cursor..).ok_or(UtxoError::CorruptRecord)?;
+            if tag >= crate::utxo::compress::SCRIPT_SPECIAL_SCRIPTS_COUNT {
+                let raw_len =
+                    usize::try_from(tag - crate::utxo::compress::SCRIPT_SPECIAL_SCRIPTS_COUNT)
+                        .map_err(|_| UtxoError::CorruptRecord)?;
+                u16::try_from(raw_len).map_err(|_| UtxoError::CorruptRecord)?;
+                if raw_len != data.len() {
+                    return Err(UtxoError::CorruptRecord);
+                }
+            }
+            EncodedScript::Core { tag, data }
+        }
+    };
+    Ok(OutputPayload {
+        value,
+        height,
+        coinbase: packed & 1 == 1,
+        script,
+    })
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {

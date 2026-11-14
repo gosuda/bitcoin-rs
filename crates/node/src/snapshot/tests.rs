@@ -5,6 +5,7 @@ impl From<SnapshotExportError> for TestError {
     fn from(error: SnapshotExportError) -> Self {
         match error {
             SnapshotExportError::Codec(inner) => Self::from(inner),
+            SnapshotExportError::Utxo(inner) => Self::from(inner),
             SnapshotExportError::Admission(inner) => Self::from(inner),
             SnapshotExportError::Output(inner)
             | SnapshotExportError::Write(inner)
@@ -551,12 +552,24 @@ fn sealed_and_proofless_activation_install_identical_state_and_survive_restart()
             state.snapshots.import(&core_path)?;
         }
         let stats = state.chainstate().coin_stats_handle().snapshot();
-        let (commitment, mut scanned) = state.chainstate().utxo().with_stable_view(|view| {
-            Ok::<_, bitcoin_rs_storage::utxo::UtxoError>((
-                view.hash_serialized_3_at_height(pinned.height)?,
-                bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)?,
-            ))
-        })?;
+        let (commitment, mut scanned) = {
+            let coin_store = state.coins();
+            let snapshot = coin_store.store().snapshot()?;
+            let coins = bitcoin_rs_storage::utxo::UtxoSet::new();
+            for row in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
+                let (_key, value) = row?;
+                coins.insert_parsed_record(
+                    bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
+                        .map_err(TestError::Utxo)?,
+                );
+            }
+            coins.with_stable_view(|view| {
+                Ok::<_, TestError>((
+                    view.hash_serialized_3_at_height(pinned.height)?,
+                    bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)?,
+                ))
+            })?
+        };
         assert_eq!(commitment, pinned.hash_serialized, "native={native}");
         scanned.tx_count = pinned.chain_tx_count;
         assert_eq!(
@@ -650,13 +663,11 @@ fn mutating_an_unproven_set_is_caught_by_the_single_verification() -> Result<(),
         Network::Regtest,
         SnapshotLimits::default(),
     )?;
-    loaded
-        .set
-        .replace_from(bitcoin_rs_storage::utxo::UtxoSet::new());
+    let empty_set = bitcoin_rs_storage::utxo::UtxoSet::new();
     let before_tip = state.chainstate().applied_tip_snapshot();
     let before_stats = state.chainstate().coin_stats_handle().snapshot();
     let result = state.snapshots.manager.activate_snapshot_state(
-        loaded.set,
+        empty_set,
         loaded.metadata.base_block_hash,
         loaded.anchor.height,
     );

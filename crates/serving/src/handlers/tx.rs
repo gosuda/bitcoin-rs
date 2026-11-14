@@ -257,8 +257,9 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
         ctx.chain
             .utxo
             .get_entry(&outpoint)
-            .map(|live| (live, ctx.chain.applied_view()))
-    }) else {
+            .map(|live| live.map(|live| (live, ctx.chain.applied_view())))
+    })?
+    else {
         return Ok(Value::new_null());
     };
     let confirmations = view.height().saturating_sub(live.height).saturating_add(1);
@@ -362,18 +363,12 @@ fn block_from_utxo(
         if cancellation.is_triggered() {
             return Err(proof_interrupted());
         }
-        if !ctx
+        if let Some(height) = ctx
             .chain
             .utxo
-            .has_live_outputs_for_txid(&Hash256::from(*txid))
+            .confirmation_height(&txid.0, MAX_OUTPUTS_PER_BLOCK)?
         {
-            continue;
-        }
-        for vout in 0..MAX_OUTPUTS_PER_BLOCK {
-            let Some(coin) = ctx.chain.utxo.get_entry(&OutPoint::new(*txid, vout)) else {
-                continue;
-            };
-            return Ok(ctx.chain.block_by_height(coin.height));
+            return Ok(ctx.chain.block_by_height(height));
         }
     }
     Ok(None)
@@ -1228,6 +1223,23 @@ mod gettxout_via_utxo_tests {
             value.is_null(),
             "expected null for output absent from UTXO set, got {value:?}"
         );
+    }
+
+    // API-02
+    #[test]
+    fn gettxout_reports_an_unreadable_coin_instead_of_null()
+    -> Result<(), crate::test_error::TestError> {
+        let txid = Hash256::from_le_bytes(&[0xD4; 32]);
+        let mut ctx = Context::new();
+        ctx.chain.utxo = crate::test_coins::utxo_reader_with_undecodable_coin(&txid)?;
+        let ctx = Arc::new(ctx);
+        let params = json!([Txid::from(txid).to_string(), 0_u64]);
+        let result = gettxout(&ctx, &params);
+        assert!(
+            matches!(&result, Err(RpcError::Internal(_))),
+            "expected an internal error for an unreadable coin, got {result:?}"
+        );
+        Ok(())
     }
 }
 

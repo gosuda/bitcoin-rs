@@ -13,14 +13,22 @@ pub use block_file::{
 };
 
 pub use cache_budget::{
-    CacheBudgetShare, clamp_dbcache_bytes, split_cache_budget_with_txindex,
-    split_cache_budget_without_txindex,
+    CacheBudgetShare, ChainstateCacheBudget, clamp_dbcache_bytes, split_cache_budget_with_txindex,
+    split_cache_budget_without_txindex, split_chainstate_cache_budget,
 };
 
 pub use column_families::ColumnFamily;
 
 pub use bytes::Bytes;
+pub use coins::{COIN_KEY_LEN, CoinCache, CoinKey, CoinStatsFeed, CoinStore, WindowDelta};
+#[cfg(any(test, feature = "test-seam"))]
+pub use commit::CommitFault;
+pub use commit::{AcceptedPrefix, CommitAuthority, CommitError, DurableReceipt};
 pub use error::{BoundedReadError, StorageError};
+pub use memory_kv::MemoryKvStore;
+pub use snapshot_activation::{
+    SNAPSHOT_ACTIVATION_KEY, SnapshotActivationMarker, SnapshotActivationRecovery,
+};
 
 #[cfg(any(test, feature = "test-seam"))]
 pub use trait_::PersistFault;
@@ -57,6 +65,7 @@ pub use surrealkv_impl::{SURREALKV_DEFAULT_CACHE_BYTES, SurrealKvStore};
 pub use mdbx_impl::{MAX_KEY_SIZE, MAX_VAL_SIZE, MdbxStore};
 
 pub mod engine_detect;
+pub use checkpoint::open_checkpoint_store;
 pub use engine_detect::detect_engine;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -110,11 +119,15 @@ mod batch;
 pub mod block_body;
 mod block_file;
 pub mod cache_budget;
+pub mod coins;
 mod column_families;
+pub mod commit;
 pub mod durable_head;
 mod error;
+pub mod memory_kv;
 pub mod pruning;
 pub mod recovery_evidence;
+pub mod snapshot_activation;
 mod trait_;
 pub mod undo;
 
@@ -124,7 +137,6 @@ mod rocksdb_impl;
 #[cfg(feature = "surrealkv")]
 mod surrealkv_impl;
 
-pub mod chainstate_journal;
 pub mod checkpoint;
 #[cfg(any(test, verification, kani))]
 pub mod schema_model;

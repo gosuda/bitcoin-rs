@@ -254,6 +254,11 @@ fn from_handles_shares_chain_handles_with_caller() {
         bitcoin_rs_wire::LatchReader::fixture_never(),
     ));
     let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
+    let fixture_reader = bitcoin_rs_storage::utxo::UtxoReader::fixture_with_set(Arc::clone(&utxo))
+        .expect("seed fixture coin store");
+    fixture_reader
+        .fixture_coin_store()
+        .track_coin_stats(coin_stats.as_ref().clone());
     let ctx = Context::from_handles(ContextHandles {
         chain: ChainHandles {
             chain_tip: TipReader::new(Arc::clone(&chain_tip)),
@@ -261,7 +266,7 @@ fn from_handles_shares_chain_handles_with_caller() {
             active_tip_wait: None,
             progress,
             blocks: BlockLogReader::fixture_empty(),
-            utxo: bitcoin_rs_storage::utxo::UtxoReader::new(Arc::clone(&utxo)),
+            utxo: fixture_reader,
             coin_stats: Arc::clone(&coin_stats),
             block_tree: BlockTreeReader::new(Arc::clone(&block_tree)),
             chain_network: Network::Mainnet,
@@ -330,6 +335,7 @@ fn from_handles_shares_chain_handles_with_caller() {
         Arc::ptr_eq(&ctx.chain.coin_stats, &coin_stats),
         "coin_stats must be shared with caller"
     );
+    assert_fixture_commit_statistics(&ctx);
     {
         let genesis = Network::Regtest.genesis_block();
         let genesis_id = block_tree
@@ -402,32 +408,6 @@ fn block_render_budget_releases_dropped_permits() {
     drop(first);
     assert!(ctx.try_acquire_block_render().is_some());
     drop(second);
-}
-
-#[test]
-fn new_context_wires_utxo_commits_to_coin_stats() {
-    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, TxOut, Txid};
-    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
-
-    let ctx = Context::new();
-    let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[1_u8; 32])), 0);
-    let txout = TxOut {
-        value: Amount::from_sat(125_000),
-        script_pubkey: Script::new(),
-    };
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(outpoint, txout, true, 7));
-
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )
-    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
-
-    let snapshot = ctx.chain.coin_stats.snapshot();
-    assert_eq!(snapshot.utxo_count, 1);
-    assert_eq!(snapshot.total_amount, 125_000);
 }
 
 #[test]
@@ -776,9 +756,10 @@ fn ibd_latch_judges_the_contexts_own_tree() {
                 )),
             ),
             blocks: BlockLogReader::fixture_empty(),
-            utxo: bitcoin_rs_storage::utxo::UtxoReader::new(Arc::new(
+            utxo: bitcoin_rs_storage::utxo::UtxoReader::fixture_with_set(Arc::new(
                 bitcoin_rs_storage::utxo::UtxoSet::new(),
-            )),
+            ))
+            .expect("seed fixture coin store"),
             coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
                 bitcoin_rs_storage::utxo::stats::CoinStats::default(),
             )),
@@ -822,4 +803,91 @@ fn ibd_latch_judges_the_contexts_own_tree() {
             .initial_block_download(now, Network::Regtest),
         "the latch must judge the tip it reaches through the context's tree"
     );
+}
+
+fn assert_fixture_commit_statistics(ctx: &Context) {
+    use bitcoin_rs_consensus::primitives::{Amount, Script, TxOut, Txid};
+    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
+
+    let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x73; 32])), 7);
+    let value_sat = 12_345;
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(
+        outpoint,
+        TxOut {
+            value: Amount::from_sat(value_sat),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        },
+        false,
+        0,
+    ));
+    ctx.populate_fixture_coins(&changes)
+        .expect("insert fixture coin");
+    let inserted = ctx.chain.coin_stats.snapshot();
+    assert_eq!(inserted.utxo_count, 1);
+    assert_eq!(inserted.total_amount, value_sat);
+
+    let mut changes = BlockChanges::<TxOut>::default();
+    changes.remove(outpoint);
+    ctx.populate_fixture_coins(&changes)
+        .expect("remove fixture coin");
+    let removed = ctx.chain.coin_stats.snapshot();
+    assert_eq!(removed.utxo_count, 0);
+    assert_eq!(removed.total_amount, 0);
+}
+
+#[test]
+fn new_context_fixture_commits_update_coin_statistics() {
+    assert_fixture_commit_statistics(&Context::new());
+}
+
+#[test]
+fn admission_snapshot_withholds_unreadable_input() -> Result<(), crate::test_error::TestError> {
+    let mut tx = Network::Regtest.genesis_block().txs[0].clone();
+    let unreadable = Hash256::from_le_bytes(&[0xd4; 32]);
+    tx.inputs[0].previous_output = OutPoint::new(Txid::from(unreadable), 7);
+    let ctx = Context::new();
+    let reader = crate::test_coins::utxo_reader_with_undecodable_coin(&unreadable)?;
+    assert!(!reader.has_live_outputs_for_txid(&Hash256::from(tx.txid()))?);
+    let view = ChainAdmissionView::new(
+        reader,
+        ctx.chain.applied_tip.clone(),
+        ctx.chain.block_tree.clone(),
+        Network::Regtest,
+    );
+    assert!(view.snapshot(&tx).is_none());
+    Ok(())
+}
+
+#[test]
+fn admission_snapshot_withholds_unreadable_submitted_transaction()
+-> Result<(), crate::test_error::TestError> {
+    let mut tx = Network::Regtest.genesis_block().txs[0].clone();
+    tx.inputs[0].previous_output = OutPoint::new(Txid(Hash256::from_le_bytes(&[0xd5; 32])), 7);
+    let ctx = Context::new();
+    let reader = crate::test_coins::utxo_reader_with_undecodable_coin(&Hash256::from(tx.txid()))?;
+    assert!(reader.get_entry(&tx.inputs[0].previous_output)?.is_none());
+    let view = ChainAdmissionView::new(
+        reader,
+        ctx.chain.applied_tip.clone(),
+        ctx.chain.block_tree.clone(),
+        Network::Regtest,
+    );
+    assert!(view.snapshot(&tx).is_none());
+    Ok(())
+}
+
+#[test]
+fn rpc_prevout_reports_unreadable_coin_instead_of_absence()
+-> Result<(), crate::test_error::TestError> {
+    let unreadable = Hash256::from_le_bytes(&[0xd6; 32]);
+    let outpoint = OutPoint::new(Txid::from(unreadable), 7);
+    let mut ctx = Context::new();
+    ctx.chain.utxo = crate::test_coins::utxo_reader_with_undecodable_coin(&unreadable)?;
+    let mut resolver = RpcPrevoutResolver::new(&ctx, LatchReader::fixture_never())?;
+    assert!(matches!(
+        PrevoutResolver::prevout(&mut resolver, &outpoint),
+        Err(LookupError::CoinReadFailed)
+    ));
+    Ok(())
 }

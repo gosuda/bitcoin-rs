@@ -4,6 +4,12 @@ use super::load::read_current;
 use super::*;
 use bitcoin_rs_consensus::primitives::hex::hex_encode;
 
+use super::{
+    CHECKPOINT_ROOT, COINSTATS_ARTIFACT_LEN, COINSTATS_CODEC, COINSTATS_FILE, COINSTATS_VERSION,
+    CURRENT_FILE, CheckpointError, CheckpointFailpoint, CheckpointManifestV1, CheckpointReference,
+    CheckpointRetention, CurrentV1, HEADER_CODEC, HEADERS_FILE, MANIFEST_FILE, MANIFEST_FORMAT,
+    MANIFEST_VERSION, UTXO_CODEC, UTXO_VERSION, UtxoArtifactV1, commit_publication, fs::read_file,
+};
 use crate::test_support::{TestError, TestResult};
 use cap_std::ambient_authority;
 use sha2::{Digest, Sha256};
@@ -51,7 +57,7 @@ fn publish_fixture_at(
         },
     )?;
     let ((), utxo_digest) = stage.write_artifact_with_failpoints(
-        UTXO_FILE,
+        "utxo-snapshot.dat",
         CheckpointFailpoint::UtxoWrite,
         CheckpointFailpoint::UtxoSync,
         |writer| {
@@ -101,8 +107,8 @@ fn publish_fixture_at(
             best_chain_sha256: "00".repeat(32),
             applied_chain_sha256: "00".repeat(32),
         },
-        utxo: UtxoArtifactV1 {
-            file: UTXO_FILE.to_owned(),
+        utxo: Some(UtxoArtifactV1 {
+            file: "utxo-snapshot.dat".to_owned(),
             codec: UTXO_CODEC.to_owned(),
             version: UTXO_VERSION,
             bytes: utxo_digest.bytes,
@@ -110,7 +116,7 @@ fn publish_fixture_at(
             record_count: 0,
             output_count: 0,
             muhash_trailer_sha256: "00".repeat(32),
-        },
+        }),
         coinstats: CoinStatsArtifactV1 {
             file: COINSTATS_FILE.to_owned(),
             codec: COINSTATS_CODEC.to_owned(),
@@ -198,12 +204,9 @@ fn publication_failpoints_preserve_the_previous_current() -> TestResult {
             manifest.headers.bytes,
             &manifest.headers.sha256,
         )?;
-        verify_artifact(
-            &generation_dir,
-            &manifest.utxo.file,
-            manifest.utxo.bytes,
-            &manifest.utxo.sha256,
-        )?;
+        if let Some(utxo) = &manifest.utxo {
+            verify_artifact(&generation_dir, &utxo.file, utxo.bytes, &utxo.sha256)?;
+        }
         verify_artifact(
             &generation_dir,
             &manifest.coinstats.file,
@@ -259,12 +262,9 @@ fn historical_publication_retains_head_generation_until_explicit_retirement() ->
                 genesis: bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash(),
             },
         )?;
-        verify_artifact(
-            &generation_dir,
-            &manifest.utxo.file,
-            manifest.utxo.bytes,
-            &manifest.utxo.sha256,
-        )?;
+        if let Some(utxo) = &manifest.utxo {
+            verify_artifact(&generation_dir, &utxo.file, utxo.bytes, &utxo.sha256)?;
+        }
         drop(generation_dir);
         let replacement = publish_fixture_at(
             &data,
@@ -528,7 +528,7 @@ fn commit_rejects_manifest_for_wrong_generation() -> TestResult {
         "applied_tip": { "height": 0, "hash": "00".repeat(32), "chainwork": "00".repeat(32), "chain_tx_count": 0 },
         "best_header_tip": { "height": 0, "hash": "00".repeat(32), "chainwork": "00".repeat(32), "chain_tx_count": 0 },
         "headers": { "file": HEADERS_FILE, "codec": HEADER_CODEC, "version": 1, "bytes": 0, "sha256": "00".repeat(32), "header_count": 0, "best_chain_sha256": "00".repeat(32), "applied_chain_sha256": "00".repeat(32) },
-        "utxo": { "file": UTXO_FILE, "codec": UTXO_CODEC, "version": UTXO_VERSION, "bytes": 0, "sha256": "00".repeat(32), "record_count": 0, "output_count": 0, "muhash_trailer_sha256": "00".repeat(32) },
+        "utxo": { "file": "utxo-snapshot.dat", "codec": UTXO_CODEC, "version": UTXO_VERSION, "bytes": 0, "sha256": "00".repeat(32), "record_count": 0, "output_count": 0, "muhash_trailer_sha256": "00".repeat(32) },
         "coinstats": { "file": COINSTATS_FILE, "codec": COINSTATS_CODEC, "version": COINSTATS_VERSION, "bytes": COINSTATS_ARTIFACT_LEN, "sha256": "00".repeat(32), "height": 0, "total_amount": 0, "bogo_size": 0, "tx_count": 0, "utxo_count": 0, "muhash": "00".repeat(32) }
     }))?;
     assert!(matches!(
@@ -576,7 +576,7 @@ fn format_and_schema_helpers_round_trip() -> TestResult {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     ensure_current_schema(&data)?;
-    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"3\n");
+    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"4\n");
     let mut oversized = data.create("oversized")?;
     oversized.write_all(&[0_u8; 17])?;
     oversized.sync_all()?;
@@ -585,7 +585,7 @@ fn format_and_schema_helpers_round_trip() -> TestResult {
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData
     ));
     data.remove_file(CURRENT_SCHEMA_FILE)?;
-    for epoch in [b"0\n", b"1\n", b"2\n"] {
+    for epoch in [b"0\n", b"1\n", b"2\n", b"3\n"] {
         let mut stale_schema = data.create(CURRENT_SCHEMA_FILE)?;
         stale_schema.write_all(epoch)?;
         stale_schema.sync_all()?;
@@ -614,7 +614,7 @@ fn schema_init_exempts_only_a_regular_lock_file() -> TestResult {
         lock.sync_all()?;
     }
     ensure_current_schema(&data)?;
-    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"3\n");
+    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"4\n");
     {
         let mut other = data.create("other")?;
         other.write_all(b"data")?;
@@ -773,15 +773,15 @@ fn open_file_reads_regular_file() -> TestResult {
     use std::io::Read as _;
 
     let dir = tempdir()?;
-    std::fs::write(dir.path().join("utxo-v4.dat"), b"checkpoint-bytes")?;
+    std::fs::write(dir.path().join("artifact.dat"), b"checkpoint-bytes")?;
     let cap_dir = open_root(dir.path())?;
 
-    let mut file = super::fs::open_file(&cap_dir, "utxo-v4.dat")?;
+    let mut file = super::fs::open_file(&cap_dir, "artifact.dat")?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     assert_eq!(bytes, b"checkpoint-bytes");
     assert_eq!(
-        read_file(&cap_dir, "utxo-v4.dat", 1024)?,
+        read_file(&cap_dir, "artifact.dat", 1024)?,
         b"checkpoint-bytes"
     );
 
@@ -822,7 +822,7 @@ fn open_file_refuses_fifo_without_blocking() -> TestResult {
     use std::os::unix::fs::FileTypeExt as _;
 
     let dir = tempdir()?;
-    let fifo_path = dir.path().join("utxo-v4.dat");
+    let fifo_path = dir.path().join("fifo.dat");
     let created = std::process::Command::new("mkfifo")
         .arg(&fifo_path)
         .status()?;
@@ -832,7 +832,7 @@ fn open_file_refuses_fifo_without_blocking() -> TestResult {
     let worker_dir = cap_dir.try_clone()?;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
-        let result = super::fs::open_file(&worker_dir, "utxo-v4.dat").map(|_| ());
+        let result = super::fs::open_file(&worker_dir, "fifo.dat").map(|_| ());
         let _ = sender.send(result.map_err(|error| error.kind()));
     });
     let observed = receiver.recv_timeout(std::time::Duration::from_secs(5));
@@ -844,7 +844,7 @@ fn open_file_refuses_fifo_without_blocking() -> TestResult {
             .write(true)
             .follow(FollowSymlinks::No)
             .nonblock(true);
-        Some(cap_dir.open_with("utxo-v4.dat", &options)?)
+        Some(cap_dir.open_with("fifo.dat", &options)?)
     } else {
         None
     };

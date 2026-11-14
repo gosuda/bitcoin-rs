@@ -2,7 +2,7 @@
 
 Research record for SwiftSync-style synchronization hints, measured against a
 pinned regtest chain. The prototype is offline. It never enters a node build and
-it shares no code with `crates/p2p`, `crates/chainstate`, or `crates/index`.
+it shares no code with `crates/wire`, `crates/execution`, or `crates/projection`.
 
 The crate is an independent Cargo workspace, like `tools/ldk` and
 `tools/compact-filter-interop`. Root workspace commands do not build it. Use
@@ -262,7 +262,8 @@ Scope limits of these numbers.
   framing, or fsync cost. The fold writes nothing, so the real gap on a large
   range is wider than the table shows, not narrower.
 - The reconstruction drives the `bitcoin-rs-storage` contract directly: it builds
-  `BlockChanges`, calls `commit_block_changes`, and scans the set. It does not
+  `BlockChanges`, applies them to the engine coin store, and scans the set. It
+  does not
   stand up a `Chainstate`, so block-tree, durable-head and publication cost stay
   outside these numbers.
 - The fold reads already-decoded rust-bitcoin blocks. The reconstruction

@@ -136,7 +136,7 @@ You can check Bitcoin behavior against Bitcoin Core, `libbitcoinkernel`, histori
 ### What can be improved
 
 - **Performance is a first-class requirement.** Synchronization, storage, memory ownership, concurrency, caching, I/O, and indexing can all be reconsidered; improvements must be demonstrated with matched whole-node benchmarks against Core.
-- **The UTXO set is the node's authoritative coin state.** The node owns the canonical UTXO set used for validation and an integrated script index exposed through Esplora-compatible APIs. Wallet-specific keys, policies, and metadata remain outside the node.
+- **The coin set is the node's authoritative state.** The node owns the canonical coin set, held in the storage engine's `Coins` keyspace, that validation and an integrated script index exposed through Esplora-compatible APIs use. Wallet-specific keys, policies, and metadata remain outside the node.
 - **Modularity keeps the core isolated and components composable.** Clear dependency and failure boundaries keep extensions from destabilizing validation or chainstate while allowing components to be reused independently.
 - **Rust-native integration is a primary path.** Applications and extensions attach to the node as typed, in-process components instead of routing through serialized RPC or separate processes.
 

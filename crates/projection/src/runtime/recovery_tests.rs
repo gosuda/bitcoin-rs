@@ -269,7 +269,6 @@ impl ForkFixture {
                         same_block_spent: None,
                         add_capacity: 0,
                         remove_capacity: 0,
-                        overwritten: None,
                         max_script_size: crate::MAX_LIVE_SCRIPT_SIZE,
                     },
                     &coins,
@@ -1289,23 +1288,21 @@ fn cell_seed_artifact(
     tempfile::TempDir,
 ) {
     let set = bitcoin_rs_storage::utxo::UtxoSet::new();
-    let mut changes = bitcoin_rs_storage::utxo::contract::BlockChanges::default();
     for i in 0..n {
         let mut bytes = [0_u8; 32];
         bytes[..8].copy_from_slice(&i.to_le_bytes());
         let txid = Hash256::from_le_bytes(&bytes);
-        changes.add(bitcoin_rs_storage::utxo::contract::UtxoAdd::new(
-            bitcoin_rs_consensus::primitives::OutPoint::new(txid.into(), 0),
-            bitcoin_rs_consensus::primitives::TxOut {
-                value: bitcoin_rs_consensus::primitives::Amount::from_sat(1_000 + i),
-                script_pubkey: vec![0x51].into(),
-            },
-            false,
+        let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+            vout: 0,
+            value: 1_000 + i,
+            script_pubkey: vec![0x51],
+            coinbase: false,
             height,
-        ));
+        };
+        let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(txid, &[out])
+            .expect("record");
+        set.insert_parsed_record(record);
     }
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(&set, &changes, &tip)
-        .expect("commit coins");
     let mut bytes = Vec::new();
     let (_, (), witness) =
         bitcoin_rs_storage::utxo::write_snapshot_witnessed(&set, &tip, height, &mut bytes, ())

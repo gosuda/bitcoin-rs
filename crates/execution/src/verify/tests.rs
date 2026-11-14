@@ -13,8 +13,7 @@ use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::{
-    BoundedReadError, InMemoryUndoStore, MandatoryRetention, RetentionRegistry, StorageError,
-    UndoStore,
+    BoundedReadError, KvUndoStore, MandatoryRetention, RetentionRegistry, StorageError, UndoStore,
 };
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
@@ -118,7 +117,7 @@ impl BlockBodyStore for Bodies {
 struct Fixture {
     chain: Chainstate,
     bodies: Arc<Bodies>,
-    undo: Arc<InMemoryUndoStore>,
+    undo: Arc<KvUndoStore<dyn bitcoin_rs_storage::KvStore>>,
     retention: Arc<RetentionRegistry>,
     blocks: Vec<Block>,
 }
@@ -126,7 +125,7 @@ struct Fixture {
 fn fixture(children: u32) -> Result<Fixture> {
     let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let bodies = Arc::new(Bodies::default());
-    let undo = Arc::new(InMemoryUndoStore::default());
+    let undo = Arc::new(KvUndoStore::new(Arc::clone(chain.commit_authority.store())));
     let retention = Arc::new(RetentionRegistry::new());
     chain.block_body_store = Some(bodies.clone());
     chain.undo_store = undo.clone();
@@ -527,7 +526,7 @@ fn a_header_that_misses_its_target_fails_the_body_level() -> Result {
 #[test]
 fn undo_records_are_read_and_decoded_only_at_the_undo_level() -> Result {
     let f = fixture(4)?;
-    f.undo.remove_archived(3, f.hash(3));
+    f.undo.remove_archived(3, f.hash(3))?;
     f.undo.persist_undo(2, f.hash(2), &[0xff, 0x00])?;
     for level in [CheckLevel::ReadBodies, CheckLevel::CheckBodies] {
         assert_eq!(
@@ -555,7 +554,7 @@ fn an_executed_prune_line_ends_the_window_without_hiding_damage_above_it() -> Re
     let f = fixture(5)?;
     f.retention.reserve(3).commit(3);
     f.drop_body(1)?;
-    f.undo.remove_archived(1, f.hash(1));
+    f.undo.remove_archived(1, f.hash(1))?;
     for level in LEVELS {
         assert_eq!(
             f.outcome(level, None)?,

@@ -1,8 +1,8 @@
 # Checkpoints and recovery
 
-A checkpoint is a serialized copy of the published chainstate: the block tree, the UTXO set, and CoinStats, written to `$DATA/chainstate-checkpoints/` with a manifest. It is an accelerator for startup. It is never proof: a replayed suffix still rechecks identities against the durable head, and a checkpoint that disagrees with the durable head is refused, not trusted.
+A checkpoint is an engine image of the published chainstate: the block tree, the `coins` keyspace, and CoinStats, written to `$DATA/chainstate-checkpoints/` with a manifest. It is an accelerator for startup. It is never proof: a replayed suffix still rechecks identities against the durable head, and a checkpoint that disagrees with the durable head is refused, not trusted.
 
-This chapter covers the publish protocol, the restore decision at boot, and the two refusals that protect the checkpoint against in-flight disconnects and an unanchored tip. For the durable head itself and the journal replay that sits above the checkpoint, see [Sync, recovery, and pruning](../run/sync-and-recovery.md) and [Chain state and storage](state-and-storage.md). The normative rules live in [`RCV-*`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md).
+This chapter covers the publish protocol, the restore decision at boot, and the two refusals that protect the checkpoint against in-flight disconnects and an unanchored tip. For the durable head itself and the restore that follows the checkpoint, see [Sync, recovery, and pruning](../run/sync-and-recovery.md) and [Chain state and storage](state-and-storage.md). The normative rules live in [`RCV-*`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md).
 
 ## What a checkpoint contains
 
@@ -14,67 +14,68 @@ chainstate-checkpoints/
 +- gen-00000000000000000001/   # one directory per generation
    +- manifest-v1.json         # digests, tips, counts
    +- headers-v1.dat           # block tree, magic "BRSHEAD\0"
-   +- utxo-v4.dat              # UTXO snapshot, Core-style v4 framing
+   +- chainstate/              # engine checkpoint of the chainstate database
    +- coinstats-v1.dat         # exactly 820 bytes, magic "BRSSTAT\0"
 ```
 
 `CURRENT` is a small JSON document (`CurrentV1`) that names the generation directory and the SHA-256 of its manifest. Loaders verify the manifest digest before opening any payload, so a stale `CURRENT` that names a deleted or rewritten generation fails closed.
 
-The manifest (`CheckpointManifestV1`) records, among other fields: generation number, network name and magic, genesis hash, applied tip (height, hash, chainwork, chain tx count), best header tip, and per-artifact byte counts, SHA-256 digests, codecs, and versions. The UTXO entry additionally carries `record_count`, `output_count`, and a digest over the MuHash trailer.
+The manifest (`CheckpointManifestV1`) records, among other fields: generation number, network name and magic, genesis hash, applied tip (height, hash, chainwork, chain tx count), best header tip, and per-artifact byte counts, SHA-256 digests, codecs, and versions. The live engine-checkpoint path writes no `utxo` entry; the field is optional and only test fixtures write it.
 
 ## The publish protocol
 
-`CheckpointPublisher` (`crates/execution/src/checkpoint/publisher.rs`) drives publication in `publish_transaction`. The node publishes on clean shutdown (`crates/node/src/lifecycle.rs`, the `published clean chainstate checkpoint` line) and when recovery work completes. The sequence:
+`CheckpointPublisher` (`crates/execution/src/checkpoint/publisher.rs`) drives publication in `publish_transaction`. The node publishes on clean shutdown (`crates/node/src/lifecycle.rs`, the `published clean chainstate checkpoint` line), when recovery work completes, and from the execution maintenance worker at most once every ten minutes while the node runs. The worker publishes only when the applied tip is above the published checkpoint height, so an idle node publishes nothing. The sequence:
 
-1. Pause block admission (`ApplyAdmission::pause`) and freeze the chainstate journal writer, so the state cannot move under the write.
-2. Refuse if a disconnect marker is `InFlight` (`publisher.rs:205-220`), or if the applied tip is ahead of the durable head (`CheckpointError::AheadOfDurableHead`, `publisher.rs:225-235`). The durable head is the commit point; a checkpoint can never legitimately name a tip the head has not certified.
+1. Pause block admission (`ApplyAdmission::pause`), so the state cannot move under the write.
+2. Refuse if a disconnect marker is `InFlight`, or if the applied tip is ahead of the durable head (`CheckpointError::DisconnectInFlight`, `CheckpointError::AheadOfDurableHead`, both raised in `publish_frozen`). The durable head is the commit point; a checkpoint can never legitimately name a tip the head has not certified.
 3. Sync and flush the block body store, so the headers restored later have their bodies available.
-4. Stage the three artifacts into a fresh generation directory (`write_checkpoint_from_dir` in `crates/execution/src/checkpoint.rs:521`). Each artifact is written through a `HashingWriter` that computes bytes and SHA-256 while writing, then the file is `sync_all`-ed.
-5. Cross-check the fused CoinStats (recomputed from the written UTXO coins) against the listener's CoinStats. On any mismatch the publication gate withholds the witness token and the run fails (`gated_witness`, `checkpoint.rs:576`).
-6. Confirm the best header tip did not change while writing (`check_best_tip_unchanged`).
+4. Copy the engine image of the chainstate store into the staging directory (`CheckpointStage::checkpoint_store`, which writes the `chainstate/` subdirectory).
+5. Write `headers-v1.dat` and `coinstats-v1.dat`. Each artifact is written through a `HashingWriter` that computes bytes and SHA-256 while writing, then the file is `sync_all`-ed.
+6. Check the CoinStats listener snapshot against the applied tip and chain tx count (`check_coinstats_listener`), and confirm the best header tip did not change while writing (`check_best_tip_unchanged`).
 7. Write `manifest-v1.json`, fsync the staging directory, `rename_noreplace` the staged directory to its final `gen-...` name, fsync the root, then write `CURRENT` to a temp file and rename it over the old one (`commit_publication`, `crates/storage/src/checkpoint/publish.rs:169-238`). With `CheckpointRetention::Replace`, older generations are removed after the rename.
 
-Generation numbers come from `allocate_generation` (`publish.rs:265`): current generation plus one, skipping any name that already exists on disk. The number is monotonic across restarts and is what log lines and `CURRENT` refer to. A manifest whose `generation` field does not match the staged directory is rejected at commit time.
+Generation numbers come from `allocate_generation` (`publish.rs:280`): current generation plus one, skipping any name that already exists on disk. The number is monotonic across restarts and is what log lines and `CURRENT` refer to. A manifest whose `generation` field does not match the staged directory is rejected at commit time.
 
 A checkpoint is a copy of the published state taken under a freeze, so it can lag the durable head only backward. Both refusals in step 2 exist because a crash during a disconnect would otherwise let the checkpoint name a state the head never certified.
 
-## Generation retention and the seed offer
+## Generation retention
 
 `CheckpointRetention::Replace` keeps exactly one generation: `cleanup_after_publication` removes every directory that is not the newly published one. The assumeutxo historical namespace retains generations explicitly instead (`retire_checkpoint_generations_at`), because startup must be able to name a specific accepted generation from the durable head regardless of what `CURRENT` says.
 
-Publication also feeds the index worker. When the UTXO write produced a `V4Witness` whose SHA-256, byte length, and fused CoinStats all match the committed artifacts, `offer_committed_seed` (`publisher.rs:286`) seals the committed `utxo-v4.dat` file into a `VerifiedSnapshotArtifact` with `SeedProvenance::Checkpoint { reference }` and hands it to the `SeedOfferCell`. The index seeder (the snapshot-seeding clause of `ARCH-05`/`ARCH-07`) uses that immutable artifact to seed prefix-coverage rows without holding the live UTXO lock, and without falling back to the live set or minting a fresh checkpoint on demand. A publication whose fused stats disagree with the listener withholds the witness, and the seeder falls back to replaying retained history.
+Publication offers no index seed. The engine-checkpoint writer returns only the published checkpoint reference.
 
 ## Restore source selection at boot
 
-`prepare_initial_chainstate` (`crates/execution/src/recovery.rs:486`) picks the restore source in this order and logs the choice as `restore_source`:
+`prepare_initial_chainstate` (`crates/execution/src/recovery.rs`) picks the restore source in this order:
 
 ```text
 full-revalidation marker present?  -> cold  (reason=fork_below_checkpoint_base)
 assumeutxo anchor in durable head? -> snapshot
-complete checkpoint in CURRENT?    -> checkpoint, then journal replay
+complete checkpoint in CURRENT?    -> checkpoint
 otherwise                          -> cold  (reason=no_complete_checkpoint)
 ```
 
-`ResumeSource` (`recovery.rs:15`) is `Snapshot`, `Cold`, `Checkpoint`, or `Journal`. The three non-cold cases:
+The cold paths log `restore_source="cold"` with the corresponding `reason` shown above (`recovery.rs`). Checkpoint startup logs `restored chainstate checkpoint` with `height` and `hash` (`crates/node/src/state/open.rs`). These are not a universal `restore_source` log for all three sources.
 
-- **Checkpoint**: load the manifest, verify every digest, rebuild the block tree from `headers-v1.dat`, load the UTXO set, and recompute CoinStats from the loaded coins; all of it must agree with the manifest. The applied tip's chain tx count must match the CoinStats tx count (`validate_chain_tx_count`), and ancestors of the applied tip are seeded with the explicit `ChainTxCount::UNKNOWN` sentinel rather than guessed values. Log line: `chainstate restore selected restore_source=checkpoint ...`.
-- **Journal**: replay the chainstate journal on top of the checkpoint base up to the durable head. If the journal is rejected (checksum failure, truncated record, identity mismatch), the node logs `chainstate journal rejected; checkpoint recovery selected` and falls back to the checkpoint alone, replaying the remaining gap from block bodies. With the journal disabled by configuration, the checkpoint restores directly (`restore_source=checkpoint`, `reason=journal_disabled`).
+`ResumeSource` (`recovery.rs:14`) is `Snapshot`, `Cold`, or `Checkpoint`. The non-cold cases:
+
+- **Checkpoint**: verify the manifest digest and the byte counts and SHA-256 digests of `headers-v1.dat` and `coinstats-v1.dat`, rebuild the block tree, and validate the header commitments and CoinStats fields against the manifest. Open the engine image in `chainstate/` through the storage engine; the manifest contains no digest for that image, and loading does not recompute CoinStats from its coins. If the applied tip's chain tx count is known, it must match the CoinStats tx count (`validate_chain_tx_count`); ancestors of the applied tip are seeded with the explicit `ChainTxCount::UNKNOWN` sentinel rather than guessed values. Log line: `restored chainstate checkpoint height=... hash=...` (`open.rs`).
 - **Snapshot**: the assumeutxo restore path, covered in [Snapshots and assumeutxo](snapshots-and-assumeutxo.md). It runs before the ordinary `CURRENT` lookup: a datadir with a live assumeutxo anchor in its durable head takes the pinned-anchor branch, and `restore_snapshot` still prefers an ordinary checkpoint when one exists that matches the pin's height, hash, commitment, and tx count.
 
-Corrupt checkpoints do not fall back silently. Load errors classify into `CheckpointLoadError`, and anything semantic (bad codec, wrong tip, mutated bytes that fail only semantic checks) surfaces as a `Corrupt` variant whose message says what to do: re-sync. The distinction matters: transient I/O errors stay retryable, but a checkpoint whose contents hash to the manifest digest yet decode wrong is datadir corruption, and the node refuses instead of silently building a different chain. Tests in `crates/execution/src/checkpoint/tests/artifact_consistency.rs` pin this split: `authenticated_header_semantics_require_resync`, `authenticated_coinstats_semantics_require_resync`, and `authenticated_utxo_value_mutation_requires_resync` each mutate one authenticated artifact and require the `Corrupt` error.
+Corrupt checkpoints do not fall back silently. Load errors classify into `CheckpointLoadError`, and anything semantic (bad codec, wrong tip, mutated bytes that fail only semantic checks) surfaces as a `Corrupt` variant whose message says what to do: re-sync. The distinction matters: transient I/O errors stay retryable, but a checkpoint whose contents hash to the manifest digest yet decode wrong is datadir corruption, and the node refuses instead of silently building a different chain. Tests in `crates/execution/src/checkpoint/tests/artifact_consistency.rs` pin this split: `authenticated_header_semantics_require_resync` and `authenticated_coinstats_semantics_require_resync` each mutate one authenticated artifact and require the `Corrupt` error.
 
 ## The full-revalidation marker and its retirement
 
-The marker is a file named `full-revalidation` inside `$DATA/chainstate-journal/` (`FULL_REVALIDATION_MARKER`, `crates/storage/src/chainstate_journal/writer.rs:45`). It is set by `require_full_script_attestation` (`recovery.rs:97`) when the node runs in full validation mode and the durable head's stored script attestation is below `Full`, for example after a `--validation-mode full` switch on a chain built under assume-valid. Its presence forces a cold start: the UTXO set is discarded and every block is revalidated from genesis, because a chain whose scripts were skipped cannot be patched incrementally.
+The marker is a file named `full-revalidation` inside `$DATA/` (`FULL_REVALIDATION_MARKER`, `crates/storage/src/recovery_evidence.rs:12`). It is set by `require_full_script_attestation` (`recovery.rs:97`) when the node runs in full validation mode and the durable head's stored script attestation is below `Full`, for example after a `--validation-mode full` switch on a chain built under assume-valid. Its presence forces a cold start: the coin set is discarded and every block is revalidated from genesis, because a chain whose scripts were skipped cannot be patched incrementally.
 
-The marker retires only through a successful checkpoint publication (`retire_full_revalidation_marker`, `publisher.rs:35`, called at `publisher.rs:273`). The publication worker computes the fully validated chainstate and records it as the next generation; only then is the marker removed. Two subtleties:
+The marker retires only through a successful checkpoint publication (`retire_full_revalidation_marker`, called from `publish_frozen`). The publication worker computes the fully validated chainstate and records it as the next generation; only then is the marker removed. Two subtleties:
 
 - A retryable I/O failure while removing the marker surfaces as `CheckpointError::FullRevalidationMarker`, owned by the checkpoint worker. It is not checkpoint corruption and does not mark the datadir bad.
-- During boot recovery, `publish_recovery_progress` publishes a compaction base without retiring either recovery marker: while replay is still below the durable head, a crash must resume recovery, not mistake the progress checkpoint for a completed repair (`DisconnectRetirement::RecoveryProgress`, `publisher.rs:44-50`).
+- During boot recovery, `publish_recovery_progress` publishes a progress checkpoint without retiring either recovery marker: while replay is still below the durable head, a crash must resume recovery, not mistake the progress checkpoint for a completed repair (`DisconnectRetirement::RecoveryProgress`).
 
 ## Disconnect-in-flight refusal
 
-A reorg disconnect is the one operation that moves the UTXO set without a forward commit. If a checkpoint froze the state while a disconnect was in flight, the written coins would not correspond to any committed tip. `publish_frozen` therefore refuses (`CheckpointError::DisconnectInFlight`):
+A reorg disconnect is the one operation that moves the coin set backward. If a checkpoint froze the state while a disconnect was in flight, the engine image would not correspond to any committed tip. `publish_frozen` therefore refuses (`CheckpointError::DisconnectInFlight`):
 
 ```text
 checkpoint refused while disconnect of block {hash} at height {height} is in flight
@@ -105,7 +106,7 @@ Clean shutdown publishes generation 1 (`crates/node/src/lifecycle.rs`):
 {"message":"published clean chainstate checkpoint","generation":1},"target":"bitcoin_rs_node::lifecycle"}
 ```
 
-On disk, `$DATA/chainstate-checkpoints/` now holds `CURRENT` and `gen-00000000000000000001/` with `manifest-v1.json`, `headers-v1.dat`, `utxo-v4.dat`, `coinstats-v1.dat`. The manifest names the tip:
+On disk, `$DATA/chainstate-checkpoints/` now holds `CURRENT` and `gen-00000000000000000001/` with `manifest-v1.json`, `headers-v1.dat`, `chainstate/`, `coinstats-v1.dat`. The manifest names the tip:
 
 ```json
 {"generation":1,"network":"regtest","applied_tip":{"height":205,
@@ -113,15 +114,15 @@ On disk, `$DATA/chainstate-checkpoints/` now holds `CURRENT` and `gen-0000000000
  "chainwork":"...019c","chain_tx_count":206}}
 ```
 
-Restarting on the same data directory restores from the checkpoint with zero replayed records:
+Restarting on the same data directory restores from the checkpoint image and logs:
 
 ```
-{"message":"chainstate restore selected","restore_source":"checkpoint","checkpoint_generation":1,
- "checkpoint_height":205,"height":205,"hash":"474cb06e...37fa7e","replayed_records":0,
- "chain_tx_count":206,"replay_seconds":0.000131045},"target":"bitcoin_rs_execution::recovery"}
+{"message":"restored chainstate checkpoint","height":205,
+ "hash":"474cb06e60cf1e0e111bacb9efba0a7bb883db107112d1a363c302391637fa7e",
+ "target":"bitcoin_rs_node::state::open"}
 ```
 
-The matching live IBD case (checkpoint plus journal replay) is documented with verified output in [First start](../run/first-start.md).
+The matching live IBD case (checkpoint restore) is documented with verified output in [First start](../run/first-start.md).
 
 ## Failure modes
 
@@ -130,18 +131,17 @@ The matching live IBD case (checkpoint plus journal replay) is documented with v
 | Disconnect in flight | Refuse; nothing written | `checkpoint refused while disconnect of block {hash} at height {height} is in flight` |
 | Tip ahead of durable head | Refuse publication | `checkpoint of tip {tip} at height {tip_height} is ahead of the durable head {head} at height {head_height}` |
 | Best tip moved during write | Refuse publication | `best header tip changed during checkpoint` |
-| Fused CoinStats differ from listener | Refuse; witness withheld | mismatch fields from `gated_witness` |
+| CoinStats listener disagrees with the applied tip or chain tx count | Refuse publication | error from `check_coinstats_listener` |
 | Crash mid-publication | Orphaned staging dir ignored; `CURRENT` still names the old generation | startup skips names that are not a valid `CURRENT` target |
-| Checkpoint version or codec not current | Fail closed at boot, no silent fallback | `headers checkpoint version {n} is not supported`, `unexpected payload codecs UTXO=... CoinStats=...` |
+| Checkpoint version or codec not current | Fail closed at boot, no silent fallback | `headers checkpoint version {n} is not supported`, `unexpected payload codec CoinStats=...` |
 | Artifact contents hash to the manifest but decode wrong | Fail closed at boot | `Corrupt` variants naming the mutated artifact |
-| Journal replay fails over the checkpoint | Fall back to checkpoint, replay from bodies | `chainstate journal rejected; checkpoint recovery selected` |
-| Full-revalidation marker present | Cold start, full resync | `chainstate restore selected restore_source=cold reason=fork_below_checkpoint_base` |
+| Full-revalidation marker present | Cold start, full resync | `chainstate restore requires full validation restore_source="cold" reason="fork_below_checkpoint_base"` |
 
 ## Where the invariants are proven
 
 - [`RCV-10`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md): a checkpoint is not recovery authority; the durable head is. Enforcement lives in the publish-time refusals above.
 - [`RCV-14`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md): the publisher freezes the published state before writing and reconciles against the durable head.
-- Crash-at-every-boundary coverage: `crates/storage/src/checkpoint/publish.rs` accepts injected failpoints at each write, sync, and rename step (`CheckpointFailpoint`); `crates/execution/src/checkpoint/tests/artifact_consistency.rs::publish_swap_between_commit_and_open_yields_integrity` fails a publication between manifest commit and `CURRENT` open and requires the old generation to stay intact. Both tests ran at HEAD for this chapter.
+- Crash-at-every-boundary coverage: `crates/storage/src/checkpoint/publish.rs` accepts injected failpoints at each write, sync, and rename step (`CheckpointFailpoint`); `crates/execution/src/checkpoint/tests/tip_transitions.rs::failed_publication_preserves_current` fails a publication and requires the old generation to stay intact.
 - Disconnect refusal and preservation: `crates/execution/src/tests/checkpoint_debt_tests.rs::checkpoint_refuses_inflight_disconnect_and_preserves_state`.
 - Contract-clause and proof coverage counts live in [`docs/contracts/evidence-index.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/evidence-index.md).
 

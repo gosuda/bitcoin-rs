@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 use std::sync::Arc;
 
 use crate::chain::NodeStatus;
@@ -179,9 +181,13 @@ fn a_failed_window_restores_the_script_cache_entries_it_took() -> TestResult {
     let first_payload = BlockImage::from_local(first);
     let second_payload = BlockImage::from_local(second);
     let payloads = [&first_payload, &second_payload];
-    let proven = super::prove_window(&handles, &payloads).proven;
+    let proven = super::prove_window(&handles, &payloads)
+        .expect("coin reads succeed")
+        .proven;
     assert!(
-        proven.is_empty(),
+        proven
+            .iter()
+            .all(|apply| matches!(apply, crate::ProvenApply::Unproven(_))),
         "bad script at 103 must fail the pre-proof"
     );
     assert!(
@@ -205,7 +211,7 @@ fn a_failed_window_restores_the_script_cache_entries_it_took() -> TestResult {
     );
     assert!(
         matches!(
-            err.source,
+            *err.source,
             crate::ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script { .. })
         ),
         "failure must be the second block's script verdict"
@@ -323,7 +329,7 @@ fn a_window_refused_after_proof_restores_only_uncommitted_takes() -> TestResult 
     assert_eq!(err.committed[0].hash, first_hash);
     assert!(
         matches!(
-            err.source,
+            *err.source,
             crate::ApplyError::Consensus(
                 bitcoin_rs_consensus::ConsensusError::CoinbaseAmount { .. }
             )

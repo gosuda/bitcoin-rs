@@ -62,7 +62,7 @@ Add `BITCOIN_RS_DBCACHE_MB=200` and the environment wins again. Environment vari
 
 ## TOML keys are flat
 
-`--config` reads a flat table of keys such as `network`, `data_dir`, `storage_backend`, `dbcache_mb`, `prune_target_mb`, `p2p_listen`, and `rpc_bind`. Two keys take structured values: `chainstate_journal` is a table, and `notifications` holds the `[[notifications.zmq]]` endpoint groups. Unknown keys fail startup; the TOML layer rejects them rather than ignoring typos.
+`--config` reads a flat table of keys such as `network`, `data_dir`, `storage_backend`, `dbcache_mb`, `prune_target_mb`, `p2p_listen`, and `rpc_bind`. One key takes structured values: `notifications` holds the `[[notifications.zmq]]` endpoint groups. Unknown keys fail startup; the TOML layer rejects them rather than ignoring typos.
 
 The accepted list for this commit is in the option table in [`crates/node/src/options.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/options.rs), and the [configuration keys reference](../reference/config-keys.md) restates it for readers.
 

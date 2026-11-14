@@ -127,9 +127,8 @@ Boolean flags come in two forms. Some require an explicit true or false value. O
 
 ## Not on the command line
 
-Two configuration surfaces have no CLI flag:
+One configuration surface has no CLI flag:
 
 - `notifications` is a TOML table holding ZeroMQ endpoints. See [ZeroMQ notifications](../use/zmq.md).
-- `chainstate_journal` is a TOML table (and a set of `BITCOIN_RS_CHAINSTATE_JOURNAL*` environment names) for journal blocks, seconds, rotation, and lag bounds.
 
 The TOML and environment forms of every key are in [Configuration keys](config-keys.md). A script that extracts every flag name from `bitcoin-rs --help` and compares it with the tables above reports zero missing and zero extra flags.

@@ -9,8 +9,6 @@ pub(crate) enum TestError {
     #[error(transparent)]
     BoundedRead(#[from] crate::BoundedReadError),
     #[error(transparent)]
-    JournalWriter(#[from] crate::chainstate_journal::JournalWriterError),
-    #[error(transparent)]
     Checkpoint(#[from] crate::checkpoint::CheckpointError),
     #[error(transparent)]
     CheckpointLoad(#[from] crate::checkpoint::CheckpointLoadError),

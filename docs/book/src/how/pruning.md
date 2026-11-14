@@ -30,7 +30,7 @@ policy_line = min(pruner_tip, durable_tip_height) - retention_depth
 retention_depth = max(keep_below_tip, 288)
 ```
 
-`durable_tip_height` is not the applied tip. The node initializes it from the tip restored at open and updates it only when the node publishes a checkpoint (`crates/node/src/state/open.rs`, `crates/execution/src/checkpoint/publisher.rs:281-282`). So the effective line never exceeds `checkpoint_height - 288`. A prune pass that asks for more records its request but deletes only what the checkpoint base already makes safe.
+`durable_tip_height` is not the applied tip. The node initializes it from the tip restored at open and updates it only when the node publishes a checkpoint (`crates/node/src/state/open.rs`, `crates/execution/src/checkpoint/publisher.rs:221-222`). The execution maintenance worker publishes a checkpoint at most once every ten minutes while the node runs, and only when the applied tip is above the checkpoint height (`crates/execution/src/maintenance.rs`). So the effective line never exceeds `checkpoint_height - 288`. A prune pass that asks for more records its request but deletes only what the checkpoint base already makes safe.
 
 That clamp is visible in the live trace and is the reason two height keys exist. On a cold datadir with 300 blocks and no checkpoint yet, `pruneblockchain 5` returned 5 and stored `node:pruneheight = 5`, but every block was still served because `durable_tip_height` was 0 and the policy line was 0. After a clean stop published checkpoint generation 1 at height 300, a restart made the same call delete heights 0 through 4.
 
@@ -162,4 +162,4 @@ test result: ok. 2 passed; 0 failed; 52 filtered out
 
 At HEAD, the numeric `--prune-target-mb` value does not drive a size loop. `prune_to_height` constructs `PrunePolicy { target_size_mb: 0, keep_below_tip: 288 }`, and `pruneblockchain` is its only production caller (`crates/storage/src/pruning.rs:146-160`). The flag selects pruned mode, service flags, the prune service, and the index refusal; the height decides what goes. `getblockchaininfo` reports `prune_target_size: None`. Do not expect the node to shrink itself to a target size without a prune call.
 
-No measurement here covers reclaim under a multi-file history, pruning during IBD, or disk-usage accounting after whole-file deletion. The safety margin is a constant, not a measured reorg depth. The write order that publishes the checkpoint bounding the line is in [Durability and the journal](durability-and-journal.md).
+No measurement here covers reclaim under a multi-file history, pruning during IBD, or disk-usage accounting after whole-file deletion. The safety margin is a constant, not a measured reorg depth. The write order that publishes the checkpoint bounding the line is in [Checkpoints and recovery](checkpoints-and-recovery.md#the-publish-protocol).

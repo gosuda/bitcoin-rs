@@ -70,8 +70,11 @@ pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 pub(crate) const PACKAGE_INGRESS_MAX_BYTES: u64 =
     1_024 * bitcoin_rs_mempool::standardness::MAX_PACKAGE_WEIGHT;
 
-const _: () = assert!(PACKAGE_INGRESS_MAX_BYTES == 413_696_000);
-const _: () = assert!(INBOUND_TX_CHANNEL_LIMIT == 1_024);
+mod bounds_assert {
+    use super::*;
+    const _: () = assert!(PACKAGE_INGRESS_MAX_BYTES == 413_696_000);
+    const _: () = assert!(INBOUND_TX_CHANNEL_LIMIT == 1_024);
+}
 
 pub struct NodeState {
     config: NodeConfig,
@@ -150,6 +153,13 @@ impl NodeState {
     #[must_use]
     pub fn durable_head(&self) -> Arc<dyn bitcoin_rs_storage::DurableHeadStore> {
         self.storage.durable_head()
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn coins(&self) -> Arc<bitcoin_rs_storage::CoinStore> {
+        self.storage.coins()
     }
 
     #[must_use]

@@ -1059,20 +1059,24 @@ impl BlockBodySource for MultiBlockBody {
 
 fn seed_utxo_reader(
     adds: Vec<(OutPoint, TxOut, bool, u32)>,
-    tip: Hash256,
+    _tip: Hash256,
 ) -> Result<Option<bitcoin_rs_storage::utxo::UtxoReader>, crate::portable::TestError> {
-    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
+    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, populate_block_changes};
+    use bitcoin_rs_storage::{CoinStore, MemoryKvStore};
     if adds.is_empty() {
         return Ok(None);
     }
-    let set = Arc::new(bitcoin_rs_storage::utxo::UtxoSet::new());
+    let store = Arc::new(MemoryKvStore::new());
+    let coin_store = Arc::new(CoinStore::open(store, 64 * 1024 * 1024));
     let mut changes = BlockChanges::with_capacity(adds.len(), 0);
     for (outpoint, txout, coinbase, height) in adds {
         changes.add(UtxoAdd::new(outpoint, txout, coinbase, height));
     }
-    commit_block_changes(&set, &changes, &tip)
+    populate_block_changes(&coin_store, &changes)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    Ok(Some(bitcoin_rs_storage::utxo::UtxoReader::new(set)))
+    Ok(Some(bitcoin_rs_storage::utxo::UtxoReader::from_coin_store(
+        coin_store,
+    )))
 }
 
 fn child_block(parent: &Block, txs: Vec<Tx>) -> Result<Block, std::io::Error> {

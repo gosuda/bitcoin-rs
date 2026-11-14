@@ -35,12 +35,8 @@ fn burn_p2pkh_script() -> Vec<u8> {
 fn commit_test_utxo(ctx: &Context, outpoint: OutPoint, txout: TxOut, coinbase: bool, height: u32) {
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(outpoint, txout, coinbase, height));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &test_txid(8_000),
-    )
-    .unwrap_or_else(|err| panic!("commit utxo failed: {err}"));
+    ctx.populate_fixture_coins(&changes)
+        .unwrap_or_else(|err| panic!("commit utxo failed: {err}"));
 }
 
 #[test]
@@ -937,4 +933,262 @@ fn cancellation_during_ranged_scan_releases_reservation() {
     .unwrap_or_else(|err| panic!("cancelled scan returned error: {err}"));
     assert_eq!(result["success"].as_bool(), Some(false));
     assert_eq!(ctx.chain.utxo.scan_progress(), None);
+}
+
+struct OracleCoin {
+    seed: u64,
+    script: Vec<u8>,
+    value_sat: u64,
+    coinbase: bool,
+}
+
+fn commit_oracle_coins(ctx: &Arc<Context>, coins: &[OracleCoin]) {
+    for coin in coins {
+        let txout = TxOut {
+            value: Amount::from_sat(coin.value_sat),
+            script_pubkey: coin.script.clone().into(),
+        };
+        commit_test_utxo(
+            ctx,
+            OutPoint::new(Txid::from(test_txid(coin.seed)), 0),
+            txout,
+            coin.coinbase,
+            0,
+        );
+    }
+}
+fn oracle_btc(sat: u64) -> f64 {
+    let sat = match u32::try_from(sat) {
+        Ok(sat) => sat,
+        Err(error) => panic!("oracle sats fit u32: {error}"),
+    };
+    f64::from(sat) / 100_000_000_f64
+}
+
+type ExpectedUnspent<'a> = ([u8; 32], u32, u64, bool, &'a Vec<u8>);
+
+#[test]
+fn scan_streams_engine_coins_without_resident_image() {
+    let ctx = Arc::new(Context::new());
+    let script_a = burn_p2pkh_script();
+    let script_b = vec![0x51];
+    let script_c = vec![0x6a];
+    let coins = [
+        OracleCoin {
+            seed: 11,
+            script: script_a.clone(),
+            value_sat: 12_345,
+            coinbase: true,
+        },
+        OracleCoin {
+            seed: 12,
+            script: script_b.clone(),
+            value_sat: 9_999,
+            coinbase: false,
+        },
+        OracleCoin {
+            seed: 13,
+            script: script_a.clone(),
+            value_sat: 50_000,
+            coinbase: false,
+        },
+        OracleCoin {
+            seed: 14,
+            script: script_b.clone(),
+            value_sat: 7_000,
+            coinbase: true,
+        },
+        OracleCoin {
+            seed: 15,
+            script: script_a.clone(),
+            value_sat: 123_456,
+            coinbase: false,
+        },
+        OracleCoin {
+            seed: 16,
+            script: script_c.clone(),
+            value_sat: 1_000_000,
+            coinbase: false,
+        },
+    ];
+    commit_oracle_coins(&ctx, &coins);
+
+    let genesis = ctx
+        .chain
+        .applied_view()
+        .hash(ctx.chain.chain_network)
+        .to_string_be();
+    let result = scantxoutset(
+        &ctx,
+        &json!(["start", ["addr(1111111111111111111114oLvT2)", "raw(51)"]]),
+    )
+    .unwrap_or_else(|err| panic!("scantxoutset failed: {err}"));
+
+    assert_eq!(result["success"].as_bool(), Some(true));
+    assert_eq!(result["height"].as_u64(), Some(0));
+    assert_eq!(result["bestblock"].as_str(), Some(genesis.as_str()));
+    assert_eq!(result["txouts"].as_u64(), Some(6));
+    assert_eq!(result["total_amount"].as_f64(), Some(oracle_btc(202_800)));
+
+    let scanned_scripts: std::collections::BTreeSet<Vec<u8>> =
+        [script_a.clone(), script_b.clone()].into_iter().collect();
+    let mut expected: Vec<ExpectedUnspent<'_>> = coins
+        .iter()
+        .filter(|coin| scanned_scripts.contains(&coin.script))
+        .map(|coin| {
+            let txid = Hash256::from(Txid::from(test_txid(coin.seed)));
+            (
+                txid.to_le_bytes(),
+                0,
+                coin.value_sat,
+                coin.coinbase,
+                &coin.script,
+            )
+        })
+        .collect();
+    expected.sort();
+    let unspents = result["unspents"].as_array().unwrap_or_else(|| {
+        panic!("unspents missing: {result:?}");
+    });
+    assert_eq!(unspents.len(), expected.len(), "unspents: {result:?}");
+    for (row, (key, vout, value_sat, coinbase, script)) in unspents.iter().zip(&expected) {
+        let txid = Txid::from(Hash256::from_le_bytes(key));
+        assert_eq!(row["txid"].as_str(), Some(txid.to_string().as_str()));
+        assert_eq!(row["vout"].as_u64(), Some(u64::from(*vout)));
+        assert_eq!(row["amount"].as_f64(), Some(oracle_btc(*value_sat)));
+        assert_eq!(row["coinbase"].as_bool(), Some(*coinbase));
+        assert_eq!(row["height"].as_u64(), Some(0));
+        assert_eq!(row["confirmations"].as_u64(), Some(1));
+        assert_eq!(row["blockhash"].as_str(), Some(genesis.as_str()));
+        assert_eq!(
+            row["scriptPubKey"].as_str(),
+            Some(script.to_lower_hex_string().as_str())
+        );
+    }
+
+    assert!(
+        ctx.chain.utxo.fixture_set().all_records().is_empty(),
+        "scantxoutset must not rebuild the resident coin image",
+    );
+    let view = ctx
+        .chain
+        .utxo
+        .lock_stable_view()
+        .unwrap_or_else(|error| panic!("committed view: {error}"));
+    assert_eq!(view.len(), coins.len());
+    for coin in &coins {
+        let outpoint = OutPoint::new(Txid::from(test_txid(coin.seed)), 0);
+        let actual = view
+            .get_entry(&outpoint)
+            .unwrap_or_else(|| panic!("committed coin missing: {outpoint:?}"));
+        assert_eq!(actual.txout.value.to_sat(), coin.value_sat);
+        assert_eq!(
+            actual.txout.script_pubkey.as_slice(),
+            coin.script.as_slice()
+        );
+        assert_eq!(actual.coinbase, coin.coinbase);
+    }
+}
+
+#[test]
+fn scan_snapshot_ignores_commit_landing_mid_scan() {
+    let ctx = Arc::new(Context::new());
+    let coin_count = 40_000_u64;
+    let scripts_per_txid = 200_u64;
+    let coins: Vec<OracleCoin> = (0..coin_count)
+        .map(|seed| {
+            let script_index = match u8::try_from(seed % scripts_per_txid) {
+                Ok(script_index) => script_index,
+                Err(error) => panic!("script index fits u8: {error}"),
+            };
+            OracleCoin {
+                seed,
+                script: vec![0x51, 0x00, script_index],
+                value_sat: 1_000 + seed,
+                coinbase: false,
+            }
+        })
+        .collect();
+    commit_oracle_coins(&ctx, &coins);
+    let scanned_script = coins[0].script.clone();
+    let scanned_descriptor = format!("raw({})", scanned_script.to_lower_hex_string());
+
+    let (committed_tx, committed_rx) = crossbeam_channel::bounded::<()>(1);
+    let commit_ctx = Arc::clone(&ctx);
+    let committer = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match commit_ctx.chain.utxo.scan_progress() {
+                Some(percent) if percent > 0 => break,
+                _ => {}
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("scan never published mid-walk progress");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            OutPoint::new(Txid::from(test_txid(999_999)), 0),
+            TxOut {
+                value: Amount::from_sat(777),
+                script_pubkey: scanned_script.into(),
+            },
+            false,
+            0,
+        ));
+        commit_ctx
+            .populate_fixture_coins(&changes)
+            .unwrap_or_else(|err| panic!("mid-scan commit failed: {err}"));
+        committed_tx
+            .send(())
+            .unwrap_or_else(|err| panic!("commit signal failed: {err}"));
+    });
+
+    let result = scantxoutset(&ctx, &json!(["start", [scanned_descriptor]]))
+        .unwrap_or_else(|err| panic!("scantxoutset failed: {err}"));
+    committer
+        .join()
+        .unwrap_or_else(|error| std::panic::panic_any(error));
+    committed_rx
+        .recv()
+        .unwrap_or_else(|err| panic!("commit signal lost: {err}"));
+
+    let late_txid = Txid::from(test_txid(999_999)).to_string();
+    assert_eq!(result["success"].as_bool(), Some(true), "{result:?}");
+    assert_eq!(result["txouts"].as_u64(), Some(40_000), "{result:?}");
+    let unspents = result["unspents"].as_array().unwrap_or_else(|| {
+        panic!("unspents missing: {result:?}");
+    });
+    assert_eq!(unspents.len(), 200);
+    assert!(
+        unspents
+            .iter()
+            .all(|row| row["txid"].as_str() != Some(late_txid.as_str())),
+        "mid-scan commit must not appear in the snapshot scan: {result:?}",
+    );
+    let expected_total: u64 = (0..coin_count)
+        .filter(|seed| seed % scripts_per_txid == 0)
+        .map(|seed| 1_000 + seed)
+        .sum();
+    assert_eq!(
+        result["total_amount"].as_f64(),
+        Some(oracle_btc(expected_total)),
+    );
+    assert!(
+        ctx.chain.utxo.fixture_set().all_records().is_empty(),
+        "scantxoutset must not rebuild the resident coin image",
+    );
+    let view = ctx
+        .chain
+        .utxo
+        .lock_stable_view()
+        .unwrap_or_else(|error| panic!("post-commit view: {error}"));
+    assert_eq!(view.len(), 40_001);
+    let late_outpoint = OutPoint::new(Txid::from(test_txid(999_999)), 0);
+    assert_eq!(
+        view.get_entry(&late_outpoint)
+            .map(|coin| coin.txout.value.to_sat()),
+        Some(777),
+    );
 }

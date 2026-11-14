@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tempfile::tempdir;
 
@@ -7,12 +7,30 @@ use super::support::error::{TestError, TestResult};
 use super::support::harness::{parse_report, recursive_dir_digest, run_converter};
 use super::support::oracle::write_schema_marker;
 
-const BASE_HASH: &str = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2200";
+const ANCHORED_BASE_HASH: &str = "06e5c2437917d314b424eb249ad2ae9d5408e530b7abf33b03cb0d0a084ca528";
 const HEADERS_PAYLOAD: &[u8] = b"assumeutxo-headers-immutable-archive-bytes";
 const COINS_PAYLOAD: &[u8] = b"assumeutxo-coins-immutable-archive-bytes";
 
+fn fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/epoch3-regtest")
+}
+
+fn copy_tree(from: &Path, to: &Path) -> TestResult<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let destination = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &destination)?;
+        } else {
+            fs::copy(entry.path(), destination)?;
+        }
+    }
+    Ok(())
+}
+
 fn write_snapshot_archive(source: &Path) -> TestResult<()> {
-    let generation_dir = source.join("assumeutxo").join(BASE_HASH);
+    let generation_dir = source.join("assumeutxo").join(ANCHORED_BASE_HASH);
     fs::create_dir_all(&generation_dir)?;
     fs::write(generation_dir.join("headers.dat"), HEADERS_PAYLOAD)?;
     fs::write(generation_dir.join("coins.dat"), COINS_PAYLOAD)?;
@@ -20,17 +38,20 @@ fn write_snapshot_archive(source: &Path) -> TestResult<()> {
 }
 
 fn assert_archive_file_copied(dest_root: &Path, file_name: &str, payload: &[u8]) -> TestResult<()> {
-    let path = dest_root.join("assumeutxo").join(BASE_HASH).join(file_name);
+    let path = dest_root
+        .join("assumeutxo")
+        .join(ANCHORED_BASE_HASH)
+        .join(file_name);
     if !path.is_file() {
         return Err(TestError::Assertion(format!(
             "converted datadir is missing the immutable snapshot archive file \
-             assumeutxo/{BASE_HASH}/{file_name} that snapshot recovery verifies at open"
+             assumeutxo/{ANCHORED_BASE_HASH}/{file_name} that snapshot recovery verifies at open"
         )));
     }
     let bytes = fs::read(&path)?;
     if bytes != payload {
         return Err(TestError::Assertion(format!(
-            "converted snapshot archive file assumeutxo/{BASE_HASH}/{file_name} is not \
+            "converted snapshot archive file assumeutxo/{ANCHORED_BASE_HASH}/{file_name} is not \
              byte-identical to the source archive"
         )));
     }
@@ -43,7 +64,11 @@ fn convert_and_assert_snapshot_archive(source_epoch: u32) -> TestResult<()> {
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, source_epoch)?;
+    if source_epoch == 3 {
+        copy_tree(&fixture_dir(), from_path)?;
+    } else {
+        write_schema_marker(from_path, source_epoch)?;
+    }
     write_snapshot_archive(from_path)?;
 
     let source_digest_before = recursive_dir_digest(from_path)?;
@@ -77,7 +102,7 @@ fn convert_and_assert_snapshot_archive(source_epoch: u32) -> TestResult<()> {
         ("headers.dat", HEADERS_PAYLOAD),
         ("coins.dat", COINS_PAYLOAD),
     ] {
-        let rel_path = format!("assumeutxo/{BASE_HASH}/{file_name}");
+        let rel_path = format!("assumeutxo/{ANCHORED_BASE_HASH}/{file_name}");
         let Some(entry) = report
             .copied_files
             .iter()

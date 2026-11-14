@@ -315,13 +315,16 @@ impl MempoolSnapshotSource for MempoolAdapter {
                             let outpoint = input.previous_output;
                             if let hashbrown::hash_map::Entry::Vacant(slot) =
                                 prevouts.entry(outpoint)
-                                && let Some(output) = self
-                                    .chainstate
-                                    .utxo_reader()
-                                    .get_entry(&outpoint)
-                                    .map(|coin| coin.txout)
+                                && let Some(coin) =
+                                    self.chainstate.utxo_reader().get_entry(&outpoint).map_err(
+                                        |error| {
+                                            MiningControlError::Failed(CompactString::from(
+                                                error.to_string(),
+                                            ))
+                                        },
+                                    )?
                             {
-                                slot.insert(output);
+                                slot.insert(coin.txout);
                             }
                         }
                     }
@@ -567,9 +570,7 @@ impl MiningControl for MiningCoordinator {
 
 fn map_apply_error(error: ApplyError) -> Result<BlockValidationResult, MiningControlError> {
     match error {
-        ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
-            Ok(BlockValidationResult::Inconclusive)
-        }
+        ApplyError::Shutdown => Ok(BlockValidationResult::Inconclusive),
         ApplyError::ConcurrentChainChange => Err(MiningControlError::Unavailable(
             CompactString::from(error.to_string()),
         )),
@@ -627,9 +628,7 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             | ChainError::BadVersion { .. }
             | ChainError::TimewarpAttack { .. }),
         ) => bitcoin_rs_serving::mining::chain_reject_reason(chain),
-        ApplyError::Shutdown
-        | ApplyError::JournalBackpressure(_)
-        | ApplyError::ConcurrentChainChange => {
+        ApplyError::Shutdown | ApplyError::ConcurrentChainChange => {
             return Err(MiningControlError::Unavailable(CompactString::from(
                 error.to_string(),
             )));
@@ -656,7 +655,10 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
         | ApplyError::DurableHeadLineage { .. }
         | ApplyError::DisconnectOffDurableHead { .. }
         | ApplyError::DurableHeadGapUnrecoverable { .. }
+        | ApplyError::WindowWorkspaceIncomplete { .. }
         | ApplyError::RecoveryPublication(_)
+        | ApplyError::RecoveryCoinStats(_)
+        | ApplyError::CoinStoreRead(_)
         | ApplyError::CoinStatsRewind(_)
         | ApplyError::DisconnectBelowSnapshotBase { .. }
         | ApplyError::PruneDuringHistoricalValidation { .. }

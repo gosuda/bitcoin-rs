@@ -66,8 +66,8 @@ pub use config::{
 };
 
 pub use options::{
-    ChainstateJournalOverrides, IndexOverrides, MiningOverrides, ObservabilityOverrides,
-    P2pOverrides, RpcOverrides, StorageOverrides, UserConfig, ValidationOverrides,
+    IndexOverrides, MiningOverrides, ObservabilityOverrides, P2pOverrides, RpcOverrides,
+    StorageOverrides, UserConfig, ValidationOverrides,
 };
 
 mod chain_feed;

@@ -1,5 +1,5 @@
-//! Orders [`bitcoin_rs_storage::utxo::contract::rollback_block`] against the journal, the
-//! durable head, and publication.
+//! Disconnect a block: compute the coin delta from its undo record, commit the
+//! reversed head and coin mutations in one atomic batch, then publish.
 
 use super::durable::commit_disconnect_head;
 use super::tx_count_delta_for;
@@ -7,9 +7,10 @@ use super::{Chainstate, DisconnectOutcome, DisconnectPlan};
 use crate::chain::{ChainTxCount, TipSnapshot};
 use crate::error::ApplyError;
 use bitcoin_rs_consensus::primitives::{Block, Hash256, Tx, Txid};
-use bitcoin_rs_storage::utxo::contract::{
-    BlockUndoCheck, RollbackError, load_block_undo_for_block, rollback_block,
-};
+use bitcoin_rs_storage::utxo::contract::{BlockUndoCheck, UndoBatch, load_block_undo_for_block};
+use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
+use bitcoin_rs_storage::{CoinKey, WindowDelta};
+use hashbrown::HashMap;
 
 pub(super) fn plan_disconnect(
     handles: &Chainstate,
@@ -124,7 +125,7 @@ pub(super) fn disconnect_block_admitted(
     let block_hash = block.block_hash().0;
     let DisconnectPlan {
         parent_tip,
-        parent_prev_hash,
+        parent_prev_hash: _,
         undo,
         height,
         tx_count_delta,
@@ -142,48 +143,31 @@ pub(super) fn disconnect_block_admitted(
             source: Box::new(source),
         })
     };
-    let rollback = rollback_block(
-        handles.undo_store.as_ref(),
-        handles.utxo.as_ref(),
-        handles.coin_stats.as_ref(),
-        block_hash,
-        height,
-        parent_tip.height,
-        tx_count_delta,
-        &undo,
-    )
-    .map_err(|error| match error {
-        RollbackError::Refused(source) => {
+
+    handles
+        .undo_store
+        .arm_disconnect(height, block_hash)
+        .map_err(|source| {
             crate::DisconnectError::Refused(Box::new(ApplyError::UndoPersistence(source)))
-        }
-        RollbackError::Utxo(source) => fatal(ApplyError::UtxoCommit(source)),
-        RollbackError::CoinStats(source) => fatal(ApplyError::CoinStatsRewind(source)),
-        RollbackError::Marker(source) => fatal(ApplyError::UndoPersistence(source)),
-    })?;
-    let journal_rewound = handles.journal.read().clone().is_some_and(|journal| {
-        let rewound = journal.lock().rewind_to(
-            parent_tip.height,
-            parent_tip.hash.to_le_bytes(),
-            parent_prev_hash.to_le_bytes(),
-            parent_tip.chain_tx_count.to_wire(),
-        );
-        rewound
-            .map_err(|error| {
-                metrics::counter!("node.chainstate_journal.reorg_failures").increment(1);
-                tracing::warn!(
-                    height = parent_tip.height,
-                    hash = %parent_tip.hash,
-                    %error,
-                    "chainstate journal fork-head rewrite failed; retaining disconnect marker"
-                );
-            })
-            .is_ok()
-    });
+        })?;
+    let coin_delta = build_disconnect_delta(&handles.coins, &undo)
+        .map_err(|e| fatal(ApplyError::CoinStoreRead(e)))?;
+
+    handles
+        .coin_stats
+        .check_rewind(height, tx_count_delta)
+        .map_err(|source| fatal(ApplyError::CoinStatsRewind(source)))?;
+    handles
+        .coin_stats
+        .rewind_block(height, parent_tip.height, tx_count_delta)
+        .map_err(|source| fatal(ApplyError::CoinStatsRewind(source)))?;
+
     let receipt = commit_disconnect_head(
         handles,
         &parent_tip,
         block_hash,
         parent_tip.chain_tx_count.to_wire(),
+        coin_delta,
     )
     .map_err(fatal)?;
     let parent_tip = receipt.certify(parent_tip);
@@ -193,18 +177,115 @@ pub(super) fn disconnect_block_admitted(
         .restore_chain_tx_count(parent_tip.tip_id, parent_tip.chain_tx_count)
         .map_err(|error| fatal(ApplyError::Chain(error)))?;
     handles.publish_applied(&parent_tip, crate::events::HintKind::Disconnected);
-    if journal_rewound {
-        handles.undo_store.disarm_disconnect().map_err(|error| {
-            poison(crate::DisconnectError::MarkerStuck {
-                hash: block_hash,
-                height,
-                source: Box::new(ApplyError::UndoPersistence(error)),
-            })
-        })?;
-    }
+
+    handles
+        .undo_store
+        .complete_disconnect(height, block_hash)
+        .map_err(|source| fatal(ApplyError::UndoPersistence(source)))?;
+    handles.undo_store.disarm_disconnect().map_err(|error| {
+        poison(crate::DisconnectError::MarkerStuck {
+            hash: block_hash,
+            height,
+            source: Box::new(ApplyError::UndoPersistence(error)),
+        })
+    })?;
 
     Ok(DisconnectOutcome {
         hash: block_hash,
-        restored_parents: rollback.restored_parents,
+        restored_parents: undo
+            .restores()
+            .iter()
+            .map(|restored| restored.outpoint.txid)
+            .collect(),
     })
+}
+
+/// Builds a [`WindowDelta`] that reverses one block's coin effects using the
+/// undo record and the current engine state.
+pub(crate) fn build_disconnect_delta(
+    coins: &bitcoin_rs_storage::CoinStore,
+    undo: &UndoBatch,
+) -> Result<WindowDelta, bitcoin_rs_storage::StorageError> {
+    let mut affected: HashMap<Txid, (Vec<OwnedUtxoOut>, Vec<u32>)> = HashMap::new();
+    for restore in undo.restores() {
+        let txid = restore.outpoint.txid;
+        let entry = affected.entry(txid).or_default();
+        entry.0.push(OwnedUtxoOut::new(
+            restore.outpoint.vout,
+            restore.txout.value.to_sat(),
+            restore.txout.script_pubkey.to_vec(),
+            restore.coinbase,
+            restore.height,
+        ));
+    }
+    for remove in undo.removes() {
+        let txid = remove.txid;
+        let entry = affected.entry(txid).or_default();
+        entry.1.push(remove.vout);
+    }
+
+    let txids: Vec<Txid> = affected.keys().copied().collect();
+    let coin_keys: Vec<CoinKey> = txids
+        .iter()
+        .map(|txid| CoinKey(txid.0.to_le_bytes()))
+        .collect();
+    let current_records = coins.multi_get(&coin_keys)?;
+
+    let mut delta = WindowDelta::default();
+    for (i, txid) in txids.iter().enumerate() {
+        let (to_restore, to_remove) = &affected[txid];
+        let mut outputs: Vec<OwnedUtxoOut> = match &current_records[i] {
+            Some(bytes) => {
+                let record =
+                    UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice()).map_err(|e| {
+                        bitcoin_rs_storage::StorageError::IncompatibleData(format!(
+                            "corrupt coin record for txid {}: {e}",
+                            txid.0.to_string_be()
+                        ))
+                    })?;
+                record
+                    .outputs()
+                    .map(|out| {
+                        OwnedUtxoOut::new(
+                            out.vout,
+                            out.value,
+                            out.script_pubkey.to_vec(),
+                            out.coinbase,
+                            out.height,
+                        )
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+
+        for vout in to_remove {
+            outputs.retain(|o| o.vout != *vout);
+        }
+
+        for restored in to_restore {
+            if !outputs.iter().any(|o| o.vout == restored.vout) {
+                outputs.push(restored.clone());
+            }
+        }
+
+        let key = CoinKey(txid.0.to_le_bytes());
+        if outputs.is_empty() {
+            delta.push_final(key, None);
+        } else {
+            let record = UtxoRecord::from_owned_outputs(
+                Hash256::from_le_bytes(&txid.0.to_le_bytes()),
+                &outputs,
+            )
+            .map_err(|e| {
+                bitcoin_rs_storage::StorageError::IncompatibleData(format!(
+                    "failed to rebuild coin record for txid {}: {e}",
+                    txid.0.to_string_be()
+                ))
+            })?;
+            delta.push_final(key, Some(bytes::Bytes::copy_from_slice(record.bytes())));
+        }
+    }
+    delta.records.sort_by_key(|(key, _)| *key);
+    Ok(delta)
 }

@@ -5,7 +5,8 @@ use super::*;
 use crate::{
     ValidationMode,
     recovery::{
-        ResumeSource, prepare_initial_chainstate, require_full_script_attestation,
+        ResumeSource, install_restored_state, prepare_initial_chainstate,
+        prepare_initial_state_with_engine, require_full_script_attestation,
         requires_full_revalidation,
     },
 };
@@ -18,8 +19,7 @@ use bitcoin_rs_consensus::script::{
     opcode::{OP_PUSHNUM_1, OP_RETURN},
 };
 use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
-use bitcoin_rs_storage::chainstate_journal::{FULL_REVALIDATION_MARKER, JOURNAL_DIR_NAME};
-use bitcoin_rs_storage::utxo::stats::CoinStatsListener;
+use bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER;
 
 use crate::test_fixtures::{TestError, TestResult};
 
@@ -37,13 +37,17 @@ fn write_accepted_checkpoint(dir: &Path, chain: &Chainstate) -> TestResult {
         network: Network::Regtest,
         genesis: Network::Regtest.genesis_block_hash(),
     };
-    crate::checkpoint::write_checkpoint_from_dir(
+    let engine = chain.commit_authority.store().clone();
+    crate::checkpoint::write_checkpoint_with_store(
         &store,
         config,
         &chain.block_tree,
-        &chain.utxo,
         &chain.coin_stats,
         chain.applied_tip_snapshot().as_deref(),
+        crate::checkpoint::CheckpointStoreTarget {
+            store: engine.as_ref(),
+            host_data_dir: dir,
+        },
     )?;
     Ok(())
 }
@@ -146,12 +150,11 @@ fn commit_spent_script(
     Ok((chain, spend_block, funding, checkpoint_dir))
 }
 
-const FULL_REVALIDATION_MARKER_TEXT: &[u8] = b"journal fork crossed below checkpoint base\n";
+const FULL_REVALIDATION_MARKER_TEXT: &[u8] =
+    b"full revalidation required after the checkpoint base\n";
 
 fn write_full_revalidation_marker(dir: &Path, marker: &[u8]) -> TestResult {
-    let journal = dir.join(JOURNAL_DIR_NAME);
-    std::fs::create_dir_all(&journal)?;
-    std::fs::write(journal.join(FULL_REVALIDATION_MARKER), marker)?;
+    std::fs::write(dir.join(FULL_REVALIDATION_MARKER), marker)?;
     Ok(())
 }
 
@@ -186,18 +189,9 @@ fn prepare_cold_with_optional_marker(
         .durable_head
         .load()?
         .ok_or(TestError::Missing("missing durable head"))?;
-    let journal_config = crate::ChainstateJournalConfig {
-        enabled: false,
-        ..crate::ChainstateJournalConfig::default()
-    };
     let dir = if let Some(dir) = checkpoint_dir {
         if let Some(marker) = marker {
-            let baseline = prepare_initial_chainstate(
-                dir.path(),
-                Network::Regtest,
-                journal_config,
-                Some(&head),
-            )?;
+            let baseline = prepare_initial_chainstate(dir.path(), Network::Regtest, Some(&head))?;
             assert_eq!(baseline.resume_source, ResumeSource::Checkpoint);
             assert_eq!(baseline.applied_tip.as_ref().map(|t| t.height), Some(100));
             write_full_revalidation_marker(dir.path(), marker)?;
@@ -211,19 +205,10 @@ fn prepare_cold_with_optional_marker(
         }
         dir
     };
-    let initial =
-        prepare_initial_chainstate(dir.path(), Network::Regtest, journal_config, Some(&head))?;
-    assert_eq!(initial.resume_source, ResumeSource::Cold);
-    assert!(initial.applied_tip.is_none());
-    chain.validation_mode = mode;
-    chain.coin_stats = Arc::new(CoinStatsListener::new(initial.coin_stats));
-    let mut utxo = initial.utxo;
-    utxo.track_coin_stats((*chain.coin_stats).clone());
-    chain.utxo = Arc::new(utxo);
-    *chain.block_tree.write() = initial.tree;
-    chain.applied_tip.store(None);
-    chain.chain_tip.store(None);
-    chain.chain_events = Arc::new(crate::events::ChainEventPublisher::detached(1));
+    let restored = prepare_initial_state_with_engine(dir.path(), Network::Regtest, Some(&head))?;
+    assert_eq!(restored.initial.resume_source, ResumeSource::Cold);
+    assert!(restored.initial.applied_tip.is_none());
+    install_restored_state(chain, restored, mode)?;
     Ok(dir)
 }
 
@@ -236,31 +221,16 @@ fn prepare_warm(
         .durable_head
         .load()?
         .ok_or(TestError::Missing("missing durable head"))?;
-    let initial = prepare_initial_chainstate(
-        checkpoint_dir.path(),
-        Network::Regtest,
-        crate::ChainstateJournalConfig {
-            enabled: false,
-            ..crate::ChainstateJournalConfig::default()
-        },
-        Some(&head),
-    )?;
-    assert_eq!(initial.resume_source, ResumeSource::Checkpoint);
-    let tip = initial
+    let restored =
+        prepare_initial_state_with_engine(checkpoint_dir.path(), Network::Regtest, Some(&head))?;
+    assert_eq!(restored.initial.resume_source, ResumeSource::Checkpoint);
+    let tip = restored
+        .initial
         .applied_tip
         .clone()
         .ok_or(TestError::Missing("missing checkpoint tip"))?;
     assert_eq!(tip.height, 100);
-    chain.validation_mode = mode;
-    chain.coin_stats = Arc::new(CoinStatsListener::new(initial.coin_stats));
-    let mut utxo = initial.utxo;
-    utxo.track_coin_stats((*chain.coin_stats).clone());
-    chain.utxo = Arc::new(utxo);
-    *chain.block_tree.write() = initial.tree;
-    let tip_arc = Some(Arc::new(tip));
-    chain.applied_tip.store(tip_arc.clone());
-    chain.chain_tip.store(tip_arc);
-    chain.chain_events = Arc::new(crate::events::ChainEventPublisher::detached(1));
+    install_restored_state(chain, restored, mode)?;
     Ok(checkpoint_dir)
 }
 
@@ -301,11 +271,11 @@ fn cold_revalidation_rejects_script_invalid_commits_and_preserves_recovery_evide
             assert_eq!(chain.chain_snapshot().tip_hash, tip.hash);
             assert_eq!(chain.chain_snapshot().tip_height, 100);
             assert_eq!(chain.coin_stats.snapshot().height, 100);
-            assert!(chain.utxo.get(&funding).is_some());
+            assert!(chain.utxo_reader().get(&funding)?.is_some());
             assert!(
                 chain
-                    .utxo
-                    .get(&OutPoint::new(invalid.txs[1].txid(), 0))
+                    .utxo_reader()
+                    .get(&OutPoint::new(invalid.txs[1].txid(), 0))?
                     .is_none()
             );
             assert_eq!(chain.durable_head.load()?, head);
@@ -324,12 +294,8 @@ fn cold_revalidation_rejects_script_invalid_commits_and_preserves_recovery_evide
             ));
             if marker {
                 assert_eq!(
-                    std::fs::read(
-                        dir.path()
-                            .join(JOURNAL_DIR_NAME)
-                            .join(FULL_REVALIDATION_MARKER)
-                    )?,
-                    b"journal fork crossed below checkpoint base\n"
+                    std::fs::read(dir.path().join(FULL_REVALIDATION_MARKER))?,
+                    b"full revalidation required after the checkpoint base\n"
                 );
             }
         }
@@ -364,11 +330,11 @@ fn valid_cold_revalidation_reuses_the_durable_receipt() -> TestResult {
         assert_eq!(tip.chain_tx_count.to_wire(), head.chain_tx_count);
         assert_eq!(chain.durable_head.load()?, Some(head));
         assert_eq!(chain.chain_snapshot().tip_hash, head.tip);
-        assert!(chain.utxo.get(&funding).is_none());
+        assert!(chain.utxo_reader().get(&funding)?.is_none());
         assert!(
             chain
-                .utxo
-                .get(&OutPoint::new(valid.txs[1].txid(), 0))
+                .utxo_reader()
+                .get(&OutPoint::new(valid.txs[1].txid(), 0))?
                 .is_some()
         );
         assert!(chain.begin_transition().is_ok());
@@ -423,11 +389,11 @@ fn valid_warm_revalidation_reuses_the_durable_receipt_and_undo_preparation() -> 
     assert_eq!(tip.chain_tx_count.to_wire(), head.chain_tx_count);
     assert_eq!(chain.durable_head.load()?, Some(head));
     assert_eq!(chain.chain_snapshot().tip_hash, head.tip);
-    assert!(chain.utxo.get(&funding).is_none());
+    assert!(chain.utxo_reader().get(&funding)?.is_none());
     assert!(
         chain
-            .utxo
-            .get(&OutPoint::new(valid.txs[1].txid(), 0))
+            .utxo_reader()
+            .get(&OutPoint::new(valid.txs[1].txid(), 0))?
             .is_some()
     );
     assert!(chain.begin_transition().is_ok());
@@ -450,22 +416,15 @@ fn warm_assume_valid_start_over_an_accepted_checkpoint_reuses_the_durable_receip
     assert_eq!(tip.chain_tx_count.to_wire(), head.chain_tx_count);
     assert_eq!(chain.durable_head.load()?, Some(head));
     assert_eq!(chain.chain_snapshot().tip_hash, head.tip);
-    assert!(chain.utxo.get(&funding).is_none());
+    assert!(chain.utxo_reader().get(&funding)?.is_none());
     assert!(
         chain
-            .utxo
-            .get(&OutPoint::new(invalid.txs[1].txid(), 0))
+            .utxo_reader()
+            .get(&OutPoint::new(invalid.txs[1].txid(), 0))?
             .is_some()
     );
     assert!(chain.begin_transition().is_ok());
     Ok(())
-}
-
-fn journal_off() -> crate::ChainstateJournalConfig {
-    crate::ChainstateJournalConfig {
-        enabled: false,
-        ..crate::ChainstateJournalConfig::default()
-    }
 }
 
 // RCV-02
@@ -491,12 +450,7 @@ fn full_start_over_an_assume_valid_commit_rebuilds_cold_and_rejects_the_invalid_
         false,
     )?;
     assert!(!requires_full_revalidation(checkpoint_dir.path()));
-    let warm = prepare_initial_chainstate(
-        checkpoint_dir.path(),
-        Network::Regtest,
-        journal_off(),
-        Some(&head),
-    )?;
+    let warm = prepare_initial_chainstate(checkpoint_dir.path(), Network::Regtest, Some(&head))?;
     assert_eq!(
         warm.resume_source,
         ResumeSource::Checkpoint,
@@ -529,7 +483,7 @@ fn full_start_over_an_assume_valid_commit_rebuilds_cold_and_rejects_the_invalid_
         (100, invalid.header.prev_blockhash.0),
         "nothing publishes at the invalid height"
     );
-    assert!(chain.utxo.get(&funding).is_some());
+    assert!(chain.utxo_reader().get(&funding)?.is_some());
     drop(dir);
     Ok(())
 }

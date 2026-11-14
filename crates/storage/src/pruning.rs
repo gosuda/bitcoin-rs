@@ -46,7 +46,7 @@ const PRUNE_EXECUTED_METADATA_KEY: &[u8] = b"node:prune_executed";
 /// when a retry repeats the same frontier and requested height.
 const PRUNE_BATCH_METADATA_KEY: &[u8] = b"node:prune_batch";
 
-fn load_u32_metadata<S: crate::KvStore>(
+fn load_u32_metadata<S: crate::KvStore + ?Sized>(
     store: &S,
     key: &[u8],
     what: &str,
@@ -80,12 +80,12 @@ fn load_prune_batch<S: crate::KvStore>(store: &S) -> Result<Option<u64>, Storage
     Ok(Some(u64::from_be_bytes(encoded)))
 }
 
-pub fn load_pruneheight<S: crate::KvStore>(store: &S) -> Result<Option<u32>, StorageError> {
+pub fn load_pruneheight(store: &dyn crate::KvStore) -> Result<Option<u32>, StorageError> {
     load_u32_metadata(store, PRUNEHEIGHT_METADATA_KEY, "pruneheight")
 }
 
-pub fn load_executed_frontier<S: crate::KvStore>(
-    store: &S,
+pub fn load_executed_frontier(
+    store: &dyn crate::KvStore,
 ) -> Result<Option<ExecutedFrontier>, StorageError> {
     let height = load_u32_metadata(store, PRUNE_EXECUTED_METADATA_KEY, "prune frontier")?;
     Ok(height.map(ExecutedFrontier::new))
@@ -104,6 +104,11 @@ impl ExecutedFrontier {
 
     #[must_use]
     pub(crate) const fn get(self) -> u32 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn height(self) -> u32 {
         self.0
     }
 

@@ -79,6 +79,8 @@ pub(crate) enum SnapshotExportError {
     ChainTxCountUnknown,
     #[error("could not encode snapshot: {0}")]
     Codec(#[from] SnapshotError),
+    #[error("could not read snapshot coins: {0}")]
+    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error("could not write snapshot: {0}")]
     Write(std::io::Error),
     #[error("snapshot file holds {actual} bytes but the encoder wrote {expected}")]
@@ -102,6 +104,7 @@ impl From<SnapshotExportError> for SnapshotControlError {
             | SnapshotExportError::NoAppliedTip
             | SnapshotExportError::ChainTxCountUnknown => Self::Unavailable(error.to_string()),
             SnapshotExportError::Codec(_)
+            | SnapshotExportError::Utxo(_)
             | SnapshotExportError::Write(_)
             | SnapshotExportError::Length { .. }
             | SnapshotExportError::DirectorySync(_) => Self::Failed(error.to_string()),
@@ -416,7 +419,7 @@ impl SnapshotControl {
         stop: &dyn Fn() -> bool,
     ) -> Result<Encoded, SnapshotExportError> {
         let utxo = self.chainstate.utxo_reader();
-        let view = utxo.lock_stable_view();
+        let view = utxo.lock_stable_view()?;
         let snapshot = self.chainstate.snapshot();
         let tip = snapshot.applied.ok_or(SnapshotExportError::NoAppliedTip)?;
         let nchaintx = snapshot

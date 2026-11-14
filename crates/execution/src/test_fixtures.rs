@@ -3,26 +3,14 @@ use std::sync::Arc;
 use crate::chain::{BlockTree, ChainTxCount, TipSnapshot};
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_consensus::primitives::{
-    Amount, BlockImage, Hash256, Network, OutPoint, TxOut, Txid,
+    Amount, Block, BlockImage, Hash256, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut,
+    Witness,
 };
-use bitcoin_rs_storage::chainstate_journal::Coin;
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use parking_lot::{Mutex, RwLock};
 
 use crate::{ApplyError, Chainstate, TipStagedHook};
-
-pub(crate) fn journal_coin(marker: u8, height: u32, value: u64) -> Coin {
-    Coin {
-        outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
-        txout: TxOut {
-            value: Amount::from_sat(value),
-            script_pubkey: vec![0x51].into(),
-        },
-        height,
-        coinbase: true,
-    }
-}
 
 pub(crate) fn handles(network: Network, utxo: Arc<UtxoSet>) -> Chainstate {
     Chainstate::new(
@@ -34,6 +22,55 @@ pub(crate) fn handles(network: Network, utxo: Arc<UtxoSet>) -> Chainstate {
         Arc::new(CoinStatsListener::new(CoinStats::default())),
         Arc::new(crate::events::ChainEventPublisher::detached(0)),
     )
+}
+
+pub(crate) fn handles_with_store<S: bitcoin_rs_storage::KvStore>(
+    network: Network,
+    utxo: Arc<UtxoSet>,
+    store: Arc<S>,
+) -> Chainstate {
+    let dyn_store: Arc<dyn bitcoin_rs_storage::KvStore> = store.clone();
+    let coins = Arc::new(bitcoin_rs_storage::CoinStore::open(
+        Arc::clone(&dyn_store),
+        64 * 1024 * 1024,
+    ));
+    let durable_head = Arc::new(bitcoin_rs_storage::KvDurableHeadStore::new(Arc::clone(
+        &store,
+    )));
+    let undo_store = Arc::new(bitcoin_rs_storage::KvUndoStore::new(Arc::clone(&dyn_store)));
+    let commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(
+        Arc::clone(&dyn_store),
+        Arc::clone(&coins),
+    ));
+    let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
+    Chainstate::from_parts(crate::ChainstateParts {
+        network,
+        block_tree: BlockTree::new(),
+        restored_applied_tip: None,
+        utxo,
+        coin_stats: Arc::new(CoinStatsListener::new(CoinStats::default())),
+        chain_events: Arc::new(crate::events::ChainEventPublisher::detached(0)),
+        block_body_store: None,
+        undo_store,
+        durable_head,
+        coins,
+        commit_authority,
+        chain_transition: crate::chain::TransitionDomain::new().authority(),
+        assume_valid_height: 0,
+        validation_mode: crate::ValidationMode::AssumeValid,
+        validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
+        script_cache: None,
+        capture_rawtx: false,
+        capture_block_bytes: false,
+        retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
+        history: bitcoin_rs_storage::pruning::HistoryAccess::new(
+            retention,
+            bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(
+                bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
+            ),
+        ),
+        role: crate::ChainstateRole::Ordinary,
+    })
 }
 
 pub(crate) fn seed_genesis(handles: &Chainstate) -> Result<TipSnapshot, ApplyError> {
@@ -50,6 +87,25 @@ pub(crate) fn seed_genesis(handles: &Chainstate) -> Result<TipSnapshot, ApplyErr
     };
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
     Ok(tip)
+}
+
+pub(crate) fn seed_durable_head(
+    chain: &Chainstate,
+    next: bitcoin_rs_storage::DurableHead,
+) -> TestResult {
+    <Chainstate>::commit_authority(chain)
+        .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+            expected_head: None,
+            next_head: next,
+            undo_rows: Vec::new(),
+            body_rows: Vec::new(),
+            attestation: None,
+            coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+        })
+        .map_err(|error| {
+            TestError::Storage(bitcoin_rs_storage::StorageError::backend(error.to_string()))
+        })?;
+    Ok(())
 }
 
 pub(crate) struct StagedFire {
@@ -97,10 +153,6 @@ pub(crate) enum TestError {
     #[error(transparent)]
     CheckpointLoad(#[from] bitcoin_rs_storage::checkpoint::CheckpointLoadError),
     #[error(transparent)]
-    JournalWriter(#[from] bitcoin_rs_storage::chainstate_journal::JournalWriterError),
-    #[error(transparent)]
-    JournalReplay(#[from] bitcoin_rs_storage::chainstate_journal::JournalReplayError),
-    #[error(transparent)]
     HistoryUnavailable(#[from] bitcoin_rs_storage::pruning::HistoryUnavailable),
     #[error(transparent)]
     Chain(#[from] crate::chain::ChainError),
@@ -122,8 +174,6 @@ pub(crate) enum TestError {
     StateVerify(#[from] bitcoin_rs_storage::utxo::core_snapshot::StateVerifyError),
     #[error(transparent)]
     RawSeed(#[from] bitcoin_rs_storage::utxo::snapshot::RawSeedError<std::convert::Infallible>),
-    #[error(transparent)]
-    Overlay(#[from] crate::overlay::WindowOverlayError),
     #[error(transparent)]
     Apply(#[from] crate::ApplyError),
     #[error(transparent)]
@@ -189,5 +239,127 @@ impl From<crate::WindowApplyError> for TestError {
 impl From<&'static str> for TestError {
     fn from(error: &'static str) -> Self {
         Self::Missing(error)
+    }
+}
+
+pub(crate) type CoinScan = Vec<(Vec<u8>, Vec<u8>)>;
+
+pub(crate) fn coin_scan(chain: &Chainstate) -> Result<CoinScan, TestError> {
+    let store = chain.commit_authority.store();
+    store
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(TestError::Storage)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CorpusSpend {
+    MatureCoinbase { height: u32 },
+    EarlierBlock { block: usize, tx: usize },
+    SameBlock { tx: usize },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CorpusSpendPlan {
+    pub spend: CorpusSpend,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CorpusBlockPlan {
+    pub spends: Vec<CorpusSpendPlan>,
+}
+
+pub(crate) struct Corpus {
+    pub prefix: Vec<Block>,
+    pub blocks: Vec<Block>,
+}
+
+pub(crate) const CORPUS_MATURITY_BLOCKS: u32 = 100;
+
+const CORPUS_SPEND_VALUE: u64 = 5_000_000_000;
+
+impl Corpus {
+    pub(crate) fn build(plans: &[CorpusBlockPlan]) -> TestResult<Self> {
+        let genesis = Network::Regtest.genesis_block();
+        let mut parent = genesis.block_hash();
+        let mut funded: Vec<Block> = Vec::new();
+        for height in 1..=CORPUS_MATURITY_BLOCKS {
+            let block = crate::chain::regtest_fixture::mined_regtest_child_at(parent, height)?;
+            parent = block.block_hash();
+            funded.push(block);
+        }
+        let mut generated: Vec<Block> = Vec::new();
+        for (offset, plan) in plans.iter().enumerate() {
+            let height = CORPUS_MATURITY_BLOCKS
+                + u32::try_from(offset)?
+                    .checked_add(1)
+                    .ok_or(TestError::Missing("corpus height overflow"))?;
+            let mut block = crate::chain::regtest_fixture::mined_regtest_child_at(parent, height)?;
+            let mut created: Vec<Tx> = Vec::new();
+            for spend in &plan.spends {
+                let previous_output = match spend.spend {
+                    CorpusSpend::MatureCoinbase { height } => {
+                        let index = usize::try_from(height)?
+                            .checked_sub(1)
+                            .ok_or(TestError::Missing("mature coinbase height"))?;
+                        let coinbase = funded
+                            .get(index)
+                            .ok_or(TestError::Missing("mature coinbase block"))?;
+                        OutPoint::new(coinbase.txs[0].txid(), 0)
+                    }
+                    CorpusSpend::EarlierBlock { block: index, tx } => {
+                        let earlier = generated
+                            .get(index)
+                            .ok_or(TestError::Missing("earlier corpus block"))?;
+                        let transaction = earlier
+                            .txs
+                            .get(tx + 1)
+                            .ok_or(TestError::Missing("earlier corpus transaction"))?;
+                        OutPoint::new(transaction.txid(), 0)
+                    }
+                    CorpusSpend::SameBlock { tx } => {
+                        let transaction = created
+                            .get(tx)
+                            .ok_or(TestError::Missing("same-block transaction"))?;
+                        OutPoint::new(transaction.txid(), 0)
+                    }
+                };
+                created.push(corpus_spend_tx(previous_output));
+            }
+            block.txs.extend(created);
+            block.header.merkle_root = crate::chain::regtest_fixture::merkle_root(&block.txs)
+                .ok_or(TestError::Missing("corpus merkle root"))?;
+            crate::chain::regtest_fixture::mine_block_to_declared_target(&mut block)?;
+            parent = block.block_hash();
+            generated.push(block);
+        }
+        Ok(Self {
+            prefix: funded,
+            blocks: generated,
+        })
+    }
+
+    pub(crate) fn payloads(&self) -> Vec<BlockImage> {
+        self.blocks
+            .iter()
+            .map(|block| BlockImage::from_local(block.clone()))
+            .collect()
+    }
+}
+
+fn corpus_spend_tx(previous_output: OutPoint) -> Tx {
+    Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output,
+            script_sig: vec![bitcoin_rs_consensus::script::opcode::OP_PUSHNUM_1].into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(CORPUS_SPEND_VALUE),
+            script_pubkey: vec![bitcoin_rs_consensus::script::opcode::OP_PUSHNUM_1].into(),
+        }],
+        lock_time: LockTime::ZERO,
     }
 }

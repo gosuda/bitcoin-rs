@@ -107,3 +107,9 @@ impl From<crate::context::TxQueryError> for RpcError {
         }
     }
 }
+
+impl From<bitcoin_rs_storage::utxo::UtxoError> for RpcError {
+    fn from(error: bitcoin_rs_storage::utxo::UtxoError) -> Self {
+        Self::Internal(format!("coin read failed: {error}"))
+    }
+}

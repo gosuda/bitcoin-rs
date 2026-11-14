@@ -18,6 +18,46 @@ pub use publish::begin_publication_at;
 pub use publish::begin_publication_at_with_failpoint;
 pub use publish::clear_checkpoint_generations_at;
 pub use publish::retire_checkpoint_generations_at;
+pub fn open_checkpoint_store(
+    dir: &std::path::Path,
+) -> Result<std::sync::Arc<dyn crate::KvStore>, crate::StorageError> {
+    #[cfg(any(test, feature = "test-seam"))]
+    if dir.join(crate::memory_kv::MEMORY_KV_FILE).exists() {
+        return Ok(std::sync::Arc::new(
+            crate::memory_kv::MemoryKvStore::open_checkpoint(dir)?,
+        ));
+    }
+    if let Some(backend) = crate::detect_engine(dir)? {
+        match backend {
+            crate::StorageBackend::RocksDb => {
+                return Ok(std::sync::Arc::new(crate::RocksDbStore::open(dir)?));
+            }
+            #[cfg(feature = "surrealkv")]
+            crate::StorageBackend::SurrealKv => {
+                return Ok(std::sync::Arc::new(crate::SurrealKvStore::open(dir)?));
+            }
+            #[cfg(not(feature = "surrealkv"))]
+            crate::StorageBackend::SurrealKv => {
+                return Err(crate::StorageError::Backend(
+                    "surrealkv feature not enabled".into(),
+                ));
+            }
+            #[cfg(feature = "mdbx")]
+            crate::StorageBackend::Mdbx => {
+                return Ok(std::sync::Arc::new(crate::MdbxStore::open(dir)?));
+            }
+            #[cfg(not(feature = "mdbx"))]
+            crate::StorageBackend::Mdbx => {
+                return Err(crate::StorageError::Backend(
+                    "mdbx feature not enabled".into(),
+                ));
+            }
+        }
+    }
+    Err(crate::StorageError::IncompatibleData(
+        "unrecognized checkpoint store".into(),
+    ))
+}
 
 use cap_std::fs::File;
 use serde::{Deserialize, Serialize};
@@ -41,14 +81,13 @@ pub enum CheckpointRetention {
 pub const CURRENT_FILE: &str = "CURRENT";
 pub const MANIFEST_FILE: &str = "manifest-v1.json";
 pub const HEADERS_FILE: &str = "headers-v1.dat";
-pub const UTXO_FILE: &str = "utxo-v4.dat";
 pub const COINSTATS_FILE: &str = "coinstats-v1.dat";
-pub(crate) const CURRENT_FORMAT: &str = "bitcoin-rs-chainstate-current";
+pub const CURRENT_FORMAT: &str = "bitcoin-rs-chainstate-current";
 pub const MANIFEST_FORMAT: &str = "bitcoin-rs-chainstate-checkpoint";
 pub const HEADER_CODEC: &str = "bitcoin-rs-canonical-headers";
 pub const UTXO_CODEC: &str = "bitcoin-rs-utxo-spendable-v1";
 pub const COINSTATS_CODEC: &str = "bitcoin-rs-coinstats-v1";
-pub(crate) const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 1;
 pub const MANIFEST_VERSION: u32 = 1;
 pub const UTXO_VERSION: u32 = 4;
 pub const COINSTATS_VERSION: u32 = 1;
@@ -134,7 +173,8 @@ pub struct CheckpointManifestV1 {
     pub applied_tip: CheckpointTipV1,
     pub best_header_tip: CheckpointTipV1,
     pub headers: HeadersArtifactV1,
-    pub utxo: UtxoArtifactV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utxo: Option<UtxoArtifactV1>,
     pub coinstats: CoinStatsArtifactV1,
 }
 
@@ -146,6 +186,8 @@ pub enum CheckpointError {
     Json(#[from] sonic_rs::Error),
     #[error("checkpoint invariant failed: {0}")]
     Invalid(String),
+    #[error("checkpoint storage error: {0}")]
+    Storage(#[from] crate::StorageError),
 }
 #[derive(Debug, Error)]
 pub enum CheckpointLoadError {
@@ -153,6 +195,10 @@ pub enum CheckpointLoadError {
         "corrupt current-schema checkpoint: {0}; remove or replace the datadir and restart to perform a full resync"
     )]
     Corrupt(String),
+    #[error(
+        "checkpoint generation {generation} carries a utxo payload written by an earlier build, which this build refuses; run bitcoin-rs-storage-convert to convert the datadir"
+    )]
+    UtxoPayloadRetired { generation: u64 },
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

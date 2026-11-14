@@ -8,9 +8,9 @@ use bitcoin_rs_node::options::{
     parse_storage_backend, parse_validation_engine, parse_validation_mode,
 };
 use bitcoin_rs_node::{
-    ChainstateJournalOverrides, IndexOverrides, MiningOverrides, Network, NetworkSelection,
-    NotificationConfig, ObservabilityOverrides, P2pOverrides, RpcOverrides, ScriptIndexMode,
-    StorageOverrides, UserConfig, ValidationEngine, ValidationOverrides,
+    IndexOverrides, MiningOverrides, Network, NetworkSelection, NotificationConfig,
+    ObservabilityOverrides, P2pOverrides, RpcOverrides, ScriptIndexMode, StorageOverrides,
+    UserConfig, ValidationEngine, ValidationOverrides,
 };
 use bitcoin_rs_storage::StorageBackend;
 use clap::Parser;

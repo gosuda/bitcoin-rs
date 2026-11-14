@@ -891,25 +891,35 @@ fn gettxoutproof_with_blockhash_answers_core_message_for_a_header_only_block() {
 // API-02
 #[test]
 fn gettxoutproof_without_blockhash_answers_from_the_utxo_set() {
-    let genesis = fixture_genesis();
-    let Some(coinbase) = genesis.txs.first() else {
-        panic!("genesis has no transactions");
-    };
-    let txid = coinbase.txid();
+    let mut genesis = fixture_genesis();
+    let tx = many_output_tx(8);
+    let txid = tx.txid();
+    let live_vout = 7;
+    let live_output = tx.outputs[live_vout].clone();
+    genesis.txs.push(tx);
+    genesis.header.merkle_root =
+        bitcoin_rs_execution::chain::regtest_fixture::merkle_root(&genesis.txs)
+            .expect("fixture merkle root");
     let mut ctx = Context::new();
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
-        OutPoint::new(txid, 0),
-        coinbase.outputs[0].clone(),
+        OutPoint::new(
+            txid,
+            u32::try_from(live_vout).expect("fixture output index"),
+        ),
+        live_output,
         false,
         0,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )
-    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    ctx.populate_fixture_coins(&changes)
+        .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    assert!(
+        ctx.chain
+            .utxo
+            .get_entry(&OutPoint::new(txid, 0))
+            .expect("read absent output")
+            .is_none()
+    );
     install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
     let ctx = Arc::new(ctx);
     let handler = Handler::new(Arc::clone(&ctx));
@@ -928,6 +938,17 @@ fn gettxoutproof_without_blockhash_answers_from_the_utxo_set() {
     };
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0].as_str(), Some(txid.to_string()).as_deref());
+}
+
+#[test]
+fn gettxoutproof_reports_unreadable_coin_instead_of_transaction_absence()
+-> Result<(), crate::test_error::TestError> {
+    let txid = many_output_tx(8).txid();
+    let mut ctx = Context::new();
+    ctx.chain.utxo = crate::test_coins::utxo_reader_with_undecodable_coin(&Hash256::from(txid))?;
+    let result = proof_for(&Arc::new(ctx), &[txid]);
+    assert!(matches!(result, Err(RpcError::Internal(_))));
+    Ok(())
 }
 
 // API-02
@@ -1007,12 +1028,8 @@ fn fund_coin(ctx: &Context, outpoint: OutPoint, value_sat: u64) {
         false,
         0,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::default(),
-    )
-    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    ctx.populate_fixture_coins(&changes)
+        .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
 }
 
 fn distinct_block(marker: u8) -> Block {
@@ -1726,12 +1743,8 @@ fn retry_fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
         false,
         1,
     ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &Hash256::from_le_bytes(&[0xaa; 32]),
-    )
-    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    ctx.populate_fixture_coins(&changes)
+        .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
     OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0)
 }
 

@@ -3,11 +3,21 @@ use super::tx_count_delta_for;
 use super::{BlockProvenance, Chainstate, ProvenApply, PublishMode};
 use crate::chain::{ChainTxCount, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256, OutPoint};
+use bitcoin_rs_storage::DurableHead;
 use bitcoin_rs_storage::utxo::UtxoCoin;
-use bitcoin_rs_storage::utxo::contract::{
-    OutputSource, RollbackError, UndoLoadError, load_block_undo, rollback_block_recovery,
-};
-use bitcoin_rs_storage::{CommitRecords, DurableHead};
+use bitcoin_rs_storage::utxo::contract::{OutputSource, UndoLoadError, load_block_undo};
+
+/// Proof that a connect replays the committed gap below the durable head.
+///
+/// In non-test builds, the private field ensures replay treatment is carried by
+/// a value only the gap replay path can build.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReplayToken(());
+
+#[cfg(test)]
+pub(crate) fn replay_token_for_test() -> ReplayToken {
+    ReplayToken(())
+}
 
 /// What one durable head commit certified: the commit id and the exact cumulative
 /// transaction count publication may carry.
@@ -16,14 +26,12 @@ use bitcoin_rs_storage::{CommitRecords, DurableHead};
 /// uncommitted count.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DurableReceipt {
-    pub(super) commit_id: u64,
     pub(super) chain_tx_count: ChainTxCount,
 }
 
 impl DurableReceipt {
     fn from_head(head: &DurableHead) -> Self {
         Self {
-            commit_id: head.commit_id,
             chain_tx_count: ChainTxCount::from_wire(head.chain_tx_count),
         }
     }
@@ -34,63 +42,11 @@ impl DurableReceipt {
     }
 }
 
-pub(super) struct ConnectCommitFacts {
-    /// Parent the durable head must currently name — for a group, the parent
-    /// of its first block. Any other stored tip is divergence the commit
-    /// refuses rather than advance a head whose lineage would break.
-    pub prev_hash: Hash256,
-    pub tip: Hash256,
-    pub height: u32,
-    pub chain_tx_count_after: u64,
-    pub undo_extent: Option<(u32, Hash256)>,
-}
-
 pub(super) fn sync_appended_blocks(handles: &Chainstate) -> Result<(), ApplyError> {
     let Some(store) = handles.block_body_store.as_ref() else {
         return Ok(());
     };
     store.sync().map_err(ApplyError::DurableHeadCommit)
-}
-
-pub(super) fn commit_connect_head(
-    handles: &Chainstate,
-    facts: &ConnectCommitFacts,
-    records: &CommitRecords<'_>,
-) -> Result<DurableReceipt, ApplyError> {
-    let prior = handles
-        .durable_head
-        .load()
-        .map_err(ApplyError::DurableHeadCommit)?;
-    if let Some(head) = prior.as_ref() {
-        if head.tip != facts.prev_hash {
-            return Err(ApplyError::DurableHeadLineage {
-                head: head.tip,
-                prev: facts.prev_hash,
-            });
-        }
-    }
-    let next = DurableHead {
-        assumeutxo: prior
-            .as_ref()
-            .map_or(crate::AssumeUtxoDiskStatus::Uninitialized, |head| {
-                head.assumeutxo
-            }),
-        commit_id: prior.as_ref().map_or(1, |head| head.commit_id + 1),
-        height: facts.height,
-        tip: facts.tip,
-        chain_tx_count: facts.chain_tx_count_after,
-        body_extent: handles
-            .block_body_store
-            .as_ref()
-            .and_then(|store| store.append_cursor()),
-        undo_extent: facts.undo_extent,
-    };
-    handles
-        .durable_head
-        .commit(prior.as_ref(), &next, records)
-        .map_err(ApplyError::DurableHeadCommit)?;
-    metrics::counter!("node.durable_head.commits").increment(1);
-    Ok(DurableReceipt::from_head(&next))
 }
 
 pub(super) fn stored_body_row(
@@ -112,6 +68,7 @@ pub(super) fn commit_disconnect_head(
     parent_tip: &crate::chain::TipSnapshot,
     disconnected_hash: Hash256,
     chain_tx_count_after: u64,
+    coin_delta: bitcoin_rs_storage::WindowDelta,
 ) -> Result<DurableReceipt, ApplyError> {
     let prior = handles
         .durable_head
@@ -146,10 +103,15 @@ pub(super) fn commit_disconnect_head(
         body_extent: head.body_extent,
         undo_extent: head.undo_extent,
     };
-    handles
-        .durable_head
-        .commit(Some(head), &next, &CommitRecords::default())
-        .map_err(ApplyError::DurableHeadCommit)?;
+    let _receipt = handles
+        .commit_authority
+        .commit_disconnect(head, &next, coin_delta)
+        .map_err(|error| match error {
+            bitcoin_rs_storage::CommitError::Storage(s) => ApplyError::DurableHeadCommit(s),
+            other => ApplyError::DurableHeadCommit(bitcoin_rs_storage::StorageError::backend(
+                other.to_string(),
+            )),
+        })?;
     metrics::counter!("node.durable_head.commits").increment(1);
     Ok(DurableReceipt::from_head(&next))
 }
@@ -191,35 +153,38 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
         .undo_store
         .load_disconnect_marker()
         .map_err(ApplyError::UndoPersistence)?;
-    let Some(marker) = marker else {
-        return reconcile_at_boot(handles);
-    };
-    let fail_closed = |head_tip: Hash256, head_height: u32, reason: &'static str| {
-        let restored = handles.applied_tip.load_full();
-        ApplyError::DurableHeadGapUnrecoverable {
-            head_tip,
-            head_height,
-            restored_tip: restored.as_ref().map(|tip| tip.hash),
-            restored_height: restored.as_ref().map(|tip| tip.height),
-            reason,
-        }
-    };
     let Some(head) = handles
         .durable_head
         .load()
         .map_err(ApplyError::DurableHeadCommit)?
     else {
-        return Err(fail_closed(
-            marker.hash,
-            marker.height,
-            "a disconnect marker exists with no durable head to reconcile it against",
-        ));
+        if let Some(marker) = marker {
+            let fail_closed = |head_tip: Hash256, head_height: u32, reason: &'static str| {
+                let restored = handles.applied_tip.load_full();
+                ApplyError::DurableHeadGapUnrecoverable {
+                    head_tip,
+                    head_height,
+                    restored_tip: restored.as_ref().map(|tip| tip.hash),
+                    restored_height: restored.as_ref().map(|tip| tip.height),
+                    reason,
+                }
+            };
+            return Err(fail_closed(
+                marker.hash,
+                marker.height,
+                "a disconnect marker exists with no durable head to reconcile it against",
+            ));
+        }
+        return Ok(());
     };
     let restored = handles.applied_tip.load_full();
+    let anchor = resolve_head_anchor(handles, &head)?;
+    let needs_rewind = restored
+        .as_deref()
+        .is_some_and(|tip| !anchor.contains_tip(handles, tip));
     let mode = match restored.as_deref() {
         None => "cold-replay",
         Some(tip) => {
-            let anchor = resolve_head_anchor(handles, &head)?;
             if anchor.contains_tip(handles, tip) {
                 "gap-replay"
             } else {
@@ -229,9 +194,16 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
         }
     };
     reconcile_at_boot(handles)?;
+    crate::recovery::settle_restored_coin_stats(handles, restored.as_deref())
+        .map_err(|error| ApplyError::RecoveryCoinStats(Box::new(error)))?;
+    if marker.is_none() && !needs_rewind {
+        return Ok(());
+    }
+    let marker_height = marker.as_ref().map_or(head.height, |m| m.height);
+    let marker_hash = marker.as_ref().map_or(head.tip, |m| m.hash);
     tracing::warn!(
-        height = marker.height,
-        hash = %marker.hash,
+        height = marker_height,
+        hash = %marker_hash,
         head = %head.tip,
         head_height = head.height,
         mode,
@@ -415,34 +387,32 @@ fn rewind_one_step(
     })?;
     let tx_count_delta = tx_count_delta_for(&block);
     let parent_tip = rewound_parent(handles, head, applied, &block, tx_count_delta)?;
-    rollback_block_recovery(
-        handles.utxo.as_ref(),
-        handles.coin_stats.as_ref(),
-        height,
-        parent_tip.height,
-        tx_count_delta,
-        &undo,
-    )
-    .map_err(|error| match error {
-        RollbackError::Refused(_) => {
-            rewind_refused(handles, head, "the disconnect marker refused the rewind")
-        }
-        RollbackError::Utxo(_) => rewind_refused(
-            handles,
-            head,
-            "the UTXO set refused the rewind to the durable head",
-        ),
-        RollbackError::CoinStats(_) => rewind_refused(
-            handles,
-            head,
-            "the coin statistics refused the rewind to the durable head",
-        ),
-        RollbackError::Marker(_) => rewind_refused(
-            handles,
-            head,
-            "the disconnect marker did not record the rewind",
-        ),
-    })?;
+    let coin_delta = super::disconnect::build_disconnect_delta(&handles.coins, &undo)
+        .map_err(|_| rewind_refused(handles, head, "failed to compute coin delta for rewind"))?;
+    handles
+        .coin_stats
+        .check_rewind(height, tx_count_delta)
+        .map_err(|_| {
+            rewind_refused(
+                handles,
+                head,
+                "the coin statistics refused the rewind to the durable head",
+            )
+        })?;
+    handles
+        .coin_stats
+        .rewind_block(height, parent_tip.height, tx_count_delta)
+        .map_err(|_| {
+            rewind_refused(
+                handles,
+                head,
+                "the coin statistics refused the rewind to the durable head",
+            )
+        })?;
+    handles
+        .commit_authority
+        .rewind_coins(&coin_delta)
+        .map_err(|_| rewind_refused(handles, head, "failed to persist coin rewind"))?;
     handles.publish_applied(&parent_tip, crate::events::HintKind::Disconnected);
     Ok(())
 }
@@ -570,53 +540,24 @@ fn apply_replayed_gap_block(
             });
         }
     };
+    let replay_token = ReplayToken(());
     super::connect::apply_committed_block_admitted(
         handles,
         payload,
         proven,
-        if restored.is_none() {
-            BlockProvenance::ColdReplay
-        } else {
-            BlockProvenance::LocalReplay
+        super::connect::ApplyScope {
+            provenance: if restored.is_none() {
+                BlockProvenance::ColdReplay(replay_token)
+            } else {
+                BlockProvenance::LocalReplay(replay_token)
+            },
+            staged: None,
         },
         PublishMode::Replay {
             receipt: DurableReceipt::from_head(head),
             certify_head: height == head.height && hash == head.tip,
         },
     )
-}
-
-fn relieve_replay_journal_backpressure<'a>(
-    handles: &'a Chainstate,
-    head: &DurableHead,
-    restored: Option<&TipSnapshot>,
-    transition: &mut Option<super::ChainTransition<'a>>,
-    height: u32,
-    hash: Hash256,
-) -> Result<(), ApplyError> {
-    let refused_tip = handles.applied_tip.load_full();
-    drop(transition.take());
-    handles
-        .publish_recovery_progress_checkpoint()
-        .map_err(|error| ApplyError::RecoveryPublication(Box::new(error)))?;
-    let resumed = handles.begin_transition()?;
-    if handles.applied_tip.load_full().as_deref() != refused_tip.as_deref() {
-        return Err(ApplyError::DurableHeadGapUnrecoverable {
-            head_tip: head.tip,
-            head_height: head.height,
-            restored_tip: restored.map(|tip| tip.hash),
-            restored_height: restored.map(|tip| tip.height),
-            reason: "the applied tip moved while recovery relieved journal backpressure",
-        });
-    }
-    *transition = Some(resumed);
-    metrics::counter!("node.durable_head.recovery_backpressure_reliefs").increment(1);
-    tracing::info!(
-        height,
-        hash = %hash.to_string_be(),
-        "compacted the chainstate journal during boot replay; retrying the refused block"
-    );
-    Ok(())
 }
 
 /// Any failure leaves the fence closed rather than half-served.
@@ -632,32 +573,14 @@ fn replay_gap_chain(
     load_body: impl Fn(u32, Hash256) -> Result<BlockImage, ApplyError>,
 ) -> Result<(), ApplyError> {
     let unrecoverable = |reason: &'static str| gap_unrecoverable(head, restored, reason);
-    let mut transition = Some(handles.begin_transition()?);
+    let transition = Some(handles.begin_transition()?);
     let replayed_blocks = u64::try_from(chain.len()).unwrap_or(u64::MAX);
     let replayed = (|| {
         let mut commit_id = 0_u64;
         for (height, hash) in chain {
             let payload = load_body(height, hash)?;
-            let outcome = match apply_replayed_gap_block(
-                handles, head, restored, &payload, height, hash,
-            ) {
-                Err(ApplyError::JournalBackpressure(error))
-                    if matches!(
-                        error.as_ref(),
-                        bitcoin_rs_storage::chainstate_journal::JournalWriterError::RetentionLimit { .. }
-                    ) => {
-                    relieve_replay_journal_backpressure(
-                        handles,
-                        head,
-                        restored,
-                        &mut transition,
-                        height,
-                        hash,
-                    )?;
-                    apply_replayed_gap_block(handles, head, restored, &payload, height, hash)
-                }
-                result => result,
-            }?;
+            let outcome =
+                apply_replayed_gap_block(handles, head, restored, &payload, height, hash)?;
             commit_id = outcome.commit_id;
             tracing::debug!(height, hash = %hash.to_string_be(), "replayed committed gap block");
         }

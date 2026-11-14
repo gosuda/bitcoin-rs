@@ -1,0 +1,100 @@
+{
+  "_comment": "Vendored from Bitcoin Core src/test/compress_tests.cpp @ commit d82283950f5ff3b2116e705f931c6e89e5fdd0be",
+  "source_commit": "d82283950f5ff3b2116e705f931c6e89e5fdd0be",
+  "amounts": [
+    [
+      0,
+      0
+    ],
+    [
+      1,
+      1
+    ],
+    [
+      1000000,
+      7
+    ],
+    [
+      100000000,
+      9
+    ],
+    [
+      5000000000,
+      50
+    ],
+    [
+      2100000000000000,
+      21000000
+    ]
+  ],
+  "amount_ranges": [
+    {
+      "desc": "unit multiples 1..100000",
+      "min": 1,
+      "max": 100000,
+      "step": 1
+    },
+    {
+      "desc": "cent multiples 1..10000",
+      "min": 1000000,
+      "max": 10000000000,
+      "step": 1000000
+    },
+    {
+      "desc": "1BTC multiples 1..10000",
+      "min": 100000000,
+      "max": 1000000000000,
+      "step": 100000000
+    },
+    {
+      "desc": "50BTC multiples 1..420000",
+      "min": 5000000000,
+      "max": 2100000000000000,
+      "step": 5000000000
+    }
+  ],
+  "scripts": [
+    {
+      "name": "p2pkh",
+      "script_hex": "76a914111111111111111111111111111111111111111188ac",
+      "expected_tag": 0,
+      "expected_data_hex": "1111111111111111111111111111111111111111"
+    },
+    {
+      "name": "p2sh",
+      "script_hex": "a914222222222222222222222222222222222222222287",
+      "expected_tag": 1,
+      "expected_data_hex": "2222222222222222222222222222222222222222"
+    },
+    {
+      "name": "p2pk_compressed_02",
+      "script_hex": "210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected_tag": 2,
+      "expected_data_hex": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    },
+    {
+      "name": "p2pk_compressed_03",
+      "script_hex": "210379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected_tag": 3,
+      "expected_data_hex": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    },
+    {
+      "name": "p2pk_uncompressed_even",
+      "script_hex": "410479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8ac",
+      "expected_tag": 4,
+      "expected_data_hex": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    },
+    {
+      "name": "p2pk_uncompressed_odd",
+      "script_hex": "410479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798b7c52588d95c3b9aa25b0403f1eef75702e84bb7597aabe663b82f6f04ef2777ac",
+      "expected_tag": 5,
+      "expected_data_hex": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    },
+    {
+      "name": "fallback_op_return",
+      "script_hex": "6a0568656c6c6f",
+      "expected_tag": 13,
+      "expected_data_hex": "6a0568656c6c6f"
+    }
+  ]
+}

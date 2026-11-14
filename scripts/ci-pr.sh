@@ -106,6 +106,8 @@ test_crates_profiles() {
     cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx --test suite
   profile "test: bitcoin-rs-storage mdbx_bounded_read_allocation (mdbx)" \
     cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx --test mdbx_bounded_read_allocation
+  profile "test: bitcoin-rs-storage utxo_query_lifetime" \
+    cargo_test -p bitcoin-rs-storage --test utxo_query_lifetime
   profile "test: bitcoin-rs-consensus (native)" \
     cargo_test -p bitcoin-rs-consensus --no-default-features
   profile "test: bitcoin-rs-execution (native)" \

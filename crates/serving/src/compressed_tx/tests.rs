@@ -248,6 +248,7 @@ fn codec_error_wire_matrix() {
         (CodecError::BodyMissing(7), -1),
         (CodecError::CorruptBody(7), -1),
         (CodecError::BodyReadFailed(7), -1),
+        (CodecError::CoinReadFailed, -1),
     ] {
         assert_eq!(RpcError::from(error).code(), code);
     }
@@ -1763,12 +1764,7 @@ fn cycling_fixture(
             });
         txids.push(txid);
     }
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        &ctx.chain.utxo.fixture_set(),
-        &changes,
-        &bitcoin_rs_consensus::primitives::Hash256::default(),
-    )
-    .unwrap();
+    ctx.populate_fixture_coins(&changes).unwrap();
     let source = Arc::new(CountingBodies {
         bodies,
         loads: std::sync::Mutex::new(HashMap::new()),

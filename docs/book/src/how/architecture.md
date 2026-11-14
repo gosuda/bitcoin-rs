@@ -22,7 +22,7 @@ node commit_window (crates/node/src/sync.rs)
   |  chain transition + mempool generation fence
   v
 chainstate connect_window (crates/execution/src/window.rs)
-  |  per block: validate, persist undo/body, mutate UTXO
+  |  per block: validate, persist undo/body, build coin delta
   |  per group: one durable-head batch (64 blocks or 8 MiB)
   v
 publish_applied (crates/execution/src/lib.rs)
@@ -55,15 +55,15 @@ The peer thread never applies a block. It builds an `InboundBlock`, sends it on 
 Inside chainstate, each block is applied with `PublishMode::Grouped`:
 
 1. Consensus gates run before any write.
-2. The undo row is persisted and the block body is appended.
-3. The applied header tip advances and the UTXO set mutates through the narrow contract (`ARCH-07a`). The raw set mutator is crate-private.
-4. When the group reaches 64 blocks or 8 MiB, one durable-head batch commits: undo rows, body locator rows, the script attestation, and the new head, with a compare-and-set on the previous head.
-5. The journal record is appended after the head commit. A journal failure logs a warning and recovery may fall back to full revalidation; it does not roll back the committed head.
+2. The block body is appended; the undo record is retained for the group commit.
+3. The staged header tip advances and the window workspace accumulates the block's coin effects. Neither the published applied tip nor the engine coins advance here.
+4. When the group reaches 64 blocks or 8 MiB, the appended bodies are synced and the workspace builds the final `WindowDelta`. One durable-head batch then commits through `CommitAuthority::commit_prefix`: undo rows, body locator rows, the script attestation, the coin replacements in the engine `Coins` keyspace, and the new head, with a compare-and-set on the previous head.
+5. After the durable batch succeeds, `CommitAuthority::commit_prefix` calls `CoinStore::install_committed` to install the coin-cache delta and stats feed before returning its receipt. Body append and sync precede this batch; it is not the group's only write.
 6. `publish_applied` stores the applied tip and advances the event sequence.
 
 The durable receipt exists before the tip is published. Apply returns only after the batch receipt, so a reader that sees the new tip is seeing a head that survives a crash. A head that does not match the restored tip at startup is a replay gap; `matching_durable_head_requires_no_replay` in [`crates/execution/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable/tests.rs) pins that rule.
 
-The UTXO set is mutated on the live set through `utxo::contract`, not carried in the durable-head batch. The head batch names the undo and body rows that make the mutation recoverable.
+Coin writes go only through the head batch, into the engine `Coins` keyspace (`ColumnFamily::Coins`). The head batch names the undo and body rows that make those coin writes recoverable. The resident `UtxoSet` receives no coin writes; it parses snapshot input only.
 
 ## Publication and followers
 
@@ -82,7 +82,7 @@ The index worker does its slow work on its own thread. Node keeps no parallel no
 
 ## Disconnect and reorg
 
-A reorg takes the same transition lock in the other direction. `ChainTransition::disconnect` refuses a block that is not the applied tip, then `utxo::contract::rollback_block` applies the undo batch under a durable disconnect marker. Chainstate rewinds the journal, commits the new head, and publishes a `Disconnected` snapshot.
+A reorg takes the same transition lock in the other direction. `ChainTransition::disconnect` refuses a block that is not the applied tip. The disconnect arms a durable disconnect marker, builds the reverse coin delta from the block's undo record (`build_disconnect_delta`), and commits the parent head with that delta in one batch (`commit_disconnect_head`). Chainstate then publishes a `Disconnected` snapshot.
 
 `ChainFollowers::on_disconnect` trims the RPC block log, publishes the ZMQ disconnect topics, wakes the index worker to roll back to the common ancestor, and hands the disconnected transactions to mempool reconsideration. Beyond 100,000 blocks of rollback, the index resets and rebuilds instead of rewinding (`IDX-06`).
 

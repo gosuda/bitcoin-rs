@@ -6,20 +6,19 @@ use crate::chain::{
 };
 pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
+use assumeutxo::commit_error;
 use bitcoin_rs_consensus::ScriptExecutionCache;
 use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network, OutPoint, TxOut, Txid};
 use bitcoin_rs_consensus::primitives::{Hash256, Header};
 use bitcoin_rs_storage::DurableHeadStore;
-#[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_storage::InMemoryUndoStore;
 pub use bitcoin_rs_storage::KvUndoStore;
 pub use bitcoin_rs_storage::UndoStore;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::utxo::contract::SpentOutputLookup;
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_storage::utxo::{UtxoCoin, UtxoSet};
-use connect::{apply_block_admitted, apply_committed_block_admitted};
+use connect::apply_block_admitted;
 use disconnect::disconnect_block_admitted;
 pub use durable::recover_disconnect_marker;
 use hashbrown::HashMap;
@@ -35,10 +34,10 @@ mod durable;
 #[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 pub mod fuzzing;
-pub(crate) mod overlay;
 mod prepare;
 mod tip_wait;
 mod window;
+mod workspace;
 pub use prepare::bytes_are_block;
 pub use window::classify_apply_error;
 
@@ -46,7 +45,7 @@ pub mod assumeutxo;
 pub use assumeutxo::{
     ActiveChainstateSummary, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager,
     ChainstateRole, ChainstatesReport, ChainstatesSummary, HistoricalChainstateSummary,
-    HistoricalCheckpointRef,
+    HistoricalCheckpointRef, recover_snapshot_activation,
 };
 
 mod assumeutxo_snapshot;
@@ -55,7 +54,6 @@ pub use assumeutxo_snapshot::SnapshotArchiveError;
 pub use checkpoint::{CheckpointError, CheckpointSetupError};
 mod error;
 pub mod events;
-mod journal;
 mod maintenance;
 pub use maintenance::MaintenanceError;
 pub mod recovery;
@@ -77,42 +75,6 @@ impl ValidationMode {
             _ => None,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ChainstateJournalConfig {
-    pub enabled: bool,
-    pub blocks: u32,
-    pub seconds: u64,
-    pub rotate_mib: u64,
-    pub max_journal_mib: u64,
-    pub max_lag_blocks: u32,
-    pub max_lag_seconds: u64,
-}
-
-impl Default for ChainstateJournalConfig {
-    fn default() -> Self {
-        let policy = bitcoin_rs_storage::chainstate_journal::JournalPolicy::default();
-        Self {
-            enabled: true,
-            blocks: policy.batch_blocks,
-            seconds: policy.batch_seconds.as_secs(),
-            rotate_mib: policy.rotate_mib,
-            max_journal_mib: policy.max_journal_mib,
-            max_lag_blocks: policy.max_lag_blocks,
-            max_lag_seconds: policy.max_lag_seconds.as_secs(),
-        }
-    }
-}
-
-pub struct JournalBootstrap {
-    pub open_existing: bool,
-    pub base_generation: u64,
-    pub height: u32,
-    pub block_hash: [u8; 32],
-    pub prev_hash: [u8; 32],
-    pub chain_tx_count: u64,
-    pub config: ChainstateJournalConfig,
 }
 
 type SameBlockSpentSet = hashbrown::HashSet<OutPoint>;
@@ -339,11 +301,13 @@ impl AssumeValidGate {
     }
 }
 
+/// Why a connect runs, and, for a durable gap replay, the proof that only the
+/// gap replay path can mint (`WIN-07`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum BlockProvenance {
     Network,
-    LocalReplay,
-    ColdReplay,
+    LocalReplay(durable::ReplayToken),
+    ColdReplay(durable::ReplayToken),
 }
 
 #[derive(Clone, Debug)]
@@ -415,6 +379,8 @@ pub struct Chainstate {
     /// advanced by one atomic batch per committed connect or disconnect
     /// before the tip publishes (`RCV-02`).
     pub(crate) durable_head: Arc<dyn DurableHeadStore>,
+    pub(crate) coins: Arc<bitcoin_rs_storage::CoinStore>,
+    pub(crate) commit_authority: Arc<bitcoin_rs_storage::CommitAuthority>,
     pub(crate) admission: Arc<ApplyAdmission>,
     pub(crate) shutdown: Arc<LatchWriter>,
     pub(crate) tip_notification: Arc<tip_wait::TipNotification>,
@@ -426,8 +392,6 @@ pub struct Chainstate {
     pub(crate) script_cache: Option<Arc<ScriptExecutionCache>>,
     pub(crate) pow_valid_block: std::sync::Arc<std::sync::OnceLock<PowValidBlockHook>>,
     pub(crate) tip_staged: std::sync::Arc<std::sync::OnceLock<TipStagedHook>>,
-    pub(crate) journal:
-        Arc<RwLock<Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>>>,
     pub(crate) checkpoint_publisher: Option<Arc<crate::checkpoint::publisher::CheckpointPublisher>>,
     pub(crate) capture_rawtx: bool,
     pub(crate) capture_block_bytes: bool,
@@ -447,12 +411,13 @@ pub struct ChainstateParts {
     pub block_body_store: Option<Arc<dyn BlockBodyStore>>,
     pub undo_store: Arc<dyn UndoStore>,
     pub durable_head: Arc<dyn DurableHeadStore>,
+    pub coins: Arc<bitcoin_rs_storage::CoinStore>,
+    pub commit_authority: Arc<bitcoin_rs_storage::CommitAuthority>,
     pub chain_transition: TransitionAuthority,
     pub assume_valid_height: u32,
     pub validation_mode: ValidationMode,
     pub validation_engine: bitcoin_rs_consensus::ValidationEngine,
     pub script_cache: Option<Arc<ScriptExecutionCache>>,
-    pub journal: Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>,
     pub capture_rawtx: bool,
     pub capture_block_bytes: bool,
     pub retention: bitcoin_rs_storage::MandatoryRetention,
@@ -470,6 +435,7 @@ pub struct ChainTransition<'a> {
 }
 
 impl<'a> ChainTransition<'a> {
+    #[expect(dead_code)]
     fn settle_apply<T>(
         &self,
         result: core::result::Result<T, ApplyError>,
@@ -487,12 +453,11 @@ impl<'a> ChainTransition<'a> {
         &self,
         payload: &BlockImage,
     ) -> core::result::Result<ConnectOutcome, ApplyError> {
-        self.settle_apply(apply_committed_block_admitted(
-            self.chainstate,
-            payload,
-            None,
-            BlockProvenance::Network,
-            PublishMode::Now,
+        let mut outcomes = self
+            .connect_window(&[payload])
+            .map_err(|error| *error.source)?;
+        outcomes.pop().ok_or(ApplyError::DurableHeadCommit(
+            bitcoin_rs_storage::StorageError::InvalidOperation("connect produced no outcome"),
         ))
     }
 
@@ -510,7 +475,6 @@ impl<'a> ChainTransition<'a> {
         result
     }
 
-    #[expect(clippy::result_large_err)]
     pub fn connect_window(
         &self,
         payloads: &[&BlockImage],
@@ -566,6 +530,8 @@ impl Chainstate {
             block_body_store: parts.block_body_store,
             undo_store: parts.undo_store,
             durable_head: parts.durable_head,
+            coins: parts.coins,
+            commit_authority: parts.commit_authority,
             admission: Arc::new(ApplyAdmission::new()),
             shutdown: Arc::new(LatchWriter::new()),
             tip_notification: Arc::default(),
@@ -577,7 +543,6 @@ impl Chainstate {
             script_cache: parts.script_cache,
             pow_valid_block: std::sync::Arc::new(std::sync::OnceLock::new()),
             tip_staged: std::sync::Arc::new(std::sync::OnceLock::new()),
-            journal: Arc::new(RwLock::new(parts.journal)),
             checkpoint_publisher: None,
             capture_rawtx: parts.capture_rawtx,
             capture_block_bytes: parts.capture_block_bytes,
@@ -607,6 +572,7 @@ impl Chainstate {
             &BlockTree,
             &TipSnapshot,
             Option<&bitcoin_rs_storage::DurableHead>,
+            &bitcoin_rs_storage::SnapshotActivationMarker,
         ) -> Result<(), AssumeUtxoError>,
     ) -> Result<(), AssumeUtxoError> {
         let _guard = self.admission.enter()?;
@@ -634,18 +600,48 @@ impl Chainstate {
         {
             return Err(AssumeUtxoError::ActivationBehindTip);
         }
-        persist(&tree, &tip_snapshot, prior.as_ref()).inspect_err(|error| {
+        let mut coin_records: Vec<(bitcoin_rs_storage::CoinKey, bytes::Bytes)> = snapshot_set
+            .all_records()
+            .into_iter()
+            .map(|record| {
+                let key = bitcoin_rs_storage::CoinKey(record.txid().to_le_bytes());
+                let value = bytes::Bytes::copy_from_slice(record.bytes());
+                (key, value)
+            })
+            .collect();
+        coin_records.sort_by_key(|(k, _)| *k);
+        let marker = bitcoin_rs_storage::SnapshotActivationMarker {
+            base_hash: pinned.block_hash,
+            coin_count: u64::try_from(coin_records.len()).map_err(|_| {
+                AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
+                    "snapshot coin count exceeds u64",
+                ))
+            })?,
+            coin_digest: pinned.hash_serialized,
+        };
+        self.commit_authority
+            .begin_snapshot_activation(prior.as_ref(), &marker)
+            .map_err(commit_error)
+            .inspect_err(|_| self.fail_closed_for_recovery())?;
+        self.coins
+            .wipe()
+            .inspect_err(|_| self.fail_closed_for_recovery())
+            .map_err(AssumeUtxoError::Storage)?;
+        self.coins
+            .ingest_sorted(coin_records.into_iter())
+            .inspect_err(|_| self.fail_closed_for_recovery())
+            .map_err(AssumeUtxoError::Storage)?;
+
+        persist(&tree, &tip_snapshot, prior.as_ref(), &marker).inspect_err(|error| {
             if !matches!(error, AssumeUtxoError::FullRevalidationRequired) {
                 self.fail_closed_for_recovery();
             }
         })?;
         drop(tree);
         let mut tree = self.block_tree.write();
-        *self.journal.write() = None;
         tree.restore_chain_tx_count(tip_snapshot.tip_id, tip_snapshot.chain_tx_count)
             .map_err(ApplyError::from)
             .inspect_err(|_| self.fail_closed_for_recovery())?;
-        self.utxo.replace_from(snapshot_set);
         stats.tx_count = pinned.chain_tx_count;
         self.coin_stats.reset(stats);
         self.publish_applied(&tip_snapshot, crate::events::HintKind::Connected);
@@ -704,17 +700,52 @@ impl Chainstate {
         &self,
         base_height: u32,
         base_hash: Hash256,
-        undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
-        restored: Option<(UtxoSet, CoinStats, TipSnapshot)>,
+        engine: Option<Arc<dyn bitcoin_rs_storage::KvStore>>,
+        restored_tip: Option<TipSnapshot>,
     ) -> Result<Arc<Self>, crate::AssumeUtxoError> {
-        let (mut historical_utxo, historical_stats, restored_tip) = match restored {
-            Some((utxo, stats, tip)) => (utxo, stats, Some(tip)),
-            None => (UtxoSet::new(), CoinStats::new(), None),
+        let historical_stats = match (&restored_tip, &engine) {
+            (Some(tip), Some(image)) => crate::assumeutxo::engine_coin_stats(image.as_ref(), tip)?,
+            (Some(_), None) => {
+                return Err(crate::AssumeUtxoError::HistoricalCheckpointWithoutEngine);
+            }
+            (None, _) => CoinStats::new(),
         };
         let historical_coin_stats = Arc::new(CoinStatsListener::new(historical_stats));
+        let mut historical_utxo = UtxoSet::new();
         historical_utxo.track_coin_stats((*historical_coin_stats).clone());
 
-        let historical_head = Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new());
+        let fresh_store = Arc::new(bitcoin_rs_storage::memory_kv::MemoryKvStore::default());
+        if let Some(image) = engine {
+            use bitcoin_rs_storage::KvStore;
+            let families = [
+                bitcoin_rs_storage::ColumnFamily::Coins,
+                bitcoin_rs_storage::ColumnFamily::UndoData,
+            ];
+            for family in families {
+                let mut batch = fresh_store.new_batch();
+                for item in image.iter_prefix(family, &[])? {
+                    let (key, value) = item?;
+                    batch.put_value(family, &key, bytes::Bytes::from(value));
+                }
+                fresh_store.write_durable(batch)?;
+            }
+        }
+        let historical_head = Arc::new(bitcoin_rs_storage::KvDurableHeadStore::new(Arc::clone(
+            &fresh_store,
+        )));
+        let dyn_hist_store: Arc<dyn bitcoin_rs_storage::KvStore> = fresh_store;
+        let historical_undo = Arc::new(bitcoin_rs_storage::KvUndoStore::new(Arc::clone(
+            &dyn_hist_store,
+        )));
+        let hist_coins = Arc::new(bitcoin_rs_storage::CoinStore::open(
+            Arc::clone(&dyn_hist_store),
+            64 * 1024 * 1024,
+        ));
+        hist_coins.track_coin_stats((*historical_coin_stats).clone());
+        let hist_commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(
+            dyn_hist_store,
+            Arc::clone(&hist_coins),
+        ));
         if let Some(restored_tip) = &restored_tip {
             let head = bitcoin_rs_storage::DurableHead {
                 assumeutxo: crate::AssumeUtxoDiskStatus::Uninitialized,
@@ -725,12 +756,16 @@ impl Chainstate {
                 body_extent: None,
                 undo_extent: None,
             };
-            bitcoin_rs_storage::DurableHeadStore::commit(
-                &*historical_head,
-                None,
-                &head,
-                &bitcoin_rs_storage::CommitRecords::default(),
-            )?;
+            hist_commit_authority
+                .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                    expected_head: None,
+                    next_head: head,
+                    undo_rows: Vec::new(),
+                    body_rows: Vec::new(),
+                    attestation: None,
+                    coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+                })
+                .map_err(crate::assumeutxo::commit_error)?;
         }
         let applied_tip = Arc::new(ArcSwapOption::new(restored_tip.map(Arc::new)));
         let chain_tip = Arc::new(arc_swap::ArcSwapOption::empty());
@@ -751,8 +786,10 @@ impl Chainstate {
                 self.chain_events.epoch(),
             )),
             block_body_store: None,
-            undo_store: undo,
+            undo_store: historical_undo,
             durable_head: historical_head,
+            coins: hist_coins,
+            commit_authority: hist_commit_authority,
             admission: Arc::new(ApplyAdmission::new()),
             shutdown: Arc::new(LatchWriter::new()),
             tip_notification: Arc::default(),
@@ -764,7 +801,6 @@ impl Chainstate {
             script_cache: self.script_cache.clone(),
             pow_valid_block: std::sync::Arc::new(std::sync::OnceLock::new()),
             tip_staged: std::sync::Arc::new(std::sync::OnceLock::new()),
-            journal: Arc::new(RwLock::new(None)),
             checkpoint_publisher: None,
             capture_rawtx: false,
             capture_block_bytes: false,
@@ -910,7 +946,21 @@ impl Chainstate {
 
     #[must_use]
     pub fn utxo_reader(&self) -> bitcoin_rs_storage::utxo::UtxoReader {
-        bitcoin_rs_storage::utxo::UtxoReader::new(Arc::clone(&self.utxo))
+        bitcoin_rs_storage::utxo::UtxoReader::with_coin_store(
+            Arc::clone(&self.utxo),
+            Arc::clone(&self.coins),
+        )
+    }
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn coins(&self) -> &bitcoin_rs_storage::CoinStore {
+        &self.coins
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn commit_authority(&self) -> &Arc<bitcoin_rs_storage::CommitAuthority> {
+        &self.commit_authority
     }
 
     #[must_use]
@@ -999,8 +1049,8 @@ impl Chainstate {
         hash: Hash256,
     ) -> bool {
         match provenance {
-            BlockProvenance::LocalReplay => true,
-            BlockProvenance::ColdReplay => false,
+            BlockProvenance::LocalReplay(_) => true,
+            BlockProvenance::ColdReplay(_) => false,
             BlockProvenance::Network => match self.validation_mode {
                 ValidationMode::Full => false,
                 ValidationMode::AssumeValid => {
@@ -1069,6 +1119,20 @@ impl Chainstate {
             BlockTreeReader::new(Arc::clone(&block_tree)),
         ));
         let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
+        let mem_store = Arc::new(bitcoin_rs_storage::memory_kv::MemoryKvStore::default());
+        let durable_head = Arc::new(bitcoin_rs_storage::KvDurableHeadStore::new(Arc::clone(
+            &mem_store,
+        )));
+        let undo_store = Arc::new(bitcoin_rs_storage::KvUndoStore::new(Arc::clone(&mem_store)));
+        let dyn_store: Arc<dyn bitcoin_rs_storage::KvStore> = mem_store;
+        let coins = Arc::new(bitcoin_rs_storage::CoinStore::open(
+            Arc::clone(&dyn_store),
+            64 * 1024 * 1024,
+        ));
+        let commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(
+            dyn_store,
+            Arc::clone(&coins),
+        ));
         Self {
             network,
             chain_tip,
@@ -1078,8 +1142,10 @@ impl Chainstate {
             coin_stats,
             chain_events,
             block_body_store: None,
-            undo_store: Arc::new(InMemoryUndoStore::default()),
-            durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
+            undo_store,
+            durable_head,
+            coins,
+            commit_authority,
             admission: Arc::new(ApplyAdmission::new()),
             shutdown: Arc::new(LatchWriter::new()),
             tip_notification: Arc::default(),
@@ -1091,7 +1157,6 @@ impl Chainstate {
             script_cache: None,
             pow_valid_block: std::sync::Arc::new(std::sync::OnceLock::new()),
             tip_staged: std::sync::Arc::new(std::sync::OnceLock::new()),
-            journal: Arc::new(RwLock::new(None)),
             checkpoint_publisher: None,
             capture_rawtx: false,
             capture_block_bytes: false,
@@ -1130,7 +1195,6 @@ impl Chainstate {
         &mut self,
         data_dir: &std::path::Path,
         durable_tip_height: Arc<std::sync::atomic::AtomicU32>,
-        seed_offer: Option<bitcoin_rs_storage::utxo::SeedOfferCell>,
     ) -> core::result::Result<(), CheckpointSetupError> {
         let checkpoint_data_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)?;
         let block_body_store = self
@@ -1148,13 +1212,11 @@ impl Chainstate {
                 network: self.network,
                 genesis_hash: self.network.genesis_block_hash(),
                 block_tree: Arc::clone(&self.block_tree),
-                utxo: Arc::clone(&self.utxo),
                 coin_stats: Arc::clone(&self.coin_stats),
-                journal: self.journal.clone(),
                 data_dir: data_dir.to_path_buf(),
                 chain_events: Arc::clone(&self.chain_events),
                 durable_tip_height,
-                seed_offer,
+                store: Arc::clone(self.commit_authority.store()),
             },
         ));
         Ok(())
@@ -1191,27 +1253,6 @@ impl Chainstate {
         }
     }
 
-    pub(crate) fn publish_recovery_progress_checkpoint(
-        &self,
-    ) -> core::result::Result<(), CheckpointError> {
-        let invalid = |reason: &str| {
-            CheckpointError::Store(bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(
-                reason.to_owned(),
-            ))
-        };
-        let Some(publisher) = &self.checkpoint_publisher else {
-            return Err(invalid(
-                "journal backpressure recovery requires a configured checkpoint publisher",
-            ));
-        };
-        match publisher.publish_recovery_progress()? {
-            crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => Err(invalid(
-                "journal backpressure recovery found no applied tip to checkpoint",
-            )),
-            crate::checkpoint::CheckpointWrite::Published { .. } => Ok(()),
-        }
-    }
-
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_block(
         &self,
@@ -1235,8 +1276,11 @@ impl Chainstate {
         drop(transition);
         result
     }
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn set_commit_fault(&self, fault: Arc<dyn bitcoin_rs_storage::commit::CommitFault>) {
+        self.commit_authority.set_fault(fault);
+    }
 
-    #[expect(clippy::result_large_err)]
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_window(
         &self,
@@ -1245,7 +1289,7 @@ impl Chainstate {
         let transition = self.begin_transition().map_err(|source| WindowApplyError {
             applied: 0,
             committed: Vec::new(),
-            source,
+            source: Box::new(source),
             disposition: WindowApplyDisposition::Operational,
             invalidated: Box::default(),
         })?;
@@ -1260,7 +1304,10 @@ impl Chainstate {
             self,
             payload,
             None,
-            BlockProvenance::Network,
+            connect::ApplyScope {
+                provenance: BlockProvenance::Network,
+                staged: None,
+            },
             ApplyIntent::Propose,
             PublishMode::Now,
         )? {
@@ -1275,6 +1322,7 @@ impl Chainstate {
 #[derive(Debug)]
 struct DisconnectPlan {
     parent_tip: TipSnapshot,
+    #[expect(dead_code)]
     parent_prev_hash: Hash256,
     undo: bitcoin_rs_storage::utxo::contract::UndoBatch,
     height: u32,
@@ -1306,7 +1354,7 @@ pub fn window_len(sizes: impl IntoIterator<Item = usize>) -> usize {
 pub struct WindowApplyError {
     pub applied: usize,
     pub committed: Vec<ConnectOutcome>,
-    pub source: ApplyError,
+    pub source: Box<ApplyError>,
     pub disposition: WindowApplyDisposition,
     pub invalidated: Box<[Hash256]>,
 }
@@ -1323,7 +1371,7 @@ impl core::fmt::Display for WindowApplyError {
 
 impl std::error::Error for WindowApplyError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
+        Some(self.source.as_ref())
     }
 }
 
@@ -1360,6 +1408,7 @@ struct BlockValidationProof<'b> {
 enum ProvenApply<'b> {
     Proven(BlockValidationProof<'b>),
     AssumeValidSkipped(PreparedApply<'b>),
+    Unproven(PreparedApply<'b>),
 }
 
 struct PreparedApply<'b> {

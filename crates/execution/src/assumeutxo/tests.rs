@@ -4,18 +4,18 @@ use std::sync::Arc;
 use crate::chain::{ChainWork, NodeStatus};
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Block, BlockImage, Hash256, Network};
+use bitcoin_rs_storage::DurableHead;
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_storage::utxo::{
     SnapshotLoad, UtxoSet, read_snapshot_strict_v4, write_snapshot_observed,
 };
-use bitcoin_rs_storage::{CommitRecords, DurableHead, DurableHeadStore, StorageError};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
     AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, ChainstateRole, known_progress,
 };
-use crate::test_fixtures::{TestError, TestResult, handles};
+use crate::test_fixtures::{TestError, TestResult, handles, seed_durable_head, seed_genesis};
 use crate::{ApplyError, Chainstate};
 
 fn chainstate() -> Arc<Chainstate> {
@@ -27,58 +27,42 @@ fn chainstate() -> Arc<Chainstate> {
     Arc::new(chainstate)
 }
 
-#[derive(Default)]
-struct FaultHead {
-    inner: bitcoin_rs_storage::InMemoryDurableHeadStore,
+struct ActivationFault {
     fail: AtomicBool,
     fail_terminal: AtomicBool,
 }
-impl DurableHeadStore for FaultHead {
-    fn load(&self) -> Result<Option<DurableHead>, StorageError> {
-        self.inner.load()
+
+impl ActivationFault {
+    fn new() -> Self {
+        Self {
+            fail: AtomicBool::new(false),
+            fail_terminal: AtomicBool::new(false),
+        }
     }
-    fn load_attestation(
+}
+
+impl bitcoin_rs_storage::CommitFault for ActivationFault {
+    fn before_commit(
         &self,
-        head: &DurableHead,
-    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
-        self.inner.load_attestation(head)
-    }
-    fn load_suffix_attestation(
-        &self,
-        head: &DurableHead,
-    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
-        self.inner.load_suffix_attestation(head)
-    }
-    fn attest(
-        &self,
-        head: &DurableHead,
-        level: bitcoin_rs_storage::ScriptAttestation,
-    ) -> Result<(), StorageError> {
-        self.inner.attest(head, level)
-    }
-    fn commit(
-        &self,
-        expected: Option<&DurableHead>,
-        next: &DurableHead,
-        records: &CommitRecords<'_>,
-    ) -> Result<(), StorageError> {
+        prefix: &bitcoin_rs_storage::AcceptedPrefix,
+    ) -> Result<(), bitcoin_rs_storage::CommitError> {
         if self.fail.load(Ordering::Acquire)
             || (self.fail_terminal.load(Ordering::Acquire)
                 && matches!(
-                    next.assumeutxo,
+                    prefix.next_head.assumeutxo,
                     AssumeUtxoDiskStatus::Failed { .. } | AssumeUtxoDiskStatus::Finalized { .. }
                 ))
         {
-            return Err(StorageError::InvalidOperation(
-                "injected durable-head failure",
+            return Err(bitcoin_rs_storage::CommitError::Storage(
+                bitcoin_rs_storage::StorageError::InvalidOperation("injected durable-head failure"),
             ));
         }
-        self.inner.commit(expected, next, records)
+        Ok(())
     }
 }
 
 struct Fixture {
-    head: Arc<FaultHead>,
+    head: Arc<ActivationFault>,
     active: Arc<Chainstate>,
     blocks: Vec<Block>,
     pinned: AssumeUtxoData,
@@ -88,7 +72,6 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> TestResult<Self> {
-        let source = chainstate();
         let mut blocks = vec![Network::Regtest.genesis_block()];
         for height in 1..=2 {
             blocks.push(crate::chain::regtest_fixture::mined_regtest_child_at(
@@ -99,11 +82,29 @@ impl Fixture {
                 height,
             )?);
         }
+        Self::from_blocks(blocks)
+    }
+
+    fn from_blocks(blocks: Vec<Block>) -> TestResult<Self> {
+        let source = chainstate();
         for block in &blocks {
             source
                 .lock_transition()?
                 .into_transition()
                 .connect(&BlockImage::from_local((*block).clone()))?;
+        }
+        let snapshot_set = UtxoSet::new();
+        for item in source
+            .commit_authority
+            .store()
+            .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+        {
+            let (_, value) = item?;
+            let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
+                value.into_boxed_slice(),
+            )
+            .map_err(|_| TestError::Missing("bad coin record"))?;
+            snapshot_set.insert_parsed_record(record);
         }
         let tip = source
             .applied_tip_snapshot()
@@ -111,16 +112,19 @@ impl Fixture {
         let pinned = AssumeUtxoData {
             height: tip.height,
             block_hash: tip.hash,
-            hash_serialized: source.utxo.lock_stable_view().hash_serialized_3()?,
+            hash_serialized: snapshot_set.lock_stable_view().hash_serialized_3()?,
             chain_tx_count: tip.chain_tx_count.to_wire(),
         };
+        let mut stats = snapshot_set.with_stable_view(|view| {
+            bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, tip.height, true)
+        })?;
+        stats.tx_count = tip.chain_tx_count.to_wire();
         let mut snapshot = Cursor::new(Vec::new());
-        write_snapshot_observed(&source.utxo, &tip.hash, tip.height, &mut snapshot, ())?;
-        let mut active = chainstate();
-        let head = Arc::new(FaultHead::default());
-        Arc::get_mut(&mut active)
-            .ok_or(TestError::Missing("shared active fixture"))?
-            .durable_head = head.clone();
+        write_snapshot_observed(&snapshot_set, &tip.hash, tip.height, &mut snapshot, ())?;
+        let active = chainstate();
+        let head = Arc::new(ActivationFault::new());
+        let fault: Arc<dyn bitcoin_rs_storage::CommitFault> = head.clone();
+        active.commit_authority.set_fault(fault);
         for block in &blocks {
             active
                 .block_tree
@@ -133,7 +137,7 @@ impl Fixture {
             blocks,
             pinned,
             snapshot: snapshot.into_inner(),
-            stats: source.coin_stats.snapshot(),
+            stats,
         })
     }
 
@@ -163,6 +167,22 @@ fn disk_status(active: &Chainstate) -> TestResult<AssumeUtxoDiskStatus> {
         .durable_head
         .load()?
         .map_or(AssumeUtxoDiskStatus::Uninitialized, |head| head.assumeutxo))
+}
+
+fn engine_coin_set(chain: &Chainstate) -> TestResult<UtxoSet> {
+    let set = UtxoSet::new();
+    for item in chain
+        .commit_authority
+        .store()
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+    {
+        let (_, value) = item?;
+        let record =
+            bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(value.into_boxed_slice())
+                .map_err(|_| TestError::Missing("bad coin record"))?;
+        set.insert_parsed_record(record);
+    }
+    Ok(set)
 }
 
 #[test]
@@ -256,7 +276,7 @@ fn snapshot_rejects_invalid_base_and_descendant_before_persistence() -> TestResu
             loaded.set,
             fixture.stats.clone(),
             &fixture.pinned,
-            |_, _, _| {
+            |_, _, _, _| {
                 persisted.store(true, Ordering::Relaxed);
                 Ok(())
             },
@@ -268,7 +288,7 @@ fn snapshot_rejects_invalid_base_and_descendant_before_persistence() -> TestResu
             ))) if hash == fixture.pinned.block_hash
         ));
         assert!(!persisted.load(Ordering::Relaxed));
-        assert!(fixture.head.load()?.is_none());
+        assert!(fixture.active.durable_head.load()?.is_none());
         assert!(fixture.active.applied_tip_snapshot().is_none());
         assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
         assert_eq!(fixture.active.coin_stats.snapshot(), before_stats);
@@ -337,13 +357,15 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
     let before_stats = fixture.active.coin_stats.snapshot();
     let before_coins = fixture.active.utxo.lock_stable_view().hash_serialized_3()?;
     let persisted = AtomicBool::new(false);
-    let result =
-        fixture
-            .active
-            .install_snapshot(loaded.set, verified_stats, &fixture.pinned, |_, _, _| {
-                persisted.store(true, Ordering::Relaxed);
-                Ok(())
-            });
+    let result = fixture.active.install_snapshot(
+        loaded.set,
+        verified_stats,
+        &fixture.pinned,
+        |_, _, _, _| {
+            persisted.store(true, Ordering::Relaxed);
+            Ok(())
+        },
+    );
     assert!(matches!(
         result,
         Err(AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain {
@@ -357,7 +379,7 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
     assert!(!persisted.load(Ordering::Relaxed));
     assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
     assert!(manager.historical_chainstate().is_none());
-    assert!(fixture.head.load()?.is_none());
+    assert!(fixture.active.durable_head.load()?.is_none());
     assert!(fixture.active.applied_tip_snapshot().is_none());
     assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
     assert_eq!(fixture.active.coin_stats.snapshot(), before_stats);
@@ -412,7 +434,7 @@ fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
         loaded.set,
         fixture.stats.clone(),
         &fixture.pinned,
-        |_, _, _| {
+        |_, _, _, _| {
             persisted.store(true, Ordering::Relaxed);
             Ok(())
         },
@@ -428,7 +450,7 @@ fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
             && best == harder.block_hash().0
     ));
     assert!(!persisted.load(Ordering::Relaxed));
-    assert!(fixture.head.load()?.is_none());
+    assert!(fixture.active.durable_head.load()?.is_none());
     assert!(fixture.active.applied_tip_snapshot().is_none());
     assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
     assert!(!fixture.active.is_closed_for_recovery());
@@ -502,15 +524,31 @@ fn snapshot_work_branch(
         blocks[index].header.nonce = 0;
         crate::chain::regtest_fixture::mine_block_to_declared_target(&mut blocks[index])?;
     }
+    let snapshot_set = UtxoSet::new();
+    for item in source
+        .commit_authority
+        .store()
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+    {
+        let (_, value) = item?;
+        let record =
+            bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(value.into_boxed_slice())
+                .map_err(|_| TestError::Missing("bad coin record"))?;
+        snapshot_set.insert_parsed_record(record);
+    }
     let tip = blocks
         .last()
         .ok_or(TestError::Missing("branch tip missing"))?
         .block_hash()
         .0;
+    let mut stats = snapshot_set.with_stable_view(|view| {
+        bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, height, true)
+    })?;
+    stats.tx_count = source.coin_stats.snapshot().tx_count;
     let mut encoded = Vec::new();
-    write_snapshot_observed(&source.utxo, &tip, height, &mut encoded, ())?;
+    write_snapshot_observed(&snapshot_set, &tip, height, &mut encoded, ())?;
     let loaded = read_snapshot_strict_v4(&mut Cursor::new(encoded))?;
-    Ok((blocks, loaded, source.coin_stats.snapshot()))
+    Ok((blocks, loaded, stats))
 }
 
 fn snapshot_work_fixture(
@@ -543,7 +581,7 @@ fn snapshot_work_fixture(
     };
     let coin_stats = Arc::new(CoinStatsListener::new(applied_stats));
     applied.set.track_coin_stats((*coin_stats).clone());
-    let mut active = Chainstate::new(
+    let active = Chainstate::new(
         Network::Regtest,
         Arc::new(ArcSwapOption::new(tree.tip())),
         Arc::new(ArcSwapOption::new(Some(Arc::new(applied_tip.clone())))),
@@ -552,21 +590,28 @@ fn snapshot_work_fixture(
         coin_stats,
         Arc::new(crate::events::ChainEventPublisher::detached(0)),
     );
-    let head = Arc::new(FaultHead::default());
-    head.commit(
-        None,
-        &DurableHead {
-            assumeutxo: AssumeUtxoDiskStatus::Uninitialized,
-            commit_id: 17,
-            height: applied_tip.height,
-            tip: applied_tip.hash,
-            chain_tx_count: applied_tip.chain_tx_count.to_wire(),
-            body_extent: None,
-            undo_extent: None,
-        },
-        &CommitRecords::default(),
-    )?;
-    active.durable_head = head.clone();
+    active
+        .commit_authority
+        .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+            expected_head: None,
+            next_head: DurableHead {
+                assumeutxo: AssumeUtxoDiskStatus::Uninitialized,
+                commit_id: 17,
+                height: applied_tip.height,
+                tip: applied_tip.hash,
+                chain_tx_count: applied_tip.chain_tx_count.to_wire(),
+                body_extent: None,
+                undo_extent: None,
+            },
+            undo_rows: Vec::new(),
+            body_rows: Vec::new(),
+            attestation: None,
+            coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+        })
+        .map_err(|error| TestError::Storage(bitcoin_rs_storage::StorageError::backend(error)))?;
+    let head = Arc::new(ActivationFault::new());
+    let fault: Arc<dyn bitcoin_rs_storage::CommitFault> = head.clone();
+    active.commit_authority.set_fault(fault);
     let pinned = AssumeUtxoData {
         height: snapshot.height,
         block_hash: snapshot.tip_hash,
@@ -699,7 +744,9 @@ fn snapshot_accepts_lower_base_with_more_work_than_applied_tip() -> TestResult {
     assert!(applied.chainwork > before.chainwork);
     assert_eq!(fixture.active.coin_stats.snapshot(), fixture.stats);
     assert_eq!(
-        fixture.active.utxo.lock_stable_view().hash_serialized_3()?,
+        engine_coin_set(&fixture.active)?
+            .lock_stable_view()
+            .hash_serialized_3()?,
         fixture.pinned.hash_serialized
     );
     assert!(fixture.active.role().is_assumed_active());
@@ -731,8 +778,19 @@ fn snapshot_refuses_work_comparison_when_durable_and_applied_tips_differ() -> Te
             ..prior
         };
         fixture
-            .head
-            .commit(Some(&prior), &unsettled, &CommitRecords::default())?;
+            .active
+            .commit_authority
+            .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                expected_head: Some(prior),
+                next_head: unsettled,
+                undo_rows: Vec::new(),
+                body_rows: Vec::new(),
+                attestation: None,
+                coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+            })
+            .map_err(|error| {
+                TestError::Storage(bitcoin_rs_storage::StorageError::backend(error))
+            })?;
         let dir = tempfile::tempdir()?;
         let manager = AssumeUtxoManager::open(
             Network::Regtest,
@@ -778,7 +836,9 @@ fn snapshot_installs_coins_statistics_and_resolved_header_together() -> TestResu
     assert_eq!(tip.chain_tx_count.to_wire(), fixture.pinned.chain_tx_count);
     assert_eq!(active.coin_stats.snapshot(), fixture.stats);
     assert_eq!(
-        active.utxo.lock_stable_view().hash_serialized_3()?,
+        engine_coin_set(active)?
+            .lock_stable_view()
+            .hash_serialized_3()?,
         fixture.pinned.hash_serialized
     );
     assert!(active.role().is_assumed_active());
@@ -909,6 +969,147 @@ fn historical_replay_preserves_active_durable_head_and_notifications() -> TestRe
     Ok(())
 }
 
+/// Independent oracle for the historical chainstate's coin statistics: a full
+/// scan of the engine `coins` keyspace at `height`, with the transaction count
+/// taken from the connected tip instead of any listener.
+fn scanned_historical_stats(
+    historical: &Chainstate,
+    height: u32,
+    chain_tx_count: u64,
+) -> TestResult<CoinStats> {
+    let mut stats = engine_coin_set(historical)?.with_stable_view(|view| {
+        bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, height, true)
+    })?;
+    stats.tx_count = chain_tx_count;
+    Ok(stats)
+}
+
+/// Compares every field. A rolling `MuHash` and a scanned one are the same
+/// value in different raw numerator and denominator form, so the digest is
+/// compared after `finalize`.
+fn assert_same_stats(actual: &CoinStats, expected: &CoinStats, height: u32) {
+    assert_eq!(
+        (
+            actual.height,
+            actual.tx_count,
+            actual.utxo_count,
+            actual.total_amount,
+            actual.bogo_size,
+        ),
+        (
+            expected.height,
+            expected.tx_count,
+            expected.utxo_count,
+            expected.total_amount,
+            expected.bogo_size,
+        ),
+        "historical coin statistics at height {height} must equal a full scan of the engine coins"
+    );
+    assert_eq!(
+        actual.muhash.finalize(),
+        expected.muhash.finalize(),
+        "historical MuHash at height {height} must equal a full scan of the engine coins"
+    );
+}
+
+/// Genesis plus 101 coinbase blocks. The last block also spends the height-1
+/// coinbase output, which is mature at height 101, so the historical replay
+/// removes a coin as well as adding them.
+fn spending_chain() -> TestResult<(Vec<Block>, bitcoin_rs_consensus::primitives::OutPoint)> {
+    use crate::chain::regtest_fixture::{
+        coinbase, mined_block_with_prev_hash, mined_regtest_child_at,
+    };
+    use bitcoin_rs_consensus::primitives::{
+        Amount, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Witness,
+    };
+    use bitcoin_rs_consensus::script::opcode::OP_PUSHNUM_1;
+
+    let mut blocks = vec![Network::Regtest.genesis_block()];
+    for height in 1..=100 {
+        let prev = blocks
+            .last()
+            .ok_or(TestError::Missing("missing predecessor"))?
+            .block_hash();
+        blocks.push(mined_regtest_child_at(prev, height)?);
+    }
+    let funding = OutPoint::new(blocks[1].txs[0].txid(), 0);
+    let spend = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: funding,
+            script_sig: vec![OP_PUSHNUM_1].into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: vec![OP_PUSHNUM_1].into(),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    let prev = blocks
+        .last()
+        .ok_or(TestError::Missing("missing predecessor"))?
+        .block_hash();
+    blocks.push(mined_block_with_prev_hash(
+        prev,
+        101,
+        vec![coinbase(101), spend],
+    )?);
+    Ok((blocks, funding))
+}
+
+#[test]
+fn historical_stats_equal_a_full_scan_after_every_step_including_a_spend() -> TestResult {
+    let (blocks, funding) = spending_chain()?;
+    let fixture = Fixture::from_blocks(blocks)?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let historical = manager
+        .historical_chainstate()
+        .ok_or(TestError::Missing("historical missing"))?;
+    for block in &fixture.blocks {
+        let outcome = manager.step_historical(&BlockImage::from_local((*block).clone()))?;
+        let expected = scanned_historical_stats(
+            &historical,
+            outcome.height,
+            outcome.tip.chain_tx_count.to_wire(),
+        )?;
+        assert_same_stats(&historical.coin_stats.snapshot(), &expected, outcome.height);
+    }
+    assert!(
+        engine_coin_set(&historical)?.get(&funding).is_none(),
+        "the height-101 spend must have removed the funding coin"
+    );
+    Ok(())
+}
+
+#[test]
+fn historical_step_advances_the_rolling_stats_without_rescanning_the_store() -> TestResult {
+    const MARKER: u64 = 1_000_000;
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let historical = manager
+        .historical_chainstate()
+        .ok_or(TestError::Missing("historical missing"))?;
+    manager.step_historical(&BlockImage::from_local(fixture.blocks[0].clone()))?;
+    let mut marked = historical.coin_stats.snapshot();
+    marked.tx_count += MARKER;
+    historical.coin_stats.reset(marked);
+    let outcome = manager.step_historical(&BlockImage::from_local(fixture.blocks[1].clone()))?;
+    let mut expected = scanned_historical_stats(
+        &historical,
+        outcome.height,
+        outcome.tip.chain_tx_count.to_wire(),
+    )?;
+    expected.tx_count += MARKER;
+    assert_same_stats(&historical.coin_stats.snapshot(), &expected, outcome.height);
+    Ok(())
+}
+
 mod recovery;
 
 #[test]
@@ -936,6 +1137,7 @@ fn snapshot_advances_partial_state_but_refuses_to_replace_an_equal_or_newer_tip(
     }
     let manager = fixture.manager(dir.path())?;
     let before = fixture.active.durable_head.load()?;
+    let before_stats = fixture.active.coin_stats.snapshot();
     assert!(matches!(
         {
             let loaded = fixture.load()?;
@@ -944,7 +1146,7 @@ fn snapshot_advances_partial_state_but_refuses_to_replace_an_equal_or_newer_tip(
         Err(AssumeUtxoError::ActivationBehindTip)
     ));
     assert_eq!(fixture.active.durable_head.load()?, before);
-    assert_eq!(fixture.active.coin_stats.snapshot(), fixture.stats);
+    assert_eq!(fixture.active.coin_stats.snapshot(), before_stats);
     assert!(!fixture.active.is_closed_for_recovery());
     Ok(())
 }
@@ -1068,14 +1270,18 @@ fn finalized_replay_keeps_an_assume_valid_suffix_below_full() -> TestResult {
         chain_tx_count: prior.chain_tx_count + 1,
         ..prior
     };
-    fixture.active.durable_head.commit(
-        Some(&prior),
-        &next,
-        &CommitRecords {
+    fixture
+        .active
+        .commit_authority
+        .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+            expected_head: Some(prior),
+            next_head: next,
+            undo_rows: Vec::new(),
+            body_rows: Vec::new(),
             attestation: Some(bitcoin_rs_storage::ScriptAttestation::AssumeValid),
-            ..CommitRecords::default()
-        },
-    )?;
+            coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+        })
+        .map_err(|error| TestError::Storage(bitcoin_rs_storage::StorageError::backend(error)))?;
     assert_eq!(
         fixture.active.durable_head.load_suffix_attestation(&next)?,
         bitcoin_rs_storage::ScriptAttestation::AssumeValid,
@@ -1188,8 +1394,18 @@ fn reconstructed_commitment_or_transaction_count_mismatch_fails_closed() -> Test
             next.commit_id += 1;
             fixture
                 .active
-                .durable_head
-                .commit(Some(&prior), &next, &CommitRecords::default())?;
+                .commit_authority
+                .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                    expected_head: Some(prior),
+                    next_head: next,
+                    undo_rows: Vec::new(),
+                    body_rows: Vec::new(),
+                    attestation: None,
+                    coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+                })
+                .map_err(|error| {
+                    TestError::Storage(bitcoin_rs_storage::StorageError::backend(error))
+                })?;
         }
         for block in &fixture.blocks[..2] {
             manager.step_historical(&BlockImage::from_local((*block).clone()))?;
@@ -1369,7 +1585,7 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
             loaded.set,
             fixture.stats.clone(),
             &fixture.pinned,
-            |_, _, _| {
+            |_, _, _, _| {
                 let (sent, received) = std::sync::mpsc::sync_channel(1);
                 scope.spawn(move || {
                     let progress = reader.progress(
@@ -1577,5 +1793,58 @@ fn rejects_assumeutxo_snapshot_with_truncated_headers() -> TestResult {
         result,
         Err(crate::assumeutxo_snapshot::SnapshotArchiveError::HeaderArchiveLength)
     ));
+    Ok(())
+}
+
+#[test]
+fn restored_coin_stats_scan_preserves_the_corrupt_row_utxo_error() -> TestResult {
+    let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    seed_durable_head(
+        &chain,
+        DurableHead {
+            assumeutxo: AssumeUtxoDiskStatus::Uninitialized,
+            commit_id: 1,
+            height: 0,
+            tip: Hash256::from(Network::Regtest.genesis_block().block_hash()),
+            chain_tx_count: 1,
+            body_extent: None,
+            undo_extent: None,
+        },
+    )?;
+
+    let txid = Hash256::from_le_bytes(&[0x5A; 32]);
+    let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
+        txid,
+        &[bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+            vout: 0,
+            value: 1_000,
+            script_pubkey: vec![0x51],
+            coinbase: false,
+            height: 0,
+        }],
+    )?;
+    let mut row = record.bytes().to_vec();
+    row.truncate(20);
+    chain.commit_authority.store().put(
+        bitcoin_rs_storage::ColumnFamily::Coins,
+        bitcoin_rs_storage::CoinKey(txid.to_le_bytes()).as_bytes(),
+        &row,
+    )?;
+
+    let error = crate::recovery::settle_restored_coin_stats(&chain, None)
+        .err()
+        .ok_or(TestError::UnexpectedSuccess(
+            "a malformed coin row must fail the restored coin statistics scan",
+        ))?;
+    let crate::recovery::RecoveryError::Utxo(source) = error else {
+        return Err(TestError::Missing(
+            "the scan failure must keep its UtxoError cause",
+        ));
+    };
+    assert!(
+        matches!(source, bitcoin_rs_storage::utxo::UtxoError::CorruptRecord),
+        "the preserved cause must name the corrupt row, got {source:?}"
+    );
     Ok(())
 }

@@ -2,7 +2,6 @@ use std::io::{Cursor, Seek};
 
 use crate::support::utxo::{TestError, TestResult};
 use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, Script, TxOut};
-use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_storage::utxo::{
     SnapshotCoin, SnapshotCoinObserver, UtxoError, UtxoSet, read_snapshot_strict_v4,
     read_snapshot_strict_v4_observed, write_snapshot_observed,
@@ -38,11 +37,32 @@ fn snapshot_roundtrip_preserves_vout_and_metadata_boundaries() -> TestResult {
         value: Amount::from_sat(42_003),
         script_pubkey: Script::new(),
     };
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(low, low_txout.clone(), false, 400));
-    changes.add(UtxoAdd::new(high, high_txout.clone(), true, 401));
-    changes.add(UtxoAdd::new(max, max_txout.clone(), false, u32::MAX));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(&set, &changes, &txid(42_004))?;
+    let out_low = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+        vout: 63,
+        value: low_txout.value.to_sat(),
+        script_pubkey: low_txout.script_pubkey.to_vec(),
+        coinbase: false,
+        height: 400,
+    };
+    let out_high = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+        vout: 64,
+        value: high_txout.value.to_sat(),
+        script_pubkey: high_txout.script_pubkey.to_vec(),
+        coinbase: true,
+        height: 401,
+    };
+    let out_max = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+        vout: u32::MAX,
+        value: max_txout.value.to_sat(),
+        script_pubkey: max_txout.script_pubkey.to_vec(),
+        coinbase: false,
+        height: u32::MAX,
+    };
+    let rec = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
+        live_txid,
+        &[out_low, out_high, out_max],
+    )?;
+    set.insert_parsed_record(rec);
 
     let expected_hash = set.lock_stable_view().hash_serialized_3()?;
     let mut file = tempfile()?;
@@ -148,26 +168,37 @@ fn observed_snapshot_traversal_matches_the_current_reader() -> TestResult {
         value: Amount::from_sat(200_011),
         script_pubkey: Script::new(),
     };
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(
-        OutPoint::new(first_txid.into(), 0),
-        first,
-        false,
-        2000,
-    ));
-    changes.add(UtxoAdd::new(
-        OutPoint::new(first_txid.into(), 9),
-        second,
-        true,
-        2001,
-    ));
-    changes.add(UtxoAdd::new(
-        OutPoint::new(second_txid.into(), 2),
-        txout(200_012),
-        false,
-        2002,
-    ));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(&set, &changes, &txid(200_002))?;
+    let rec1 = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
+        first_txid,
+        &[
+            bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+                vout: 0,
+                value: first.value.to_sat(),
+                script_pubkey: first.script_pubkey.to_vec(),
+                coinbase: false,
+                height: 2000,
+            },
+            bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+                vout: 9,
+                value: second.value.to_sat(),
+                script_pubkey: second.script_pubkey.to_vec(),
+                coinbase: true,
+                height: 2001,
+            },
+        ],
+    )?;
+    let rec2 = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
+        second_txid,
+        &[bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+            vout: 2,
+            value: txout(200_012).value.to_sat(),
+            script_pubkey: txout(200_012).script_pubkey.to_vec(),
+            coinbase: false,
+            height: 2002,
+        }],
+    )?;
+    set.insert_parsed_record(rec1);
+    set.insert_parsed_record(rec2);
 
     let mut ordinary = Vec::new();
     let (ordinary_trailer, ()) =
@@ -198,10 +229,17 @@ fn observed_snapshot_traversal_matches_the_current_reader() -> TestResult {
 fn snapshot_trailer_round_trips_without_a_listener() -> TestResult {
     let set = UtxoSet::new();
 
-    let op = OutPoint::new(txid(130_000).into(), 0);
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(op, txout(130_001), false, 900));
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(&set, &changes, &txid(130_099))?;
+    let rec = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
+        txid(130_000),
+        &[bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+            vout: 0,
+            value: txout(130_001).value.to_sat(),
+            script_pubkey: txout(130_001).script_pubkey.to_vec(),
+            coinbase: false,
+            height: 900,
+        }],
+    )?;
+    set.insert_parsed_record(rec);
 
     let mut file = tempfile()?;
     let (returned_trailer, ()) = write_snapshot_observed(&set, &txid(130_100), 900, &mut file, ())?;

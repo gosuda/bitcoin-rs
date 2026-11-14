@@ -86,11 +86,21 @@ pub fn write_snapshot_observed<O: SnapshotCoinObserver, W: Write + ?Sized>(
     writer: &mut W,
     observer: O,
 ) -> Result<([u8; MUHASH_TRAILER_LEN], O), UtxoError> {
-    set.with_stable_view(|view| {
+    set.with_stable_view(|view| view.write_snapshot_observed(tip_hash, height, writer, observer))
+}
+
+impl UtxoSetView<'_> {
+    pub fn write_snapshot_observed<O: SnapshotCoinObserver, W: Write + ?Sized>(
+        &self,
+        tip_hash: &Hash256,
+        height: u32,
+        writer: &mut W,
+        observer: O,
+    ) -> Result<([u8; MUHASH_TRAILER_LEN], O), UtxoError> {
         let (trailer, observer, _audit) =
-            write_snapshot_view(view, tip_hash, height, writer, observer)?;
+            write_snapshot_view(self, tip_hash, height, writer, observer)?;
         Ok((trailer, observer))
-    })
+    }
 }
 
 fn write_snapshot_view<O: SnapshotCoinObserver, W: Write + ?Sized>(
@@ -116,6 +126,7 @@ fn write_snapshot_view<O: SnapshotCoinObserver, W: Write + ?Sized>(
         record_count: record_count.to_le(),
     };
     writer.write_all(header.as_bytes())?;
+    let mut snapshot_stats = view.snapshot_muhash_accumulator();
 
     for shard_idx in 0_u8..=u8::MAX {
         view.shard(usize::from(shard_idx)).with_table(|table| {
@@ -153,23 +164,31 @@ fn write_snapshot_view<O: SnapshotCoinObserver, W: Write + ?Sized>(
                     };
                     writer.write_all(vout_header.as_bytes())?;
                     writer.write_all(output.script_pubkey)?;
-                    observer.observe_coin(SnapshotCoin {
+                    let coin = SnapshotCoin {
                         txid,
                         vout: output.vout,
                         value: output.value,
                         script_pubkey: output.script_pubkey,
                         height: output.height,
                         coinbase: output.coinbase,
-                    });
+                    };
+                    if let Some(stats) = &mut snapshot_stats {
+                        stats.observe_coin(coin);
+                    }
+                    observer.observe_coin(coin);
                 }
             }
             Ok::<(), UtxoError>(())
         })?;
     }
 
-    let fallback = view
-        .listener_muhash3072()
-        .unwrap_or([0_u8; MUHASH_TRAILER_LEN]);
+    let fallback = snapshot_stats.map_or_else(
+        || {
+            view.listener_muhash3072()
+                .unwrap_or([0_u8; MUHASH_TRAILER_LEN])
+        },
+        |stats| stats.into_stats().muhash.finalize(),
+    );
     let trailer = observer.select_trailer(fallback);
     writer.write_all(&trailer)?;
     Ok((trailer, observer, audit))
@@ -301,7 +320,7 @@ pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
     let mut seen_vouts = HashSet::new();
     for _ in 0..record_count_usize {
         let (txid, outputs) = read_snapshot_record_v4(reader, &mut seen_vouts)?;
-        set.insert_snapshot_record(UtxoRecord::from_owned_outputs(txid, &outputs)?);
+        set.insert_parsed_record(UtxoRecord::from_owned_outputs(txid, &outputs)?);
         for output in &outputs {
             observer.observe_coin(SnapshotCoin {
                 txid,
@@ -465,6 +484,43 @@ fn read_snapshot_output(reader: &mut impl Read) -> Result<OwnedUtxoOut, UtxoErro
     let mut script = vec![0_u8; usize::from(script_len)];
     reader.read_exact(&mut script)?;
     Ok(OwnedUtxoOut::new(vout, value, script, coinbase, height))
+}
+
+/// Computes Core's `hash_serialized_3` from a consistent engine snapshot.
+///
+/// Coin rows must have strictly ascending full little-endian txid keys matching
+/// their records. Outputs are sorted numerically within each record. Hash-owned
+/// buffering retains only one decoded record and its borrowed output descriptors;
+/// backend snapshot and iterator backing storage are excluded from this bound.
+/// If supplied, `snapshot_height` bounds every coin's creation height.
+pub fn hash_serialized_3_snapshot(
+    snapshot: &dyn crate::KvSnapshot,
+    snapshot_height: Option<u32>,
+) -> Result<Hash256, UtxoError> {
+    let mut hasher = SerializedUtxoHasher::new();
+    let mut previous = None;
+    for row in snapshot.iter_prefix(crate::ColumnFamily::Coins, &[])? {
+        let (key, value) = row?;
+        let key = crate::coins::CoinKey::from_slice(&key)?;
+        if previous.is_some_and(|previous| previous >= key) {
+            return Err(crate::StorageError::InvalidOperation(
+                "coin snapshot keys are not strictly ascending",
+            )
+            .into());
+        }
+        previous = Some(key);
+        let record = UtxoRecord::from_encoded(value.into_boxed_slice())?;
+        let txid_le = record.txid().to_le_bytes();
+        if key.as_bytes() != &txid_le {
+            return Err(UtxoError::CorruptRecord);
+        }
+        let mut outputs: Vec<_> = record.outputs().collect();
+        outputs.sort_unstable_by_key(|output| output.vout);
+        for output in outputs {
+            hasher.add(txid_le, output, snapshot_height)?;
+        }
+    }
+    Ok(hasher.finish())
 }
 
 pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256, UtxoError> {
@@ -965,11 +1021,8 @@ mod seed_no_token_tests {
         read_raw_snapshot_stream, read_snapshot_strict_v4, read_snapshot_strict_v4_witnessed,
         write_snapshot_witnessed,
     };
-    use crate::utxo::{
-        UtxoError, UtxoKey, UtxoSet,
-        contract::{BlockChanges, UtxoAdd, commit_block_changes},
-    };
-    use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
+    use crate::utxo::{UtxoError, UtxoKey, UtxoSet};
+    use bitcoin_rs_consensus::primitives::{Amount, Hash256, TxOut, Txid};
     use std::io::Cursor;
 
     use crate::utxo::test_support::{TestError, TestResult};
@@ -994,29 +1047,31 @@ mod seed_no_token_tests {
         let set = UtxoSet::new();
         let first = txid(7_001);
         let second = txid(7_002);
-        let mut changes = BlockChanges::default();
-        changes.add(UtxoAdd::new(
-            OutPoint::new(first.into(), 0),
-            txout(7_010)?,
-            false,
-            100,
-        ));
-        changes.add(UtxoAdd::new(
-            OutPoint::new(first.into(), 3),
-            TxOut {
-                value: Amount::from_sat(7_011),
-                script_pubkey: Script::new(),
-            },
-            true,
-            101,
-        ));
-        changes.add(UtxoAdd::new(
-            OutPoint::new(second.into(), 1),
-            txout(7_012)?,
-            false,
-            102,
-        ));
-        commit_block_changes(&set, &changes, &txid(7_003))?;
+        let out1 = crate::utxo::record::OwnedUtxoOut {
+            vout: 0,
+            value: txout(7_010)?.value.to_sat(),
+            script_pubkey: txout(7_010)?.script_pubkey.to_vec(),
+            coinbase: false,
+            height: 100,
+        };
+        let out2 = crate::utxo::record::OwnedUtxoOut {
+            vout: 3,
+            value: 7_011,
+            script_pubkey: Vec::new(),
+            coinbase: true,
+            height: 101,
+        };
+        let out3 = crate::utxo::record::OwnedUtxoOut {
+            vout: 1,
+            value: txout(7_012)?.value.to_sat(),
+            script_pubkey: txout(7_012)?.script_pubkey.to_vec(),
+            coinbase: false,
+            height: 102,
+        };
+        let rec1 = crate::utxo::record::UtxoRecord::from_owned_outputs(first, &[out1, out2])?;
+        let rec2 = crate::utxo::record::UtxoRecord::from_owned_outputs(second, &[out3])?;
+        set.insert_parsed_record(rec1);
+        set.insert_parsed_record(rec2);
         Ok((set, txid(7_004), 103))
     }
 
@@ -1165,31 +1220,27 @@ mod seed_no_token_tests {
 #[cfg(test)]
 mod walk_tests {
     use super::WALK_CANCELLATION_INTERVAL;
-    use crate::utxo::{
-        UtxoError, UtxoSet,
-        contract::{BlockChanges, UtxoAdd, commit_block_changes},
-    };
-    use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut};
+    use crate::utxo::{UtxoError, UtxoSet};
+    use bitcoin_rs_consensus::primitives::Hash256;
     use std::cell::Cell;
 
     fn set_with_coins(count: usize) -> UtxoSet {
         let set = UtxoSet::new();
-        let mut changes = BlockChanges::default();
         for index in 0..count {
             let mut bytes = [0_u8; 32];
             bytes[..8].copy_from_slice(&u64::try_from(index).unwrap_or(u64::MAX).to_le_bytes());
-            changes.add(UtxoAdd::new(
-                OutPoint::new(Hash256::from_le_bytes(&bytes).into(), 0),
-                TxOut {
-                    value: Amount::from_sat(7),
-                    script_pubkey: vec![0x51].into(),
-                },
-                false,
-                0,
-            ));
+            let txid = Hash256::from_le_bytes(&bytes);
+            let out = crate::utxo::record::OwnedUtxoOut {
+                vout: 0,
+                value: 7,
+                script_pubkey: vec![0x51],
+                coinbase: false,
+                height: 0,
+            };
+            let record = crate::utxo::record::UtxoRecord::from_owned_outputs(txid, &[out])
+                .unwrap_or_else(|error| panic!("fixture record: {error}"));
+            set.insert_parsed_record(record);
         }
-        commit_block_changes(&set, &changes, &Hash256::default())
-            .unwrap_or_else(|error| panic!("fixture coins: {error}"));
         set
     }
 
@@ -1213,5 +1264,123 @@ mod walk_tests {
             "the first check must run after the documented interval"
         );
         assert_eq!(checks.get(), 1, "one walk asks once before stopping");
+    }
+}
+
+#[cfg(test)]
+mod engine_commitment_tests {
+    use super::*;
+    use crate::utxo::test_support::TestResult;
+    use crate::{ColumnFamily, KvIter, KvSnapshot, PrefixScan, PrefixScanLimit, StorageError};
+
+    #[derive(Default)]
+    struct Rows {
+        rows: Vec<(Vec<u8>, Vec<u8>)>,
+        fail_read: bool,
+    }
+
+    impl KvSnapshot for Rows {
+        fn get(&self, _: ColumnFamily, _: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            Err(StorageError::InvalidOperation("unused test lookup"))
+        }
+
+        fn iter_prefix<'a>(
+            &'a self,
+            _: ColumnFamily,
+            _: &[u8],
+        ) -> Result<KvIter<'a>, StorageError> {
+            Ok(Box::new(
+                self.rows.iter().cloned().map(Ok).chain(
+                    self.fail_read
+                        .then_some(())
+                        .into_iter()
+                        .map(|()| Err(StorageError::InvalidOperation("test row read failure"))),
+                ),
+            ))
+        }
+
+        fn scan_prefix_from_bounded(
+            &self,
+            _: ColumnFamily,
+            _: &[u8],
+            _: &[u8],
+            _: PrefixScanLimit,
+        ) -> Result<PrefixScan, StorageError> {
+            Err(StorageError::InvalidOperation("unused test scan"))
+        }
+    }
+
+    // API-33
+    #[test]
+    fn engine_commitment_matches_independent_stable_view_ordering() -> TestResult {
+        let set = UtxoSet::new();
+        let mut snapshot = Rows::default();
+        let mut p2pkh = vec![0x76, 0xa9, 0x14];
+        p2pkh.extend_from_slice(&[7; 20]);
+        p2pkh.extend_from_slice(&[0x88, 0xac]);
+        for (first, suffix) in [(255, 0), (1, 255), (0, 9), (1, 0), (0, 2)] {
+            let mut key = [0_u8; 32];
+            key[0] = first;
+            key[31] = suffix;
+            let outputs = [300, 1, 256, 0].map(|vout| OwnedUtxoOut {
+                vout,
+                value: u64::from(vout) + 1,
+                script_pubkey: if vout == 1 {
+                    p2pkh.clone()
+                } else {
+                    vec![0x51, 0x75]
+                },
+                coinbase: vout == 0,
+                height: 10,
+            });
+            let record = UtxoRecord::from_owned_outputs(Hash256::from_le_bytes(&key), &outputs)?;
+            snapshot.rows.push((key.to_vec(), record.bytes().to_vec()));
+            set.insert_parsed_record(record);
+        }
+        snapshot
+            .rows
+            .sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let expected = set.lock_stable_view().hash_serialized_3()?;
+        assert_eq!(hash_serialized_3_snapshot(&snapshot, None)?, expected);
+        assert_eq!(hash_serialized_3_snapshot(&snapshot, Some(10))?, expected);
+        assert!(matches!(
+            hash_serialized_3_snapshot(&snapshot, Some(9)),
+            Err(UtxoError::SnapshotCoinHeightOutOfRange {
+                height: 10,
+                snapshot_height: 9
+            })
+        ));
+
+        snapshot.rows.swap(0, 1);
+        assert!(matches!(
+            hash_serialized_3_snapshot(&snapshot, None),
+            Err(UtxoError::Storage(StorageError::InvalidOperation(_)))
+        ));
+        snapshot.rows.swap(0, 1);
+        snapshot.rows[0].0[31] ^= 1;
+        assert!(matches!(
+            hash_serialized_3_snapshot(&snapshot, None),
+            Err(UtxoError::CorruptRecord)
+        ));
+        snapshot.rows[0].0.pop();
+        assert!(matches!(
+            hash_serialized_3_snapshot(&snapshot, None),
+            Err(UtxoError::Storage(StorageError::InvalidOperation(_)))
+        ));
+        snapshot.rows[0].0.push(9);
+        snapshot.rows[0].1.clear();
+        assert!(matches!(
+            hash_serialized_3_snapshot(&snapshot, None),
+            Err(UtxoError::CorruptRecord)
+        ));
+        snapshot.rows.clear();
+        snapshot.fail_read = true;
+        assert!(matches!(
+            hash_serialized_3_snapshot(&snapshot, None),
+            Err(UtxoError::Storage(StorageError::InvalidOperation(
+                "test row read failure"
+            )))
+        ));
+        Ok(())
     }
 }

@@ -2,12 +2,11 @@ use crate::chain::ChainError;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::{ConsensusError, ScriptEngine, ValidationEngine};
 use bitcoin_rs_storage::StorageError;
-use bitcoin_rs_storage::chainstate_journal::JournalWriterError;
 
 use crate::{ApplyError, CheckpointError, WindowApplyDisposition, classify_apply_error};
 use ApplyError::{
-    BlockBodyPersistence, BlockOutputsExceedInputs, BlockValueOverflow, JournalBackpressure,
-    RecoveryPublication, UndoPersistence,
+    BlockBodyPersistence, BlockOutputsExceedInputs, BlockValueOverflow, RecoveryPublication,
+    UndoPersistence,
 };
 
 // SYNC-04
@@ -78,19 +77,6 @@ fn apply_errors_classify_into_their_documented_dispositions() {
         ),
         (
             BlockBodyPersistence(StorageError::backend("block append failed")),
-            Fatal,
-        ),
-        (
-            JournalBackpressure(Box::new(JournalWriterError::RetentionLimit {
-                bytes: 1024,
-                limit: 512,
-            })),
-            Operational,
-        ),
-        (
-            JournalBackpressure(Box::new(JournalWriterError::Io(std::io::Error::other(
-                "journal device gone",
-            )))),
             Fatal,
         ),
         (BlockValueOverflow, Permanent),

@@ -132,16 +132,19 @@ fn assert_state(chain: &FuzzChain, model: &Model) {
     );
     let utxo = chain.utxo();
     assert_eq!(
-        utxo.len(),
+        utxo.with_stable_view(|view| view.len())
+            .expect("the model's committed coin state must be readable"),
         model.coins.len(),
         "utxo output count must track the model"
     );
     for (outpoint, output) in &model.coins {
-        assert_eq!(
-            utxo.get(outpoint).as_ref(),
-            Some(output),
-            "utxo entry {outpoint:?} must track the model"
-        );
+        match utxo.get(outpoint) {
+            Ok(Some(found)) => assert_eq!(
+                &found, output,
+                "utxo entry {outpoint:?} must track the model"
+            ),
+            other => panic!("utxo entry {outpoint:?} must track the model: got {other:?}"),
+        }
     }
 }
 
@@ -213,11 +216,11 @@ fuzz_target!(|data: &[u8]| {
                 connect(&chain, &mut model, &block);
             }
             2 => {
-                if let Some(block) = model.blocks.last().cloned() {
-                    if chain.disconnect(&block).is_ok() {
-                        model.disconnect(&block);
-                        can_reopen = false;
-                    }
+                if let Some(block) = model.blocks.last().cloned()
+                    && chain.disconnect(&block).is_ok()
+                {
+                    model.disconnect(&block);
+                    can_reopen = false;
                 }
             }
             3 => {

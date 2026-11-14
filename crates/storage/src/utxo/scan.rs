@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 use bitcoin_rs_consensus::primitives::{Amount, OutPoint, TxOut};
 use parking_lot::Mutex;
 
+use crate::utxo::record::UtxoRecord;
 use crate::utxo::{UtxoCoin, UtxoScan, UtxoSet};
+use crate::{ColumnFamily, KvSnapshot, StorageError};
 
 pub const MAX_SCAN_SCRIPTS: usize = 1_024;
 pub const MAX_SCAN_SCRIPT_BYTES: usize = 1_048_576;
@@ -22,8 +24,33 @@ pub enum UtxoScanError {
     Limit(&'static str),
     #[error("UTXO scan aborted")]
     Aborted,
+    #[error("UTXO coin row is unreadable: {0}")]
+    Corrupt(String),
 }
 
+fn validate_scan_scripts(scripts: &BTreeSet<Vec<u8>>) -> Result<(), UtxoScanError> {
+    if scripts.len() > MAX_SCAN_SCRIPTS {
+        return Err(UtxoScanError::Limit("1024 scripts"));
+    }
+    if scripts
+        .iter()
+        .try_fold(0usize, |n, script| n.checked_add(script.len()))
+        .is_none_or(|n| n > MAX_SCAN_SCRIPT_BYTES)
+    {
+        return Err(UtxoScanError::Limit("1 MiB of scripts"));
+    }
+    Ok(())
+}
+
+fn percent_complete(rows_seen: usize, total_rows: usize) -> u8 {
+    let seen = u64::try_from(rows_seen).unwrap_or(u64::MAX);
+    let total = u64::try_from(total_rows).unwrap_or(u64::MAX).max(1);
+    u8::try_from(seen.saturating_mul(100) / total).unwrap_or(100)
+}
+
+fn snapshot_error(error: StorageError) -> UtxoScanError {
+    UtxoScanError::Corrupt(error.to_string())
+}
 #[derive(Default)]
 pub(crate) struct ScanState(Mutex<Option<Progress>>);
 
@@ -93,43 +120,20 @@ impl<'a> UtxoScanPermit<'a> {
         Ok(false)
     }
 
-    pub(crate) fn scan_scripts(&self, scripts: &[Vec<u8>]) -> Result<UtxoScan, UtxoScanError> {
-        let mut needles = BTreeSet::<Vec<u8>>::new();
-        let mut script_bytes = 0usize;
-        for script in scripts {
-            if self.cancelled(|| false)? {
-                return Err(UtxoScanError::Aborted);
-            }
-            if needles.contains(script.as_slice()) {
-                continue;
-            }
-            if needles.len() == MAX_SCAN_SCRIPTS {
-                return Err(UtxoScanError::Limit("1024 scripts"));
-            }
-            script_bytes = script_bytes
-                .checked_add(script.len())
-                .filter(|bytes| *bytes <= MAX_SCAN_SCRIPT_BYTES)
-                .ok_or(UtxoScanError::Limit("1 MiB of scripts"))?;
-            needles.insert(script.clone());
-        }
-        let (complete, scan) = self.scan(&needles, || false)?;
-        if !complete {
-            return Err(UtxoScanError::Aborted);
-        }
-        Ok(scan)
-    }
-
-    /// Script matching is logarithmic in the bounded needle set.
+    /// Streams one engine snapshot of the `coins` keyspace.
     ///
-    /// Traversal stops before exceeding 250 million coins, 10,000 matches or 8 MiB of
-    /// matched scripts. Abort/deadline checks occur every 256 coins and between shards.
-    /// No write lock or durable mutation is used.
-    pub fn scan(
+    /// Rows are decoded one at a time and only matched coins are retained, so
+    /// memory stays O(matches), never O(UTXO set). The snapshot is a
+    /// point-in-time image: commits landing after it was taken stay invisible,
+    /// so the walk agrees with the applied head captured beside it.
+    pub fn scan_snapshot(
         &self,
+        snapshot: &dyn KvSnapshot,
         scripts: &BTreeSet<Vec<u8>>,
         stopping: impl Fn() -> bool,
     ) -> Result<(bool, UtxoScan), UtxoScanError> {
-        self.scan_bounded(
+        self.scan_snapshot_bounded(
+            snapshot,
             scripts,
             stopping,
             MAX_VISITED_COINS,
@@ -138,81 +142,95 @@ impl<'a> UtxoScanPermit<'a> {
         )
     }
 
-    fn scan_bounded(
+    /// Counts the snapshot rows first so progress percentages are exact.
+    ///
+    /// `None` means the caller aborted or the deadline expired mid-count.
+    fn count_coin_rows(
         &self,
+        snapshot: &dyn KvSnapshot,
+        stopping: &impl Fn() -> bool,
+    ) -> Result<Option<usize>, UtxoScanError> {
+        let rows = snapshot
+            .iter_prefix(ColumnFamily::Coins, &[])
+            .map_err(snapshot_error)?;
+        let mut total = 0usize;
+        for row in rows {
+            if total.is_multiple_of(CHECK_INTERVAL) && self.cancelled(stopping)? {
+                return Ok(None);
+            }
+            row.map_err(snapshot_error)?;
+            total += 1;
+        }
+        Ok(Some(total))
+    }
+
+    fn scan_snapshot_bounded(
+        &self,
+        snapshot: &dyn KvSnapshot,
         scripts: &BTreeSet<Vec<u8>>,
         stopping: impl Fn() -> bool,
         max_coins: usize,
         max_matches: usize,
         max_bytes: usize,
     ) -> Result<(bool, UtxoScan), UtxoScanError> {
-        if scripts.len() > MAX_SCAN_SCRIPTS {
-            return Err(UtxoScanError::Limit("1024 scripts"));
-        }
-        if scripts
-            .iter()
-            .try_fold(0usize, |n, script| n.checked_add(script.len()))
-            .is_none_or(|n| n > MAX_SCAN_SCRIPT_BYTES)
-        {
-            return Err(UtxoScanError::Limit("1 MiB of scripts"));
-        }
+        validate_scan_scripts(scripts)?;
         let mut scan = UtxoScan::default();
-        let view = loop {
-            if self.cancelled(&stopping)? {
-                return Ok((false, scan));
-            }
-            if let Some(view) = self.set.try_stable_view(Duration::from_millis(50)) {
-                break view;
-            }
+        let Some(total_rows) = self.count_coin_rows(snapshot, &stopping)? else {
+            return Ok((false, scan));
         };
+        let rows = snapshot
+            .iter_prefix(ColumnFamily::Coins, &[])
+            .map_err(snapshot_error)?;
         let mut script_bytes = 0usize;
-        for (index, shard) in self.set.shards.iter().enumerate() {
-            if self.cancelled(&stopping)? {
+        let mut rows_seen = 0usize;
+        if self.cancelled(&stopping)? {
+            return Ok((false, scan));
+        }
+        for row in rows {
+            if rows_seen.is_multiple_of(CHECK_INTERVAL) && self.cancelled(&stopping)? {
                 return Ok((false, scan));
             }
-            let complete = shard.with_table(|table| -> Result<bool, UtxoScanError> {
-                for record in &table.table {
-                    for output in record.outputs() {
-                        if scan.txouts.is_multiple_of(CHECK_INTERVAL)
-                            && self.cancelled(&stopping)?
-                        {
-                            return Ok(false);
-                        }
-                        if scan.txouts == max_coins {
-                            return Err(UtxoScanError::Limit("250 million visited coins"));
-                        }
-                        scan.txouts += 1;
-                        if scripts.contains(output.script_pubkey) {
-                            if scan.unspents.len() == max_matches {
-                                return Err(UtxoScanError::Limit("10000 matched coins"));
-                            }
-                            script_bytes += output.script_pubkey.len();
-                            if script_bytes > max_bytes {
-                                return Err(UtxoScanError::Limit("8 MiB of matched scripts"));
-                            }
-                            scan.unspents.push(UtxoCoin {
-                                outpoint: OutPoint::new(record.txid().into(), output.vout),
-                                txout: TxOut {
-                                    value: Amount::from_sat(output.value),
-                                    script_pubkey: output.script_pubkey.to_vec().into(),
-                                },
-                                coinbase: output.coinbase,
-                                height: output.height,
-                            });
-                        }
-                    }
+            let (_key, value) = row.map_err(snapshot_error)?;
+            let record = UtxoRecord::from_encoded(value.into_boxed_slice())
+                .map_err(|error| UtxoScanError::Corrupt(error.to_string()))?;
+            for output in record.outputs() {
+                if scan.txouts.is_multiple_of(CHECK_INTERVAL) && self.cancelled(&stopping)? {
+                    return Ok((false, scan));
                 }
-                Ok(true)
-            })?;
-            if !complete {
-                return Ok((false, scan));
+                if scan.txouts == max_coins {
+                    return Err(UtxoScanError::Limit("250 million visited coins"));
+                }
+                scan.txouts += 1;
+                if scripts.contains(output.script_pubkey) {
+                    if scan.unspents.len() == max_matches {
+                        return Err(UtxoScanError::Limit("10000 matched coins"));
+                    }
+                    script_bytes += output.script_pubkey.len();
+                    if script_bytes > max_bytes {
+                        return Err(UtxoScanError::Limit("8 MiB of matched scripts"));
+                    }
+                    scan.unspents.push(UtxoCoin {
+                        outpoint: OutPoint::new(record.txid().into(), output.vout),
+                        txout: TxOut {
+                            value: Amount::from_sat(output.value),
+                            script_pubkey: output.script_pubkey.to_vec().into(),
+                        },
+                        coinbase: output.coinbase,
+                        height: output.height,
+                    });
+                }
             }
-            if let Some(progress) = self.set.scan.0.lock().as_mut() {
-                progress.percent =
-                    u8::try_from((index + 1) * 100 / self.set.shards.len()).unwrap_or(100);
+            rows_seen += 1;
+            if rows_seen.is_multiple_of(CHECK_INTERVAL) {
+                let percent = percent_complete(rows_seen, total_rows);
+                if let Some(progress) = self.set.scan.0.lock().as_mut() {
+                    progress.percent = percent;
+                }
             }
         }
-        drop(view);
+        if let Some(progress) = self.set.scan.0.lock().as_mut() {
+            progress.percent = 100;
+        }
         Ok((true, scan))
     }
 }
@@ -227,19 +245,17 @@ impl Drop for UtxoScanPermit<'_> {
 mod tests {
     use super::*;
     use crate::utxo::UtxoReader;
-    use crate::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
-    use bitcoin_rs_consensus::primitives::{Hash256, Txid};
-    use std::cell::Cell;
-    use std::sync::Arc;
+    use bitcoin_rs_consensus::primitives::Hash256;
 
-    fn coins(count: u32) -> Arc<UtxoSet> {
-        let set = Arc::new(UtxoSet::new());
-        let mut changes = BlockChanges::default();
-        for i in 0..count {
-            let mut bytes = [0u8; 32];
-            bytes[1..5].copy_from_slice(&i.to_le_bytes());
-            changes.add(UtxoAdd::new(
-                OutPoint::new(Txid::from(Hash256::from_le_bytes(&bytes)), 0),
+    fn fixture_reader(coin_count: u32) -> UtxoReader {
+        let reader = UtxoReader::fixture_new();
+        let mut changes = crate::utxo::contract::BlockChanges::default();
+        for index in 0..coin_count {
+            let mut bytes = [0_u8; 32];
+            bytes[1..5].copy_from_slice(&index.to_le_bytes());
+            let txid = Hash256::from_le_bytes(&bytes);
+            changes.add(crate::utxo::contract::UtxoAdd::new(
+                OutPoint::new(txid.into(), 0),
                 TxOut {
                     value: Amount::from_sat(7),
                     script_pubkey: vec![0x51].into(),
@@ -248,70 +264,180 @@ mod tests {
                 0,
             ));
         }
-        commit_block_changes(&set, &changes, &Hash256::default())
-            .unwrap_or_else(|error| panic!("fixture coins: {error}"));
-        set
+        reader
+            .populate_fixture_coins(&changes)
+            .unwrap_or_else(|error| panic!("engine coin write: {error}"));
+        reader
+    }
+
+    fn coin_snapshot(reader: &UtxoReader) -> Box<dyn crate::KvSnapshot + '_> {
+        reader
+            .scan_coin_snapshot()
+            .unwrap_or_else(|error| panic!("snapshot: {error}"))
     }
 
     #[test]
-    fn complete_scan_deduplicates_before_charging_script_budgets() {
-        let reader = UtxoReader::new(coins(1));
-        let mut scripts = vec![vec![0u8; 1_024]; MAX_SCAN_SCRIPTS + 1];
-        scripts.push(vec![0x51]);
-        let scan = reader
-            .scan_script_pubkeys(&scripts)
-            .unwrap_or_else(|error| panic!("duplicate needles: {error}"));
-        assert_eq!(scan.txouts, 1);
-        assert_eq!(scan.unspents.len(), 1);
-        assert_eq!(scan.unspents[0].txout.value, Amount::from_sat(7));
-        assert_eq!(reader.scan_progress(), None);
+    fn snapshot_scan_streams_engine_rows_without_resident_image() {
+        let reader = UtxoReader::fixture_new();
+        let mut changes = crate::utxo::contract::BlockChanges::default();
+        let scripts = [vec![0x51], vec![0x6a], vec![0x51]];
+        for (index, script) in scripts.iter().enumerate() {
+            let index_u8 = match u8::try_from(index) {
+                Ok(index) => index,
+                Err(error) => panic!("fixture index fits u8: {error}"),
+            };
+            let index_u64 = u64::try_from(index)
+                .unwrap_or_else(|error| panic!("fixture index fits u64: {error}"));
+            let txid = Hash256::from_le_bytes(&{
+                let mut bytes = [0_u8; 32];
+                bytes[1] = index_u8;
+                bytes
+            });
+            changes.add(crate::utxo::contract::UtxoAdd::new(
+                OutPoint::new(txid.into(), 0),
+                TxOut {
+                    value: Amount::from_sat(10 + index_u64),
+                    script_pubkey: script.clone().into(),
+                },
+                false,
+                0,
+            ));
+        }
+        reader
+            .populate_fixture_coins(&changes)
+            .unwrap_or_else(|error| panic!("engine coin write: {error}"));
+        let snapshot = coin_snapshot(&reader);
+        let resident_insertions =
+            crate::utxo::set::PARSED_RECORD_INSERTIONS.with(|count| count.get());
+        let permit = reader
+            .reserve_scan()
+            .unwrap_or_else(|error| panic!("reserve: {error}"));
+        let (complete, scan) = permit
+            .scan_snapshot(&*snapshot, &BTreeSet::from([vec![0x51]]), || false)
+            .unwrap_or_else(|error| panic!("snapshot scan: {error}"));
+        assert!(complete);
+        assert_eq!(scan.txouts, 3);
+        assert_eq!(
+            scan.unspents
+                .iter()
+                .map(|coin| (coin.outpoint.vout, coin.txout.value.to_sat()))
+                .collect::<Vec<_>>(),
+            vec![(0, 10), (0, 12)]
+        );
+        assert_eq!(
+            crate::utxo::set::PARSED_RECORD_INSERTIONS.with(|count| count.get()),
+            resident_insertions,
+            "snapshot scan must not materialize the resident coin image"
+        );
     }
 
     #[test]
-    fn complete_scan_input_bounds_are_inclusive_and_release_reservations() {
-        let reader = UtxoReader::new(coins(1));
-        let mut scripts: Vec<_> = (0..MAX_SCAN_SCRIPTS)
+    fn snapshot_scan_rejects_undecodable_coin_row() {
+        let reader = UtxoReader::fixture_new();
+        reader
+            .fixture_coin_store()
+            .store()
+            .put(ColumnFamily::Coins, &[7_u8; 32], &[0xff, 0xff])
+            .unwrap_or_else(|error| panic!("corrupt row write: {error}"));
+        let snapshot = coin_snapshot(&reader);
+        let permit = reader
+            .reserve_scan()
+            .unwrap_or_else(|error| panic!("reserve: {error}"));
+        let error = permit
+            .scan_snapshot(&*snapshot, &BTreeSet::new(), || false)
+            .err()
+            .unwrap_or_else(|| panic!("corrupt row must fail the scan"));
+        assert!(matches!(error, UtxoScanError::Corrupt(_)), "{error:?}");
+    }
+
+    #[test]
+    fn snapshot_scan_input_bounds_are_inclusive_and_release_reservations() {
+        let reader = fixture_reader(1);
+        let snapshot = coin_snapshot(&reader);
+        let permit = reader
+            .reserve_scan()
+            .unwrap_or_else(|error| panic!("reserve: {error}"));
+        let mut scripts: BTreeSet<Vec<u8>> = (0..MAX_SCAN_SCRIPTS - 1)
             .map(|n| n.to_le_bytes().to_vec())
             .collect();
-        assert!(reader.scan_script_pubkeys(&scripts).is_ok());
-        scripts.push(MAX_SCAN_SCRIPTS.to_le_bytes().to_vec());
-        assert!(matches!(
-            reader.scan_script_pubkeys(&scripts),
-            Err(crate::utxo::UtxoError::Scan(UtxoScanError::Limit(_)))
-        ));
+        scripts.insert(vec![0x51]);
+        let (complete, scan) = permit
+            .scan_snapshot(&*snapshot, &scripts, || false)
+            .unwrap_or_else(|error| panic!("inclusive bounds: {error}"));
+        assert!(complete);
+        assert_eq!(scan.txouts, 1);
+        assert_eq!(scan.unspents.len(), 1);
+        drop(permit);
         assert_eq!(reader.scan_progress(), None);
 
-        let script = vec![0u8; MAX_SCAN_SCRIPT_BYTES];
+        scripts.insert(MAX_SCAN_SCRIPTS.to_le_bytes().to_vec());
+        let permit = reader
+            .reserve_scan()
+            .unwrap_or_else(|error| panic!("reserve: {error}"));
+        assert!(matches!(
+            permit.scan_snapshot(&*snapshot, &scripts, || false),
+            Err(UtxoScanError::Limit(_))
+        ));
+        drop(permit);
+        assert_eq!(reader.scan_progress(), None);
+
+        let permit = reader
+            .reserve_scan()
+            .unwrap_or_else(|error| panic!("reserve: {error}"));
+        let exact = vec![0_u8; MAX_SCAN_SCRIPT_BYTES];
         assert!(
-            reader
-                .scan_script_pubkeys(std::slice::from_ref(&script))
+            permit
+                .scan_snapshot(&*snapshot, &BTreeSet::from([exact]), || false)
                 .is_ok()
         );
-        for scripts in [
-            vec![vec![0u8; MAX_SCAN_SCRIPT_BYTES + 1]],
-            vec![script, vec![1u8]],
-        ] {
-            assert!(matches!(
-                reader.scan_script_pubkeys(&scripts),
-                Err(crate::utxo::UtxoError::Scan(UtxoScanError::Limit(_)))
-            ));
-            assert_eq!(reader.scan_progress(), None);
-        }
-        assert!(reader.scan_script_pubkeys(&[vec![0x51]]).is_ok());
+        drop(permit);
+        assert_eq!(reader.scan_progress(), None);
+
+        let permit = reader
+            .reserve_scan()
+            .unwrap_or_else(|error| panic!("reserve: {error}"));
+        assert!(matches!(
+            permit.scan_snapshot(
+                &*snapshot,
+                &BTreeSet::from([vec![0_u8; MAX_SCAN_SCRIPT_BYTES + 1]]),
+                || false
+            ),
+            Err(UtxoScanError::Limit(_))
+        ));
+        assert!(matches!(
+            permit.scan_snapshot(
+                &*snapshot,
+                &BTreeSet::from([vec![0_u8; MAX_SCAN_SCRIPT_BYTES], vec![1_u8],]),
+                || false
+            ),
+            Err(UtxoScanError::Limit(_))
+        ));
+        assert_eq!(reader.scan_progress(), Some(0));
+        drop(permit);
+        assert_eq!(reader.scan_progress(), None);
+        let permit = reader
+            .reserve_scan()
+            .unwrap_or_else(|error| panic!("reserve: {error}"));
+        assert!(
+            permit
+                .scan_snapshot(&*snapshot, &BTreeSet::from([vec![0x51]]), || false)
+                .is_ok()
+        );
     }
 
     #[test]
-    fn complete_scan_preparation_observes_abort_and_deadline() {
-        let reader = UtxoReader::new(coins(1));
-        let scripts = [vec![0u8; MAX_SCAN_SCRIPT_BYTES + 1]];
+    fn snapshot_scan_observes_abort_and_deadline() {
+        let reader = fixture_reader(1);
+        let snapshot = coin_snapshot(&reader);
         let permit = reader
             .reserve_scan()
             .unwrap_or_else(|error| panic!("reserve: {error}"));
         assert!(reader.abort_scan());
-        assert!(matches!(
-            permit.scan_scripts(&scripts),
-            Err(UtxoScanError::Aborted)
-        ));
+        let (complete, scan) = permit
+            .scan_snapshot(&*snapshot, &BTreeSet::from([vec![0x51]]), || false)
+            .unwrap_or_else(|error| panic!("aborted snapshot scan: {error}"));
+        assert!(!complete);
+        assert_eq!(scan.txouts, 0);
         drop(permit);
         assert_eq!(reader.scan_progress(), None);
 
@@ -322,7 +448,7 @@ mod tests {
             .checked_sub(MAX_DURATION)
             .unwrap_or_else(|| panic!("monotonic clock has no prior instant"));
         assert!(matches!(
-            permit.scan_scripts(&scripts),
+            permit.scan_snapshot(&*snapshot, &BTreeSet::from([vec![0x51]]), || false),
             Err(UtxoScanError::Limit("60 seconds"))
         ));
         drop(permit);
@@ -331,7 +457,7 @@ mod tests {
 
     #[test]
     fn reservation_is_shared_and_drop_clears_abort() {
-        let reader = UtxoReader::new(coins(1));
+        let reader = fixture_reader(1);
         let other = reader.clone();
         assert_eq!(reader.scan_progress(), None);
         assert!(!reader.abort_scan());
@@ -344,8 +470,9 @@ mod tests {
             Err(UtxoScanError::InProgress)
         ));
         assert!(other.abort_scan());
+        let snapshot = coin_snapshot(&reader);
         let (complete, scan) = permit
-            .scan(&BTreeSet::new(), || false)
+            .scan_snapshot(&*snapshot, &BTreeSet::new(), || false)
             .unwrap_or_else(|error| panic!("cancel: {error}"));
         assert!(!complete);
         assert_eq!(scan.txouts, 0);
@@ -360,40 +487,23 @@ mod tests {
                 .unwrap_or_else(|error| panic!("clean state: {error}"))
         );
         assert_eq!(
-            UtxoReader::new(coins(0)).scan_progress(),
+            UtxoReader::fixture_new().scan_progress(),
             None,
             "restart has no scan"
         );
     }
 
     #[test]
-    fn snapshot_replacement_does_not_create_a_second_scan_owner() {
-        let set = coins(1);
-        let reader = UtxoReader::new(Arc::clone(&set));
-        let permit = reader
-            .reserve_scan()
-            .unwrap_or_else(|error| panic!("reserve: {error}"));
-        set.replace_from(UtxoSet::new());
-        assert_eq!(reader.scan_progress(), Some(0));
-        assert!(matches!(
-            reader.reserve_scan(),
-            Err(UtxoScanError::InProgress)
-        ));
-        let (complete, scan) = permit
-            .scan(&BTreeSet::new(), || false)
-            .unwrap_or_else(|error| panic!("new stable coins: {error}"));
-        assert!(complete);
-        assert_eq!(scan.txouts, 0);
-    }
-
-    #[test]
     fn unwind_releases_the_reservation() {
-        let reader = UtxoReader::new(coins(1));
+        let reader = fixture_reader(1);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let permit = reader
                 .reserve_scan()
                 .unwrap_or_else(|error| panic!("reserve: {error}"));
-            let _ = permit.scan(&BTreeSet::new(), || panic!("interrupted caller"));
+            let snapshot = coin_snapshot(&reader);
+            let _ = permit.scan_snapshot(&*snapshot, &BTreeSet::new(), || {
+                panic!("interrupted caller")
+            });
         }));
         assert!(outcome.is_err());
         assert_eq!(reader.scan_progress(), None);
@@ -402,25 +512,24 @@ mod tests {
 
     #[test]
     fn abort_during_traversal_returns_only_visited_matches() {
-        let reader = UtxoReader::new(coins(1_024));
+        let reader = fixture_reader(512);
+        let snapshot = coin_snapshot(&reader);
         let permit = reader
             .reserve_scan()
             .unwrap_or_else(|error| panic!("reserve: {error}"));
-        let checks = Cell::new(0usize);
         let (complete, scan) = permit
-            .scan(&BTreeSet::from([vec![0x51]]), || {
-                checks.set(checks.get() + 1);
-                checks.get() == 5
+            .scan_snapshot(&*snapshot, &BTreeSet::from([vec![0x51]]), || {
+                reader.scan_progress().is_some_and(|percent| percent >= 50)
             })
             .unwrap_or_else(|error| panic!("bounded cancellation: {error}"));
         assert!(!complete);
-        assert_eq!(scan.txouts, 512);
-        assert_eq!(scan.unspents.len(), 512);
+        assert_eq!(scan.txouts, 256);
+        assert_eq!(scan.unspents.len(), 256);
     }
 
     #[test]
     fn a_reserved_walk_observes_the_scan_abort_flag() {
-        let reader = UtxoReader::new(coins(4));
+        let reader = fixture_reader(4);
         let permit = reader
             .reserve_scan()
             .unwrap_or_else(|error| panic!("reserve: {error}"));
@@ -434,19 +543,20 @@ mod tests {
 
     #[test]
     fn traversal_match_and_payload_bounds_fail_without_complete_results() {
-        let reader = UtxoReader::new(coins(4));
+        let reader = fixture_reader(4);
+        let snapshot = coin_snapshot(&reader);
         let permit = reader
             .reserve_scan()
             .unwrap_or_else(|error| panic!("reserve: {error}"));
         let scripts = BTreeSet::from([vec![0x51]]);
         for (coins, matches, bytes) in [(3, 4, 4), (4, 3, 4), (4, 4, 3)] {
             assert!(matches!(
-                permit.scan_bounded(&scripts, || false, coins, matches, bytes),
+                permit.scan_snapshot_bounded(&*snapshot, &scripts, || false, coins, matches, bytes),
                 Err(UtxoScanError::Limit(_))
             ));
         }
         let (complete, scan) = permit
-            .scan_bounded(&scripts, || false, 4, 4, 4)
+            .scan_snapshot_bounded(&*snapshot, &scripts, || false, 4, 4, 4)
             .unwrap_or_else(|error| panic!("inclusive budget: {error}"));
         assert!(complete);
         assert_eq!(scan.txouts, 4);
@@ -455,20 +565,21 @@ mod tests {
 
     #[test]
     fn needle_and_deadline_bounds_apply_before_traversal() {
-        let reader = UtxoReader::new(coins(1));
+        let reader = fixture_reader(1);
+        let snapshot = coin_snapshot(&reader);
         let mut permit = reader
             .reserve_scan()
             .unwrap_or_else(|error| panic!("reserve: {error}"));
-        let scripts = (0..=MAX_SCAN_SCRIPTS)
+        let scripts: BTreeSet<Vec<u8>> = (0..=MAX_SCAN_SCRIPTS)
             .map(|n| n.to_le_bytes().to_vec())
             .collect();
         assert!(matches!(
-            permit.scan(&scripts, || false),
+            permit.scan_snapshot(&*snapshot, &scripts, || false),
             Err(UtxoScanError::Limit(_))
         ));
-        let scripts = BTreeSet::from([vec![0u8; MAX_SCAN_SCRIPT_BYTES + 1]]);
+        let scripts = BTreeSet::from([vec![0_u8; MAX_SCAN_SCRIPT_BYTES + 1]]);
         assert!(matches!(
-            permit.scan(&scripts, || false),
+            permit.scan_snapshot(&*snapshot, &scripts, || false),
             Err(UtxoScanError::Limit(_))
         ));
         permit.started = Instant::now()

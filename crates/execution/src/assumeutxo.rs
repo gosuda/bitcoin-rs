@@ -91,6 +91,77 @@ impl ChainstateRole {
 
 pub use bitcoin_rs_storage::assumeutxo::{AssumeUtxoDiskStatus, HistoricalCheckpointRef};
 
+pub(crate) fn commit_error(error: bitcoin_rs_storage::CommitError) -> AssumeUtxoError {
+    match error {
+        bitcoin_rs_storage::CommitError::Storage(storage) => AssumeUtxoError::Storage(storage),
+        other => {
+            AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::backend(other.to_string()))
+        }
+    }
+}
+
+pub(crate) fn engine_coin_stats(
+    engine: &dyn bitcoin_rs_storage::KvStore,
+    tip: &crate::chain::TipSnapshot,
+) -> Result<bitcoin_rs_storage::utxo::stats::CoinStats, AssumeUtxoError> {
+    use bitcoin_rs_storage::utxo::SnapshotCoinObserver;
+    let mut accumulator =
+        bitcoin_rs_storage::utxo::stats::CoinStatsAccumulator::with_parallel_muhash(tip.height);
+    for item in engine.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
+        let (key, value) = item?;
+        let key: [u8; 32] = key.as_slice().try_into().map_err(|_| {
+            AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
+                "coin key is not a 32-byte txid",
+            ))
+        })?;
+        let txid = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&key);
+        let record =
+            bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(value.into_boxed_slice())?;
+        for out in record.outputs() {
+            accumulator.observe_coin(bitcoin_rs_storage::utxo::SnapshotCoin {
+                txid,
+                vout: out.vout,
+                value: out.value,
+                script_pubkey: out.script_pubkey,
+                height: out.height,
+                coinbase: out.coinbase,
+            });
+        }
+    }
+    let mut stats = accumulator.into_stats();
+    stats.tx_count = tip.chain_tx_count.to_wire();
+    Ok(stats)
+}
+
+/// Reconciles an interrupted snapshot activation before anything reads coins.
+///
+/// A durable activation marker without its activation head means the staged
+/// snapshot coin ingest never completed its head commit. The marker's staged
+/// coins are wiped from the engine and the marker cleared, leaving the exact
+/// pre-activation state; the activation must be run again from the snapshot
+/// file (CMT-01, CMT-03).
+///
+/// Callers must run this before installing a checkpoint engine image and
+/// before boot replay, so the wipe cannot erase rows the replay cannot
+/// rebuild.
+pub fn recover_snapshot_activation(active: &Chainstate) -> Result<(), AssumeUtxoError> {
+    match active
+        .commit_authority
+        .recover_snapshot_activation()
+        .map_err(commit_error)?
+    {
+        bitcoin_rs_storage::SnapshotActivationRecovery::Clean => Ok(()),
+        bitcoin_rs_storage::SnapshotActivationRecovery::RolledBack { marker } => {
+            tracing::warn!(
+                base_hash = %marker.base_hash.to_string_be(),
+                coin_count = marker.coin_count,
+                "interrupted snapshot activation rolled back; staged coins wiped and the pre-activation head kept; re-run the activation"
+            );
+            Ok(())
+        }
+    }
+}
+
 const DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL: u32 = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +210,8 @@ pub enum AssumeUtxoError {
     HistoricalCheckpointReferenceMismatch,
     #[error("historical checkpoint has no certified transaction count")]
     HistoricalCheckpointWithoutTransactionCount,
+    #[error("historical checkpoint has no engine image, so its coins cannot be restored")]
+    HistoricalCheckpointWithoutEngine,
     #[error("historical checkpoint is not on the pinned ancestry")]
     HistoricalCheckpointNotOnAncestry,
     #[error("historical checkpoint hash is not on the pinned ancestry")]
@@ -283,7 +356,6 @@ pub struct AssumeUtxoManager {
     network: Network,
     active_chainstate: Arc<Chainstate>,
     historical_chainstate: RwLock<Option<Arc<Chainstate>>>,
-    historical_undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
     data_dir: PathBuf,
     historical_checkpoint_interval: u32,
     pending_activation_mint: Mutex<Option<bitcoin_rs_storage::utxo::V4Witness>>,
@@ -307,7 +379,6 @@ struct HistoricalRecovery {
     historical_height: u32,
     historical_hash: Hash256,
     checkpoint: Option<HistoricalCheckpointRef>,
-    undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
 }
 
 #[derive(Clone, Copy)]
@@ -338,25 +409,19 @@ impl AssumeUtxoManager {
         data_dir: PathBuf,
         historical_checkpoint_interval: u32,
     ) -> Result<Self, AssumeUtxoError> {
+        crate::recover_snapshot_activation(&active_chainstate)?;
         let loaded_status = active_chainstate
             .durable_head
             .load()?
             .map_or(AssumeUtxoDiskStatus::Uninitialized, |head| head.assumeutxo);
-        let historical_undo = Arc::new(bitcoin_rs_storage::InMemoryUndoStore::default());
-        let historical = Self::restore_historical(
-            &active_chainstate,
-            network,
-            &data_dir,
-            &loaded_status,
-            &historical_undo,
-        )?;
+        let historical =
+            Self::restore_historical(&active_chainstate, network, &data_dir, &loaded_status)?;
 
         let manager = Self {
             lifecycle: Mutex::new(()),
             network,
             active_chainstate,
             historical_chainstate: RwLock::new(historical),
-            historical_undo,
             data_dir,
             historical_checkpoint_interval: historical_checkpoint_interval.max(1),
             pending_activation_mint: Mutex::new(None),
@@ -370,7 +435,6 @@ impl AssumeUtxoManager {
         network: Network,
         data_dir: &Path,
         loaded_status: &AssumeUtxoDiskStatus,
-        historical_undo: &Arc<bitcoin_rs_storage::InMemoryUndoStore>,
     ) -> Result<Option<Arc<Chainstate>>, AssumeUtxoError> {
         match *loaded_status {
             AssumeUtxoDiskStatus::Failed {
@@ -408,7 +472,6 @@ impl AssumeUtxoManager {
                         historical_height,
                         historical_hash,
                         checkpoint,
-                        undo: Arc::clone(historical_undo),
                     },
                 )
                 .map(Some)
@@ -448,7 +511,7 @@ impl AssumeUtxoManager {
             return active.create_historical_counterpart(
                 recovery.base_height,
                 recovery.base_hash,
-                recovery.undo,
+                None,
                 None,
             );
         };
@@ -461,6 +524,24 @@ impl AssumeUtxoManager {
         Self::install_historical_checkpoint(active, recovery, &checkpoint, restored)
     }
 
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn historical_checkpoint_engine(
+        network: Network,
+        data_dir: PathBuf,
+        checkpoint: &HistoricalCheckpointRef,
+    ) -> Result<Option<Arc<dyn bitcoin_rs_storage::KvStore>>, AssumeUtxoError> {
+        let recovery = HistoricalRecovery {
+            network,
+            data_dir,
+            base_height: checkpoint.height,
+            base_hash: checkpoint.hash,
+            historical_height: checkpoint.height,
+            historical_hash: checkpoint.hash,
+            checkpoint: Some(*checkpoint),
+        };
+        Ok(Self::load_historical_checkpoint(&recovery, checkpoint)?.engine)
+    }
+
     fn load_historical_checkpoint(
         recovery: &HistoricalRecovery,
         checkpoint: &HistoricalCheckpointRef,
@@ -471,8 +552,9 @@ impl AssumeUtxoManager {
             network: recovery.network,
             genesis: recovery.network.genesis_block_hash(),
         };
-        let loaded = crate::checkpoint::load_checkpoint_generation_from_dir(
+        let loaded = crate::checkpoint::load_checkpoint_generation_from_dir_with_path(
             &data,
+            Some(&recovery.data_dir),
             config,
             bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
             checkpoint.checkpoint,
@@ -490,6 +572,9 @@ impl AssumeUtxoManager {
         if restored.applied_tip.chain_tx_count.get().is_none() {
             return Err(AssumeUtxoError::HistoricalCheckpointWithoutTransactionCount);
         }
+        if restored.engine.is_none() {
+            return Err(AssumeUtxoError::HistoricalCheckpointWithoutEngine);
+        }
         Ok(*restored)
     }
 
@@ -502,7 +587,6 @@ impl AssumeUtxoManager {
         let HistoricalRecovery {
             base_height,
             base_hash,
-            undo,
             ..
         } = recovery;
         let mut tree = active.block_tree.write();
@@ -539,8 +623,8 @@ impl AssumeUtxoManager {
         active.create_historical_counterpart(
             base_height,
             base_hash,
-            undo,
-            Some((restored.utxo, restored.coin_stats, applied_tip)),
+            restored.engine,
+            Some(applied_tip),
         )
     }
 
@@ -634,8 +718,12 @@ impl AssumeUtxoManager {
         let (set, stats, staging_witness) =
             crate::assumeutxo_snapshot::write_coins_sealed(&self.data_dir, state, pinned)
                 .map_err(AssumeUtxoError::Archive)?;
-        self.active_chainstate
-            .install_snapshot(set, stats, pinned, |tree, tip, prior| {
+        let activation_authority = Arc::clone(&self.active_chainstate.commit_authority);
+        self.active_chainstate.install_snapshot(
+            set,
+            stats,
+            pinned,
+            |tree, tip, prior, marker| {
                 if crate::recovery::requires_full_revalidation(&self.data_dir) {
                     return Err(AssumeUtxoError::FullRevalidationRequired);
                 }
@@ -650,22 +738,28 @@ impl AssumeUtxoManager {
                     body_extent: prior.and_then(|head| head.body_extent),
                     undo_extent: prior.and_then(|head| head.undo_extent),
                 };
-                self.active_chainstate.durable_head.commit(
-                    prior,
-                    &next,
-                    &bitcoin_rs_storage::CommitRecords {
-                        attestation: Some(bitcoin_rs_storage::ScriptAttestation::AssumeValid),
-                        ..bitcoin_rs_storage::CommitRecords::default()
-                    },
-                )?;
+                activation_authority
+                    .commit_snapshot_activation(
+                        bitcoin_rs_storage::AcceptedPrefix {
+                            expected_head: prior.cloned(),
+                            next_head: next,
+                            undo_rows: Vec::new(),
+                            body_rows: Vec::new(),
+                            attestation: Some(bitcoin_rs_storage::ScriptAttestation::AssumeValid),
+                            coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+                        },
+                        marker,
+                    )
+                    .map_err(commit_error)?;
                 Ok(())
-            })?;
+            },
+        )?;
         *self.pending_activation_mint.lock() = staging_witness;
 
         let historical = self.active_chainstate.create_historical_counterpart(
             pinned.height,
             pinned.block_hash,
-            Arc::clone(&self.historical_undo),
+            None,
             None,
         )?;
 
@@ -678,6 +772,14 @@ impl AssumeUtxoManager {
         self.pending_activation_mint.lock().take()
     }
 
+    /// Connects one historical block and records validation progress.
+    ///
+    /// The historical chainstate's coin statistics move with the commit: the
+    /// tracked `CoinStore` feeds the listener the coin delta of every committed
+    /// window, and the connect adds the block's transaction count. A step
+    /// therefore costs the block, not the accumulated coin set. The listener is
+    /// seeded from the checkpoint engine image on restore and starts empty
+    /// otherwise (`create_historical_counterpart`).
     pub fn step_historical(&self, payload: &BlockImage) -> Result<ConnectOutcome, AssumeUtxoError> {
         let _lifecycle = self.lifecycle.lock();
         let historical = self
@@ -689,8 +791,9 @@ impl AssumeUtxoManager {
         if !archived {
             self.record_historical_progress(&historical, payload, &outcome)?;
         }
-        self.historical_undo
-            .remove_archived(outcome.height, outcome.hash);
+        historical
+            .undo_store
+            .remove_archived(outcome.height, outcome.hash)?;
         Ok(outcome)
     }
 
@@ -812,14 +915,14 @@ impl AssumeUtxoManager {
                 found: outcome_hash,
             });
         }
-        let actual_hash_serialized = historical
-            .utxo
-            .lock_stable_view()
-            .hash_serialized_3()
-            .inspect_err(|_| {
-                self.active_chainstate.fail_closed_for_recovery();
-                historical.fail_closed_for_recovery();
-            })?;
+        let actual_hash_serialized = (|| {
+            let snapshot = historical.commit_authority.store().snapshot()?;
+            bitcoin_rs_storage::utxo::snapshot::hash_serialized_3_snapshot(snapshot.as_ref(), None)
+        })()
+        .inspect_err(|_| {
+            self.active_chainstate.fail_closed_for_recovery();
+            historical.fail_closed_for_recovery();
+        })?;
         let actual_count = historical
             .applied_tip_snapshot()
             .map_or(0, |tip| tip.chain_tx_count.to_wire());
@@ -1021,7 +1124,12 @@ impl AssumeUtxoManager {
             ..
         } = self.status()?
         {
-            let actual_hash_serialized = historical.utxo.lock_stable_view().hash_serialized_3()?;
+            let snapshot = historical.commit_authority.store().snapshot()?;
+            let actual_hash_serialized =
+                bitcoin_rs_storage::utxo::snapshot::hash_serialized_3_snapshot(
+                    snapshot.as_ref(),
+                    None,
+                )?;
             let failed = AssumeUtxoDiskStatus::Failed {
                 base_height,
                 base_hash,
@@ -1091,11 +1199,17 @@ impl AssumeUtxoManager {
                 .or(prior.body_extent),
             ..prior
         };
-        active.durable_head.commit(
-            Some(&prior),
-            &next,
-            &bitcoin_rs_storage::CommitRecords::default(),
-        )?;
+        active
+            .commit_authority
+            .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                expected_head: Some(prior),
+                next_head: next,
+                undo_rows: Vec::new(),
+                body_rows: Vec::new(),
+                attestation: None,
+                coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+            })
+            .map_err(commit_error)?;
         Ok(false)
     }
 
@@ -1146,7 +1260,7 @@ impl AssumeUtxoManager {
                 .lock_transition()?
                 .into_transition()
                 .connect(&payload)?;
-            self.historical_undo.remove_archived(height, hash);
+            historical.undo_store.remove_archived(height, hash)?;
         }
         let payload = if pending.height == 0 && pending.hash == self.network.genesis_block_hash() {
             BlockImage::from_local(self.network.genesis_block())
@@ -1180,17 +1294,17 @@ impl AssumeUtxoManager {
             .load()?
             .ok_or(AssumeUtxoError::MissingDurableAnchor)?;
         self.maybe_publish_historical_checkpoint(&mut status, historical_block.map(|(_, cs)| cs))?;
-        let mut records = bitcoin_rs_storage::CommitRecords::default();
-        let undo;
+        let mut body_rows: Vec<(u32, Hash256, bitcoin_rs_storage::BlockFilePosition)> = Vec::new();
+        let mut undo_rows: Vec<(u32, Hash256, bytes::Bytes)> = Vec::new();
         if let Some((block, historical)) = historical_block {
             let tip = historical
                 .applied_tip_snapshot()
                 .ok_or(AssumeUtxoError::NoHistoricalChainstate)?;
-            undo = historical
+            let undo = historical
                 .undo_store
                 .load_undo(tip.height, tip.hash)?
                 .ok_or(AssumeUtxoError::MissingHistoricalUndo)?;
-            records.undo_rows.push((tip.height, tip.hash, &undo));
+            undo_rows.push((tip.height, tip.hash, bytes::Bytes::copy_from_slice(&undo)));
             if let Some(store) = &active.block_body_store {
                 let staged = match prior.assumeutxo {
                     AssumeUtxoDiskStatus::Validating {
@@ -1207,15 +1321,14 @@ impl AssumeUtxoManager {
                 };
                 store.sync()?;
                 if let Some(position) = position {
-                    records.body_rows.push((tip.height, tip.hash, position));
+                    body_rows.push((tip.height, tip.hash, position));
                 }
             }
         }
         let next = bitcoin_rs_storage::DurableHead {
             commit_id: prior.commit_id + 1,
             assumeutxo: status,
-            undo_extent: records
-                .undo_rows
+            undo_extent: undo_rows
                 .last()
                 .map(|(height, hash, _)| (*height, *hash))
                 .filter(|(height, _)| prior.undo_extent.is_none_or(|(old, _)| *height > old))
@@ -1239,7 +1352,17 @@ impl AssumeUtxoManager {
             }
             _ => false,
         };
-        active.durable_head.commit(Some(&prior), &next, &records)?;
+        active
+            .commit_authority
+            .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                expected_head: Some(prior),
+                next_head: next,
+                undo_rows,
+                body_rows,
+                attestation: None,
+                coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+            })
+            .map_err(commit_error)?;
         if finalized_full {
             active
                 .durable_head
@@ -1322,15 +1445,16 @@ impl AssumeUtxoManager {
             network: self.network,
             genesis: self.network.genesis_block_hash(),
         };
-        let (write, _historical_witness) = crate::checkpoint::write_checkpoint_from_dir_at(
+        let write = crate::checkpoint::write_historical_checkpoint_with_store(
             &data,
             config,
             &historical.block_tree,
-            &historical.utxo,
             &historical.coin_stats,
             Some(&tip),
-            bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
-            bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
+            crate::checkpoint::CheckpointStoreTarget {
+                store: historical.commit_authority.store().as_ref(),
+                host_data_dir: &self.data_dir,
+            },
         )
         .map_err(|error| AssumeUtxoError::HistoricalCheckpointPublish { error })?;
         let reference = match write {

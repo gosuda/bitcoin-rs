@@ -27,7 +27,7 @@ pool-sv2 = [
 ]
 silent-payments = ["bitcoin-rs-projection/silent-payments"]
 # Synthetic capability worlds for tests, not production composition.
-test-seam = ["bitcoin-rs-projection/test-seam"]
+test-seam = ["bitcoin-rs-projection/test-seam", "bitcoin-rs-storage/test-seam"]
 zmq = ["dep:zmq"]
 
 [dependencies]

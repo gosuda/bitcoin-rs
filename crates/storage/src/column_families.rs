@@ -12,7 +12,7 @@ pub enum ColumnFamily {
     BlockBodies = 8,
     UndoData = 9,
     ScriptLive = 10,
-    CoinRecords = 11,
+    Coins = 11,
     PoolLedger = 12,
 }
 
@@ -29,7 +29,7 @@ impl ColumnFamily {
         Self::BlockBodies,
         Self::UndoData,
         Self::ScriptLive,
-        Self::CoinRecords,
+        Self::Coins,
         Self::PoolLedger,
     ];
     pub const fn name(self) -> &'static str {
@@ -45,7 +45,7 @@ impl ColumnFamily {
             Self::BlockBodies => "block_bodies",
             Self::UndoData => "undo_data",
             Self::ScriptLive => "script_live",
-            Self::CoinRecords => "coin_records",
+            Self::Coins => "coins",
             Self::PoolLedger => "pool_ledger",
         }
     }
@@ -63,7 +63,7 @@ impl ColumnFamily {
             Self::BlockBodies => 8,
             Self::UndoData => 9,
             Self::ScriptLive => 10,
-            Self::CoinRecords => 11,
+            Self::Coins => 11,
             Self::PoolLedger => 12,
         }
     }

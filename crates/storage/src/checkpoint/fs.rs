@@ -10,7 +10,7 @@ use cap_std::fs::{Dir, File, OpenOptions};
 pub const CURRENT_SCHEMA_FILE: &str = "CURRENT_SCHEMA";
 pub const DATA_DIR_LOCK_FILE: &str = ".lock";
 const CURRENT_SCHEMA_TEMP_FILE: &str = ".CURRENT_SCHEMA.tmp";
-const CURRENT_SCHEMA_VERSION: u32 = 3;
+const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 pub fn open_data_dir(path: &Path) -> io::Result<Dir> {
     Dir::open_ambient_dir(path, ambient_authority())
@@ -310,19 +310,32 @@ fn check_confined_endpoint(name: &str) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn remove_known_dir(root: &CheckpointRoot, name: &str) -> io::Result<()> {
-    let dir = root.open_dir(name)?;
+/// Name of the nested engine-image directory a staged checkpoint generation
+/// writes under itself (`CheckpointStage::checkpoint_store`).
+pub(crate) const STAGED_STORE_DIR: &str = "chainstate";
+
+fn remove_known_dir_content(dir: &Dir) -> io::Result<()> {
     for entry in dir.entries()? {
         let entry = entry?;
         let file_name = entry.file_name();
-        let Some(file_name) = file_name.to_str() else {
-            continue;
-        };
         let file_type = entry.file_type()?;
-        if file_type.is_file() {
-            dir.remove_file(file_name)?;
+        if file_type.is_dir() && file_name != std::ffi::OsStr::new(STAGED_STORE_DIR) {
+            continue;
+        }
+        if file_type.is_dir() {
+            let child = dir.open_dir_nofollow(&file_name)?;
+            remove_known_dir_content(&child)?;
+            dir.remove_dir(&file_name)?;
+        } else {
+            dir.remove_file(&file_name)?;
         }
     }
+    Ok(())
+}
+
+pub(crate) fn remove_known_dir(root: &CheckpointRoot, name: &str) -> io::Result<()> {
+    let dir = root.open_dir(name)?;
+    remove_known_dir_content(&dir)?;
     drop(dir);
     root.remove_dir(name)
 }

@@ -1,8 +1,8 @@
-use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut, varint};
-use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
-use bitcoin_rs_storage::utxo::{UtxoError, UtxoSet};
-use sha2::{Digest, Sha256};
-
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, populate_block_changes};
+use bitcoin_rs_storage::utxo::{UtxoError, UtxoReader};
+use bitcoin_rs_storage::{CoinStore, MemoryKvStore};
+use std::sync::Arc;
 type Entry = (OutPoint, TxOut, bool, u32);
 use crate::support::utxo::{TestError, TestResult};
 
@@ -50,41 +50,6 @@ fn txid_in_shard(shard: u8, suffix: u64) -> Hash256 {
     Hash256::from_le_bytes(&bytes)
 }
 
-fn expected_hash_serialized_3(entries: &[Entry]) -> Result<Hash256, TestError> {
-    let mut sorted: Vec<&Entry> = entries.iter().collect();
-    sorted.sort_unstable_by(|left, right| {
-        left.0
-            .txid
-            .0
-            .to_le_bytes()
-            .cmp(&right.0.txid.0.to_le_bytes())
-            .then_with(|| {
-                let left_vout = left.0.vout;
-                let right_vout = right.0.vout;
-                left_vout.cmp(&right_vout)
-            })
-    });
-
-    let mut engine = Sha256::new();
-    for (outpoint, txout, coinbase, height) in sorted {
-        engine.update(outpoint.txid.0.to_le_bytes());
-        engine.update(outpoint.vout.to_le_bytes());
-        let code = (*height << 1) | u32::from(*coinbase);
-        engine.update(code.to_le_bytes());
-        engine.update(txout.value.to_le_bytes());
-        let script = txout.script_pubkey.as_slice();
-        let script_len = u64::try_from(script.len())?;
-        let encoded_len = varint::encode(script_len);
-        engine.update(encoded_len.as_slice());
-        engine.update(script);
-    }
-
-    let first = engine.finalize();
-    let second = Sha256::digest(first);
-    let bytes: [u8; 32] = second.into();
-    Ok(Hash256::from_le_bytes(&bytes))
-}
-
 fn borrowed_changes<'a>(adds: &'a [Entry], removes: &[OutPoint]) -> BlockChanges<&'a TxOut> {
     let mut changes = BlockChanges::with_capacity(adds.len(), removes.len());
     for remove in removes {
@@ -107,68 +72,77 @@ fn owned_changes(adds: &[Entry], removes: &[OutPoint]) -> BlockChanges {
     changes
 }
 
-type CommitPath = fn(&UtxoSet, &[Entry], &[OutPoint], &Hash256) -> Result<(), UtxoError>;
+type CommitPath = fn(&CoinStore, &[Entry], &[OutPoint], &Hash256) -> Result<(), UtxoError>;
 
 fn commit_borrowed(
-    set: &UtxoSet,
+    store: &CoinStore,
     adds: &[Entry],
     removes: &[OutPoint],
-    block: &Hash256,
+    _block: &Hash256,
 ) -> Result<(), UtxoError> {
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        set,
-        &borrowed_changes(adds, removes),
-        block,
-    )
+    populate_block_changes(store, &borrowed_changes(adds, removes))
 }
 
 fn commit_owned(
-    set: &UtxoSet,
+    store: &CoinStore,
     adds: &[Entry],
     removes: &[OutPoint],
-    block: &Hash256,
+    _block: &Hash256,
 ) -> Result<(), UtxoError> {
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(
-        set,
-        &owned_changes(adds, removes),
-        block,
-    )
+    populate_block_changes(store, &owned_changes(adds, removes))
 }
 
 #[test]
-fn owned_and_borrowed_commits_match_independent_state_hashes() -> TestResult {
-    use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
-
+fn owned_and_borrowed_commits_preserve_coin_fields() -> TestResult {
     for shard_count in [1_u8, 20] {
-        for with_listener in [false, true] {
-            let mut owned = UtxoSet::new();
-            let mut borrowed = UtxoSet::new();
-            if with_listener {
-                owned.track_coin_stats(CoinStatsListener::new(CoinStats::new()));
-                borrowed.track_coin_stats(CoinStatsListener::new(CoinStats::new()));
+        let store1 = Arc::new(MemoryKvStore::new());
+        let owned = Arc::new(CoinStore::open(store1, 64 * 1024 * 1024));
+        let store2 = Arc::new(MemoryKvStore::new());
+        let borrowed = Arc::new(CoinStore::open(store2, 64 * 1024 * 1024));
+
+        let mut entries: Vec<Entry> = (0_u8..64)
+            .map(|index| {
+                let outpoint = OutPoint::new(
+                    txid_in_shard(index % shard_count, u64::from(index)).into(),
+                    u32::from(index),
+                );
+                (outpoint, txout(u64::from(index)), index % 2 == 0, 100)
+            })
+            .collect();
+        let mut removes = Vec::new();
+        for round in 0..2 {
+            commit_owned(&owned, &entries, &removes, &txid(round))?;
+            commit_borrowed(&borrowed, &entries, &removes, &txid(round))?;
+            let reader_owned = UtxoReader::from_coin_store(Arc::clone(&owned));
+            let reader_borrowed = UtxoReader::from_coin_store(Arc::clone(&borrowed));
+            for (outpoint, txout, coinbase, height) in &entries {
+                let expected = Some((txout.clone(), *coinbase, *height));
+                assert_eq!(
+                    reader_owned.get_entry(outpoint)?.map(|coin| (
+                        coin.txout,
+                        coin.coinbase,
+                        coin.height
+                    )),
+                    expected
+                );
+                assert_eq!(
+                    reader_borrowed.get_entry(outpoint)?.map(|coin| (
+                        coin.txout,
+                        coin.coinbase,
+                        coin.height
+                    )),
+                    expected
+                );
             }
-            let mut entries: Vec<Entry> = (0_u8..64)
-                .map(|index| {
-                    let outpoint = OutPoint::new(
-                        txid_in_shard(index % shard_count, u64::from(index)).into(),
-                        u32::from(index),
-                    );
-                    (outpoint, txout(u64::from(index)), index % 2 == 0, 100)
-                })
-                .collect();
-            let mut removes = Vec::new();
-            for round in 0..2 {
-                commit_owned(&owned, &entries, &removes, &txid(round))?;
-                commit_borrowed(&borrowed, &entries, &removes, &txid(round))?;
-                let expected = expected_hash_serialized_3(&entries)?;
-                assert_eq!(owned.lock_stable_view().hash_serialized_3()?, expected);
-                assert_eq!(borrowed.lock_stable_view().hash_serialized_3()?, expected);
-                removes = entries.drain(..16).map(|entry| entry.0).collect();
-                for (_, txout, coinbase, height) in &mut entries {
-                    txout.value = Amount::from_sat(77);
-                    *coinbase = !*coinbase;
-                    *height += 1;
-                }
+            for outpoint in &removes {
+                assert_eq!(reader_owned.get(outpoint)?, None);
+                assert_eq!(reader_borrowed.get(outpoint)?, None);
+            }
+            removes = entries.drain(..16).map(|entry| entry.0).collect();
+            for (_, txout, coinbase, height) in &mut entries {
+                txout.value = Amount::from_sat(77);
+                *coinbase = !*coinbase;
+                *height += 1;
             }
         }
     }
@@ -177,11 +151,13 @@ fn owned_and_borrowed_commits_match_independent_state_hashes() -> TestResult {
 
 #[test]
 fn an_invalid_add_rejects_the_whole_commit_in_every_commit_path() -> TestResult {
+    let commit_paths: [CommitPath; 2] = [commit_owned, commit_borrowed];
     for cross_shard in [false, true] {
         let far_shard = u8::from(cross_shard);
-        let commit_paths: [CommitPath; 2] = [commit_owned, commit_borrowed];
         for commit in commit_paths {
-            let set = UtxoSet::new();
+            let store = Arc::new(MemoryKvStore::new());
+            let coin_store = Arc::new(CoinStore::open(store, 64 * 1024 * 1024));
+            let reader = UtxoReader::from_coin_store(Arc::clone(&coin_store));
             let retained = OutPoint::new(txid_in_shard(0, 100).into(), 0);
             let peer = OutPoint::new(txid_in_shard(far_shard, 101).into(), 0);
             let retained_txout = txout(100);
@@ -190,7 +166,7 @@ fn an_invalid_add_rejects_the_whole_commit_in_every_commit_path() -> TestResult 
                 (retained, retained_txout.clone(), false, 10),
                 (peer, peer_txout.clone(), false, 10),
             ];
-            commit_owned(&set, &preload, &[], &txid(102))?;
+            commit_owned(&coin_store, &preload, &[], &txid(102))?;
 
             let valid_add = OutPoint::new(txid_in_shard(0, 200).into(), 0);
             let invalid_add = OutPoint::new(txid_in_shard(far_shard, 201).into(), 0);
@@ -198,7 +174,7 @@ fn an_invalid_add_rejects_the_whole_commit_in_every_commit_path() -> TestResult 
                 (valid_add, txout(200), false, 11),
                 (invalid_add, oversized_txout(201), false, 11),
             ];
-            let error = match commit(&set, &adds, &[retained], &txid(103)) {
+            let error = match commit(&coin_store, &adds, &[retained], &txid(103)) {
                 Ok(()) => {
                     return Err(TestError::UnexpectedSuccess(
                         "oversized script unexpectedly committed",
@@ -214,18 +190,17 @@ fn an_invalid_add_rejects_the_whole_commit_in_every_commit_path() -> TestResult 
                 "unexpected error: {error}"
             );
             assert_eq!(
-                set.get(&retained),
+                reader.get(&retained)?,
                 Some(retained_txout),
                 "a rejected commit applied its removes"
             );
-            assert_eq!(set.get(&peer), Some(peer_txout));
+            assert_eq!(reader.get(&peer)?, Some(peer_txout));
             assert_eq!(
-                set.get(&valid_add),
+                reader.get(&valid_add)?,
                 None,
                 "a rejected commit applied an earlier add"
             );
-            assert_eq!(set.get(&invalid_add), None);
-            assert_eq!(set.len(), 2);
+            assert_eq!(reader.get(&invalid_add)?, None);
         }
     }
     Ok(())
@@ -248,7 +223,9 @@ fn output_boundaries_roundtrip_through_get_scan_and_spend() -> TestResult {
         ),
     ];
     let live = txid(88);
-    let set = UtxoSet::new();
+    let store = Arc::new(MemoryKvStore::new());
+    let coin_store = Arc::new(CoinStore::open(store, 64 * 1024 * 1024));
+    let reader = UtxoReader::from_coin_store(Arc::clone(&coin_store));
     let entries: Vec<Entry> = cases
         .iter()
         .map(|(vout, value, coinbase, height, script)| {
@@ -263,50 +240,73 @@ fn output_boundaries_roundtrip_through_get_scan_and_spend() -> TestResult {
             )
         })
         .collect();
-    commit_owned(&set, &entries, &[], &txid(90))?;
+    commit_owned(&coin_store, &entries, &[], &txid(90))?;
 
-    assert_eq!(set.record_count(), 1, "one txid must hold one record");
-    assert_eq!(set.len(), entries.len());
-    assert_eq!(
-        set.lock_stable_view().hash_serialized_3()?,
-        expected_hash_serialized_3(&entries)?
-    );
-    assert!(set.has_live_outputs_for_txid(&live));
-    assert!(!set.has_live_outputs_for_txid(&txid(89)));
+    assert!(reader.has_live_outputs_for_txid(&live)?);
+    assert!(!reader.has_live_outputs_for_txid(&txid(89))?);
 
     for (outpoint, txout, coinbase, height) in &entries {
-        assert_eq!(set.get(outpoint).as_ref(), Some(txout));
-        let entry = set
-            .get_entry(outpoint)
+        assert_eq!(reader.get(outpoint)?.as_ref(), Some(txout));
+        let entry = reader
+            .get_entry(outpoint)?
             .ok_or(TestError::Missing("expected a committed output to be live"))?;
         assert_eq!(&entry.txout, txout);
         assert_eq!(entry.coinbase, *coinbase, "coinbase lost at {outpoint:?}");
         assert_eq!(entry.height, *height, "height lost at {outpoint:?}");
-
-        let scan = set.scan_script_pubkeys(std::slice::from_ref(&txout.script_pubkey))?;
-        assert_eq!(scan.txouts, entries.len());
-        assert_eq!(scan.unspents.len(), 1, "scan matched the wrong outputs");
-        assert_eq!(scan.unspents[0].outpoint, *outpoint);
-        assert_eq!(scan.unspents[0].txout, *txout);
-        assert_eq!(scan.unspents[0].coinbase, *coinbase);
-        assert_eq!(scan.unspents[0].height, *height);
     }
+
+    let view = reader.lock_stable_view()?;
+    let mut remaining: std::collections::HashSet<_> =
+        entries.iter().map(|(outpoint, ..)| *outpoint).collect();
+    let mut scan_failure: Option<TestError> = None;
+    view.for_each_all(|outpoint, script| {
+        assert!(
+            remaining.remove(outpoint),
+            "unexpected or duplicate output {outpoint:?}"
+        );
+        if scan_failure.is_some() {
+            return;
+        }
+        let Some((_, txout, coinbase, height)) = entries
+            .iter()
+            .find(|(expected_outpoint, ..)| expected_outpoint == outpoint)
+        else {
+            scan_failure = Some(TestError::Missing(
+                "scanned output does not belong to the supplied inputs",
+            ));
+            return;
+        };
+        assert_eq!(script, txout.script_pubkey.as_slice());
+        let Some(coin) = view.get_entry(outpoint) else {
+            scan_failure = Some(TestError::Missing("scanned coin must be live"));
+            return;
+        };
+        assert_eq!(
+            (&coin.txout, coin.coinbase, coin.height),
+            (txout, *coinbase, *height)
+        );
+    });
+    if let Some(failure) = scan_failure {
+        return Err(failure);
+    }
+    assert!(remaining.is_empty());
+    drop(view);
 
     for (index, (outpoint, _txout, _coinbase, _height)) in entries.iter().enumerate() {
-        assert!(set.has_live_outputs_for_txid(&live));
+        assert!(reader.has_live_outputs_for_txid(&live)?);
         let block = txid(91 + u64::try_from(index)?);
-        commit_owned(&set, &[], std::slice::from_ref(outpoint), &block)?;
-        assert_eq!(set.get(outpoint), None);
+        commit_owned(&coin_store, &[], std::slice::from_ref(outpoint), &block)?;
+        assert_eq!(reader.get(outpoint)?, None);
     }
-    assert!(!set.has_live_outputs_for_txid(&live));
-    assert_eq!(set.record_count(), 0);
-    assert!(set.is_empty());
+    assert!(!reader.has_live_outputs_for_txid(&live)?);
     Ok(())
 }
 
 #[test]
 fn high_vout_full_record_delete_removes_all_outputs_in_one_commit() -> TestResult {
-    let set = UtxoSet::new();
+    let store = Arc::new(MemoryKvStore::new());
+    let coin_store = Arc::new(CoinStore::open(store, 64 * 1024 * 1024));
+    let reader = UtxoReader::from_coin_store(Arc::clone(&coin_store));
     let live = txid(93);
     let adds: Vec<Entry> = (64_u32..128)
         .map(|vout| {
@@ -319,18 +319,14 @@ fn high_vout_full_record_delete_removes_all_outputs_in_one_commit() -> TestResul
         })
         .collect();
     let removes: Vec<OutPoint> = adds.iter().map(|entry| entry.0).collect();
-    commit_owned(&set, &adds, &[], &txid(94))?;
-    assert_eq!(set.record_count(), 1);
-    assert_eq!(set.len(), 64);
+    commit_owned(&coin_store, &adds, &[], &txid(94))?;
 
-    commit_owned(&set, &[], &removes, &txid(95))?;
+    commit_owned(&coin_store, &[], &removes, &txid(95))?;
 
     for remove in &removes {
-        assert_eq!(set.get(remove), None);
+        assert_eq!(reader.get(remove)?, None);
     }
-    assert!(!set.has_live_outputs_for_txid(&live));
-    assert_eq!(set.record_count(), 0);
-    assert!(set.is_empty());
+    assert!(!reader.has_live_outputs_for_txid(&live)?);
     Ok(())
 }
 
@@ -338,7 +334,9 @@ fn high_vout_full_record_delete_removes_all_outputs_in_one_commit() -> TestResul
 fn a_shared_txid_prefix_keeps_records_and_deletes_independent() -> TestResult {
     for reverse in [false, true] {
         let prefix = 0xfeed_face_cafe_beef_u64;
-        let set = UtxoSet::new();
+        let store = Arc::new(MemoryKvStore::new());
+        let coin_store = Arc::new(CoinStore::open(store, 64 * 1024 * 1024));
+        let reader = UtxoReader::from_coin_store(Arc::clone(&coin_store));
         let first = txid_with_prefix(prefix, if reverse { 2 } else { 1 });
         let second = txid_with_prefix(prefix, if reverse { 1 } else { 2 });
         let first_a = OutPoint::new(first.into(), 0);
@@ -354,26 +352,26 @@ fn a_shared_txid_prefix_keeps_records_and_deletes_independent() -> TestResult {
         if reverse {
             adds.reverse();
         }
-        commit_owned(&set, &adds, &[], &txid(300))?;
+        commit_owned(&coin_store, &adds, &[], &txid(300))?;
 
-        commit_owned(&set, &[], &[first_a], &txid(301))?;
-        assert_eq!(set.get(&first_a), None);
-        assert_eq!(set.get(&first_b), Some(first_b_txout));
-        assert_eq!(set.get(&peer), Some(peer_txout.clone()));
+        commit_owned(&coin_store, &[], &[first_a], &txid(301))?;
+        assert_eq!(reader.get(&first_a)?, None);
+        assert_eq!(reader.get(&first_b)?, Some(first_b_txout));
+        assert_eq!(reader.get(&peer)?, Some(peer_txout.clone()));
 
-        commit_owned(&set, &[], &[first_b], &txid(302))?;
-        assert_eq!(set.get(&peer), Some(peer_txout));
-        assert!(!set.has_live_outputs_for_txid(&first));
-        assert!(set.has_live_outputs_for_txid(&second));
-        assert_eq!(set.record_count(), 1);
-        assert_eq!(set.len(), 1);
+        commit_owned(&coin_store, &[], &[first_b], &txid(302))?;
+        assert_eq!(reader.get(&peer)?, Some(peer_txout));
+        assert!(!reader.has_live_outputs_for_txid(&first)?);
+        assert!(reader.has_live_outputs_for_txid(&second)?);
     }
     Ok(())
 }
 
 #[test]
 fn duplicate_remove_does_not_fast_delete_unspent_vout() -> TestResult {
-    let set = UtxoSet::new();
+    let store = Arc::new(MemoryKvStore::new());
+    let coin_store = Arc::new(CoinStore::open(store, 64 * 1024 * 1024));
+    let reader = UtxoReader::from_coin_store(Arc::clone(&coin_store));
     let live = txid(700);
     let removed = OutPoint::new(live.into(), 0);
     let retained = OutPoint::new(live.into(), 1);
@@ -382,14 +380,104 @@ fn duplicate_remove_does_not_fast_delete_unspent_vout() -> TestResult {
         (removed, txout(700), false, 1),
         (retained, retained_txout.clone(), false, 1),
     ];
-    commit_owned(&set, &adds, &[], &txid(702))?;
+    commit_owned(&coin_store, &adds, &[], &txid(702))?;
 
-    commit_owned(&set, &[], &[removed, removed], &txid(703))?;
+    commit_owned(&coin_store, &[], &[removed, removed], &txid(703))?;
 
-    assert_eq!(set.get(&removed), None);
-    assert_eq!(set.get(&retained), Some(retained_txout));
-    assert!(set.has_live_outputs_for_txid(&live));
-    assert_eq!(set.record_count(), 1);
-    assert_eq!(set.len(), 1);
+    assert_eq!(reader.get(&removed)?, None);
+    assert_eq!(reader.get(&retained)?, Some(retained_txout));
+    assert!(reader.has_live_outputs_for_txid(&live)?);
+    Ok(())
+}
+
+#[test]
+fn coin_store_scans_b_framed_values_matching_oracle() -> TestResult {
+    use bitcoin_rs_storage::utxo::record::{B_FRAMING_FLAG, RecordFraming, UtxoRecord};
+    use bitcoin_rs_storage::{ColumnFamily, KvStore};
+
+    let store: Arc<dyn KvStore> = Arc::new(MemoryKvStore::new());
+    let coin_store = Arc::new(CoinStore::open(Arc::clone(&store), 64 * 1024 * 1024));
+
+    let txid1 = txid(1);
+    let txid2 = txid(2);
+    let out1_0 = OutPoint::new(txid1.into(), 0);
+    let out1_1 = OutPoint::new(txid1.into(), 1);
+    let out2_0 = OutPoint::new(txid2.into(), 0);
+
+    let txout1_0 = txout(10);
+    let txout1_1 = txout(20);
+    let txout2_0 = txout(30);
+
+    let adds1 = [
+        (out1_0, txout1_0.clone(), false, 100),
+        (out1_1, txout1_1.clone(), true, 100),
+        (out2_0, txout2_0.clone(), false, 100),
+    ];
+    commit_owned(&coin_store, &adds1, &[], &txid(101))?;
+
+    let spend_out1_0 = [out1_0];
+    let txid3 = txid(3);
+    let out3_0 = OutPoint::new(txid3.into(), 0);
+    let txout3_0 = txout(40);
+    let adds2 = [(out3_0, txout3_0.clone(), false, 101)];
+    commit_owned(&coin_store, &adds2, &spend_out1_0, &txid(102))?;
+
+    let mut scanned_rows = 0;
+    for item in store
+        .iter_prefix(ColumnFamily::Coins, &[])
+        .map_err(UtxoError::from)?
+    {
+        let (key, value) = item.map_err(UtxoError::from)?;
+        scanned_rows += 1;
+
+        assert!(value.len() > 36, "coin row must have header");
+        assert_eq!(
+            value[36] & B_FRAMING_FLAG,
+            B_FRAMING_FLAG,
+            "engine coin row must have b-framing discriminator set"
+        );
+
+        let record = UtxoRecord::from_encoded(value.to_vec().into_boxed_slice())?;
+        assert_eq!(record.framing(), RecordFraming::B);
+
+        let mut key_bytes = [0_u8; 32];
+        key_bytes.copy_from_slice(&key);
+        let row_txid = Hash256::from_le_bytes(&key_bytes);
+        assert_eq!(record.txid(), row_txid);
+
+        if row_txid == txid1 {
+            assert_eq!(record.output_count(), 1);
+            let out = record
+                .find_output(1)
+                .ok_or(TestError::Missing("out1_1 must exist"))?;
+            assert_eq!(out.value, txout1_1.value.to_sat());
+            assert_eq!(out.script_pubkey, txout1_1.script_pubkey.as_slice());
+            assert!(out.coinbase);
+            assert_eq!(out.height, 100);
+            assert!(record.find_output(0).is_none());
+        } else if row_txid == txid2 {
+            assert_eq!(record.output_count(), 1);
+            let out = record
+                .find_output(0)
+                .ok_or(TestError::Missing("out2_0 must exist"))?;
+            assert_eq!(out.value, txout2_0.value.to_sat());
+            assert_eq!(out.script_pubkey, txout2_0.script_pubkey.as_slice());
+            assert!(!out.coinbase);
+            assert_eq!(out.height, 100);
+        } else if row_txid == txid3 {
+            assert_eq!(record.output_count(), 1);
+            let out = record
+                .find_output(0)
+                .ok_or(TestError::Missing("out3_0 must exist"))?;
+            assert_eq!(out.value, txout3_0.value.to_sat());
+            assert_eq!(out.script_pubkey, txout3_0.script_pubkey.as_slice());
+            assert!(!out.coinbase);
+            assert_eq!(out.height, 101);
+        } else {
+            panic!("unexpected txid {row_txid:?}");
+        }
+    }
+    assert_eq!(scanned_rows, 3);
+
     Ok(())
 }

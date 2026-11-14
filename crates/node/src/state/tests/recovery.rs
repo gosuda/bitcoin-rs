@@ -25,14 +25,14 @@ fn crash_test_backend(
 }
 
 #[test]
-fn full_revalidation_marker_is_sticky_when_journal_is_disabled() -> Result<(), TestError> {
+fn full_revalidation_marker_is_sticky_in_the_datadir() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
-    config.chainstate_journal.enabled = false;
-    let journal_dir = config.data_dir.join(CHAINSTATE_JOURNAL_DIR);
-    let marker = journal_dir.join(bitcoin_rs_storage::chainstate_journal::FULL_REVALIDATION_MARKER);
-    std::fs::create_dir_all(&journal_dir)?;
+    std::fs::create_dir_all(&config.data_dir)?;
+    let marker = config
+        .data_dir
+        .join(bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER);
     std::fs::write(&marker, b"force full validation\n")?;
 
     assert!(requires_full_revalidation(&config.data_dir));
@@ -47,8 +47,7 @@ fn invalidate_block_settles_disconnect_debt() -> Result<(), TestError> {
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
     config.storage.backend = crash_test_backend(config.storage.backend);
-    config.chainstate_journal.enabled = false;
-    let state = NodeState::open(config, None)?;
+    let state = NodeState::open(config.clone(), None)?;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis.clone(),
@@ -63,12 +62,6 @@ fn invalidate_block_settles_disconnect_debt() -> Result<(), TestError> {
     ))?;
     state.publish_checkpoint()?;
 
-    let current_before = sonic_rs::from_slice::<sonic_rs::Value>(&std::fs::read(
-        data_dir.join("chainstate-checkpoints/CURRENT"),
-    )?)?
-    .get("generation")
-    .and_then(sonic_rs::JsonValueTrait::as_u64)
-    .ok_or(TestError::Missing("CURRENT generation"))?;
     let block_two = regtest_fixture::mined_regtest_child_at_time(
         block_one.block_hash(),
         genesis.header.time + 2,
@@ -84,25 +77,46 @@ fn invalidate_block_settles_disconnect_debt() -> Result<(), TestError> {
         Hash256::from(block_two.block_hash()),
     )?;
 
-    let current_after = sonic_rs::from_slice::<sonic_rs::Value>(&std::fs::read(
-        data_dir.join("chainstate-checkpoints/CURRENT"),
-    )?)?
-    .get("generation")
-    .and_then(sonic_rs::JsonValueTrait::as_u64)
-    .ok_or(TestError::Missing("CURRENT generation"))?;
-    assert!(current_after > current_before);
+    let head = state
+        .storage
+        .durable_head()
+        .load()?
+        .ok_or(TestError::Missing("durable head"))?;
+    assert_eq!(head.height, 1);
+    assert_eq!(head.tip, Hash256::from(block_one.block_hash()));
+    assert!(
+        state.undo_store().load_disconnect_marker()?.is_none(),
+        "settling debt against the engine disarms the disconnect marker"
+    );
+    let tip = state
+        .chainstate()
+        .applied_tip()
+        .load_full()
+        .ok_or(TestError::Missing("applied tip after invalidation"))?;
+    assert_eq!(tip.height, 1);
+    assert_eq!(tip.hash, Hash256::from(block_one.block_hash()));
+
+    drop(state);
+    let reopened = NodeState::open(config, None)?;
+    let reopened_tip = reopened
+        .chainstate()
+        .applied_tip()
+        .load_full()
+        .ok_or(TestError::Missing("reopened tip"))?;
+    assert_eq!(reopened_tip.height, 1);
+    assert_eq!(reopened_tip.hash, Hash256::from(block_one.block_hash()));
     Ok(())
 }
 
 #[test]
-fn below_base_invalidate_settles_debt_and_reopens_journal() -> Result<(), TestError> {
+fn below_base_invalidate_settles_debt_against_engine() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
     config.storage.backend = crash_test_backend(config.storage.backend);
-    let state = NodeState::open(config, None)?;
+    let state = NodeState::open(config.clone(), None)?;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis.clone(),
@@ -125,35 +139,25 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> Result<(), TestEr
         block_two,
     ))?;
 
-    let current_before = sonic_rs::from_slice::<sonic_rs::Value>(&std::fs::read(
-        data_dir.join("chainstate-checkpoints/CURRENT"),
-    )?)?
-    .get("generation")
-    .and_then(sonic_rs::JsonValueTrait::as_u64)
-    .ok_or(TestError::Missing("CURRENT generation"))?;
-
     crate::reorg::invalidate_block(
         &state.chainstate(),
         &state.chain_followers(),
         Hash256::from(block_one.block_hash()),
     )?;
 
-    let current_after = sonic_rs::from_slice::<sonic_rs::Value>(&std::fs::read(
-        data_dir.join("chainstate-checkpoints/CURRENT"),
-    )?)?
-    .get("generation")
-    .and_then(sonic_rs::JsonValueTrait::as_u64)
-    .ok_or(TestError::Missing("CURRENT generation"))?;
-    assert!(
-        current_after > current_before,
-        "settlement must publish the rolled-back checkpoint"
+    let head = state
+        .storage
+        .durable_head()
+        .load()?
+        .ok_or(TestError::Missing("durable head"))?;
+    assert_eq!(
+        (head.height, head.tip),
+        (0, Hash256::from(genesis.block_hash())),
+        "settlement must record the rolled-back head in the engine"
     );
     assert!(
-        !data_dir
-            .join(CHAINSTATE_JOURNAL_DIR)
-            .join(bitcoin_rs_storage::chainstate_journal::FULL_REVALIDATION_MARKER)
-            .exists(),
-        "the settlement checkpoint retires the full-revalidation marker"
+        state.undo_store().load_disconnect_marker()?.is_none(),
+        "settling debt against the engine disarms the disconnect marker"
     );
     let tip = state
         .chainstate()
@@ -183,6 +187,18 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> Result<(), TestEr
         .load_full()
         .ok_or(TestError::Missing("rebuilt tip"))?;
     assert_eq!(tip.height, 2);
+
+    drop(state);
+    let reopened = NodeState::open(config, None)?;
+    let reopened_tip = reopened
+        .chainstate()
+        .applied_tip()
+        .load_full()
+        .ok_or(TestError::Missing("reopened tip"))?;
+    assert_eq!(
+        (reopened_tip.height, reopened_tip.hash),
+        (2, Hash256::from(previous)),
+    );
     Ok(())
 }
 
@@ -271,8 +287,7 @@ fn switch_to_branch_settles_disconnect_debt() -> Result<(), TestError> {
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
     config.storage.backend = crash_test_backend(config.storage.backend);
-    config.chainstate_journal.enabled = false;
-    let state = NodeState::open(config, None)?;
+    let state = NodeState::open(config.clone(), None)?;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
         genesis.clone(),
@@ -286,13 +301,6 @@ fn switch_to_branch_settles_disconnect_debt() -> Result<(), TestError> {
         block_one,
     ))?;
     state.publish_checkpoint()?;
-
-    let current_before = sonic_rs::from_slice::<sonic_rs::Value>(&std::fs::read(
-        data_dir.join("chainstate-checkpoints/CURRENT"),
-    )?)?
-    .get("generation")
-    .and_then(sonic_rs::JsonValueTrait::as_u64)
-    .ok_or(TestError::Missing("CURRENT generation"))?;
 
     let genesis_id = state
         .chainstate()
@@ -332,13 +340,31 @@ fn switch_to_branch_settles_disconnect_debt() -> Result<(), TestError> {
         |_| {},
     )?;
 
-    let current_after = sonic_rs::from_slice::<sonic_rs::Value>(&std::fs::read(
-        data_dir.join("chainstate-checkpoints/CURRENT"),
-    )?)?
-    .get("generation")
-    .and_then(sonic_rs::JsonValueTrait::as_u64)
-    .ok_or(TestError::Missing("CURRENT generation"))?;
-    assert!(current_after > current_before);
+    let head = state
+        .storage
+        .durable_head()
+        .load()?
+        .ok_or(TestError::Missing("durable head"))?;
+    assert_eq!(head.height, 2);
+    assert_eq!(head.tip, Hash256::from(previous_hash));
+    assert!(state.undo_store().load_disconnect_marker()?.is_none());
+    let tip = handles
+        .applied_tip()
+        .load_full()
+        .ok_or(TestError::Missing("applied tip after branch switch"))?;
+    assert_eq!(tip.height, 2);
+    assert_eq!(tip.hash, Hash256::from(previous_hash));
+
+    drop(handles);
+    drop(state);
+    let reopened = NodeState::open(config, None)?;
+    let reopened_tip = reopened
+        .chainstate()
+        .applied_tip()
+        .load_full()
+        .ok_or(TestError::Missing("reopened tip"))?;
+    assert_eq!(reopened_tip.height, 2);
+    assert_eq!(reopened_tip.hash, Hash256::from(previous_hash));
     Ok(())
 }
 
@@ -437,7 +463,6 @@ fn forked_regtest_state() -> Result<ForkFixture, TestError> {
     config.data_dir = data_dir;
     config.p2p.listen.clear();
     config.storage.backend = crash_test_backend(config.storage.backend);
-    config.chainstate_journal.enabled = false;
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
     state.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
@@ -570,9 +595,41 @@ fn missing_checkpoint_replays_durable_head_chain_at_startup() -> Result<(), Test
         .chainstate()
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("applied tip"))?;
+    let committed_coins = state
+        .chainstate()
+        .coins()
+        .scan_snapshot()?
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+        .collect::<Result<Vec<_>, _>>()?;
+    let root = config.data_dir.join("chainstate-checkpoints");
+    let current: sonic_rs::Value = sonic_rs::from_slice(&std::fs::read(root.join("CURRENT"))?)?;
+    let directory = current
+        .get("directory")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| std::io::Error::other("CURRENT has no generation directory"))?;
+    let image = root.join(directory).join("chainstate");
+    let missing_image = root.join(directory).join("chainstate.missing");
+    std::fs::rename(&image, &missing_image)?;
     drop(state);
-    std::fs::remove_dir_all(config.data_dir.join("chainstate-checkpoints"))?;
 
+    let open_result = NodeState::open(config.clone(), None);
+    std::fs::rename(&missing_image, &image)?;
+    let error = open_result.err().ok_or(TestError::UnexpectedSuccess(
+        "missing checkpoint engine image was accepted",
+    ))?;
+    assert!(
+        matches!(
+            &error,
+            NodeOpenError::Recovery(source)
+                if matches!(
+                    source.as_ref(),
+                    bitcoin_rs_execution::recovery::RecoveryError::CheckpointEngineImageMissing
+                )
+        ),
+        "unexpected missing-image refusal: {error:#}"
+    );
+
+    std::fs::remove_dir_all(root)?;
     let reopened = NodeState::open(config, None)?;
     let tip = reopened
         .chainstate()
@@ -582,6 +639,16 @@ fn missing_checkpoint_replays_durable_head_chain_at_startup() -> Result<(), Test
         (tip.hash, tip.height),
         (remembered_tip.hash, remembered_tip.height),
         "a missing checkpoint must replay the durable head chain from genesis"
+    );
+    let reopened_coins = reopened
+        .chainstate()
+        .coins()
+        .scan_snapshot()?
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        reopened_coins, committed_coins,
+        "newer committed coin rows must survive the missing-image refusal"
     );
     Ok(())
 }
@@ -709,10 +776,10 @@ fn full_revalidation_marker_resumes_on_durable_head() -> Result<(), TestError> {
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("applied tip"))?;
     drop(state);
-    let journal_dir = config.data_dir.join(CHAINSTATE_JOURNAL_DIR);
-    std::fs::create_dir_all(&journal_dir)?;
     std::fs::write(
-        journal_dir.join(bitcoin_rs_storage::chainstate_journal::FULL_REVALIDATION_MARKER),
+        config
+            .data_dir
+            .join(bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER),
         b"force full validation\n",
     )?;
 
@@ -728,84 +795,47 @@ fn full_revalidation_marker_resumes_on_durable_head() -> Result<(), TestError> {
     );
     Ok(())
 }
-
+// SYNC-05
 #[test]
-fn cold_revalidation_relieves_journal_pressure_and_retries() -> Result<(), TestError> {
-    let (_dir, state, mut config) = applied_regtest_chain(2, 1)?;
+fn full_revalidation_cold_open_wipes_stale_engine_coins() -> Result<(), TestError> {
+    let (_dir, state, config) = applied_regtest_chain(2, 1)?;
     let remembered_tip = state
         .chainstate()
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("applied tip"))?;
+    let stale = bitcoin_rs_storage::CoinKey([0xA5; 32]);
+    assert!(
+        state.chainstate().coins().get(&stale)?.is_none(),
+        "the probe key must start absent from the engine coin namespace"
+    );
+    state.chainstate().coins().ingest_sorted(std::iter::once((
+        stale,
+        bitcoin_rs_storage::Bytes::from_static(b"stale"),
+    )))?;
+    assert!(
+        state.chainstate().coins().get(&stale)?.is_some(),
+        "the seeded row must read back before the cold reopen"
+    );
     drop(state);
-
-    config.chainstate_journal.max_journal_mib = 1;
-    config.chainstate_journal.rotate_mib = 1;
-    let journal_dir = config.data_dir.join(CHAINSTATE_JOURNAL_DIR);
-    std::fs::remove_dir_all(&journal_dir)?;
-    std::fs::create_dir_all(&journal_dir)?;
-    let marker = journal_dir.join(bitcoin_rs_storage::chainstate_journal::FULL_REVALIDATION_MARKER);
-    std::fs::write(&marker, b"force full validation\n")?;
-
-    let pressure = journal_dir.join("segment-9999999999.log");
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&pressure)?
-        .set_len(1024 * 1024 - 1)?;
-
-    let reopened = NodeState::open(config.clone(), None)?;
-    assert_eq!(reopened.resume_source(), ResumeSource::Cold);
+    std::fs::write(
+        config
+            .data_dir
+            .join(bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER),
+        b"force full validation\n",
+    )?;
+    let reopened = NodeState::open(config, None)?;
+    assert!(
+        reopened.chainstate().coins().get(&stale)?.is_none(),
+        "a cold open with no engine image must wipe stale engine coin rows before replay"
+    );
     let tip = reopened
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or(TestError::Missing("cold-replayed applied tip"))?;
+        .ok_or(TestError::Missing("replayed applied tip"))?;
     assert_eq!(
         (tip.hash, tip.height),
         (remembered_tip.hash, remembered_tip.height),
-        "cold replay must retry the block refused by journal retention pressure"
-    );
-    assert_eq!(
-        tip.chain_tx_count.get(),
-        Some(
-            reopened
-                .chainstate()
-                .coin_stats_handle()
-                .snapshot()
-                .tx_count
-        ),
-        "the recovered tip count must remain coherent with CoinStats"
-    );
-    assert!(
-        marker.exists(),
-        "a progress checkpoint must not retire the full-revalidation marker"
-    );
-    assert!(
-        !pressure.exists(),
-        "recovery relief must compact the retained journal segments"
-    );
-
-    drop(reopened);
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&pressure)?
-        .set_len(1024 * 1024)?;
-    let restarted = NodeState::open(config, None)?;
-    let landed = restarted
-        .chainstate()
-        .applied_tip_snapshot()
-        .ok_or(TestError::Missing("restart at the retention limit"))?;
-    assert_eq!(
-        (landed.hash, landed.height),
-        (remembered_tip.hash, remembered_tip.height)
-    );
-    assert!(
-        marker.exists(),
-        "replay progress must preserve the sticky marker"
-    );
-    assert!(
-        !pressure.exists(),
-        "post-genesis relief must compact stale segments"
+        "the wipe must keep the durable head chain that replay rebuilds"
     );
     Ok(())
 }
@@ -1014,10 +1044,7 @@ fn restart_without_periodic_publication_restores_tip_and_commit_id() -> Result<(
         .ok_or(TestError::Missing("surviving durable head"))?;
     assert_eq!(restored.tip, head.tip);
     assert_eq!(restored.commit_id, head.commit_id);
-    assert!(matches!(
-        reopened.resume_source(),
-        ResumeSource::Journal | ResumeSource::Checkpoint
-    ));
+    assert!(matches!(reopened.resume_source(), ResumeSource::Checkpoint));
 
     drop(reopened);
     let second = NodeState::open(config, None)?;

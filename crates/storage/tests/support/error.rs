@@ -12,6 +12,8 @@ pub(crate) enum TestError {
     Retention(#[from] bitcoin_rs_storage::pruning::RetentionError),
     #[error(transparent)]
     HistoryUnavailable(#[from] bitcoin_rs_storage::pruning::HistoryUnavailable),
+    #[error(transparent)]
+    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
 }
 
 pub(crate) type TestResult<T = ()> = Result<T, TestError>;

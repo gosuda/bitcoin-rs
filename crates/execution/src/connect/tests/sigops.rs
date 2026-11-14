@@ -174,7 +174,7 @@ fn check_budget(
                 assert!(error.committed.is_empty());
                 assert_eq!(error.disposition, WindowApplyDisposition::Permanent);
                 assert!(error.invalidated.contains(&hash));
-                error.source
+                *error.source
             }),
     };
     match &expected {

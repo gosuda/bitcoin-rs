@@ -41,6 +41,10 @@ pub trait UndoStore: Send + Sync {
         Err(crate::BoundedReadError::Unsupported)
     }
 
+    /// Drops the archived undo row when one exists. Pruning and AssumeUTXO
+    /// progress call this once the row can no longer be served.
+    fn remove_archived(&self, height: u32, hash: Hash256) -> Result<(), StorageError>;
+
     fn arm_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError>;
 
     /// Records that the rollback finished, in memory, and is owed a checkpoint.
@@ -120,12 +124,6 @@ pub struct InMemoryUndoStore {
     marker: parking_lot::RwLock<Option<DisconnectMarker>>,
 }
 
-impl InMemoryUndoStore {
-    pub fn remove_archived(&self, height: u32, hash: Hash256) {
-        self.records.write().remove(&(height, hash));
-    }
-}
-
 impl UndoStore for InMemoryUndoStore {
     fn load_undo_bounded(
         &self,
@@ -138,6 +136,11 @@ impl UndoStore for InMemoryUndoStore {
             .get(&(height, hash))
             .map(|value| crate::error::copy_bounded(value, max_bytes))
             .transpose()
+    }
+
+    fn remove_archived(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
+        self.records.write().remove(&(height, hash));
+        Ok(())
     }
 
     fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError> {
@@ -202,11 +205,11 @@ impl UndoStore for InMemoryUndoStore {
     }
 }
 
-pub struct KvUndoStore<S: KvStore> {
+pub struct KvUndoStore<S: KvStore + ?Sized> {
     store: Arc<S>,
 }
 
-impl<S: KvStore> KvUndoStore<S> {
+impl<S: KvStore + ?Sized> KvUndoStore<S> {
     #[must_use]
     pub const fn new(store: Arc<S>) -> Self {
         Self { store }
@@ -240,7 +243,7 @@ impl<S: KvStore> KvUndoStore<S> {
     }
 }
 
-impl<S: KvStore> UndoStore for KvUndoStore<S> {
+impl<S: KvStore + ?Sized> UndoStore for KvUndoStore<S> {
     fn load_undo_bounded(
         &self,
         height: u32,
@@ -252,6 +255,12 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
             &block_undo_key(height, hash),
             max_bytes,
         )
+    }
+
+    fn remove_archived(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
+        let mut batch = self.store.new_batch();
+        batch.delete(ColumnFamily::UndoData, &block_undo_key(height, hash));
+        self.store.write_deferred(batch)
     }
 
     /// Deferred, matching the rest of the apply path.

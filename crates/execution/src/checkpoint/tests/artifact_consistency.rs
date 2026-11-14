@@ -13,9 +13,8 @@ fn checkpoint_transaction_counts_must_agree_when_known() -> TestResult {
         };
         let mut stats = CoinStats::new();
         stats.finish_block(0, 1);
-        let data_dir = super::super::open_data_dir(dir.path())?;
-        super::super::write_checkpoint_from_dir(
-            &data_dir,
+        super::super::write_checkpoint(
+            dir.path(),
             config(),
             &tree,
             &UtxoSet::new(),
@@ -54,9 +53,8 @@ fn checkpoint_writer_refuses_inconsistent_transaction_counts() -> TestResult {
         chain_tx_count: crate::chain::ChainTxCount::established(2),
         ..applied_tip
     };
-    let data_dir = super::super::open_data_dir(dir.path())?;
-    let result = super::super::write_checkpoint_from_dir(
-        &data_dir,
+    let result = super::super::write_checkpoint(
+        dir.path(),
         config(),
         &RwLock::new(tree),
         &UtxoSet::new(),
@@ -76,11 +74,10 @@ fn checkpoint_writer_refuses_height_mismatch() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
-    let data_dir = super::super::open_data_dir(dir.path())?;
     let mut stats = CoinStats::new();
     stats.finish_block(1, 0);
-    let result = super::super::write_checkpoint_from_dir(
-        &data_dir,
+    let result = super::super::write_checkpoint(
+        dir.path(),
         config(),
         &RwLock::new(tree),
         &UtxoSet::new(),
@@ -171,127 +168,5 @@ fn authenticated_coinstats_semantics_require_resync() -> TestResult {
             "unexpected checkpoint load error: {error}"
         );
     }
-    Ok(())
-}
-
-#[test]
-fn authenticated_utxo_value_mutation_requires_resync() -> TestResult {
-    const FIRST_VALUE_OFFSET: usize = 52 + 45 + 4;
-
-    let dir = tempfile::tempdir()?;
-    let (tree, _, applied) = chain_with_applied_height(0, 0)?;
-    let applied_tip = tip_snapshot(&tree, applied)?;
-    super::super::write_checkpoint(
-        dir.path(),
-        config(),
-        &RwLock::new(tree),
-        &populated_utxo()?,
-        &CoinStatsListener::new(CoinStats::new()),
-        Some(&applied_tip),
-    )?;
-
-    mutate_authenticated_artifact(dir.path(), UTXO_FILE, |bytes| {
-        bytes[FIRST_VALUE_OFFSET] ^= 1;
-    })?;
-
-    let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
-        return Err(TestError::UnexpectedSuccess(
-            "corrupt UTXO checkpoint unexpectedly loaded",
-        ));
-    };
-    Ok(())
-}
-
-#[test]
-fn publish_gate_withholds_token_on_fused_mismatch() -> TestResult {
-    let dir = tempfile::tempdir()?;
-    let (tree, _, applied) = chain_with_applied_height(2, 0)?;
-    let applied_tip = tip_snapshot(&tree, applied)?;
-    let data_dir = super::super::open_data_dir(dir.path())?;
-    let (write, witness) = super::super::write_checkpoint_from_dir(
-        &data_dir,
-        config(),
-        &RwLock::new(tree),
-        &populated_utxo()?,
-        &CoinStatsListener::new(CoinStats::new()),
-        Some(&applied_tip),
-    )?;
-    assert!(matches!(write, CheckpointWrite::Published { .. }));
-    assert!(
-        witness.is_none(),
-        "fused mismatch must withhold the seed witness"
-    );
-    let dir = tempfile::tempdir()?;
-    let (tree, _, applied) = chain_with_applied_height(0, 0)?;
-    let applied_tip = tip_snapshot(&tree, applied)?;
-    let data_dir = super::super::open_data_dir(dir.path())?;
-    let (write, witness) = super::super::write_checkpoint_from_dir(
-        &data_dir,
-        config(),
-        &RwLock::new(tree),
-        &UtxoSet::new(),
-        &CoinStatsListener::new(CoinStats::new()),
-        Some(&applied_tip),
-    )?;
-    assert!(matches!(write, CheckpointWrite::Published { .. }));
-    assert!(
-        witness.is_some(),
-        "matching empty state must mint the seed witness"
-    );
-    Ok(())
-}
-
-#[test]
-fn publish_swap_between_commit_and_open_yields_integrity() -> TestResult {
-    use bitcoin_rs_storage::utxo::snapshot::{
-        RawSeedError, SeedProvenance, VerifiedSnapshotArtifact,
-    };
-
-    let dir = tempfile::tempdir()?;
-    let (tree, _, applied) = chain_with_applied_height(0, 0)?;
-    let applied_tip = tip_snapshot(&tree, applied)?;
-    let data_dir = super::super::open_data_dir(dir.path())?;
-    let (write, witness) = super::super::write_checkpoint_from_dir(
-        &data_dir,
-        config(),
-        &RwLock::new(tree),
-        &UtxoSet::new(),
-        &CoinStatsListener::new(CoinStats::new()),
-        Some(&applied_tip),
-    )?;
-    let CheckpointWrite::Published { reference } = write else {
-        return Err(TestError::UnexpectedSuccess("checkpoint did not publish"));
-    };
-    let Some(witness) = witness else {
-        return Err(TestError::UnexpectedSuccess(
-            "full gate unexpectedly withheld the seed witness",
-        ));
-    };
-    mutate_authenticated_artifact(dir.path(), UTXO_FILE, |bytes| {
-        let last = bytes.len() - 1;
-        bytes[last] ^= 1;
-    })?;
-    let root = dir.path().join(CHECKPOINT_ROOT);
-    let current: CurrentV1 = sonic_rs::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
-    let artifact_path = root.join(&current.directory).join(UTXO_FILE);
-    assert_eq!(fs::metadata(&artifact_path)?.len(), witness.byte_len());
-    let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
-        return Err(TestError::UnexpectedSuccess(
-            "swapped checkpoint bytes unexpectedly loaded",
-        ));
-    };
-    let file = fs::File::open(&artifact_path)?;
-    let mut seed =
-        VerifiedSnapshotArtifact::seal(file, witness, SeedProvenance::Checkpoint(reference));
-    let mut coins = 0_u64;
-    let mut emit = |_: &OutPoint, _: &[u8]| -> Result<(), std::convert::Infallible> {
-        coins += 1;
-        Ok(())
-    };
-    assert!(matches!(
-        seed.for_each_coin_raw(&mut emit, &|| false),
-        Err(RawSeedError::Integrity)
-    ));
-    assert_eq!(coins, 0);
     Ok(())
 }

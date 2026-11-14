@@ -2,6 +2,8 @@ mod acceptance;
 mod assumeutxo;
 mod block_spends;
 mod chain_queries;
+mod converter;
+mod converter_fixture;
 mod deployment_info;
 mod http_surfaces;
 mod lifecycle;

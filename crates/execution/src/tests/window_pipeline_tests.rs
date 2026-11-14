@@ -15,13 +15,10 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_consensus::script::opcode::OP_PUSHNUM_1;
 use bitcoin_rs_storage::utxo::UtxoSet;
-use bitcoin_rs_storage::{
-    CommitRecords, DisconnectMarker, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
-    InMemoryUndoStore, ScriptAttestation, StorageError, UndoStore,
-};
+use bitcoin_rs_storage::{DurableHead, StorageError};
 
 use super::{ApplyError, Chainstate, WindowApplyDisposition};
-use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
+use crate::test_fixtures::{TestError, TestResult, handles, seed_durable_head, seed_genesis};
 
 /// The group cap `RCV-02` states: 64 blocks or 8 MiB of block data, whichever first.
 const GROUP_BLOCKS: usize = 64;
@@ -88,9 +85,9 @@ fn coinbase_less_block(prev: BlockHash, height: u32, script_len: usize) -> TestR
 
 fn commit_genesis_head(chain: &Chainstate) -> TestResult {
     let genesis = Network::Regtest.genesis_block();
-    chain.durable_head.commit(
-        None,
-        &DurableHead {
+    seed_durable_head(
+        chain,
+        DurableHead {
             assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: 1,
             height: 0,
@@ -99,7 +96,6 @@ fn commit_genesis_head(chain: &Chainstate) -> TestResult {
             body_extent: None,
             undo_extent: None,
         },
-        &CommitRecords::default(),
     )?;
     Ok(())
 }
@@ -117,58 +113,21 @@ fn apply_headers(chain: &Chainstate, blocks: &[&Block]) -> TestResult {
     Ok(())
 }
 
-struct CrashOnCommitHead {
-    inner: InMemoryDurableHeadStore,
+struct CrashOnCommitFault {
     fail_on_commit: u64,
-    attempts: AtomicU64,
 }
 
-impl CrashOnCommitHead {
-    fn new(fail_on_commit: u64) -> Self {
-        Self {
-            inner: InMemoryDurableHeadStore::new(),
-            fail_on_commit,
-            attempts: AtomicU64::new(0),
-        }
-    }
-}
-
-impl DurableHeadStore for CrashOnCommitHead {
-    fn load(&self) -> Result<Option<DurableHead>, StorageError> {
-        self.inner.load()
-    }
-
-    fn load_attestation(&self, head: &DurableHead) -> Result<ScriptAttestation, StorageError> {
-        self.inner.load_attestation(head)
-    }
-
-    fn load_suffix_attestation(
+impl bitcoin_rs_storage::commit::CommitFault for CrashOnCommitFault {
+    fn before_commit(
         &self,
-        head: &DurableHead,
-    ) -> Result<ScriptAttestation, StorageError> {
-        self.inner.load_suffix_attestation(head)
-    }
-
-    fn attest(&self, head: &DurableHead, level: ScriptAttestation) -> Result<(), StorageError> {
-        self.inner.attest(head, level)
-    }
-
-    fn commit(
-        &self,
-        expected: Option<&DurableHead>,
-        next: &DurableHead,
-        records: &CommitRecords<'_>,
-    ) -> Result<(), StorageError> {
-        let attempt = self
-            .attempts
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
-        if attempt == self.fail_on_commit {
-            return Err(StorageError::InvalidOperation(
-                "injected durable head commit failure",
+        prefix: &bitcoin_rs_storage::commit::AcceptedPrefix,
+    ) -> Result<(), bitcoin_rs_storage::CommitError> {
+        if prefix.next_head.commit_id == self.fail_on_commit {
+            return Err(bitcoin_rs_storage::CommitError::Storage(
+                StorageError::InvalidOperation("injected durable head commit failure"),
             ));
         }
-        self.inner.commit(expected, next, records)
+        Ok(())
     }
 }
 
@@ -259,52 +218,62 @@ fn a_window_commits_every_block_in_order() -> TestResult {
     Ok(())
 }
 
-struct PoisonedUndoStore {
-    inner: InMemoryUndoStore,
-}
+#[test]
+fn partial_header_admission_commits_the_valid_prefix_and_remains_usable() -> TestResult {
+    let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    commit_genesis_head(&chain)?;
+    let first = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
+    let missing_parent = BlockHash::from(Hash256::from_le_bytes(&[0x37; 32]));
+    let orphan = mined_child(missing_parent, 2)?;
+    let payloads = dump_payloads(&[first.clone(), orphan]);
+    let window: Vec<&BlockImage> = payloads.iter().collect();
 
-impl UndoStore for PoisonedUndoStore {
-    fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError> {
-        if height == 0 {
-            return self.inner.persist_undo(height, hash, record);
-        }
-        Err(StorageError::backend("RocksDbError: Poisoned"))
-    }
+    let error = chain
+        .apply_window(&window)
+        .err()
+        .ok_or(TestError::Missing("missing parent rejects the suffix"))?;
+    assert_eq!(error.disposition, WindowApplyDisposition::Operational);
+    assert_eq!(error.applied, 1);
+    assert_eq!(error.committed.len(), 1);
+    assert_eq!(error.committed[0].hash, Hash256::from(first.block_hash()));
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("prefix head"))?;
+    assert_eq!(
+        (head.height, head.tip),
+        (1, Hash256::from(first.block_hash()))
+    );
+    assert_eq!(
+        chain
+            .applied_tip_snapshot()
+            .ok_or(TestError::Missing("prefix tip"))?
+            .hash,
+        Hash256::from(first.block_hash())
+    );
 
-    fn load_undo(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
-        self.inner.load_undo(height, hash)
-    }
-
-    fn arm_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
-        self.inner.arm_disconnect(height, hash)
-    }
-
-    fn complete_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
-        self.inner.complete_disconnect(height, hash)
-    }
-
-    fn disarm_disconnect(&self) -> Result<(), StorageError> {
-        self.inner.disarm_disconnect()
-    }
-
-    fn retire_disconnect_marker(&self) -> Result<(), StorageError> {
-        self.inner.retire_disconnect_marker()
-    }
-
-    fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError> {
-        self.inner.load_disconnect_marker()
-    }
+    let next = mined_child(first.block_hash(), 2)?;
+    let next_image = BlockImage::from_local(next.clone());
+    let outcomes = chain.apply_window(&[&next_image])?;
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        (outcomes[0].height, outcomes[0].hash),
+        (2, Hash256::from(next.block_hash()))
+    );
+    Ok(())
 }
 
 // SYNC-04
 #[test]
 fn a_poisoned_undo_store_settles_the_window_fatal() -> TestResult {
-    let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     seed_genesis(&chain)?;
     commit_genesis_head(&chain)?;
-    chain.undo_store = Arc::new(PoisonedUndoStore {
-        inner: InMemoryUndoStore::default(),
-    });
+    chain
+        .commit_authority
+        .store()
+        .arm_persist_fault(bitcoin_rs_storage::PersistFault::FailApply);
 
     let block = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
     apply_headers(&chain, &[&block])?;
@@ -316,9 +285,9 @@ fn a_poisoned_undo_store_settles_the_window_fatal() -> TestResult {
     ))?;
 
     assert!(
-        matches!(error.source, ApplyError::UndoPersistence(_)),
-        "the failure must name undo persistence, got {:?}",
-        error.source
+        matches!(*error.source, ApplyError::DurableHeadCommit(_)),
+        "the failure must name the durable commit, got {:?}",
+        *error.source
     );
     assert_eq!(
         error.disposition,
@@ -395,7 +364,7 @@ fn a_window_commits_a_block_that_spends_the_previous_blocks_output() -> TestResu
         "the dependent spend is committed and published as the window tip"
     );
     assert!(
-        chain.utxo.get(&first_spend_outpoint).is_none(),
+        chain.utxo_reader().get(&first_spend_outpoint)?.is_none(),
         "the dependent block spends the funding block's output, so that coin leaves the utxo set"
     );
     Ok(())
@@ -423,11 +392,11 @@ fn a_window_with_an_invalid_middle_block_commits_only_the_valid_prefix() -> Test
     ))?;
     assert!(
         matches!(
-            error.source,
+            *error.source,
             ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::MissingCoinbase)
         ),
         "a body whose only transaction is not a coinbase is rejected as missing its coinbase, got {:?}",
-        error.source
+        *error.source
     );
 
     assert_eq!(
@@ -564,9 +533,9 @@ fn a_window_prepared_against_a_replaced_tip_discards_the_stale_branch() -> TestR
         "the committed outcome names the block that extended the reorged tip"
     );
     assert!(
-        matches!(error.source, ApplyError::PrevHashMismatch { .. }),
+        matches!(*error.source, ApplyError::PrevHashMismatch { .. }),
         "the stale block is refused because its predecessor is not the applied tip, got {:?}",
-        error.source
+        *error.source
     );
     assert_eq!(
         error.disposition,
@@ -679,9 +648,9 @@ fn a_window_holds_its_transition_until_a_concurrent_shutdown_acquires_it() -> Te
         .err()
         .ok_or(TestError::Missing("closed admission refuses a new window"))?;
     assert!(
-        matches!(refused.source, ApplyError::Shutdown),
+        matches!(*refused.source, ApplyError::Shutdown),
         "a window after the shutdown is refused at admission, got {:?}",
-        refused.source
+        *refused.source
     );
     Ok(())
 }
@@ -700,10 +669,11 @@ fn a_window_crash_at_a_group_commit_boundary_keeps_the_last_complete_group() -> 
     let payloads = dump_payloads(&blocks);
 
     for (fail_on_commit, committed_blocks) in [(2_u64, 0_usize), (3, GROUP_BLOCKS)] {
-        let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
         seed_genesis(&chain)?;
-        let fault = Arc::new(CrashOnCommitHead::new(fail_on_commit));
-        chain.durable_head = fault;
+        chain
+            .commit_authority
+            .set_fault(Arc::new(CrashOnCommitFault { fail_on_commit }));
         commit_genesis_head(&chain)?;
         let refs: Vec<&Block> = blocks.iter().collect();
         apply_headers(&chain, &refs)?;

@@ -11,15 +11,13 @@ use bitcoin_rs_consensus::primitives::{
     deserialize,
 };
 use bitcoin_rs_storage::utxo::UtxoSet;
-use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener, scan_coin_stats};
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 
 use super::{
     CHECKPOINT_ROOT, COINSTATS_FILE, CURRENT_FILE, CheckpointLoad, CheckpointLoadError,
-    CheckpointManifestV1, CheckpointWrite, CurrentV1, HEADERS_FILE, MANIFEST_FILE, UTXO_FILE,
-    load_checkpoint,
+    CheckpointManifestV1, CheckpointWrite, CurrentV1, HEADERS_FILE, MANIFEST_FILE, load_checkpoint,
 };
 use crate::test_fixtures::{TestError, TestResult};
 
@@ -47,10 +45,6 @@ fn mutate_authenticated_artifact(
         HEADERS_FILE => {
             manifest.headers.bytes = length;
             manifest.headers.sha256 = digest;
-        }
-        UTXO_FILE => {
-            manifest.utxo.bytes = length;
-            manifest.utxo.sha256 = digest;
         }
         COINSTATS_FILE => {
             manifest.coinstats.bytes = length;
@@ -177,18 +171,20 @@ fn header_from_row(row: &[u8]) -> Result<Header, headers::HeaderCheckpointError>
 }
 
 fn populated_utxo() -> Result<UtxoSet, bitcoin_rs_storage::utxo::UtxoError> {
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(
-        OutPoint::new(Txid(Hash256::from_le_bytes(&[7_u8; 32])), 3),
-        TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey: Script::from_bytes(vec![0x51, 0x21]),
-        },
-        true,
-        0,
-    ));
     let utxo = UtxoSet::new();
-    bitcoin_rs_storage::utxo::contract::commit_block_changes(&utxo, &changes, &Hash256::default())?;
+    let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+        vout: 3,
+        value: 50_000,
+        script_pubkey: vec![0x51, 0x21],
+        coinbase: true,
+        height: 0,
+    };
+    let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
+        Hash256::from_le_bytes(&[7_u8; 32]),
+        &[out],
+    )?;
+    utxo.insert_parsed_record(record);
+
     Ok(utxo)
 }
 
@@ -200,6 +196,9 @@ mod artifact_consistency;
 
 #[cfg(test)]
 mod storage_roundtrip;
+
+#[cfg(test)]
+mod engine_image;
 
 #[cfg(test)]
 mod tip_transitions;

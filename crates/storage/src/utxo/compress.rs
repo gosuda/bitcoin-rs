@@ -198,6 +198,124 @@ pub(crate) fn compress_script(script: &[u8]) -> Option<(u64, &[u8])> {
     None
 }
 
+pub(crate) const SCRIPT_SPECIAL_SCRIPTS_COUNT: u64 = 6;
+#[cfg(test)]
+pub(crate) fn decompressed_script_len(code: u64, data_len: usize) -> Result<usize, UtxoError> {
+    match code {
+        0 => {
+            if data_len != 20 {
+                return Err(UtxoError::CorruptRecord);
+            }
+            Ok(25)
+        }
+        1 => {
+            if data_len != 20 {
+                return Err(UtxoError::CorruptRecord);
+            }
+            Ok(23)
+        }
+        2 | 3 => {
+            if data_len != 32 {
+                return Err(UtxoError::CorruptRecord);
+            }
+            Ok(35)
+        }
+        4 | 5 => {
+            if data_len != 32 {
+                return Err(UtxoError::CorruptRecord);
+            }
+            Ok(67)
+        }
+        _ => {
+            let raw_len = usize::try_from(
+                code.checked_sub(SCRIPT_SPECIAL_SCRIPTS_COUNT)
+                    .ok_or(UtxoError::CorruptRecord)?,
+            )
+            .map_err(|_| UtxoError::CorruptRecord)?;
+            if raw_len > usize::from(u16::MAX) || data_len != raw_len {
+                return Err(UtxoError::CorruptRecord);
+            }
+            Ok(raw_len)
+        }
+    }
+}
+
+pub(crate) fn decompress_script_into(
+    code: u64,
+    data: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<(), UtxoError> {
+    match code {
+        0 => {
+            if data.len() != 20 {
+                return Err(UtxoError::CorruptRecord);
+            }
+            out.reserve(25);
+            out.extend_from_slice(&[0x76, 0xa9, 0x14]);
+            out.extend_from_slice(data);
+            out.extend_from_slice(&[0x88, 0xac]);
+            Ok(())
+        }
+        1 => {
+            if data.len() != 20 {
+                return Err(UtxoError::CorruptRecord);
+            }
+            out.reserve(23);
+            out.extend_from_slice(&[0xa9, 0x14]);
+            out.extend_from_slice(data);
+            out.push(0x87);
+            Ok(())
+        }
+        2 | 3 => {
+            if data.len() != 32 {
+                return Err(UtxoError::CorruptRecord);
+            }
+            out.reserve(35);
+            out.push(0x21);
+            let prefix = u8::try_from(code).map_err(|_| UtxoError::CorruptRecord)?;
+            out.push(prefix);
+            out.extend_from_slice(data);
+            out.push(0xac);
+            Ok(())
+        }
+        4 | 5 => {
+            if data.len() != 32 {
+                return Err(UtxoError::CorruptRecord);
+            }
+            let mut comp = [0_u8; 33];
+            comp[0] = if code == 4 { 0x02 } else { 0x03 };
+            comp[1..33].copy_from_slice(data);
+            let pubkey =
+                secp256k1::PublicKey::from_slice(&comp).map_err(|_| UtxoError::CorruptRecord)?;
+            let uncompressed = pubkey.serialize_uncompressed();
+            out.reserve(67);
+            out.push(0x41);
+            out.extend_from_slice(&uncompressed);
+            out.push(0xac);
+            Ok(())
+        }
+        _ => {
+            let raw_len = usize::try_from(
+                code.checked_sub(SCRIPT_SPECIAL_SCRIPTS_COUNT)
+                    .ok_or(UtxoError::CorruptRecord)?,
+            )
+            .map_err(|_| UtxoError::CorruptRecord)?;
+            if raw_len > usize::from(u16::MAX) || data.len() != raw_len {
+                return Err(UtxoError::CorruptRecord);
+            }
+            out.extend_from_slice(data);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn decompress_script(code: u64, data: &[u8]) -> Result<Vec<u8>, UtxoError> {
+    let mut out = Vec::new();
+    decompress_script_into(code, data, &mut out)?;
+    Ok(out)
+}
+
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "test assertions")]
 mod tests {
@@ -540,5 +658,174 @@ mod tests {
                 prop_assert_ne!(ca, cb);
             }
         }
+    }
+
+    #[test]
+    fn core_compress_tests_vectors() -> Result<(), crate::utxo::UtxoError> {
+        const AMOUNT_PAIRS: &[(u64, u64)] = &[
+            (0, 0),
+            (1, 1),
+            (1_000_000, 7),
+            (100_000_000, 9),
+            (5_000_000_000, 50),
+            (2_100_000_000_000_000, 21_000_000),
+        ];
+
+        for &(dec, enc) in AMOUNT_PAIRS {
+            assert_eq!(
+                super::compress_amount(dec)?,
+                enc,
+                "failed compress_amount({dec})"
+            );
+            assert_eq!(
+                super::decompress_amount(enc),
+                Some(dec),
+                "failed decompress_amount({enc})"
+            );
+        }
+
+        let gx = [
+            0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+            0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
+            0x16, 0xf8, 0x17, 0x98,
+        ];
+        let gy_even = [
+            0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11,
+            0x08, 0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f,
+            0xfb, 0x10, 0xd4, 0xb8,
+        ];
+        let gy_odd = [
+            0xb7, 0xc5, 0x25, 0x88, 0xd9, 0x5c, 0x3b, 0x9a, 0xa2, 0x5b, 0x04, 0x03, 0xf1, 0xee,
+            0xf7, 0x57, 0x02, 0xe8, 0x4b, 0xb7, 0x59, 0x7a, 0xab, 0xe6, 0x63, 0xb8, 0x2f, 0x6f,
+            0x04, 0xef, 0x27, 0x77,
+        ];
+        let pkh = [0x11_u8; 20];
+        let sh = [0x22_u8; 20];
+
+        let mut p2pkh = vec![0x76, 0xa9, 0x14];
+        p2pkh.extend_from_slice(&pkh);
+        p2pkh.extend_from_slice(&[0x88, 0xac]);
+
+        let mut p2sh = vec![0xa9, 0x14];
+        p2sh.extend_from_slice(&sh);
+        p2sh.push(0x87);
+
+        let mut p2pk_comp2 = vec![0x21, 0x02];
+        p2pk_comp2.extend_from_slice(&gx);
+        p2pk_comp2.push(0xac);
+
+        let mut p2pk_comp3 = vec![0x21, 0x03];
+        p2pk_comp3.extend_from_slice(&gx);
+        p2pk_comp3.push(0xac);
+
+        let mut p2pk_uncomp_even = vec![0x41, 0x04];
+        p2pk_uncomp_even.extend_from_slice(&gx);
+        p2pk_uncomp_even.extend_from_slice(&gy_even);
+        p2pk_uncomp_even.push(0xac);
+
+        let mut p2pk_uncomp_odd = vec![0x41, 0x04];
+        p2pk_uncomp_odd.extend_from_slice(&gx);
+        p2pk_uncomp_odd.extend_from_slice(&gy_odd);
+        p2pk_uncomp_odd.push(0xac);
+
+        let fallback = vec![0x6a, 0x05, 0x68, 0x65, 0x6c, 0x6c, 0x6f];
+
+        let test_scripts: [(&str, Vec<u8>, u64, &[u8]); 7] = [
+            ("p2pkh", p2pkh, 0_u64, &pkh[..]),
+            ("p2sh", p2sh, 1, &sh[..]),
+            ("p2pk_comp2", p2pk_comp2, 2, &gx[..]),
+            ("p2pk_comp3", p2pk_comp3, 3, &gx[..]),
+            ("p2pk_uncomp_even", p2pk_uncomp_even, 4, &gx[..]),
+            ("p2pk_uncomp_odd", p2pk_uncomp_odd, 5, &gx[..]),
+            ("fallback", fallback.clone(), 13, &fallback[..]),
+        ];
+
+        for (name, script, expected_tag, expected_data) in test_scripts {
+            if expected_tag < super::SCRIPT_SPECIAL_SCRIPTS_COUNT {
+                let (tag, data) =
+                    super::compress_script(&script).expect("should compress special script");
+                assert_eq!(tag, expected_tag, "{name}: tag mismatch");
+                assert_eq!(data, expected_data, "{name}: data mismatch");
+            } else {
+                assert!(
+                    super::compress_script(&script).is_none(),
+                    "{name}: non-special"
+                );
+            }
+
+            let decompressed = super::decompress_script(expected_tag, expected_data)?;
+            assert_eq!(decompressed, script, "{name}: decompress mismatch");
+
+            let mut out = Vec::new();
+            super::decompress_script_into(expected_tag, expected_data, &mut out)?;
+            assert_eq!(out, script, "{name}: decompress_into mismatch");
+
+            let expected_len = super::decompressed_script_len(expected_tag, expected_data.len())?;
+            assert_eq!(
+                expected_len,
+                script.len(),
+                "{name}: decompressed_script_len mismatch"
+            );
+        }
+
+        for i in 1..=100_000_u64 {
+            assert_eq!(
+                super::decompress_amount(super::compress_amount(i)?),
+                Some(i)
+            );
+        }
+
+        for i in 1..=10_000_u64 {
+            let val = i * 1_000_000;
+            assert_eq!(
+                super::decompress_amount(super::compress_amount(val)?),
+                Some(val)
+            );
+        }
+
+        for i in 1..=10_000_u64 {
+            let val = i * 100_000_000;
+            assert_eq!(
+                super::decompress_amount(super::compress_amount(val)?),
+                Some(val)
+            );
+        }
+
+        for i in 1..=420_000_u64 {
+            let val = i * 5_000_000_000;
+            assert_eq!(
+                super::decompress_amount(super::compress_amount(val)?),
+                Some(val)
+            );
+        }
+
+        for i in 0..100_000_u64 {
+            if let Some(dec) = super::decompress_amount(i) {
+                assert_eq!(super::compress_amount(dec)?, i);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn decompress_script_rejects_corrupted_inputs() {
+        assert!(super::decompress_script(0, &[0x11; 19]).is_err());
+        assert!(super::decompress_script(0, &[0x11; 21]).is_err());
+
+        assert!(super::decompress_script(1, &[0x22; 19]).is_err());
+        assert!(super::decompress_script(1, &[0x22; 21]).is_err());
+
+        assert!(super::decompress_script(2, &[0x33; 31]).is_err());
+        assert!(super::decompress_script(2, &[0x33; 33]).is_err());
+        assert!(super::decompress_script(3, &[0x33; 31]).is_err());
+
+        let invalid_x = [0xff_u8; 32];
+        assert!(super::decompress_script(4, &invalid_x).is_err());
+        assert!(super::decompress_script(5, &invalid_x).is_err());
+
+        assert!(super::decompress_script(6, &[0x51]).is_err());
+        assert!(super::decompress_script(7, &[]).is_err());
+        assert!(super::decompress_script(u64::MAX, &[]).is_err());
     }
 }

@@ -99,6 +99,25 @@ fn bitcoin_conf_is_applied_before_environment_and_cli() {
 }
 
 #[test]
+fn removed_chainstate_journal_table_fails_as_unknown_key() {
+    let result = load_file(
+        "--config",
+        "[chainstate_journal]\nblocks = 10\n",
+        &[],
+        std::iter::empty(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(TestError::Bin(
+                crate::config::BinError::ParseTomlConfig { .. }
+            ))
+        ),
+        "a removed [chainstate_journal] table must fail the TOML load as a parse error"
+    );
+}
+
+#[test]
 fn mempool_persistence_resolves_toml_environment_and_cli() -> Result<(), TestError> {
     let config = load_file(
         "--config",
@@ -619,42 +638,6 @@ fn unrelated_non_utf8_environment_value_is_ignored() {
     .unwrap_or_else(|error| panic!("unrelated environment variable: {error}"));
 
     assert_eq!(config.network, Network::Mainnet);
-}
-
-#[test]
-fn toml_chainstate_journal_is_overridden_by_environment() {
-    let config = load_file(
-        "--config",
-        r"
-[chainstate_journal]
-enabled = true
-blocks = 100
-",
-        &[],
-        std::iter::once(("BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS", "200"))
-            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-    )
-    .unwrap_or_else(|error| panic!("valid journal configuration: {error}"));
-
-    assert!(config.chainstate_journal.enabled);
-    assert_eq!(config.chainstate_journal.blocks, 200);
-    assert_eq!(config.chainstate_journal.seconds, 5);
-}
-
-#[test]
-fn environment_rejects_invalid_chainstate_journal_boolean() {
-    let error = match super::load(
-        ["bitcoin-rs"],
-        std::iter::once(("BITCOIN_RS_CHAINSTATE_JOURNAL", "sometimes"))
-            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-    ) {
-        Ok(_) => panic!("invalid journal boolean must be rejected"),
-        Err(error) => error,
-    };
-    let TestError::Bin(crate::config::BinError::Config(error)) = error else {
-        panic!("expected a configuration error: {error}");
-    };
-    assert!(matches!(error, ConfigError::InvalidBoolean(_)), "{error}");
 }
 
 #[cfg(unix)]

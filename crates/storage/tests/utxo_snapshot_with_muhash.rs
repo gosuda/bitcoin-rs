@@ -1,6 +1,6 @@
 use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut};
-use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
-use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsAccumulator};
 use bitcoin_rs_storage::utxo::{UtxoSet, write_snapshot_observed};
 
 use crate::support::utxo::TestResult;
@@ -22,7 +22,7 @@ struct Plan {
 }
 
 #[test]
-fn listener_stats_and_snapshot_trailer_match_a_serial_reference() -> TestResult {
+fn snapshot_trailer_matches_a_serial_reference() -> TestResult {
     let plans = [
         Plan {
             name: "single shard runs",
@@ -62,9 +62,7 @@ fn listener_stats_and_snapshot_trailer_match_a_serial_reference() -> TestResult 
 }
 
 fn run(plan: &Plan) -> TestResult {
-    let listener = CoinStatsListener::new(CoinStats::new());
-    let mut set = UtxoSet::new();
-    set.track_coin_stats(listener.clone());
+    let set = UtxoSet::new();
     let mut expected = CoinStats::new();
 
     let capacity = usize::try_from(plan.entries)?;
@@ -84,9 +82,6 @@ fn run(plan: &Plan) -> TestResult {
         first.add(UtxoAdd::new(outpoint, txout.clone(), coinbase, 200));
         seeded.push((outpoint, txout, coinbase));
     }
-    commit_block_changes(&set, &first, &txid(3_000))?;
-    assert_stats_eq(plan.name, &listener.snapshot(), &expected);
-
     let mut second = BlockChanges::with_capacity(capacity, capacity);
     let mut live = Vec::with_capacity(capacity);
     let mut spent = Vec::with_capacity(capacity);
@@ -121,23 +116,33 @@ fn run(plan: &Plan) -> TestResult {
             }
         }
     }
-    commit_block_changes(&set, &second, &txid(3_001))?;
-    assert_stats_eq(plan.name, &listener.snapshot(), &expected);
-
-    for (outpoint, txout) in live {
-        assert_eq!(
-            set.get(&outpoint),
-            Some(txout),
-            "{}: lost a coin",
-            plan.name
+    use std::collections::HashMap;
+    let mut by_txid: HashMap<Hash256, Vec<bitcoin_rs_storage::utxo::record::OwnedUtxoOut>> =
+        HashMap::new();
+    for (outpoint, txout) in &live {
+        by_txid.entry(outpoint.txid.into()).or_default().push(
+            bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
+                vout: outpoint.vout,
+                value: txout.value.to_sat(),
+                script_pubkey: txout.script_pubkey.to_vec(),
+                coinbase: false,
+                height: 201,
+            },
         );
     }
-    for outpoint in spent {
-        assert_eq!(set.get(&outpoint), None, "{}: kept a spent coin", plan.name);
+    for (txid, mut outs) in by_txid {
+        outs.sort_by_key(|o| o.vout);
+        let rec = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(txid, &outs)?;
+        set.insert_parsed_record(rec);
     }
-
     let mut snapshot = Vec::new();
-    let (trailer, ()) = write_snapshot_observed(&set, &txid(3_001), 201, &mut snapshot, ())?;
+    let (trailer, _) = write_snapshot_observed(
+        &set,
+        &txid(3_001),
+        201,
+        &mut snapshot,
+        CoinStatsAccumulator::with_parallel_muhash(201),
+    )?;
     let expected_trailer = expected.muhash.finalize();
     assert_eq!(trailer, expected_trailer, "{}: trailer", plan.name);
     assert_ne!(
@@ -151,25 +156,31 @@ fn run(plan: &Plan) -> TestResult {
         "{}: trailer bytes",
         plan.name
     );
+    if let Some((outpoint, txout)) = live.first() {
+        let mut bumped = txout.clone();
+        bumped.value = Amount::from_sat(txout.value.to_sat().saturating_add(1));
+        let mut perturbed = expected.clone();
+        perturbed.remove_utxo(outpoint, txout, 201, false);
+        perturbed.insert_utxo(outpoint, &bumped, 201, false);
+        assert_ne!(
+            trailer,
+            perturbed.muhash.finalize(),
+            "{}: perturbed trailer must differ",
+            plan.name
+        );
+    }
+    for (outpoint, txout) in live {
+        assert_eq!(
+            set.get(&outpoint),
+            Some(txout),
+            "{}: lost a coin",
+            plan.name
+        );
+    }
+    for outpoint in spent {
+        assert_eq!(set.get(&outpoint), None, "{}: kept a spent coin", plan.name);
+    }
     Ok(())
-}
-
-fn assert_stats_eq(name: &str, left: &CoinStats, right: &CoinStats) {
-    assert_eq!(left.height, right.height, "{name}: height");
-    assert_eq!(left.total_amount, right.total_amount, "{name}: amount");
-    assert_eq!(left.bogo_size, right.bogo_size, "{name}: bogo size");
-    assert_eq!(left.tx_count, right.tx_count, "{name}: tx count");
-    assert_eq!(left.utxo_count, right.utxo_count, "{name}: utxo count");
-    assert_eq!(
-        left.muhash.finalize(),
-        right.muhash.finalize(),
-        "{name}: muhash"
-    );
-    assert_eq!(
-        left.muhash.finalize_hash(),
-        right.muhash.finalize_hash(),
-        "{name}: muhash digest"
-    );
 }
 
 fn txout(index: u32) -> TxOut {

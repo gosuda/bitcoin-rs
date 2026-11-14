@@ -2,7 +2,7 @@
 
 Inbound peers enter through a listener; outbound peers are redialed by one drain thread from the address book, feelers, and pinned peers. Both paths end in the same handshake and peer machine, and the node negotiates BIP324 v2 transport by default.
 
-The wire surface lives in [`crates/wire`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/wire), and sync, dispatch, and relay orchestration live in [`crates/node/src/p2p`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/node/src/p2p). Wire compatibility and deviations are owned by [docs/contracts/p2p-wire.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/p2p-wire.md) and [docs/policies/p2p-compatibility.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/p2p-compatibility.md).
+The wire protocols live in [`crates/wire`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/wire), and sync, dispatch, and orchestration live in [`crates/node/src/p2p`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/node/src/p2p). Wire compatibility and deviations are owned by [docs/contracts/p2p-wire.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/p2p-wire.md) and [docs/policies/p2p-compatibility.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/p2p-compatibility.md).
 
 ```text
                      inbound                         outbound

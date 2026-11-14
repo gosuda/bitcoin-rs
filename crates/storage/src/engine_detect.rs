@@ -63,6 +63,7 @@ pub fn detect_engine(dir: &Path) -> Result<Option<StorageBackend>, StorageError>
     if let Some(backend) = detected {
         return Ok(Some(backend));
     }
+
     Err(StorageError::IncompatibleData(
         "unknown engine files".to_owned(),
     ))
@@ -72,6 +73,57 @@ pub fn detect_engine(dir: &Path) -> Result<Option<StorageBackend>, StorageError>
 mod tests {
     use super::detect_engine;
     use crate::StorageError;
+
+    #[test]
+    fn current_and_manifest_without_options_are_incompatible() -> Result<(), StorageError> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("CURRENT"), b"MANIFEST-000001\n")?;
+        std::fs::write(dir.path().join("MANIFEST-000001"), b"foreign manifest")?;
+
+        assert!(matches!(
+            detect_engine(dir.path()),
+            Err(StorageError::IncompatibleData(_))
+        ));
+        assert_eq!(std::fs::read_dir(dir.path())?.count(), 2);
+        assert_eq!(
+            std::fs::read(dir.path().join("CURRENT"))?,
+            b"MANIFEST-000001\n"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("MANIFEST-000001"))?,
+            b"foreign manifest"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rocksdb_checkpoint_is_detected_and_loads_row_without_identity() -> Result<(), StorageError> {
+        use crate::{ColumnFamily, KvStore, RocksDbStore, StorageBackend};
+
+        let dir = tempfile::tempdir()?;
+        let source = RocksDbStore::open(dir.path().join("source"))?;
+        let checkpoint = dir.path().join("checkpoint");
+        source.put(
+            ColumnFamily::UtxoMeta,
+            b"checkpoint-key",
+            b"checkpoint-value",
+        )?;
+        source.checkpoint(&checkpoint)?;
+        source.put(
+            ColumnFamily::UtxoMeta,
+            b"checkpoint-key",
+            b"source-only-value",
+        )?;
+
+        assert!(!checkpoint.join("IDENTITY").exists());
+        assert_eq!(detect_engine(&checkpoint)?, Some(StorageBackend::RocksDb));
+        let restored = crate::checkpoint::open_checkpoint_store(&checkpoint)?;
+        assert_eq!(
+            restored.get(ColumnFamily::UtxoMeta, b"checkpoint-key")?,
+            Some(b"checkpoint-value".to_vec())
+        );
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]

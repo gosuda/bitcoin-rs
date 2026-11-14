@@ -5,15 +5,17 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::record::UtxoRecord;
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_storage::{
-    CommitRecords, DurableHead, DurableHeadStore, InMemoryDurableHeadStore, StorageError,
+    CoinKey, ColumnFamily, CommitRecords, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
+    KvStore, StorageError,
 };
 use parking_lot::Mutex;
 use proptest::prelude::*;
 use std::sync::Arc;
 
-use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
+use crate::test_fixtures::{TestError, TestResult, handles, handles_with_store, seed_genesis};
 use crate::test_support::MemoryBodies;
 use crate::{ApplyError, Chainstate};
 
@@ -561,15 +563,6 @@ impl DurableHeadStore for AttestFailHeadStore {
         self.inner.load()
     }
 
-    fn commit(
-        &self,
-        expected: Option<&DurableHead>,
-        next: &DurableHead,
-        records: &CommitRecords<'_>,
-    ) -> Result<(), StorageError> {
-        self.inner.commit(expected, next, records)
-    }
-
     fn load_attestation(
         &self,
         head: &DurableHead,
@@ -635,114 +628,16 @@ fn cold_replay_attestation_failure_fails_closed() -> TestResult {
     Ok(())
 }
 
-/// RCV-02 / JW-ORDER-1: retention relief must not turn append-gap poison into
-/// a progress checkpoint or a retry. The original writer error stays intact.
-// RCV-02, JW-ORDER-1
-#[test]
-fn committed_gap_append_gap_does_not_enter_retention_relief() -> TestResult {
-    use bitcoin_rs_storage::chainstate_journal::{
-        FULL_REVALIDATION_MARKER, JournalEmit, JournalWriter, JournalWriterError,
-        shared_journal_writer,
-    };
+struct CrashFault;
 
-    let (mut handles, child) = restored_chainstate()?;
-    let bodies = Arc::new(MemoryBodies::default());
-    bodies.persist_block_body(1, child.block_hash().0, &consensus_bytes(&child))?;
-    let head = install_head(&mut handles, &child, bodies)?;
-    let temp = tempfile::tempdir()?;
-    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(
-        temp.path().join("kv"),
-    )?);
-    let path = temp.path().join("journal");
-    std::fs::create_dir(&path)?;
-    let dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&path)?;
-    let mut writer = JournalWriter::initialize(
-        dir,
-        store,
-        0,
-        (0, 0),
-        0,
-        Network::Regtest.genesis_block_hash().to_le_bytes(),
-        [0; 32],
-        1,
-    )?;
-    std::fs::write(
-        path.join(FULL_REVALIDATION_MARKER),
-        b"force full validation\n",
-    )?;
-    let marker_before = std::fs::read(path.join(FULL_REVALIDATION_MARKER))?;
-    let journal_head_before = std::fs::read(path.join("head.json"))?;
-    JournalEmit::mark_append_gap(&mut writer, 1);
-    *handles.journal.write() = Some(shared_journal_writer(writer));
-
-    let Err(ApplyError::JournalBackpressure(error)) = super::reconcile_at_boot(&handles) else {
-        panic!("append gap must return the original journal refusal, not recovery publication");
-    };
-    assert!(matches!(
-        *error,
-        JournalWriterError::AppendGap { height: 1 }
-    ));
-    assert!(matches!(
-        handles.begin_transition(),
-        Err(ApplyError::Shutdown)
-    ));
-    assert_eq!(
-        handles.applied_tip.load_full().map(|tip| tip.height),
-        Some(0)
-    );
-    assert_eq!(handles.durable_head.load()?, Some(head));
-    assert_eq!(
-        std::fs::read(path.join(FULL_REVALIDATION_MARKER))?,
-        marker_before
-    );
-    assert_eq!(std::fs::read(path.join("head.json"))?, journal_head_before);
-    Ok(())
-}
-
-struct CrashWindowHeadStore {
-    inner: Arc<dyn DurableHeadStore>,
-    fail_on_commit: Mutex<bool>,
-}
-
-impl DurableHeadStore for CrashWindowHeadStore {
-    fn load(&self) -> Result<Option<DurableHead>, StorageError> {
-        self.inner.load()
-    }
-
-    fn commit(
+impl bitcoin_rs_storage::commit::CommitFault for CrashFault {
+    fn before_commit(
         &self,
-        expected: Option<&DurableHead>,
-        next: &DurableHead,
-        records: &CommitRecords<'_>,
-    ) -> Result<(), StorageError> {
-        if *self.fail_on_commit.lock() {
-            return Err(StorageError::Backend(
-                "simulated crash during head commit".to_owned(),
-            ));
-        }
-        self.inner.commit(expected, next, records)
-    }
-
-    fn load_attestation(
-        &self,
-        head: &DurableHead,
-    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
-        self.inner.load_attestation(head)
-    }
-
-    fn load_suffix_attestation(
-        &self,
-        head: &DurableHead,
-    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
-        self.inner.load_suffix_attestation(head)
-    }
-
-    fn attest(
-        &self,
-        head: &DurableHead,
-        level: bitcoin_rs_storage::ScriptAttestation,
-    ) -> Result<(), StorageError> {
-        self.inner.attest(head, level)
+        _prefix: &bitcoin_rs_storage::AcceptedPrefix,
+    ) -> Result<(), bitcoin_rs_storage::CommitError> {
+        Err(bitcoin_rs_storage::CommitError::Storage(
+            StorageError::Backend("simulated crash during head commit".to_owned()),
+        ))
     }
 }
 
@@ -757,7 +652,6 @@ proptest! {
         fail_mode in 0_u8..=2,
         cold_boot in any::<bool>(),
     ) {
-        let store: Arc<dyn DurableHeadStore> = Arc::new(InMemoryDurableHeadStore::new());
         let bodies: Arc<dyn BlockBodyStore> = Arc::new(MemoryBodies::default());
         let genesis = Network::Regtest.genesis_block();
         let genesis_hash = Hash256::from(genesis.block_hash());
@@ -774,26 +668,39 @@ proptest! {
             body_extent: None,
             undo_extent: None,
         };
-        store
-            .commit(None, &genesis_head, &CommitRecords::default())
-            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
 
         let child1 = mined_child(BlockHash(genesis_hash), 1)
             .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
         let child1_hash = Hash256::from(child1.block_hash());
+        let child_coinbase_txid = child1.txs[0].txid();
+        let child_coinbase_value = child1.txs[0].outputs[0].value.to_sat();
         bodies
             .persist_block_body(1, child1_hash, &consensus_bytes(&child1))
             .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
 
-        let crash_store = Arc::new(CrashWindowHeadStore {
-            inner: Arc::clone(&store),
-            fail_on_commit: Mutex::new(fail_mode == 0),
-        });
-
-        let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        let store = Arc::new(bitcoin_rs_storage::MemoryKvStore::new());
+        let mut chain = handles_with_store(
+            Network::Regtest,
+            Arc::new(UtxoSet::new()),
+            Arc::clone(&store),
+        );
+        chain
+            .commit_authority
+            .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+                expected_head: None,
+                next_head: genesis_head,
+                undo_rows: Vec::new(),
+                body_rows: Vec::new(),
+                attestation: None,
+                coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+            })
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
         let genesis_tip = seed_genesis(&chain).map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
-        chain.durable_head = crash_store;
         chain.block_body_store = Some(Arc::clone(&bodies));
+
+        if fail_mode == 0 {
+            chain.commit_authority.set_fault(Arc::new(CrashFault));
+        }
 
         let payload = bitcoin_rs_consensus::primitives::BlockImage::from_local(child1);
         let apply_result = chain.apply_block(&payload);
@@ -806,9 +713,16 @@ proptest! {
             prop_assert!(apply_result.is_ok(), "clean write must succeed");
         }
 
-        let mut reopened = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        let committed_head = chain
+            .durable_head
+            .load()
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+        let mut reopened = handles_with_store(
+            Network::Regtest,
+            Arc::new(UtxoSet::new()),
+            Arc::clone(&store),
+        );
         let _ = seed_genesis(&reopened).map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
-        reopened.durable_head = store;
         reopened.block_body_store = Some(bodies);
         if cold_boot {
             reopened.applied_tip.store(None);
@@ -831,6 +745,11 @@ proptest! {
 
         prop_assert_eq!(recovered_tip.height, recovered_head.height);
         prop_assert_eq!(recovered_tip.hash, recovered_head.tip);
+        prop_assert_eq!(
+            Some(recovered_head),
+            committed_head,
+            "boot replay must leave the durable head exactly as it was committed"
+        );
 
         let is_state_before = recovered_head == prior_head
             && recovered_tip.height == 0
@@ -839,6 +758,44 @@ proptest! {
             && recovered_head.tip == child1_hash
             && recovered_tip.height == 1
             && recovered_tip.hash == child1_hash;
+
+        let child_coinbase_key = CoinKey(child_coinbase_txid.0.to_le_bytes());
+        let authoritative_coin = store
+            .get(ColumnFamily::Coins, child_coinbase_key.as_bytes())
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+        let reopened_coin = reopened
+            .coins
+            .get(&child_coinbase_key)
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+        prop_assert_eq!(
+            reopened_coin.is_some(),
+            is_state_after,
+            "reopened coin view must expose the child coinbase exactly when the block is committed"
+        );
+        prop_assert_eq!(
+            authoritative_coin.is_some(),
+            is_state_after,
+            "authoritative KV must hold the child coinbase row exactly when the block is committed"
+        );
+        if is_state_after {
+            let committed_bytes = authoritative_coin.as_ref().ok_or_else(|| {
+                TestCaseError::fail("committed coin row missing from authoritative store")
+            })?;
+            prop_assert_eq!(
+                reopened_coin.as_deref(),
+                authoritative_coin.as_deref(),
+                "reopened coin store must read the committed authoritative row unchanged"
+            );
+            let record = UtxoRecord::from_encoded(committed_bytes.to_vec().into_boxed_slice())
+                .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+            prop_assert_eq!(record.txid(), child_coinbase_txid.0);
+            let coinbase_out = record
+                .find_output(0)
+                .ok_or_else(|| TestCaseError::fail("committed coinbase record lost output 0"))?;
+            prop_assert_eq!(coinbase_out.height, 1_u32);
+            prop_assert!(coinbase_out.coinbase, "committed coinbase row must be marked coinbase");
+            prop_assert_eq!(coinbase_out.value, child_coinbase_value);
+        }
 
         if fail_mode == 0 {
             prop_assert!(

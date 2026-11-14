@@ -29,7 +29,7 @@ $ ./target/release/bitcoin-rs --storage-backend rocksdb --network regtest --data
 Error: unsupported storage backend rocksdb
 ```
 
-In the current runtime, RocksDB is always compiled in, so a separate `--features rocksdb` flag is no longer required. Historical epoch-2 datadirs wrote `chainstate/0.jnl` plus numbered `chainstate/keyspaces/` (`fjall`) or `chainstate/redb.db` (`redb`); current epoch-3 datadirs write native RocksDB files (including `chainstate/CURRENT`).
+In the current runtime, RocksDB is always compiled in, so a separate `--features rocksdb` flag is no longer required. Historical epoch-2 datadirs wrote `chainstate/0.jnl` plus numbered `chainstate/keyspaces/` (`fjall`) or `chainstate/redb.db` (`redb`); current epoch-4 datadirs write native RocksDB files (including `chainstate/CURRENT`).
 
 The backend appears in the startup line:
 
@@ -83,21 +83,17 @@ Error: transaction, script and compact-filter indexing are not compatible with -
 
 The process exits with status 1. Pruning keeps a reorg safety margin of 288 blocks below the applied tip, so a recent reorg can still disconnect and reconnect. Older block bodies are removed; a query that needs them reports the history unavailable instead of returning an empty success.
 
-## The chainstate journal
-
-`chainstate_journal` is a TOML table with no CLI flags. Each field also has a `BITCOIN_RS_CHAINSTATE_JOURNAL*` environment spelling. It controls the derived journal that records committed chain events for consumers. Defaults from the resolved config are `blocks = 500`, `seconds = 5`, `rotate_mib = 256`, `max_journal_mib = 2048`, `max_lag_blocks = 500`, and `max_lag_seconds = 30`. The journal may lag the durable head, never lead it, and losing it does not lose chainstate.
-
 ## Schema and migrations
 
-The authoritative format has one current epoch, `3`, recorded in `CURRENT_SCHEMA`. The node does not migrate, translate, or repair an incompatible directory in place. It refuses to open it and:
+The authoritative format has one current epoch, `4`, recorded in `CURRENT_SCHEMA`. The node does not migrate, translate, or repair an incompatible directory in place. It refuses to open it and:
 
 - preserves the directory untouched,
 - reports `incompatible_schema` when the marker, epoch, or referenced bytes do not match,
-- requires a separately named data directory and a fresh replay for a format change.
+- requires a separately named data directory and a fresh replay, or an implemented offline conversion step, for a format change.
 
 Owner-local state carries its own versions. Rejected mempool snapshots move intact to a `mempool-snapshot-rejected-*` directory; a fee estimator with no usable history reports insufficient data. Those cases never move `CURRENT_SCHEMA`.
 
-> **Warning** An epoch change is not an in-place upgrade. Keep the old directory, create a new one, sync it, then switch (or migrate retired epoch-2 datadirs using `tools/storage-convert`). The [datadir format policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/db-migration.md) owns the procedure, and [`RCV-09`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md) owns the fresh-replay and schema-refusal rule.
+> **Warning** An epoch change is not an in-place upgrade. Stop all node processes and prevent changes to the source and target trees throughout conversion. Keep the old directory and use a distinct empty destination for each step. The converter implements `2 -> 3`, `3 -> 4`, and `4 -> 4` for an engine change; it does not take an epoch-2 source directly to epoch 4. Run `bitcoin-rs-storage-convert --from <epoch-2-dir> --to <epoch-3-dir> --to-engine rocksdb`, inspect its JSON verification report, then run `bitcoin-rs-storage-convert --from <epoch-3-dir> --to <epoch-4-dir> --to-engine rocksdb` and inspect that report before switching to the epoch-4 directory. Do not start the current node on the intermediate epoch-3 directory. For an epoch-3 source, use only the second invocation. The `3 -> 4` step requires a complete checkpoint and the block bodies and undo rows needed to replay its suffix to the durable head. It moves the checkpoint coins into the engine `Coins` keyspace and publishes an engine-backed checkpoint. If the required inputs are unavailable, use a separately named directory and fresh replay instead. It carries a legacy `chainstate-journal/full-revalidation` marker to the target root; the `4 -> 4` engine-copy path carries an existing root marker. Both paths reject markers larger than 9 bytes and preserve the full-revalidation requirement in the target. The [datadir format policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/db-migration.md) owns the procedure, and [`RCV-09`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md) owns the fresh-replay and schema-refusal rule.
 
 ## Next
 

@@ -231,6 +231,10 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> Result<(), 
         "read_fence",
         "utxo",
         "utxo_handle",
+        "coins",
+        "commit_authority",
+        "coin_store",
+        "coin_store_handle",
         "apply_block",
         "apply_block_with_serialized",
         "disconnect_block",
@@ -248,6 +252,62 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> Result<(), 
         ),
         &["E0599"],
         "fixture_set",
+    )?;
+    Ok(())
+}
+
+// ARCH-07a
+#[test]
+fn utxo_queries_expose_no_production_mutation_capability() -> Result<(), TestError> {
+    let manifest = dependency_graph::workspace_root_manifest();
+    let root = manifest
+        .parent()
+        .ok_or(TestError::Missing("workspace root"))?
+        .canonicalize()?;
+    let consumer = capability_compile::ProductionConsumer::new(&root)?;
+    let control = r"
+use bitcoin_rs_storage::utxo::{UtxoReader, UtxoSetView};
+pub fn observe(reader: &UtxoReader, view: &UtxoSetView<'_>) {
+    let _ = reader.with_stable_view(|view| view.len());
+    let _ = reader.scan_coin_snapshot();
+    let _ = reader.confirmation_height(&Default::default(), u32::MAX);
+    let _ = view.record_count();
+}
+";
+    consumer.allow_reads(control)?;
+    for (receiver, method) in [
+        ("reader: &UtxoReader", "coin_store"),
+        ("reader: &UtxoReader", "set"),
+        ("reader: &UtxoReader", "fixture_set"),
+        ("reader: &UtxoReader", "fixture_coin_store"),
+        ("view: &UtxoSetView<'_>", "coin_store"),
+        ("view: &UtxoSetView<'_>", "set"),
+        ("view: &UtxoSetView<'_>", "store"),
+    ] {
+        let variable = receiver.split(':').next().unwrap_or("reader");
+        consumer.deny(
+            &format!("{control}\npub fn denied({receiver}) {{ let _ = {variable}.{method}(); }}"),
+            &["E0599"],
+            method,
+        )?;
+    }
+    for (receiver, field) in [
+        ("reader: &UtxoReader", "coin_store"),
+        ("reader: &UtxoReader", "set"),
+        ("view: &UtxoSetView<'_>", "set"),
+        ("view: &UtxoSetView<'_>", "backing"),
+    ] {
+        let variable = receiver.split(':').next().unwrap_or("reader");
+        consumer.deny(
+            &format!("{control}\npub fn denied({receiver}) {{ let _ = &{variable}.{field}; }}"),
+            &["E0616", "E0609"],
+            field,
+        )?;
+    }
+    consumer.deny(
+        &format!("{control}\npub fn denied(view: &UtxoSetView<'_>) {{ let _ = view.shard(0); }}"),
+        &["E0624"],
+        "shard",
     )?;
     Ok(())
 }

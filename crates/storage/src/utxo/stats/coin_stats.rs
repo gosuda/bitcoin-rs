@@ -1,11 +1,9 @@
 use alloc::sync::Arc;
 
-use crate::utxo::listener::{UtxoChangeEvents, UtxoCommittedEvent, UtxoInserted, UtxoRemoved};
 use crate::utxo::snapshot::{SnapshotCoin, SnapshotCoinObserver};
 use bitcoin_rs_consensus::primitives::{OutPoint, TxOut, varint};
 use parking_lot::Mutex;
 use rayon::prelude::*;
-use smallvec::SmallVec;
 use zerocopy::IntoBytes;
 
 use crate::utxo::stats::MuHash3072;
@@ -16,15 +14,7 @@ const AMOUNT_BYTES: u64 = 8;
 const AMOUNT_ENCODED_BYTES: usize = 8;
 const SCRIPT_LEN_BYTES: u64 = 2;
 const FIXED_BOGO_SIZE: u64 = 36 + COIN_HEADER_BYTES + AMOUNT_BYTES + SCRIPT_LEN_BYTES;
-const MAX_RETAINED_SCRATCH_CAPACITY: usize = 4096;
-const PARALLEL_COIN_BATCH_OP_THRESHOLD: usize = 1024;
-const COIN_BATCH_CHUNK_SIZE: usize = 512;
-const PARALLEL_EVENT_CHUNK_OP_THRESHOLD: usize = 64;
-const WIDE_EVENT_BATCH_SHARD_THRESHOLD: usize = 16;
-const NARROW_EVENT_CHUNK_SIZE: usize = 16;
-const WIDE_EVENT_CHUNK_SIZE: usize = 4;
-const INLINE_EVENT_CHUNKS: usize = 64;
-
+pub(crate) const PARALLEL_COIN_BATCH_OP_THRESHOLD: usize = 1024;
 const PARALLEL_MUHASH_MAX_COINS: usize = 262_144;
 const PARALLEL_MUHASH_MAX_BYTES: usize = 16 * 1024 * 1024;
 const PARALLEL_MUHASH_MAX_LANES: usize = 32;
@@ -376,192 +366,6 @@ impl SnapshotCoinObserver for CoinStatsAccumulator {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CoinStatsDelta {
-    muhash: MuHash3072,
-    added_amount: u64,
-    added_bogo_size: u64,
-    added_utxos: u64,
-    removed_amount: u64,
-    removed_bogo_size: u64,
-    removed_utxos: u64,
-}
-
-impl CoinStatsDelta {
-    const fn new() -> Self {
-        Self {
-            muhash: MuHash3072::new(),
-            added_amount: 0,
-            added_bogo_size: 0,
-            added_utxos: 0,
-            removed_amount: 0,
-            removed_bogo_size: 0,
-            removed_utxos: 0,
-        }
-    }
-
-    fn from_insertions(insertions: &[UtxoInserted<'_>]) -> Self {
-        let mut delta = Self::new();
-        let mut scratch = Vec::new();
-        for insertion in insertions {
-            delta.insert_utxo(
-                &mut scratch,
-                insertion.op,
-                insertion.txout,
-                insertion.height,
-                insertion.coinbase,
-            );
-        }
-        delta
-    }
-
-    fn from_removals(removals: &[UtxoRemoved]) -> Self {
-        let mut delta = Self::new();
-        let mut scratch = Vec::new();
-        for removal in removals {
-            delta.remove_utxo(
-                &mut scratch,
-                &removal.op,
-                &removal.txout,
-                removal.height,
-                removal.coinbase,
-            );
-        }
-        delta
-    }
-
-    fn from_events(events: &UtxoChangeEvents<'_>) -> Self {
-        let mut delta = Self::new();
-        let mut scratch = Vec::new();
-        events.for_each(|event| match event {
-            UtxoCommittedEvent::InsertBatch(insertions) => {
-                delta.insert_batch(&mut scratch, insertions);
-            }
-            UtxoCommittedEvent::RemoveBatch(removals) => {
-                delta.remove_batch(&mut scratch, removals);
-            }
-        });
-        delta
-    }
-
-    fn from_event(event: UtxoCommittedEvent<'_, '_>) -> Self {
-        let mut delta = Self::new();
-        let mut scratch = Vec::new();
-        match event {
-            UtxoCommittedEvent::InsertBatch(insertions) => {
-                delta.insert_batch(&mut scratch, insertions);
-            }
-            UtxoCommittedEvent::RemoveBatch(removals) => {
-                delta.remove_batch(&mut scratch, removals);
-            }
-        }
-        delta
-    }
-
-    fn combine(mut self, other: Self) -> Self {
-        let Self {
-            muhash,
-            added_amount,
-            added_bogo_size,
-            added_utxos,
-            removed_amount,
-            removed_bogo_size,
-            removed_utxos,
-        } = other;
-        if added_utxos != 0 {
-            self.muhash.combine_numerator(&muhash);
-        }
-        if removed_utxos != 0 {
-            self.muhash.combine_denominator(&muhash);
-        }
-        self.added_amount = self.added_amount.saturating_add(added_amount);
-        self.added_bogo_size = self.added_bogo_size.saturating_add(added_bogo_size);
-        self.added_utxos = self.added_utxos.saturating_add(added_utxos);
-        self.removed_amount = self.removed_amount.saturating_add(removed_amount);
-        self.removed_bogo_size = self.removed_bogo_size.saturating_add(removed_bogo_size);
-        self.removed_utxos = self.removed_utxos.saturating_add(removed_utxos);
-        self
-    }
-
-    #[inline]
-    fn apply_to(self, stats: &mut CoinStats) {
-        match (self.added_utxos != 0, self.removed_utxos != 0) {
-            (true, true) => stats.muhash.combine(&self.muhash),
-            (true, false) => stats.muhash.combine_numerator(&self.muhash),
-            (false, true) => stats.muhash.combine_denominator(&self.muhash),
-            (false, false) => {}
-        }
-        stats.total_amount = stats
-            .total_amount
-            .saturating_add(self.added_amount)
-            .saturating_sub(self.removed_amount);
-        stats.bogo_size = stats
-            .bogo_size
-            .saturating_add(self.added_bogo_size)
-            .saturating_sub(self.removed_bogo_size);
-        stats.utxo_count = stats
-            .utxo_count
-            .saturating_add(self.added_utxos)
-            .saturating_sub(self.removed_utxos);
-    }
-
-    #[inline]
-    fn insert_utxo(
-        &mut self,
-        scratch: &mut Vec<u8>,
-        op: &OutPoint,
-        txout: &TxOut,
-        height: u32,
-        coinbase: bool,
-    ) {
-        coin_hash_bytes_into(scratch, op, txout, height, coinbase);
-        self.muhash.insert(scratch.as_slice());
-        self.added_amount = self.added_amount.saturating_add(txout.value.to_sat());
-        self.added_bogo_size = self.added_bogo_size.saturating_add(bogo_size(txout));
-        self.added_utxos = self.added_utxos.saturating_add(1);
-    }
-
-    fn insert_batch(&mut self, scratch: &mut Vec<u8>, insertions: &[UtxoInserted<'_>]) {
-        for insertion in insertions {
-            self.insert_utxo(
-                scratch,
-                insertion.op,
-                insertion.txout,
-                insertion.height,
-                insertion.coinbase,
-            );
-        }
-    }
-
-    #[inline]
-    fn remove_utxo(
-        &mut self,
-        scratch: &mut Vec<u8>,
-        op: &OutPoint,
-        txout: &TxOut,
-        height: u32,
-        coinbase: bool,
-    ) {
-        coin_hash_bytes_into(scratch, op, txout, height, coinbase);
-        self.muhash.remove(scratch.as_slice());
-        self.removed_amount = self.removed_amount.saturating_add(txout.value.to_sat());
-        self.removed_bogo_size = self.removed_bogo_size.saturating_add(bogo_size(txout));
-        self.removed_utxos = self.removed_utxos.saturating_add(1);
-    }
-
-    fn remove_batch(&mut self, scratch: &mut Vec<u8>, removals: &[UtxoRemoved]) {
-        for removal in removals {
-            self.remove_utxo(
-                scratch,
-                &removal.op,
-                &removal.txout,
-                removal.height,
-                removal.coinbase,
-            );
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum CoinStatsDecodeError {
     #[error("coinstats row is truncated")]
@@ -578,37 +382,13 @@ pub struct CoinStatsListener {
 #[derive(Debug)]
 struct CoinStatsListenerState {
     stats: CoinStats,
-    scratch: Vec<u8>,
-}
-
-impl CoinStatsListenerState {
-    fn insert_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
-        coin_hash_bytes_into(&mut self.scratch, op, txout, height, coinbase);
-        self.stats.muhash.insert(self.scratch.as_slice());
-        self.stats.account_insert(txout);
-    }
-
-    fn remove_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
-        coin_hash_bytes_into(&mut self.scratch, op, txout, height, coinbase);
-        self.stats.muhash.remove(self.scratch.as_slice());
-        self.stats.account_remove(txout);
-    }
-
-    fn trim_scratch_capacity(&mut self) {
-        if self.scratch.capacity() > MAX_RETAINED_SCRATCH_CAPACITY {
-            self.scratch = Vec::new();
-        }
-    }
 }
 
 impl CoinStatsListener {
     #[must_use]
     pub fn new(stats: CoinStats) -> Self {
         Self {
-            state: Arc::new(Mutex::new(CoinStatsListenerState {
-                stats,
-                scratch: Vec::new(),
-            })),
+            state: Arc::new(Mutex::new(CoinStatsListenerState { stats })),
         }
     }
 
@@ -620,14 +400,46 @@ impl CoinStatsListener {
     pub fn reset(&self, stats: CoinStats) {
         let mut guard = self.state.lock();
         guard.stats = stats;
-        guard.scratch.clear();
+    }
+
+    pub fn insert_utxo(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.state
+            .lock()
+            .stats
+            .insert_utxo(op, txout, height, coinbase);
+    }
+
+    pub fn remove_utxo(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.state
+            .lock()
+            .stats
+            .remove_utxo(op, txout, height, coinbase);
+    }
+
+    pub(crate) fn apply_utxos<'a>(
+        &self,
+        updates: impl IntoIterator<Item = (bool, &'a OutPoint, &'a TxOut, u32, bool)>,
+    ) {
+        let mut guard = self.state.lock();
+        let stats = &mut guard.stats;
+        let mut encoded = Vec::new();
+        for (insert, op, txout, height, coinbase) in updates {
+            coin_hash_bytes_into(&mut encoded, op, txout, height, coinbase);
+            if insert {
+                stats.muhash.insert(&encoded);
+                stats.account_insert(txout);
+            } else {
+                stats.muhash.remove(&encoded);
+                stats.account_remove(txout);
+            }
+        }
     }
 
     pub fn finish_block(&self, height: u32, tx_delta: u64) {
         self.state.lock().stats.finish_block(height, tx_delta);
     }
 
-    pub(crate) fn rewind_block(
+    pub fn rewind_block(
         &self,
         disconnected_height: u32,
         parent_height: u32,
@@ -649,91 +461,6 @@ impl CoinStatsListener {
             .stats
             .check_rewind(disconnected_height, tx_delta)
             .map(|_| ())
-    }
-}
-
-impl CoinStatsListener {
-    pub(crate) fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
-        if insertions.len() < PARALLEL_COIN_BATCH_OP_THRESHOLD {
-            let mut state = self.state.lock();
-            for insertion in insertions {
-                state.insert_utxo(
-                    insertion.op,
-                    insertion.txout,
-                    insertion.height,
-                    insertion.coinbase,
-                );
-            }
-            state.trim_scratch_capacity();
-            return;
-        }
-
-        let delta = insertions
-            .par_chunks(COIN_BATCH_CHUNK_SIZE)
-            .map(CoinStatsDelta::from_insertions)
-            .reduce(CoinStatsDelta::new, CoinStatsDelta::combine);
-        let mut state = self.state.lock();
-        delta.apply_to(&mut state.stats);
-    }
-
-    pub(crate) fn on_remove_coins(&self, removals: &[UtxoRemoved]) {
-        if removals.len() < PARALLEL_COIN_BATCH_OP_THRESHOLD {
-            let mut state = self.state.lock();
-            for removal in removals {
-                state.remove_utxo(
-                    &removal.op,
-                    &removal.txout,
-                    removal.height,
-                    removal.coinbase,
-                );
-            }
-            state.trim_scratch_capacity();
-            return;
-        }
-
-        let delta = removals
-            .par_chunks(COIN_BATCH_CHUNK_SIZE)
-            .map(CoinStatsDelta::from_removals)
-            .reduce(CoinStatsDelta::new, CoinStatsDelta::combine);
-        let mut state = self.state.lock();
-        delta.apply_to(&mut state.stats);
-    }
-
-    pub(crate) fn on_committed_event_batches(&self, batches: &[UtxoChangeEvents<'_>]) {
-        if batches.is_empty() {
-            return;
-        }
-
-        let operation_count = batches
-            .iter()
-            .map(UtxoChangeEvents::operation_count)
-            .sum::<usize>();
-        let delta = if operation_count >= PARALLEL_EVENT_CHUNK_OP_THRESHOLD {
-            let event_chunk_size = if batches.len() >= WIDE_EVENT_BATCH_SHARD_THRESHOLD {
-                WIDE_EVENT_CHUNK_SIZE
-            } else {
-                NARROW_EVENT_CHUNK_SIZE
-            };
-            let mut chunks =
-                SmallVec::<[UtxoCommittedEvent<'_, '_>; INLINE_EVENT_CHUNKS]>::with_capacity(
-                    operation_count.div_ceil(event_chunk_size),
-                );
-            for batch in batches {
-                batch.for_each_chunk(event_chunk_size, |event| chunks.push(event));
-            }
-            chunks
-                .par_iter()
-                .copied()
-                .map(CoinStatsDelta::from_event)
-                .reduce(CoinStatsDelta::new, CoinStatsDelta::combine)
-        } else {
-            batches
-                .iter()
-                .map(CoinStatsDelta::from_events)
-                .fold(CoinStatsDelta::new(), CoinStatsDelta::combine)
-        };
-        let mut state = self.state.lock();
-        delta.apply_to(&mut state.stats);
     }
 
     pub(crate) fn muhash3072(&self) -> [u8; 384] {
@@ -873,18 +600,16 @@ mod tests {
 
     #[test]
     fn scan_coin_stats_matches_rolling_listener() {
-        use crate::utxo::contract::{BlockChanges, UtxoAdd};
-        use crate::utxo::{SnapshotCoinObserver, UtxoSet};
+        use crate::utxo::UtxoSet;
         use bitcoin_rs_consensus::primitives::{Hash256, OutPoint};
 
-        let mut utxo = UtxoSet::new();
-        let listener = super::CoinStatsListener::new(super::CoinStats::new());
-        utxo.track_coin_stats(listener.clone());
-        let mut changes = BlockChanges::default();
+        let utxo = UtxoSet::new();
+        let mut stats = super::CoinStats::new();
         for (i, script_len) in [0_usize, 1, 252, 253, 65_535].into_iter().enumerate() {
             let mut txid_bytes = [0_u8; 32];
             txid_bytes[0] = u8::try_from(i + 1).unwrap_or(u8::MAX);
-            let output = OutPoint::new(Hash256::from_le_bytes(&txid_bytes).into(), u32::MAX);
+            let txid = Hash256::from_le_bytes(&txid_bytes);
+            let output = OutPoint::new(txid.into(), u32::MAX);
             let txout = TxOut {
                 value: bitcoin_rs_consensus::primitives::Amount::from_sat(if i == 4 {
                     u64::MAX
@@ -893,20 +618,25 @@ mod tests {
                 }),
                 script_pubkey: vec![0x51; script_len].into(),
             };
-            changes.add(UtxoAdd::new(
-                output,
-                txout,
-                i % 2 == 1,
-                if i == 4 {
-                    u32::MAX >> 1
-                } else {
-                    u32::try_from(i).unwrap_or(u32::MAX)
-                },
-            ));
+            let coinbase = i % 2 == 1;
+            let height = if i == 4 {
+                u32::MAX >> 1
+            } else {
+                u32::try_from(i).unwrap_or(u32::MAX)
+            };
+            stats.insert_utxo(&output, &txout, height, coinbase);
+            let out = crate::utxo::record::OwnedUtxoOut {
+                vout: output.vout,
+                value: txout.value.to_sat(),
+                script_pubkey: txout.script_pubkey.to_vec(),
+                coinbase,
+                height,
+            };
+            let record = crate::utxo::record::UtxoRecord::from_owned_outputs(txid, &[out])
+                .unwrap_or_else(|err| panic!("record failed: {err}"));
+            utxo.insert_parsed_record(record);
         }
-        crate::utxo::contract::commit_block_changes(&utxo, &changes, &Hash256::default())
-            .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
-
+        let listener = super::CoinStatsListener::new(stats);
         let rolling = listener.snapshot();
         let (scanned, accumulated, without_muhash) = utxo.with_stable_view(|view| {
             let scanned = super::scan_coin_stats(view, rolling.height, true)

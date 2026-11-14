@@ -1105,24 +1105,28 @@ fn scan_txoutset_view(
         return Err(RpcError::Misc("gettxoutsetinfo interrupted".to_owned()));
     }
     let want_muhash = hash_type == "muhash";
-    ctx.chain.utxo.with_stable_view(|stable| {
-        let stats = bitcoin_rs_storage::utxo::stats::scan_coin_stats_cancellable(
-            stable,
-            view.height(),
-            want_muhash,
-            cancelled,
-        )
-        .map_err(txoutset_walk_error)?;
-        let set_hash = compute_txoutset_hash(stable, &stats, hash_type, cancelled)?;
-        let disk_size = u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX);
-        Ok(TxOutSetScan {
-            stats,
-            txouts: stable.len(),
-            transactions: stable.record_count(),
-            set_hash,
-            disk_size,
+    ctx.chain
+        .utxo
+        .with_stable_view(|stable| {
+            let stats = bitcoin_rs_storage::utxo::stats::scan_coin_stats_cancellable(
+                stable,
+                view.height(),
+                want_muhash,
+                cancelled,
+            )
+            .map_err(txoutset_walk_error)?;
+            let set_hash = compute_txoutset_hash(stable, &stats, hash_type, cancelled)?;
+            let disk_size =
+                u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX);
+            Ok(TxOutSetScan {
+                stats,
+                txouts: stable.len(),
+                transactions: stable.record_count(),
+                set_hash,
+                disk_size,
+            })
         })
-    })
+        .map_err(txoutset_walk_error)?
 }
 
 fn execute_txoutset_scan(
@@ -1393,11 +1397,15 @@ fn scantxoutset_scan(
             .chain_transition
             .try_lock_for(std::time::Duration::from_millis(50))
         {
+            let snapshot =
+                ctx.chain.utxo.scan_coin_snapshot().map_err(|error| {
+                    RpcError::Misc(format!("UTXO scan snapshot failed: {error}"))
+                })?;
             let applied = ctx.chain.applied_view();
-            let (complete, scan) = permit
-                .scan(&scripts, || cancellation.is_triggered())
-                .map_err(|error| scan_error(&error))?;
             drop(transition);
+            let (complete, scan) = permit
+                .scan_snapshot(&*snapshot, &scripts, || cancellation.is_triggered())
+                .map_err(|error| scan_error(&error))?;
             break (applied, complete, scan);
         }
     };

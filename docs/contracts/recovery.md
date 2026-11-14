@@ -8,7 +8,7 @@ That head certifies ordering and high-water bounds, not coin contents.
 If startup restores no chainstate while a durable head still exists, `reconcile_at_boot` replays the head chain.
 Replay starts from the newest accepted checkpoint out of the durable bodies it certifies.
 Replay starts from genesis when no checkpoint is accepted.
-Coins are recovery artifacts and the durable head remains the only surviving authority.
+Coins commit in the engine `coins` keyspace in the same atomic batch as the durable head.
 A missing or mismatched body MUST fail closed.
 A replayed gap above no restored checkpoint is a cold rebuild.
 A cold rebuild executes the scripts of every block in every validation mode.
@@ -22,7 +22,7 @@ Startup ignores an unreferenced generation.
 Owners:
 - Authoritative durable root and ordered commit protocol (`crates/execution/src/connect.rs`, `disconnect.rs`, `durable.rs`).
 - Recovery and schema admission (`crates/execution/src/recovery.rs`, with process-composition tests in `crates/node/src/state/tests/`).
-- Persistent coin transition boundary (`crates/storage/src/utxo/set.rs`, durable form in `crates/storage/src/durable_head.rs`).
+- Persistent coin transition boundary (`crates/storage/src/commit.rs`, `crates/storage/src/coins.rs`; durable form in `crates/storage/src/durable_head.rs`).
 - Crash and lost-write fault tests (`crates/node/tests/crash_recovery.rs`).
 - Reorg and disconnect (`crates/execution/src/reorg.rs`, `disconnect.rs`).
 - Checkpoint publication and recovery (`crates/execution/src/checkpoint.rs` and companions, `crates/storage/src/checkpoint/`).
@@ -42,7 +42,7 @@ R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs
 - `height` is the block height as a compact big-endian integer.
 - `CommitId` is a strictly monotonic durable serial advancing on every committed connect and every committed disconnect.
 - `coins_version` equals the current `CommitId` at commit time, never derived from coin contents.
-- `coins` is the authoritative UTXO set, keyed and valued as defined in `crates/storage/src/utxo`.
+- `coins` is the authoritative UTXO set in the engine `coins` keyspace (`ColumnFamily::Coins`), keyed by the 32-byte little-endian txid and valued as `UtxoRecord` bytes (`crates/storage/src/coins.rs`).
 - `body_extent` and `undo_extent` are the committed durable high-water bounds for body and undo segment files.
 - `refs` maps `(height, block_hash, Body|Undo)` to the durable byte range in the matching segment file.
 - Undo and body references include the block hash, never `height` alone.
@@ -68,9 +68,9 @@ struct DurableHead {
 - One connect or disconnect commits one atomic named-family batch.
 - The `write_durable_if` receipt covers the head row, the block undo row, its body locator row, and block-file maximum-height rows.
 - Appended body bytes and the blocks directory are synced before the batch MAY name them.
-- Coins commit in memory and become durable through the checkpoint export.
-- Undo and body records in the batch are what make a committed tip recoverable.
-- The chainstate journal derives from this batch and MAY lag it, never lead it.
+- Coins commit directly in the engine `coins` keyspace in the atomic storage batch.
+- Undo records, body locators, and coin replacements in the batch make the committed tip recoverable.
+- No chainstate journal exists; coins and the durable head commit together in the engine store.
 - `commit_id` is strictly monotonic on disconnect as well as on connect.
 - A reorg lowers `height`, never `commit_id`.
 - AssumeUTXO activation and historical archive updates use the same transition reservation but separate recovery namespaces.
@@ -103,13 +103,13 @@ struct DurableHead {
 - Snapshot recovery restores a compatible checkpoint or verifies the immutable snapshot archive.
 - Snapshot recovery replays the root-certified foreground suffix.
 - A full-revalidation marker still overrides incremental recovery.
-- The pre-activation journal cannot extend a snapshot jump and is detached.
+- No pre-activation journal exists to extend a snapshot jump; the legacy journal marker directory is only read for a leftover full-revalidation marker.
 - Historical coins are restored from the head-accepted checkpoint.
 - Retained bodies supply only the remaining suffix.
 - Durable archive progress never pretends to be a recovered coin set.
 - Finalized history supplies ordinary undo/reorg behavior.
 - A disconnect below the base clears the snapshot anchor in its head batch.
-- These bytes use datadir schema epoch 2; older datadirs are refused without conversion.
+- These bytes use datadir schema epoch 4; older datadirs are refused without offline conversion.
 - A checkpoint exactly at the pinned snapshot base MUST match its commitment and transaction count.
 - The checkpoint MUST contain no coin created above that base height.
 - Recovery uses the same height-bounded commitment traversal as snapshot activation and immutable archive restoration.
@@ -146,85 +146,71 @@ struct DurableHead {
 For one block, or a bounded fully verified prefix during IBD:
 
 1. Hold the chain transition reservation; close admission and mixed reads with the generation fence.
-2. Build exact forward and undo facts without mutating the public stable view.
-3. Append required block-body frames. Sync the block files and required directory entries.
-4. Apply one atomic storage batch containing the durable head row, undo rows, body locator records, and block-file maximum-height rows.
-- Wait for durable completion.
-- A successful commit on this nonempty batch makes prior deferred body-index writes on the same store durable with the head.
-5. Publish the committed chain and coin view.
-6. Feed the committed chain update into the mempool canonical lifecycle, update the fee estimator, and reconcile projections.
-
-Script attestation rules:
-- The atomic batch in step 4 also holds the `node:script-attestation` row in `UtxoMeta`.
-- The row carries the `commit_id` of the head it describes.
-- The row carries one level: `Unattested`, `AssumeValid` or `Full`.
-- A commit writes the weakest of the previous level and the level of its own batch.
-- A batch is `Full` when every block in it executed scripts.
-- A batch is `AssumeValid` when any block skipped them.
-- A replay above an accepted checkpoint keeps the previous level.
-- A row that is absent, or that names another `commit_id`, reads as `Unattested`.
-- A row with a wrong length or an unknown level is a corruption error.
-- A `Full` start whose head is below `Full` writes the revalidation marker and takes the cold path.
-- When the datadir is pruned, that start stops instead.
-- The stop message names `--validation-mode assume-valid` and resync.
-- A cold rebuild that reaches the stored head writes `Full`.
-- A second `node:script-attestation-suffix` row folds only the commits made above a pending assumeutxo base.
-- The suffix row starts at `Full` when the base installs; an absent row, or a row naming another `commit_id`, reads as `Unattested`.
-- A finalized assumeutxo replay attests the head `Full` when the head is the validated base or the suffix row is `Full`; otherwise the stored level stays.
-- An `AssumeValid` start never raises a level.
-- The rows do not change the head encoding, so no schema epoch moves.
-
-7. Publish the stable coherent generation only after mempool and projection alignment.
+2. Build exact forward transitions and undo facts without mutating the public stable view.
+3. Append required block-body frames. Synchronize the block files and required directory entries.
+4. Apply one atomic storage batch containing:
+   - The durable head row (`UtxoMeta`).
+   - The `node:script-attestation` row (and optional suffix row).
+   - Block undo rows.
+   - Body locator records.
+   - Block-file maximum-height rows.
+   - Coin replacement records in the engine `coins` keyspace (`ColumnFamily::Coins = 11`) computed from the window delta.
+   Wait for durable batch completion.
+   A successful commit on this batch makes prior deferred body-index writes on the same store durable with the head.
+5. Install the matching resident coin cache (`CoinCache`) records.
+6. Publish the committed chain head and coin view (applied epoch).
+7. Feed the committed chain update into the mempool canonical lifecycle, update the fee estimator, and reconcile projections using committed facts.
 8. Dispatch notifications and relay in the declared observable order outside all domain locks.
 
+Script attestation rules:
+- The atomic batch in step 4 holds the `node:script-attestation` row in `UtxoMeta`.
+- The row carries the `commit_id` of the head it describes.
+- The row carries one level: `Unattested`, `AssumeValid`, or `Full`.
+- A commit writes the weakest of the previous level and the level of its own batch.
+- A batch is `Full` when every block in it executed scripts.
+- A batch is `AssumeValid` when any block skipped script execution.
+- A replay above an accepted checkpoint keeps the previous level.
+- A row that is absent, or that names another `commit_id`, reads as `Unattested`.
+- A row with an invalid length or unknown level fails closed as a corruption error.
+- A `Full` startup over a head below `Full` writes the revalidation marker and executes the cold rebuild path.
+- When the datadir is pruned, that startup stops instead with resync instructions.
+- A cold rebuild that reaches the stored head writes `Full`.
+- A second `node:script-attestation-suffix` row folds only commits made above a pending AssumeUTXO base.
+- The suffix row starts at `Full` when the base installs; an absent row, or a row naming another `commit_id`, reads as `Unattested`.
+- A finalized AssumeUTXO replay attests the head `Full` when the head is the validated base or the suffix row is `Full`; otherwise the stored level remains.
+- An `AssumeValid` startup never raises an attestation level.
+- The attestation rows do not change the head encoding, preserving schema epoch compatibility.
+
 Commit details:
-- Coins commit in memory rather than as rows in the durable-head batch.
-- Coin durability comes from checkpoint export.
-- Before the block-file sync in step 3, chainstate fires an optional staged-tip hook to enqueue prospective work.
-- The hook fires in `PublishMode::Now` only for a direct child of the published tip (reorg connects never match).
-- The hook fires in `PublishMode::Grouped` only for the newest block of the staged prefix immediately before the group sync.
+- Coins commit directly in the engine `coins` keyspace in the atomic storage batch.
+- No chainstate journal exists: no writer, segment, rotation, retention, or replay path remains. A legacy `chainstate-journal/` directory in an older datadir is read only to find and clear a leftover full-revalidation marker.
+- Coin durability comes from the atomic storage batch; coin durability does not depend on checkpoint export.
+- Before the block-file sync in step 3, execution fires an optional staged-tip hook to enqueue prospective work.
+- The hook fires in `PublishMode::Now` only for a direct child of the published tip.
+- The hook fires in `PublishMode::Grouped` only for the newest block of the staged prefix immediately before group sync.
 - A failing window hands off only the last successful block.
 - The hook is gated on the IBD latch in `crates/node/src/state/open.rs`.
 - The hook never fires in `PublishMode::Replay`.
 - The hook enqueues without waiting.
-- Commit order is unchanged (sync in step 3, batch in step 4, publication in step 5, follower dispatch in step 8).
+- Commit order remains strict: block sync in step 3, atomic batch in step 4, cache install in step 5, publication in step 6, follower dispatch in step 8.
 - Speculative projections never advance `tip` or `DurableHead`.
 - Speculative projections publish no applied tip, advance no durable serials, and expose no candidate before durable commit.
-- Cache installation needs an authoritative committed receipt for the exact tip.
+- Cache installation requires an authoritative committed receipt for the exact tip.
 - The receipt matches txids, removal reasons, and the live full generation key.
-- Any mismatch, prioritisation, or failure discards the preparation for lazy assembly.
-- In follower dispatch (step 8) a gatewayless connect publishes a truthful empty receipt at the same point.
+- Any mismatch or failure discards speculative preparation for lazy assembly.
+- In follower dispatch (step 8), a gatewayless connect publishes a truthful empty receipt at the same point.
 - Receipt publication releases foreground waiters, including gatewayless connects.
 - A failure before stable publication leaves the fence closed until explicit recovery.
-- A guard destructor MUST never quietly reopen the fence after an error.
-- A live `submitblock` success waits for durable body, undo, and head completion.
-- `apply_block` returns only after the batch receipt.
+- A guard destructor must never quietly reopen the fence after an error.
+- A live `submitblock` call waits for durable body, undo, and head completion.
+- `apply_block` returns only after receiving the batch receipt.
 - The returned `ConnectOutcome.commit_id` is the receipt id.
-- IBD MAY group a bounded verified prefix.
+- IBD groups a bounded verified prefix.
 - Only committed prefixes are published.
-- Group caps are stated constants: `DURABLE_HEAD_GROUP_BLOCKS` = 64 blocks or `DURABLE_HEAD_GROUP_MAX_BYTES` = 8 MiB of block data, whichever first.
-- This creates one durable batch every one to two seconds at IBD rates.
-- This gives a crash-redo bound of at most 64 body re-applies.
-- Callers of `BlockBodyStore::sync` without a following durable batch on the body-index store MUST call `flush_index` after syncing the block files.
-- Boot-time durable-head replay runs before the journal maintenance worker starts.
-- If retention pressure refuses a replay block, recovery releases its transition.
-- Recovery publishes a marker-preserving progress checkpoint to compact the journal.
-- Recovery reacquires the transition and verifies the applied tip is unchanged.
-- Recovery retries that same block once.
-- The progress checkpoint does not retire the disconnect or full-revalidation marker.
-- Intermediate replay tips retain the cumulative transaction count from their parent.
-- Only the landing tip adopts the head certified count, so every progress checkpoint agrees with CoinStats.
-- Failure to publish the checkpoint, reacquire the transition, preserve the captured tip, or apply the retry fails closed.
-- Before genesis no progress checkpoint is possible.
-- An empty cold writer hitting retention pressure with the full-revalidation marker present removes only invalidated, non-active journal segment generations.
-- That writer syncs the journal directory, preserving marker, head, and active cursor.
-- Append-gap admission and filesystem errors still fail closed.
-- Other journal refusals (append gaps, unreadable state, corruption, storage/filesystem failures) never enter this checkpoint-and-retry path.
-- Proof: `crates/node/tests/mining/coordination.rs` (staged preparation, commit-time install, stale-race discard).
+- Group caps are stated constants or budget limits; a failure at block j commits the prefix before j (`WIN-08`).
+- An ambiguous storage failure closes mutation admission until recovery resolves the durable outcome (`CMT-04`).
 - Proof: `crates/execution/src/tests/` (grouped-window staging).
-- Proof: `durable_replay_tests.rs` (gap replay never fires the staged-tip hook).
 - Proof: `crates/node/src/mining/coordinator/tests.rs` (receipt install, mismatch fallback, waiter release).
-- Proof: `crates/node/src/chain_effects.rs` (gatewayless empty receipt).
 
 Replay validation rules:
 - Cold durable-head replay (no accepted checkpoint, including a full-revalidation marker) rechecks scripts for every replayed spend against the rebuilt UTXO view.
@@ -234,8 +220,7 @@ Replay validation rules:
 - Malformed records fail closed instead of being silently replaced.
 - Replay from an accepted checkpoint retains its existing committed-gap trust.
 - Both paths reuse the durable receipt and preserve replay publication/commit-id semantics.
-- The original cold base remains authoritative through progress-checkpoint retries.
-- Progress checkpoints do not turn that replay into a trusted gap.
+- The original cold base remains authoritative.
 - Script failure stops admission before publishing the invalid block.
 - Script failure preserves the durable head and full-revalidation marker.
 - Script failure leaves checkpoint publication as the marker-retirement owner.
@@ -244,7 +229,6 @@ Replay validation rules:
 - A completed rebuild attests `Full`.
 - The tests verify valid-spend receipt reuse and corrupt-undo refusal.
 - Proof: `durable/tests.rs` (committed-gap receipt reuse, future-clock recheck exclusion, fail-closed replay).
-
 ### `RCV-03`: Prior-or-whole-proposed and orphan tails
 
 - The storage engine resolves an outstanding atomic batch to the prior root or to the wholly proposed root.
@@ -267,31 +251,28 @@ Replay validation rules:
 
 ### `RCV-04`: Crash matrix
 
-Both checkpoint-gap and cold replay retain the shared [block admission
-invariants](validation-default.md#block-admission-invariants), including
-coinbase transaction structure. A receipt does not exempt an invalid body from
-these checks. Refusal preserves the durable head and retained evidence, leaves
-only the valid prefix published, and closes admission; it does not reset or
-repair previously committed invalid data.
+Both checkpoint-gap and cold replay retain the shared block admission invariants, including coinbase transaction structure.
+A receipt does not exempt an invalid body from these checks.
+Refusal preserves the durable head and retained evidence, leaves only the valid prefix published, and closes admission; it does not reset or repair previously committed invalid data.
 
-The crash and error points in this contract and `docs/policies/db-migration.md` produce exactly these results:
+The crash and error points produce exactly these results:
 
 | Crash or error point | Recovery result |
 |---|---|
 | Body append mid-frame | The in-progress frame is discarded on next start; no durable head references it. |
-| Undo row written, head batch not committed | An undo row without a committed head reference is not authoritative. The head batch atomically commits the head and the undo rows it names. |
-| Sync before durable batch | The atomic batch contains only data that reached the OS; any missing body or undo prevents commit. |
-| Durable batch complete, no publish | Restart sees the new head, coins, and `refs`; mempool and index reconcile. |
-| Durable batch ambiguous | Recovery resolves the ambiguity by `CommitId` and full identity; no mixed head/coins. |
-| Publication callback lost | The durable root is still authoritative; mempool and index reconcile after restart. |
-| Reorg stage 1: disconnect | Apply the exact per-block inverse; hold the fence until all disconnects commit. |
+| Undo row written, head batch not committed | An undo row without a committed head reference is not authoritative. The head batch atomically commits the head, coin replacements, and undo rows. |
+| Sync before durable batch | The atomic batch contains only data that reached the OS; any missing body or undo prevents commit. Startup restores to the prior committed head. |
+| Durable batch ambiguous | Mutation admission closes immediately. Recovery on next startup resolves ambiguity by `CommitId` and full block identity; no mixed head/coins; do not retry an ambiguous batch. |
+| Durable batch complete, no publish | Restart reads the authoritative durable head and engine coins; resident cache reloads from storage on demand; mempool and projections reconcile. |
+| Publication callback lost | The durable root and engine coins remain authoritative; mempool and projections reconcile after restart. |
+| Reorg stage 1: disconnect | Apply the exact per-block inverse; hold the fence until all disconnects commit atomically. |
 | Reorg stage 2: reconnect | Apply the new branch using ordinary connect; each connect advances `CommitId`. |
-| Index watermark commit failure | The failure does not block ordinary chain progress; the affected capability reconciles. |
-| Incompatible `CURRENT_SCHEMA` | `incompatible_schema` error at open; existing datadirs stay untouched. |
+| Index watermark commit failure | The failure does not block ordinary chain progress; the affected capability reconciles from canonical data. |
+| Incompatible `CURRENT_SCHEMA` | `incompatible_schema` error at open with migration guidance; existing datadirs stay untouched. |
 
-- Tests MUST exercise actual process death and storage fault semantics in an isolated local environment.
+- Tests must exercise actual process death and storage fault semantics in an isolated local environment.
 - A process kill is not a substitute for simulated power loss.
-- Fault-injection storage tests MUST exercise lost writes, partial writes, and failures around sync completion in addition to child-process kill tests.
+- Fault-injection storage tests must exercise lost writes, partial writes, and failures around sync completion in addition to child-process kill tests.
 
 ### `RCV-05`: Deep rollback and selective rebuild
 
@@ -352,13 +333,17 @@ The crash and error points in this contract and `docs/policies/db-migration.md` 
 - The affected index rebuilds from retained canonical data.
 - A rejected owner-local file is left in place until explicit authorized rebuild, never silently deleted.
 
-### `RCV-10`: Checkpoint-worker removal
+### `RCV-10`: Checkpoint as engine state image
 
-- Full-checkpoint publication is not recovery authority.
-- The durable root and the ordered commit protocol are the only recovery authority.
-- Checkpoints MAY remain as a maintenance and export command.
+- A checkpoint is an engine image of the committed durable head state, created through the storage seam `KvStore::checkpoint(&self, dir: &Path)`.
+- The engine MUST synchronize the image contents and its containing directory before `KvStore::checkpoint` returns success. A synchronization failure MUST prevent generation publication.
+- A checkpoint is not an independent recovery authority.
+- The durable root and the ordered atomic commit protocol are the only recovery authority.
+- Checkpoints are created as a maintenance and export mechanism, published under the generation protocol (manifest, `CURRENT`, sync, rename).
+- Checkpoints do not write a standalone UTXO snapshot file; coins reside directly in the cloned `coins` column family in the engine image.
 - No code path treats a checkpoint as chainstate authority.
-- Manual export and checkpoint commands still write a durable copy for operator convenience, not a new authority.
+- State restoration uses the accepted checkpoint plus its certified committed suffix replayed from canonical block files and undo records.
+- Proof: `memory_kv::tests::checkpoint_propagates_image_sync_failure` proves that an image-file synchronization failure returns an error. `checkpoint::tests::engine_image::a_published_engine_image_restores_with_its_engine` proves image restoration. `checkpoint::tests::engine_image::runtime_rejects_a_missing_checkpoint_image` proves missing-image refusal. `state::tests::recovery::missing_checkpoint_replays_durable_head_chain_at_startup` proves that startup refusal preserves newer committed state. These tests do not prove directory synchronization for each backend.
 
 ### `RCV-11`: Owner-local schema versions
 
@@ -404,7 +389,7 @@ The crash and error points in this contract and `docs/policies/db-migration.md` 
 - Publication acquires the exclusive apply fence, then admission's publication mutex, and checks recovery closure before writing artifacts.
 - Recovery closure takes only the publication mutex, so it can run while its caller holds an apply permit. A publication admitted first completes before closure; closure that wins first refuses later publication.
 - Recovery closure triggers its latch and wakes waiters under the publication mutex. It releases that mutex before it runs cancellation hooks. A hook can call recovery closure again without a lock cycle.
-- Proof: `crates/execution/src/tests/checkpoint_debt_tests.rs::recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication` (paused body sync), `checkpoint_refuses_a_closed_for_recovery_chainstate` (closure first), and `crates/execution/src/tests/admission_tests.rs::recovery_closure_does_not_upgrade_an_apply_permit` (lock order) and `recovery_closure_hooks_can_reenter_after_publication_unlocks` (cancellation hooks). The interleaving proof does not inject journal compaction/resume or marker-retirement faults.
+- Proof: `crates/execution/src/tests/checkpoint_debt_tests.rs::recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication` (paused body sync), `checkpoint_refuses_a_closed_for_recovery_chainstate` (closure first), and `crates/execution/src/tests/admission_tests.rs::recovery_closure_does_not_upgrade_an_apply_permit` (lock order) and `recovery_closure_hooks_can_reenter_after_publication_unlocks` (cancellation hooks). The interleaving proof does not inject marker-retirement faults.
 - The checkpoint publisher freezes the published state.
 - The published state always trails or meets the durable head, because publication follows the batch.
 - Before writing, the publisher loads the head.
@@ -464,7 +449,7 @@ The crash and error points in this contract and `docs/policies/db-migration.md` 
 - No datadir epoch changes and no existing checkpoint is rewritten or deleted on load.
 - A binary that predates version 2 refuses a version-2 checkpoint as corrupt.
 - Downgrade needs a fresh resync into a separate datadir.
-- Journal replay reuses a restored node with the record hash and parent instead of inserting a duplicate, as block connection does.
+- Replay reuses a restored node with the record hash and parent instead of inserting a duplicate, as block connection does.
 
 ## Verification boundaries
 
@@ -476,19 +461,3 @@ The crash and error points in this contract and `docs/policies/db-migration.md` 
 
 Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md): ordered commit protocol, durable root, `DurableHead`, `CommitId`, `CapabilityState`.
 
-## Chainstate journal writer
-
-**Contract:** `chainstate-journal-writer/v1.0.0`; normative for `crates/storage/src/chainstate_journal/writer/tests/` (test names/comments cite IDs below; implementation is not contractual). Guarantee changes require a new version or requirement revision with test review.
-
-### Requirements
-
-- **JW-BOOT-1**: A new writer MUST use configured defaults.
-- **JW-REC-1**: On reopen, the writer ignores or truncates post-head bytes. The writer retries an incomplete append without duplication.
-- **JW-ORDER-1**: Appends MUST stay contiguous. A failed or out-of-order append blocks apply and checkpoint compaction until resolved.
-- **JW-DUR-1**: The head advances only after storage flush and filesystem sync succeed. Failed boundaries MUST be retryable.
-- **JW-ROT-1**: Segment rotation preserves cursor invariants. The published head MUST never name a missing segment.
-- **JW-RET-1**: Retention limits block apply until checkpoint compaction. A successful compaction re-permits apply.
-- **JW-LIFE-1**: Failures during freeze, resume, or compaction leave a retryable state. Successful transitions preserve the contract.
-- **JW-MARK-1**: Clearing the full-revalidation marker MUST be idempotent. A failed directory sync MUST be retried.
-- **JW-MARK-2**: Boot-replay-only compaction preserves the marker. Only completed recovery or an ordinary replacement checkpoint retires it.
-- **JW-FAIL-1**: Documented failpoints fail their named boundary without publishing an advanced head.

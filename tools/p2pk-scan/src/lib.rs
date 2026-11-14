@@ -5,9 +5,10 @@ use bitcoin_rs_consensus::primitives::hex::{HexError, hex_decode, hex_encode};
 use bitcoin_rs_consensus::primitives::layout::ParsedBlock;
 use bitcoin_rs_consensus::primitives::{Block, BlockHash, OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_storage::utxo::UtxoError;
-use bitcoin_rs_storage::utxo::UtxoSet;
-use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
+use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd, populate_block_changes};
+use bitcoin_rs_storage::{CoinStore, ColumnFamily, MemoryKvStore};
 use serde::Serialize;
+use std::sync::Arc;
 use thiserror::Error;
 
 pub const MAX_BLOCK_HEX_BYTES: usize = 8_000_000;
@@ -100,7 +101,8 @@ pub fn p2pk_pubkey(script: &[u8]) -> Option<(&[u8], KeyShape)> {
 }
 
 pub fn scan_blocks<R: BufRead>(mut reader: R) -> Result<ScanReport, ScanError> {
-    let set = UtxoSet::new();
+    let store = Arc::new(MemoryKvStore::new());
+    let coin_store = Arc::new(CoinStore::open(store.clone(), 64 * 1024 * 1024));
     let mut line = 0_u64;
     let mut tip_height = 0_u32;
     let mut previous: Option<BlockHash> = None;
@@ -122,15 +124,14 @@ pub fn scan_blocks<R: BufRead>(mut reader: R) -> Result<ScanReport, ScanError> {
         }
         previous = Some(block.block_hash());
         if height > 0 {
-            apply_block(&set, &block, height).map_err(|failure| match failure {
+            apply_block(&coin_store, &block, height).map_err(|failure| match failure {
                 ApplyFailure::Utxo(source) => ScanError::Apply { line, source },
                 ApplyFailure::VoutOverflow(txid) => ScanError::VoutOverflow { line, txid },
             })?;
         }
         tip_height = height;
     }
-    let utxo_outputs = set.len();
-    let p2pk = collect_p2pk(&set)?;
+    let (utxo_outputs, p2pk) = collect_p2pk(&store)?;
     let p2pk_value_sat = p2pk
         .iter()
         .fold(0_u64, |total, coin| total.saturating_add(coin.value_sat));
@@ -144,7 +145,7 @@ pub fn scan_blocks<R: BufRead>(mut reader: R) -> Result<ScanReport, ScanError> {
     })
 }
 
-fn apply_block(set: &UtxoSet, block: &Block, height: u32) -> Result<(), ApplyFailure> {
+fn apply_block(coin_store: &CoinStore, block: &Block, height: u32) -> Result<(), ApplyFailure> {
     let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
     let same_block = same_block_spends(block, &txids);
     let mut changes: BlockChanges<&TxOut> = BlockChanges::with_capacity(
@@ -182,7 +183,7 @@ fn apply_block(set: &UtxoSet, block: &Block, height: u32) -> Result<(), ApplyFai
             changes.remove(input.previous_output);
         }
     }
-    commit_block_changes(set, &changes, &block.block_hash().into()).map_err(ApplyFailure::Utxo)
+    populate_block_changes(coin_store, &changes).map_err(ApplyFailure::Utxo)
 }
 
 fn same_block_spends(block: &Block, txids: &[Txid]) -> HashSet<OutPoint> {
@@ -197,35 +198,44 @@ fn same_block_spends(block: &Block, txids: &[Txid]) -> HashSet<OutPoint> {
         .collect()
 }
 
-fn collect_p2pk(set: &UtxoSet) -> Result<Vec<P2pkCoin>, ScanError> {
-    let mut coins = set.with_stable_view(|view| -> Result<Vec<P2pkCoin>, ScanError> {
-        let mut shaped: Vec<(OutPoint, KeyShape, String)> = Vec::new();
-        view.for_each_all(|outpoint, script| {
-            if let Some((pubkey, shape)) = p2pk_pubkey(script) {
-                shaped.push((*outpoint, shape, hex_encode(pubkey)));
+fn collect_p2pk(store: &MemoryKvStore) -> Result<(usize, Vec<P2pkCoin>), ScanError> {
+    use bitcoin_rs_storage::KvStore;
+    let mut total_outputs = 0;
+    let mut coins = Vec::new();
+    let iter = store
+        .iter_prefix(ColumnFamily::Coins, &[])
+        .map_err(|e| ScanError::Apply {
+            line: 0,
+            source: UtxoError::Storage(e),
+        })?;
+    for pair in iter {
+        let (_key, val) = pair.map_err(|e| ScanError::Apply {
+            line: 0,
+            source: UtxoError::Storage(e),
+        })?;
+        let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
+            val.to_vec().into_boxed_slice(),
+        )
+        .map_err(|e| ScanError::Apply { line: 0, source: e })?;
+        let txid = record.txid();
+        for out in record.outputs() {
+            total_outputs += 1;
+            if let Some((pubkey, shape)) = p2pk_pubkey(out.script_pubkey) {
+                coins.push(P2pkCoin {
+                    txid: txid.to_string(),
+                    vout: out.vout,
+                    height: out.height,
+                    value_sat: out.value,
+                    key: shape,
+                    pubkey: hex_encode(pubkey),
+                });
             }
-        });
-        let mut coins = Vec::with_capacity(shaped.len());
-        for (outpoint, key, pubkey) in shaped {
-            let coin = view.get_entry(&outpoint).ok_or(ScanError::MissingCoin {
-                txid: outpoint.txid,
-                vout: outpoint.vout,
-            })?;
-            coins.push(P2pkCoin {
-                txid: outpoint.txid.to_string(),
-                vout: outpoint.vout,
-                height: coin.height,
-                value_sat: coin.txout.value.to_sat(),
-                key,
-                pubkey,
-            });
         }
-        Ok(coins)
-    })?;
+    }
     coins.sort_by(|left, right| {
         (left.height, &left.txid, left.vout).cmp(&(right.height, &right.txid, right.vout))
     });
-    Ok(coins)
+    Ok((total_outputs, coins))
 }
 
 fn read_block_hex<R: BufRead>(reader: &mut R, line: u64) -> Result<Option<String>, ScanError> {

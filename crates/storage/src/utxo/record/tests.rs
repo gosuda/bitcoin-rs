@@ -1,3 +1,5 @@
+#![expect(clippy::expect_used, reason = "test assertions")]
+
 use super::*;
 
 fn output(vout: u32, script: &[u8], value: u64) -> OwnedUtxoOut {
@@ -19,22 +21,24 @@ fn codec_accepts_exact_script_length_limit() -> Result<(), UtxoError> {
 
 #[test]
 fn codec_keeps_canonical_metadata_and_zero_copy_script() -> Result<(), UtxoError> {
-    let record = UtxoRecord::from_owned_outputs(
+    let out = OwnedUtxoOut::new(u32::MAX, 42, vec![0x51, 0xAC], true, u32::MAX);
+    let record_v5 = UtxoRecord::from_owned_outputs_with_framing(
         Hash256::default(),
-        &[OwnedUtxoOut::new(
-            u32::MAX,
-            42,
-            vec![0x51, 0xAC],
-            true,
-            u32::MAX,
-        )],
+        std::slice::from_ref(&out),
+        RecordFraming::V5Plain,
     )?;
     assert_eq!(
-        record.payload_bytes(),
+        record_v5.payload_bytes(),
         RECORD_HEADER_LEN + 15,
         "v5 output layout changed"
     );
-    let output = record.outputs().next().ok_or(UtxoError::CorruptRecord)?;
+    let record_b = UtxoRecord::from_owned_outputs(Hash256::default(), std::slice::from_ref(&out))?;
+    assert_eq!(
+        record_b.payload_bytes(),
+        RECORD_HEADER_LEN + 16,
+        "b output layout changed"
+    );
+    let output = record_b.outputs().next().ok_or(UtxoError::CorruptRecord)?;
     assert_eq!(output.vout, u32::MAX);
     assert_eq!(output.value, 42);
     assert_eq!(output.height, u32::MAX);
@@ -54,7 +58,7 @@ fn encoded_len_matches_the_bytes_written() -> Result<(), UtxoError> {
         OwnedUtxoOut::new(u32::MAX, u64::MAX, script, true, u32::MAX),
     ];
     for case in cases {
-        let payload = OutputParts::from_owned(&case).payload_len()?;
+        let payload = OutputParts::from_owned(&case).payload_len(RecordFraming::B)?;
         let vout_width = width_for(u64::from(case.vout));
         let len_width = width_for(u64::try_from(payload).unwrap_or(u64::MAX));
         let expected = RECORD_HEADER_LEN + 1 + vout_width + len_width + payload;
@@ -540,5 +544,236 @@ fn failed_non_unique_add_leaves_the_overwrite_sink_untouched() -> Result<(), Utx
         overwritten.is_empty(),
         "a failed add must leave the overwrite sink untouched"
     );
+    Ok(())
+}
+use proptest::prop_assert_eq;
+
+const GX: [u8; 32] = [
+    0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
+    0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+];
+const GY_EVEN: [u8; 32] = [
+    0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08, 0xa8,
+    0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4, 0xb8,
+];
+const GY_ODD: [u8; 32] = [
+    0xb7, 0xc5, 0x25, 0x88, 0xd9, 0x5c, 0x3b, 0x9a, 0xa2, 0x5b, 0x04, 0x03, 0xf1, 0xee, 0xf7, 0x57,
+    0x02, 0xe8, 0x4b, 0xb7, 0x59, 0x7a, 0xab, 0xe6, 0x63, 0xb8, 0x2f, 0x6f, 0x04, 0xef, 0x27, 0x77,
+];
+
+fn p2pkh_script(hash: &[u8; 20]) -> Vec<u8> {
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend_from_slice(hash);
+    script.extend_from_slice(&[0x88, 0xac]);
+    script
+}
+
+fn p2sh_script(hash: &[u8; 20]) -> Vec<u8> {
+    let mut script = vec![0xa9, 0x14];
+    script.extend_from_slice(hash);
+    script.push(0x87);
+    script
+}
+
+fn p2pk_comp_script(prefix: u8, x: &[u8; 32]) -> Vec<u8> {
+    let mut script = vec![0x21, prefix];
+    script.extend_from_slice(x);
+    script.push(0xac);
+    script
+}
+
+fn p2pk_uncomp_script(x: &[u8; 32], y: &[u8; 32]) -> Vec<u8> {
+    let mut script = vec![0x41, 0x04];
+    script.extend_from_slice(x);
+    script.extend_from_slice(y);
+    script.push(0xac);
+    script
+}
+
+#[test]
+fn plain_v5_and_b_records_decode_to_equal_logical_records() -> Result<(), UtxoError> {
+    let outputs = vec![
+        OwnedUtxoOut::new(0, 0, p2pkh_script(&[0x11; 20]), false, 100),
+        OwnedUtxoOut::new(1, 1, p2sh_script(&[0x22; 20]), true, 200),
+        OwnedUtxoOut::new(2, 1_000_000, p2pk_comp_script(0x02, &GX), false, 300),
+        OwnedUtxoOut::new(3, 100_000_000, p2pk_comp_script(0x03, &GX), true, 400),
+        OwnedUtxoOut::new(
+            4,
+            5_000_000_000,
+            p2pk_uncomp_script(&GX, &GY_EVEN),
+            false,
+            500,
+        ),
+        OwnedUtxoOut::new(
+            5,
+            2_100_000_000_000_000,
+            p2pk_uncomp_script(&GX, &GY_ODD),
+            true,
+            600,
+        ),
+        OwnedUtxoOut::new(
+            6,
+            2_100_000_000_000_001,
+            vec![0x6a, 0x04, 0xde, 0xad, 0xbe, 0xef],
+            false,
+            700,
+        ),
+    ];
+    let txid = Hash256::from_le_bytes(&[0x55; 32]);
+
+    let rec_v5 =
+        UtxoRecord::from_owned_outputs_with_framing(txid, &outputs, RecordFraming::V5Plain)?;
+    let rec_b = UtxoRecord::from_owned_outputs(txid, &outputs)?;
+
+    assert_eq!(rec_v5.framing(), RecordFraming::V5Plain);
+    assert_eq!(rec_b.framing(), RecordFraming::B);
+
+    assert_eq!(rec_v5.bytes()[INLINE_LEN_OFFSET] & B_FRAMING_FLAG, 0);
+    assert_eq!(
+        rec_b.bytes()[INLINE_LEN_OFFSET] & B_FRAMING_FLAG,
+        B_FRAMING_FLAG
+    );
+
+    assert_ne!(rec_v5.bytes(), rec_b.bytes());
+    assert_eq!(rec_v5, rec_b);
+
+    let decoded_v5 = UtxoRecord::from_encoded(rec_v5.bytes().to_vec().into_boxed_slice())?;
+    let decoded_b = UtxoRecord::from_encoded(rec_b.bytes().to_vec().into_boxed_slice())?;
+
+    assert_eq!(decoded_v5, decoded_b);
+    assert_eq!(decoded_v5.framing(), RecordFraming::V5Plain);
+    assert_eq!(decoded_b.framing(), RecordFraming::B);
+
+    for (out_v5, out_b) in decoded_v5.outputs().zip(decoded_b.outputs()) {
+        assert_eq!(out_v5, out_b);
+    }
+
+    let mut forged_b = rec_v5.bytes().to_vec();
+    forged_b[INLINE_LEN_OFFSET] |= B_FRAMING_FLAG;
+    assert!(matches!(
+        UtxoRecord::from_encoded(forged_b.into_boxed_slice()),
+        Err(UtxoError::CorruptRecord)
+    ));
+
+    let truncated = rec_b.bytes()[..36].to_vec();
+    assert!(matches!(
+        UtxoRecord::from_encoded(truncated.into_boxed_slice()),
+        Err(UtxoError::CorruptRecord)
+    ));
+
+    let mut invalid_inline = rec_b.bytes().to_vec();
+    invalid_inline[INLINE_LEN_OFFSET] = 9 | B_FRAMING_FLAG;
+    assert!(matches!(
+        UtxoRecord::from_encoded(invalid_inline.into_boxed_slice()),
+        Err(UtxoError::CorruptRecord)
+    ));
+
+    Ok(())
+}
+
+fn arbitrary_script_strategy() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+    use proptest::prelude::*;
+    prop_oneof![
+        Just(p2pkh_script(&[0x11; 20])),
+        Just(p2sh_script(&[0x22; 20])),
+        Just(p2pk_comp_script(0x02, &GX)),
+        Just(p2pk_comp_script(0x03, &GX)),
+        Just(p2pk_uncomp_script(&GX, &GY_EVEN)),
+        Just(p2pk_uncomp_script(&GX, &GY_ODD)),
+        Just(vec![0x6a, 0x05, 0x74, 0x65, 0x73, 0x74, 0x31]),
+        Just(Vec::new()),
+        Just(vec![0x51]),
+        proptest::collection::vec(any::<u8>(), 0..64),
+    ]
+}
+
+fn arbitrary_amount_strategy() -> impl proptest::strategy::Strategy<Value = u64> {
+    use proptest::prelude::*;
+    prop_oneof![
+        Just(0),
+        Just(1),
+        Just(1_000_000),
+        Just(100_000_000),
+        Just(5_000_000_000),
+        Just(crate::utxo::compress::MAX_COMPRESSIBLE_AMOUNT),
+        Just(crate::utxo::compress::MAX_COMPRESSIBLE_AMOUNT + 1),
+        Just(u64::MAX / 2),
+        Just(u64::MAX),
+        any::<u64>(),
+    ]
+}
+
+fn arbitrary_output_strategy()
+-> impl proptest::strategy::Strategy<Value = (u64, Vec<u8>, bool, u32)> {
+    use proptest::prelude::*;
+    (
+        arbitrary_amount_strategy(),
+        arbitrary_script_strategy(),
+        any::<bool>(),
+        prop_oneof![
+            Just(0),
+            Just(1),
+            Just(840_000),
+            Just(u32::MAX),
+            any::<u32>()
+        ],
+    )
+}
+
+proptest::proptest! {
+    #[test]
+    fn arbitrary_utxo_records_b_framing_round_trip(
+        txid_bytes in proptest::prelude::any::<[u8; 32]>(),
+        raw_outputs in proptest::collection::vec(arbitrary_output_strategy(), 0..8),
+    ) {
+        let txid = Hash256::from_le_bytes(&txid_bytes);
+        let outputs: Vec<OwnedUtxoOut> = raw_outputs
+            .into_iter()
+            .enumerate()
+            .map(|(vout, (val, script, coinbase, height))| {
+                OwnedUtxoOut::new(u32::try_from(vout).expect("vout"), val, script, coinbase, height)
+            })
+            .collect();
+
+        let record = UtxoRecord::from_owned_outputs(txid, &outputs).expect("encode b");
+        prop_assert_eq!(record.framing(), RecordFraming::B);
+
+        let decoded = UtxoRecord::from_encoded(record.bytes().to_vec().into_boxed_slice())
+            .expect("decode b");
+        prop_assert_eq!(&decoded, &record);
+        prop_assert_eq!(decoded.txid(), txid);
+        prop_assert_eq!(decoded.output_count(), outputs.len());
+        prop_assert_eq!(decoded.framing(), RecordFraming::B);
+
+        for (dec_out, exp_out) in decoded.outputs().zip(outputs.iter()) {
+            prop_assert_eq!(dec_out.vout, exp_out.vout);
+            prop_assert_eq!(dec_out.value, exp_out.value);
+            prop_assert_eq!(dec_out.script_pubkey, exp_out.script_pubkey.as_slice());
+            prop_assert_eq!(dec_out.coinbase, exp_out.coinbase);
+            prop_assert_eq!(dec_out.height, exp_out.height);
+        }
+    }
+}
+
+const PACKED_HEIGHT_JUST_ABOVE_U32: [u8; 5] = [0x80, 0x80, 0x80, 0x80, 0x20];
+
+#[test]
+fn validate_encoded_rejects_packed_height_above_u32() -> Result<(), UtxoError> {
+    let out = OwnedUtxoOut::new(0, 42, vec![0x51], false, u32::MAX);
+    let record = UtxoRecord::from_owned_outputs(Hash256::default(), core::slice::from_ref(&out))?;
+    let mut bytes = record.bytes().to_vec();
+    let layout = V5Layout::read(&bytes, 1)?;
+    let payload = payload_offset(&bytes, &layout, 0)?;
+    let body = bytes.get(payload..).ok_or(UtxoError::CorruptRecord)?;
+    let (_, amount_end) = crate::utxo::compress::read_varint(body, 0)?;
+    let (packed, packed_end) = crate::utxo::compress::read_varint(body, amount_end)?;
+    assert_eq!(packed, u64::from(u32::MAX) << 1);
+    assert_eq!(packed_end - amount_end, PACKED_HEIGHT_JUST_ABOVE_U32.len());
+    let start = payload + amount_end;
+    let end = start + PACKED_HEIGHT_JUST_ABOVE_U32.len();
+    let slot = bytes.get_mut(start..end).ok_or(UtxoError::CorruptRecord)?;
+    slot.copy_from_slice(&PACKED_HEIGHT_JUST_ABOVE_U32);
+    let decoded = UtxoRecord::from_encoded(bytes.into_boxed_slice());
+    assert!(matches!(decoded, Err(UtxoError::CorruptRecord)));
     Ok(())
 }

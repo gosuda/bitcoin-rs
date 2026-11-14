@@ -174,7 +174,6 @@ metric. The named hooks are:
 | `node.sync.apply_idle_seconds` |
 | `node.sync.download_blocked_by_apply_seconds` |
 | `node.sync.apply_buffered_blocks_seconds` |
-| `node.chainstate_journal.storage_flush_seconds` |
 | `node.event_loop.tick_seconds` |
 
 ### `OBS-05`: Decision table for new instrumentation
@@ -207,7 +206,6 @@ below):
 | `node.apply_block.script_resolution_seconds` | `tracing::debug!("script_verify: profile")` field `script_resolution_us` |
 | `node.apply_block.script_prepare_seconds` | `"script_verify: profile"` field `script_prepare_us` |
 | `node.apply_block.script_parallel_seconds` | `"script_verify: profile"` field `script_parallel_us` |
-| `node.chainstate_journal.replay_seconds` | removed as redundant: already a `replay_seconds` field on `tracing::info!("chainstate restore selected")` |
 | `node.durable_head.group_sync_seconds` | `tracing::debug!("durable_head: group commit")` field `sync_us` |
 | `node.durable_head.group_commit_seconds` | `"durable_head: group commit"` field `commit_us` |
 | `node.durable_head.group_blocks` | `"durable_head: group commit"` field `blocks` |

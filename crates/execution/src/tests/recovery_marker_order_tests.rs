@@ -3,23 +3,21 @@ use std::path::Path;
 
 use crate::chain::{BlockTree, TipSnapshot, accept_headers};
 use bitcoin_rs_consensus::primitives::Network;
-use bitcoin_rs_storage::chainstate_journal::{FULL_REVALIDATION_MARKER, JOURNAL_DIR_NAME};
+use bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER;
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use parking_lot::RwLock;
 
+use crate::checkpoint;
 use crate::checkpoint::headers::HeaderCheckpointConfig;
 use crate::checkpoint::{CHECKPOINT_ROOT, CURRENT_FILE, MANIFEST_FILE};
 use crate::recovery::{ResumeSource, prepare_initial_chainstate};
-use crate::{ChainstateJournalConfig, checkpoint};
 
 use crate::test_fixtures::TestResult;
 const NETWORK: Network = Network::Regtest;
 
 fn arm_full_revalidation_marker(data_dir: &Path) {
-    let journal_dir = data_dir.join(JOURNAL_DIR_NAME);
-    fs::create_dir_all(&journal_dir).unwrap_or_else(|e| panic!("create journal dir: {e}"));
-    fs::write(journal_dir.join(FULL_REVALIDATION_MARKER), b"")
+    fs::write(data_dir.join(FULL_REVALIDATION_MARKER), b"")
         .unwrap_or_else(|e| panic!("arm marker: {e}"));
 }
 
@@ -80,8 +78,7 @@ fn corrupt_checkpoint_with_marker_selects_cold_replay() -> TestResult {
 
     arm_full_revalidation_marker(data_dir);
 
-    let config = ChainstateJournalConfig::default();
-    let state = prepare_initial_chainstate(data_dir, NETWORK, config, None)?;
+    let state = prepare_initial_chainstate(data_dir, NETWORK, None)?;
 
     assert!(
         matches!(state.resume_source, ResumeSource::Cold),
@@ -100,8 +97,8 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> TestResult {
 
     let (tree, tip) = genesis_tip()?;
     let store = bitcoin_rs_storage::checkpoint::open_data_dir(data_dir)?;
-    let _ = checkpoint::write_checkpoint_from_dir(
-        &store,
+    let _ = checkpoint::write_checkpoint(
+        data_dir,
         checkpoint_config(),
         &tree,
         &UtxoSet::new(),
@@ -110,8 +107,7 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> TestResult {
     )?;
     drop(store);
 
-    let no_marker =
-        prepare_initial_chainstate(data_dir, NETWORK, ChainstateJournalConfig::default(), None)?;
+    let no_marker = prepare_initial_chainstate(data_dir, NETWORK, None)?;
     assert!(
         matches!(no_marker.resume_source, ResumeSource::Checkpoint),
         "a valid checkpoint without a marker must restore to Checkpoint, got {:?}",
@@ -120,8 +116,7 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> TestResult {
 
     arm_full_revalidation_marker(data_dir);
 
-    let config = ChainstateJournalConfig::default();
-    let state = prepare_initial_chainstate(data_dir, NETWORK, config, None)?;
+    let state = prepare_initial_chainstate(data_dir, NETWORK, None)?;
 
     assert!(
         matches!(state.resume_source, ResumeSource::Cold),

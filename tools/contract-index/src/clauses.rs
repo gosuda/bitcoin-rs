@@ -180,14 +180,7 @@ mod tests {
     #[test]
     fn clause_ids_cover_the_inventory_shapes() {
         for id in [
-            "ARCH-01",
-            "ARCH-07a",
-            "SYNC-05",
-            "JW-BOOT-1",
-            "JW-MARK-2",
-            "CONV-1",
-            "CORP-00",
-            "P2P-11",
+            "ARCH-01", "ARCH-07a", "SYNC-05", "CMT-01", "WIN-07", "CONV-1", "CORP-00", "P2P-11",
         ] {
             assert!(is_clause_id(id), "{id} must be a clause ID");
         }

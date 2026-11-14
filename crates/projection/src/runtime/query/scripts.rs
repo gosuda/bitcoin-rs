@@ -508,31 +508,29 @@ impl DerivedIndexQueryEngine {
             ));
         };
         let rows = self.scan_live_rows(snapshot, budget, scripthash)?;
-        utxo.with_stable_view(|view| {
-            let mut records = Vec::with_capacity(rows.len());
-            for row in rows {
-                let outpoint = row.outpoint();
-                let Some(entry) = view.get_entry(&outpoint) else {
-                    return Err(TxQueryError::Unavailable(
-                        TxUnavailableCause::MissingAuthority(
-                            "ScriptLive locator is absent from authoritative UTXO",
-                        ),
-                    ));
-                };
-                if ScriptHash::new(&entry.txout.script_pubkey) != scripthash {
-                    continue;
-                }
-                records.push(ScriptIndexRecord {
-                    txid: outpoint.txid,
-                    height: entry.height,
-                    value: entry.txout.value.to_sat(),
-                    vout: outpoint.vout,
-                });
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            let outpoint = row.outpoint();
+            let Some(entry) = utxo.get_entry(&outpoint).map_err(storage_error)? else {
+                return Err(TxQueryError::Unavailable(
+                    TxUnavailableCause::MissingAuthority(
+                        "ScriptLive locator is absent from authoritative UTXO",
+                    ),
+                ));
+            };
+            if ScriptHash::new(&entry.txout.script_pubkey) != scripthash {
+                continue;
             }
-            records.sort_by(order_by_height_txid_vout);
-            records.dedup_by(|a, b| a.txid == b.txid && a.vout == b.vout);
-            Ok(records)
-        })
+            records.push(ScriptIndexRecord {
+                txid: outpoint.txid,
+                height: entry.height,
+                value: entry.txout.value.to_sat(),
+                vout: outpoint.vout,
+            });
+        }
+        records.sort_by(order_by_height_txid_vout);
+        records.dedup_by(|a, b| a.txid == b.txid && a.vout == b.vout);
+        Ok(records)
     }
 }
 

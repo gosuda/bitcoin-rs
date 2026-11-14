@@ -26,7 +26,7 @@ The gate checks two rules on the resolved graph: every edge goes to the same or 
 | [`bitcoin-rs-projection`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/README.md) | 2 | Confirmed transaction index, script history and live views, compact filters, prefix queries | consensus, execution, storage |
 | [`bitcoin-rs-mempool`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/mempool/README.md) | 2 | Unconfirmed pool, cluster and replacement policy, packages, orphan parking, fee estimator | consensus |
 | [`bitcoin-rs-wire`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/wire/README.md) | 2 | Wire codec, handshake, transport, listeners, addresses, compact block decode | consensus, storage |
-| [`bitcoin-rs-serving`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/serving/README.md) | 3 | Core-compatible JSON-RPC, REST, Esplora, ZeroMQ, Stratum mining and pool surface | consensus, execution, mempool, projection, wire |
+| [`bitcoin-rs-serving`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/serving/README.md) | 3 | Core-compatible JSON-RPC, REST, Esplora, ZeroMQ, Stratum mining and pool surface | consensus, execution, mempool, projection, storage, wire |
 | [`bitcoin-rs-node`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/README.md) | 4 | Composition, lifecycle, configuration resolution, mining coordination, pool ledger, typed embedding surface | every service crate |
 | [`bitcoin-rs`](https://github.com/gosuda/bitcoin-rs/tree/main/bin/bitcoin-rs) | 4 | The daemon binary: option table, signal bridging, process entry | consensus, execution, node, storage, wire |
 | [`bitcoin-rs-e2e`](https://github.com/gosuda/bitcoin-rs/tree/main/e2e) | 4 | Process-level end-to-end tests over public surfaces | serving |
@@ -39,7 +39,7 @@ Edges that are easy to misread:
 
 - `bitcoin-rs-execution` does not depend on mempool, wire, projection, serving, node, or the binary. It composes consensus and storage capabilities only.
 - `bitcoin-rs-wire` defines the `ChainQuery` and `TxInventory` traits; the node implements them over mempool and projection. Mempool never depends on wire, serving, node, or the binary.
-- `bitcoin-rs-serving` has no dependency on `bitcoin-rs-storage` (`ARCH-04`). It reads storage-backed facts through node-supplied capabilities, never through a database handle.
+- `bitcoin-rs-serving` depends directly on `bitcoin-rs-storage` for backend-neutral capabilities and shared storage-owned types (`ARCH-04`). It has no dependencies on concrete storage engine crates (`rust-rocksdb`, `surrealkv`, `signet-libmdbx`) and defines or forwards no storage backend features. The node supplies its capabilities through `Context::from_handles(ContextHandles)`. Serving uses those capabilities for storage access and chain operations, without independent database access or transition authority.
 - `bitcoin-rs-storage` is the only crate allowed to name storage engine crates (`rust-rocksdb`, `surrealkv`, `signet-libmdbx`, and `tokio` for the SurrealKV bridge only) (`ARCH-02`); only `bitcoin-rs-storage-convert` may name `fjall` and `redb`, to read retired datadirs. Every other crate reaches state through `KvStore`.
 
 Changing a layer assignment, adding a workspace crate, or adding a cross-crate edge requires the three steps in `ARCH-06`: update the gate table, update the architecture contract, and pass `g17_dependency_direction`.

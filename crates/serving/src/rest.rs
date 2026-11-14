@@ -406,10 +406,10 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str, body: &[u8]) -> Response {
                 .and_then(|index| entry.tx.outputs.get(index))
                 .map(|output| (MEMPOOL_HEIGHT, output.clone()))
         } else {
-            ctx.chain
-                .utxo
-                .get_entry(&outpoint)
-                .map(|entry| (entry.height, entry.txout))
+            match ctx.chain.utxo.get_entry(&outpoint) {
+                Ok(entry) => entry.map(|entry| (entry.height, entry.txout)),
+                Err(error) => return internal_error(format!("coin read failed: {error}")),
+            }
         };
         hits.push(coin.is_some());
         if let Some(coin) = coin {
