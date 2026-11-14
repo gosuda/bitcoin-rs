@@ -177,11 +177,10 @@ pub(crate) struct QueryEngineLive {
     pub(crate) chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
 }
 
-/// View-qualified pagination position (`QRY-06`): the generation that issued
-/// the cursor plus the funding-row position it resolved to.
+/// Pagination position (`QRY-06`): the height and funding-row position that
+/// a cursor resolved to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OccurrenceCursor {
-    pub(crate) view_id: u64,
     pub(crate) height: u32,
     pub(crate) tx_pos: u32,
 }
@@ -220,10 +219,9 @@ impl DerivedIndexQueryEngine {
                 coverage.last_height == view.epoch.height && coverage.last_hash == view.epoch.hash
             });
             if !covers_tip {
-                return Err(TxQueryError::Retry(RetryReason::TipMoved {
-                    expected_commit: view.epoch.commit_id,
-                    current_commit: view.epoch.commit_id,
-                }));
+                return Err(TxQueryError::Retry(RetryReason::PendingCapabilityCoverage(
+                    capability,
+                )));
             }
         }
         Ok(())
@@ -304,10 +302,7 @@ impl ServingView {
         is_historical: bool,
     ) -> Result<ReadPrefix, TxQueryError> {
         let coverage = self.coverage_for(capability).ok_or_else(|| {
-            TxQueryError::Retry(RetryReason::TipMoved {
-                expected_commit: self.epoch.commit_id,
-                current_commit: self.epoch.commit_id,
-            })
+            TxQueryError::Retry(RetryReason::PendingCapabilityCoverage(capability))
         })?;
         if coverage.floor > self.epoch.height {
             return Err(TxQueryError::Unavailable(
@@ -440,12 +435,10 @@ impl DerivedIndexQueryEngine {
             return Err(TxQueryError::ExpiredView);
         }
         let revision = self.runtime.revision();
-        let tip = self.applied_tip.load_full().ok_or_else(|| {
-            TxQueryError::Retry(RetryReason::TipMoved {
-                expected_commit: revision,
-                current_commit: revision,
-            })
-        })?;
+        let tip = self
+            .applied_tip
+            .load_full()
+            .ok_or_else(|| TxQueryError::Retry(RetryReason::MissingAppliedTip))?;
 
         let reader: &dyn IndexReader = self.reader.as_ref();
         let snapshot = reader
@@ -469,10 +462,9 @@ impl DerivedIndexQueryEngine {
                 .capability_watermark(capability)
                 .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
             let Some(watermark) = watermark else {
-                return Err(TxQueryError::Retry(RetryReason::TipMoved {
-                    expected_commit: revision,
-                    current_commit: revision,
-                }));
+                return Err(TxQueryError::Retry(RetryReason::PendingCapabilityCoverage(
+                    capability,
+                )));
             };
             let floor = snapshot
                 .capability_floor(capability)
@@ -492,10 +484,9 @@ impl DerivedIndexQueryEngine {
                 if Self::hash_at_height(&tree, tip.tip_id, entry.last_height)
                     != Some(entry.last_hash)
                 {
-                    return Err(TxQueryError::Retry(RetryReason::TipMoved {
-                        expected_commit: revision,
-                        current_commit: revision,
-                    }));
+                    return Err(TxQueryError::Retry(RetryReason::PendingCapabilityCoverage(
+                        capability,
+                    )));
                 }
             }
         }
@@ -510,7 +501,7 @@ impl DerivedIndexQueryEngine {
                 epoch: AppliedEpoch {
                     hash: tip.hash,
                     height: tip.height,
-                    commit_id: self.runtime.revision(),
+                    runtime_revision: revision,
                 },
                 generation_id: self.generation.id(),
                 coverage,
@@ -701,30 +692,6 @@ impl DerivedIndexQueryEngine {
         view.prefix_for(capability, false)
     }
 
-    #[cfg(test)]
-    pub(crate) fn transaction_at_prefix(
-        &self,
-        txid: &Txid,
-    ) -> Result<Answer<Option<(u32, Tx)>>, TxQueryError> {
-        self.transaction_at_answer(txid)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn script_history_at_prefix(
-        &self,
-        script: ScriptHash,
-    ) -> Result<Answer<ScriptIndexSnapshot>, TxQueryError> {
-        self.script_history_at_answer(script)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn spender_at_prefix(
-        &self,
-        outpoint: OutPoint,
-    ) -> Result<Answer<Option<SpendingRecord>>, TxQueryError> {
-        self.spender_at_answer(outpoint)
-    }
-
     pub(crate) fn index_progress_for(
         &self,
         required: IndexCapabilities,
@@ -732,12 +699,10 @@ impl DerivedIndexQueryEngine {
         self.query_health()?;
 
         let revision_before = self.runtime.revision();
-        let tip_before = self.applied_tip.load_full().ok_or_else(|| {
-            TxQueryError::Retry(RetryReason::TipMoved {
-                expected_commit: revision_before,
-                current_commit: revision_before,
-            })
-        })?;
+        let tip_before = self
+            .applied_tip
+            .load_full()
+            .ok_or_else(|| TxQueryError::Retry(RetryReason::MissingAppliedTip))?;
 
         let reader: &dyn IndexReader = self.reader.as_ref();
         let snapshot = reader
@@ -881,15 +846,7 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
                 self.script_budget(budget);
                 Self::require_cursor_tx_lookup_coverage_on_view(view, last)?;
                 let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
-                Self::history_page_for(
-                    snapshot,
-                    &prefix,
-                    budget,
-                    script,
-                    last,
-                    view.generation_id,
-                    limit,
-                )
+                Self::history_page_for(snapshot, &prefix, budget, script, last, limit)
             },
         )
     }
@@ -946,13 +903,7 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
                 Self::require_cursor_tx_lookup_coverage_on_view(view, cursor)?;
                 let prefix = Self::require_prefix(view, IndexCapability::ScriptHistory)?;
                 Self::confirmed_history_page_for(
-                    snapshot,
-                    &prefix,
-                    budget,
-                    scripthash,
-                    cursor,
-                    view.generation_id,
-                    limit,
+                    snapshot, &prefix, budget, scripthash, cursor, limit,
                 )
             },
         )
@@ -1200,7 +1151,7 @@ mod tests {
             epoch: AppliedEpoch {
                 hash: tip_hash,
                 height: 9,
-                commit_id: 1,
+                runtime_revision: 1,
             },
             generation_id: 0,
             coverage: [
@@ -1226,7 +1177,9 @@ mod tests {
         assert!(
             matches!(
                 refused,
-                Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+                Err(TxQueryError::Retry(RetryReason::PendingCapabilityCoverage(
+                    IndexCapability::TxLookup
+                )))
             ),
             "a watermark on another chain at the same height must refuse tip reads"
         );
