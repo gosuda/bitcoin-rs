@@ -35,10 +35,11 @@ pub(crate) fn check_symlink_final_component(path: &Path) -> Result<(), ConvertEr
 }
 
 pub(crate) fn validate_and_open_roots(args: &CliArgs) -> Result<OpenedRoots, ConvertError> {
+    let (from, to) = args.convert_roots()?;
     args.validate()?;
 
-    check_symlink_final_component(&args.from)?;
-    check_symlink_final_component(&args.to)?;
+    check_symlink_final_component(from)?;
+    check_symlink_final_component(to)?;
     if let Some(pool_from) = &args.pool_from {
         check_symlink_final_component(pool_from)?;
     }
@@ -46,16 +47,16 @@ pub(crate) fn validate_and_open_roots(args: &CliArgs) -> Result<OpenedRoots, Con
         check_symlink_final_component(pool_to)?;
     }
 
-    if !args.from.exists() {
+    if !from.exists() {
         return Err(ConvertError::Io(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("source datadir '{}' does not exist", args.from.display()),
+            format!("source datadir '{}' does not exist", from.display()),
         )));
     }
-    if !args.from.is_dir() {
+    if !from.is_dir() {
         return Err(ConvertError::InvalidOperation(format!(
             "source datadir '{}' is not a directory",
-            args.from.display()
+            from.display()
         )));
     }
 
@@ -77,15 +78,15 @@ pub(crate) fn validate_and_open_roots(args: &CliArgs) -> Result<OpenedRoots, Con
         }
     }
 
-    validate_pre_creation_disjointness(args)?;
+    validate_pre_creation_disjointness(args, from, to)?;
 
-    prepare_destination_dir(&args.to)?;
+    prepare_destination_dir(to)?;
     if let Some(pool_to) = &args.pool_to {
         prepare_destination_dir(pool_to)?;
     }
 
-    let from_dir = Dir::open_ambient_dir(&args.from, ambient_authority())?;
-    let to_dir = Dir::open_ambient_dir(&args.to, ambient_authority())?;
+    let from_dir = Dir::open_ambient_dir(from, ambient_authority())?;
+    let to_dir = Dir::open_ambient_dir(to, ambient_authority())?;
 
     let pool_from_dir = if let Some(pool_from) = &args.pool_from {
         Some(Dir::open_ambient_dir(pool_from, ambient_authority())?)
@@ -99,7 +100,7 @@ pub(crate) fn validate_and_open_roots(args: &CliArgs) -> Result<OpenedRoots, Con
         None
     };
 
-    let mut open_dirs: Vec<(&Path, &Dir)> = vec![(&args.from, &from_dir), (&args.to, &to_dir)];
+    let mut open_dirs: Vec<(&Path, &Dir)> = vec![(from, &from_dir), (to, &to_dir)];
     if let (Some(pf_path), Some(pf_dir)) = (&args.pool_from, &pool_from_dir) {
         open_dirs.push((pf_path, pf_dir));
     }
@@ -117,8 +118,12 @@ pub(crate) fn validate_and_open_roots(args: &CliArgs) -> Result<OpenedRoots, Con
     })
 }
 
-fn validate_pre_creation_disjointness(args: &CliArgs) -> Result<(), ConvertError> {
-    let from_canon = fs::canonicalize(&args.from)?;
+fn validate_pre_creation_disjointness(
+    args: &CliArgs,
+    from: &Path,
+    to: &Path,
+) -> Result<(), ConvertError> {
+    let from_canon = fs::canonicalize(from)?;
 
     let pool_from_canon = if let Some(pf) = &args.pool_from {
         Some(fs::canonicalize(pf)?)
@@ -131,24 +136,24 @@ fn validate_pre_creation_disjointness(args: &CliArgs) -> Result<(), ConvertError
             return Err(ConvertError::InvalidOperation(format!(
                 "source pool '{}' is the same directory as source '{}'",
                 pf_orig.display(),
-                args.from.display()
+                from.display()
             )));
         }
         if pf_c.starts_with(&from_canon) || from_canon.starts_with(pf_c) {
             return Err(ConvertError::InvalidOperation(format!(
                 "source pool '{}' and source '{}' overlap or are nested",
                 pf_orig.display(),
-                args.from.display()
+                from.display()
             )));
         }
     }
 
-    check_dest_candidate_against_sources(&args.to, &from_canon, pool_from_canon.as_deref())?;
+    check_dest_candidate_against_sources(to, &from_canon, pool_from_canon.as_deref())?;
 
     if let Some(pool_to) = &args.pool_to {
         check_dest_candidate_against_sources(pool_to, &from_canon, pool_from_canon.as_deref())?;
 
-        check_two_dest_candidates(&args.to, pool_to)?;
+        check_two_dest_candidates(to, pool_to)?;
     }
 
     Ok(())

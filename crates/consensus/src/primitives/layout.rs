@@ -620,6 +620,8 @@ impl BlockLayout {
     }
 
     pub fn parse_exact(bytes: &[u8]) -> Result<(Self, Box<[TxIdentity]>), DecodeError> {
+        #[cfg(any(test, feature = "test-seam"))]
+        PARSE_EXACT_CALLS.with(|calls| calls.set(calls.get() + 1));
         let mut cursor = 0_u64;
         let (layout, identities) = Self::parse_at(bytes, &mut cursor)?;
         let consumed = usize::try_from(cursor).map_err(|_| impossible(0))?;
@@ -946,7 +948,7 @@ impl<'a> ParsedBlock<'a> {
 
     pub fn parse_exact(bytes: &'a [u8]) -> Result<Self, DecodeError> {
         #[cfg(any(test, feature = "test-seam"))]
-        PARSE_EXACT_CALLS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        PARSE_EXACT_CALLS.with(|calls| calls.set(calls.get() + 1));
         let mut cursor = 0_u64;
         let parsed = Self::parse_at(bytes, &mut cursor)?;
         let consumed = usize::try_from(cursor)
@@ -1071,15 +1073,17 @@ impl<'a> ParsedBlock<'a> {
     }
 }
 #[cfg(any(test, feature = "test-seam"))]
-static PARSE_EXACT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static PARSE_EXACT_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
 
 #[cfg(any(test, feature = "test-seam"))]
 #[must_use]
 pub fn parse_exact_call_count() -> usize {
-    PARSE_EXACT_CALLS.load(core::sync::atomic::Ordering::SeqCst)
+    PARSE_EXACT_CALLS.with(core::cell::Cell::get)
 }
 
 #[cfg(any(test, feature = "test-seam"))]
 pub fn reset_parse_exact_call_count() {
-    PARSE_EXACT_CALLS.store(0, core::sync::atomic::Ordering::SeqCst);
+    PARSE_EXACT_CALLS.with(|calls| calls.set(0));
 }

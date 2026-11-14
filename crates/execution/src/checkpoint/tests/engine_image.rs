@@ -39,7 +39,8 @@ fn a_published_engine_image_restores_with_its_engine() -> TestResult {
         ));
     };
     assert!(restored.engine.is_some());
-    let Ok(runtime) = crate::recovery::prepare_initial_state_with_engine(dir.path(), NETWORK, None)
+    let Ok(runtime) =
+        crate::recovery::prepare_initial_state_with_engine(dir.path(), NETWORK, None, None)
     else {
         return Err(TestError::UnexpectedSuccess(
             "valid runtime checkpoint did not load",
@@ -84,7 +85,8 @@ fn runtime_rejects_a_missing_checkpoint_image() -> TestResult {
     let manifest_before = fs::read(generation.join(MANIFEST_FILE))?;
     fs::remove_dir_all(&image)?;
 
-    let result = crate::recovery::prepare_initial_state_with_engine(dir.path(), NETWORK, None);
+    let result =
+        crate::recovery::prepare_initial_state_with_engine(dir.path(), NETWORK, None, None);
     assert!(matches!(
         result,
         Err(crate::recovery::RecoveryError::CheckpointEngineImageMissing)
@@ -127,7 +129,7 @@ fn an_engine_image_that_cannot_be_identified_fails_the_load_closed() -> TestResu
 fn an_engine_image_with_a_non_utf8_file_name_fails_the_load_closed() -> TestResult {
     use std::os::unix::ffi::OsStringExt as _;
 
-    let dir = tempfile::tempdir()?;
+    let dir = tempfile::tempdir_in("/tmp")?;
     let image = publish_checkpoint_with_engine_image(dir.path())?;
     let foreign = std::ffi::OsString::from_vec(b"\xff\xfenon-utf8".to_vec());
     replace_image_with_files(&image, &[foreign])?;

@@ -7,13 +7,9 @@ use super::{
 };
 use crate::chain::NodeStatus;
 use crate::error::ApplyError;
-use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Txid};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, TxOut, Txid};
 use rayon::prelude::*;
 use std::sync::Arc;
-
-pub(super) const DURABLE_HEAD_GROUP_BLOCKS: usize = 64;
-
-const DURABLE_HEAD_GROUP_MAX_BYTES: usize = 8 << 20;
 
 pub(super) enum PublishMode<'a> {
     Now,
@@ -31,13 +27,21 @@ pub(super) struct PendingBlockCommit {
     pub attestation: Option<bitcoin_rs_storage::ScriptAttestation>,
 }
 
-#[derive(Default)]
 pub(super) struct WindowGroup {
+    limits: crate::window_limits::WindowLimits,
     pending: Vec<PendingBlockCommit>,
     staged_bytes: usize,
 }
 
 impl WindowGroup {
+    pub(super) fn new(limits: crate::window_limits::WindowLimits) -> Self {
+        Self {
+            limits,
+            pending: Vec::new(),
+            staged_bytes: 0,
+        }
+    }
+
     pub(super) fn predecessor(
         &self,
         prev_hash: Hash256,
@@ -60,13 +64,27 @@ impl WindowGroup {
     }
 
     pub(super) fn stage(&mut self, pending: PendingBlockCommit) {
-        self.staged_bytes += pending.outcome.block_bytes.len();
+        self.staged_bytes +=
+            pending.outcome.block_bytes.len() + pending.undo_record.as_bytes().len();
         self.pending.push(pending);
     }
 
-    fn should_flush(&self) -> bool {
-        self.pending.len() >= DURABLE_HEAD_GROUP_BLOCKS
-            || self.staged_bytes >= DURABLE_HEAD_GROUP_MAX_BYTES
+    fn should_flush(
+        &self,
+        workspace: Option<&mut super::workspace::WindowWorkspace>,
+    ) -> core::result::Result<bool, ApplyError> {
+        if self.pending.len() >= self.limits.max_blocks
+            || self.staged_bytes >= self.limits.max_bytes
+        {
+            return Ok(true);
+        }
+        let coin_bytes = match workspace {
+            Some(workspace) => workspace
+                .staged_coin_bytes(self.pending.len())
+                .map_err(ApplyError::UtxoCommit)?,
+            None => 0,
+        };
+        Ok(self.staged_bytes.saturating_add(coin_bytes) >= self.limits.max_bytes)
     }
 
     fn flush(
@@ -199,6 +217,11 @@ impl WindowGroup {
     fn finish_commit(&mut self, handles: &Chainstate, commit_id: u64) -> Vec<ConnectOutcome> {
         for pending in &mut self.pending {
             pending.outcome.commit_id = commit_id;
+            if let Some(facts) = &mut pending.outcome.committed_facts {
+                if let Some(facts_mut) = std::sync::Arc::get_mut(facts) {
+                    facts_mut.commit_id = commit_id;
+                }
+            }
         }
         self.staged_bytes = 0;
         let published = self
@@ -219,12 +242,57 @@ impl WindowGroup {
     }
 }
 
+struct WindowPrevouts {
+    charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+    bytes: u64,
+}
+
+impl WindowPrevouts {
+    fn new(charge: Option<bitcoin_rs_storage::budget::ChargeHandle>) -> Self {
+        Self { charge, bytes: 0 }
+    }
+
+    fn admit(&mut self, bytes: u64) -> bool {
+        let Some(charge) = self.charge.as_ref() else {
+            return true;
+        };
+        if charge.charge(bytes).is_err() {
+            return false;
+        }
+        self.bytes += bytes;
+        true
+    }
+}
+
+impl Drop for WindowPrevouts {
+    fn drop(&mut self) {
+        if let Some(charge) = self.charge.as_ref() {
+            charge.release(self.bytes);
+        }
+    }
+}
+
+fn prevout_bytes(resolved: &[Vec<Option<TxOut>>]) -> u64 {
+    let slot = std::mem::size_of::<Option<TxOut>>();
+    resolved
+        .iter()
+        .flatten()
+        .map(|prevout| {
+            let script = prevout
+                .as_ref()
+                .map_or(0, |txout| txout.script_pubkey.len());
+            u64::try_from(slot + script).unwrap_or(u64::MAX)
+        })
+        .fold(0_u64, u64::saturating_add)
+}
+
 #[derive(Default)]
 struct ProvenWindow<'a, 'h> {
     proven: Vec<ProvenApply<'a>>,
     takes: Option<bitcoin_rs_consensus::WindowCacheTakes<'h>>,
     take_starts: Vec<usize>,
     workspace: Option<super::workspace::WindowWorkspace>,
+    prevouts: Option<WindowPrevouts>,
 }
 
 fn restore_uncommitted_takes(
@@ -296,7 +364,8 @@ pub(super) fn apply_window_admitted(
     let mut takes = window.takes;
     let take_starts = window.take_starts;
     let mut workspace = window.workspace;
-    let mut group = WindowGroup::default();
+    let _window_prevouts = window.prevouts;
+    let mut group = WindowGroup::new((handles.window_limits)());
     let mut committed: Vec<ConnectOutcome> = Vec::with_capacity(payloads.len());
     for (index, &payload) in payloads.iter().enumerate() {
         if workspace.is_some() && index >= covered {
@@ -386,7 +455,21 @@ pub(super) fn apply_window_admitted(
                 });
             }
         }
-        if group.should_flush() {
+        let flush_now = match group.should_flush(workspace.as_mut()) {
+            Ok(flush_now) => flush_now,
+            Err(source) => {
+                restore_uncommitted_takes(takes.take(), &take_starts, committed.len());
+                group.abandon();
+                return Err(WindowApplyError {
+                    applied: committed.len(),
+                    committed,
+                    source: Box::new(source),
+                    disposition: WindowApplyDisposition::Fatal,
+                    invalidated: Box::default(),
+                });
+            }
+        };
+        if flush_now {
             if let Err(error) = flush_group(
                 &mut group,
                 handles,
@@ -520,6 +603,7 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
         | ApplyError::DisconnectBelowSnapshotBase { .. }
         | ApplyError::PruneDuringHistoricalValidation { .. }
         | ApplyError::ConnectPastHistoricalTarget { .. }
+        | ApplyError::StagedBudgetExhausted
         | ApplyError::HistoricalTargetHashMismatch { .. } => Operational,
     }
 }
@@ -724,7 +808,12 @@ fn prepare_window<'a>(
                 super::workspace::WindowReadError::Record(source) => ApplyError::UtxoCommit(source),
             });
         }
-        let resolved = Arc::new(ResolvedUtxoView::resolve(&workspace, payload, &tx_plan));
+        let resolved = Arc::new(ResolvedUtxoView::resolve_charged(
+            &workspace,
+            payload,
+            &tx_plan,
+            handles.prevout_charge.clone(),
+        )?);
         if workspace
             .advance(
                 &payload.materialize(),
@@ -778,6 +867,7 @@ type WindowScriptProof<'h> = (
     Option<bitcoin_rs_consensus::WindowCacheTakes<'h>>,
     Vec<usize>,
     Vec<bool>,
+    WindowPrevouts,
 );
 
 fn prove_window_scripts<'a, 'h>(
@@ -786,6 +876,7 @@ fn prove_window_scripts<'a, 'h>(
     prepared: &mut [PreparedApply<'a>],
     contexts: &[BlockValidationContext],
 ) -> Option<WindowScriptProof<'h>> {
+    let mut prevouts = WindowPrevouts::new(handles.prevout_charge.clone());
     let mut takes = handles
         .script_cache
         .as_deref()
@@ -818,8 +909,20 @@ fn prove_window_scripts<'a, 'h>(
             if let Some(takes) = takes.take() {
                 takes.rollback();
             }
+            for unit in prepared.iter_mut() {
+                unit.view.set_resolved(Vec::new());
+            }
             return None;
         };
+        if !prevouts.admit(prevout_bytes(&resolved)) {
+            if let Some(takes) = takes.take() {
+                takes.rollback();
+            }
+            for unit in prepared.iter_mut() {
+                unit.view.set_resolved(Vec::new());
+            }
+            return None;
+        }
         unit.view.set_resolved(resolved);
         if let Ok(checks) = bitcoin_rs_consensus::verify_tx::prepare_block_script_checks(
             &mut unit.view,
@@ -833,6 +936,9 @@ fn prove_window_scripts<'a, 'h>(
         } else {
             if let Some(takes) = takes.take() {
                 takes.rollback();
+            }
+            for unit in prepared.iter_mut() {
+                unit.view.set_resolved(Vec::new());
             }
             return None;
         }
@@ -852,12 +958,15 @@ fn prove_window_scripts<'a, 'h>(
         if let Some(takes) = takes.take() {
             takes.rollback();
         }
+        for unit in prepared.iter_mut() {
+            unit.view.set_resolved(Vec::new());
+        }
         return None;
     }
     if !units.is_empty() {
         metrics::counter!("node.window.verify_success_total").increment(1);
     }
-    Some((takes, take_starts, skipped))
+    Some((takes, take_starts, skipped, prevouts))
 }
 
 fn prove_window<'a, 'h>(
@@ -882,10 +991,10 @@ fn prove_window<'a, 'h>(
     let Some((mut prepared, workspace)) = prepare_window(handles, payloads, &contexts)? else {
         return Ok(ProvenWindow::default());
     };
-    let (proven, takes, take_starts) =
+    let (proven, takes, take_starts, prevouts) =
         if window_commitments_match(payloads, &mut prepared, &contexts) {
             match prove_window_scripts(handles, payloads, &mut prepared, &contexts) {
-                Some((takes, take_starts, skipped)) => {
+                Some((takes, take_starts, skipped, prevouts)) => {
                     let proven = prepared
                         .into_iter()
                         .zip(contexts)
@@ -898,12 +1007,13 @@ fn prove_window<'a, 'h>(
                             }
                         })
                         .collect();
-                    (proven, takes, take_starts)
+                    (proven, takes, take_starts, Some(prevouts))
                 }
                 None => (
                     prepared.into_iter().map(ProvenApply::Unproven).collect(),
                     None,
                     Vec::new(),
+                    None,
                 ),
             }
         } else {
@@ -911,6 +1021,7 @@ fn prove_window<'a, 'h>(
                 prepared.into_iter().map(ProvenApply::Unproven).collect(),
                 None,
                 Vec::new(),
+                None,
             )
         };
     Ok(ProvenWindow {
@@ -918,6 +1029,7 @@ fn prove_window<'a, 'h>(
         takes,
         take_starts,
         workspace: Some(workspace),
+        prevouts,
     })
 }
 
@@ -1088,7 +1200,7 @@ mod workspace_guard_tests {
         )
         .expect("header tip");
 
-        let mut group = WindowGroup::default();
+        let mut group = WindowGroup::new(crate::window_limits::default_window_limits_source()());
         group.stage(PendingBlockCommit {
             outcome: ConnectOutcome {
                 tip: tip.clone(),
@@ -1098,6 +1210,7 @@ mod workspace_guard_tests {
                 txids: b1.txs.iter().map(|tx| tx.txid()).collect(),
                 block_bytes: Default::default(),
                 raw_txs: None,
+                committed_facts: None,
             },
             undo_record: UndoRecord::new(Vec::new()),
             prev_hash: Hash256::from(genesis.block_hash()),

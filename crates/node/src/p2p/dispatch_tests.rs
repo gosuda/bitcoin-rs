@@ -50,9 +50,9 @@ fn dispatch_collect_full<S: std::io::Read + std::io::Write>(
     message: &Message,
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
-) -> Vec<Message> {
+) -> Result<Vec<Message>, PeerError> {
     let collected = RefCell::new(Vec::new());
-    let _ = dispatch_inbound_full(
+    dispatch_inbound_full(
         peer,
         message,
         chain,
@@ -65,8 +65,8 @@ fn dispatch_collect_full<S: std::io::Read + std::io::Write>(
         },
         &mut |_| {},
         &mut |items| collected.borrow_mut().push(Message::GetData(items)),
-    );
-    collected.into_inner()
+    )?;
+    Ok(collected.into_inner())
 }
 
 fn gateway_holding_witness_tx(orphan: bool) -> (MempoolGateway, Arc<Tx>) {
@@ -194,7 +194,7 @@ fn getdata_completes_initial_broadcast_only_after_successful_send() -> Result<()
 }
 
 #[test]
-fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
+fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() -> Result<(), PeerError> {
     for orphan in [false, true] {
         let (gateway, tx) = gateway_holding_witness_tx(orphan);
         let txid = bitcoin::Txid::from_byte_array(*tx.txid().as_bytes());
@@ -215,7 +215,7 @@ fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
                 &Message::Inv(vec![item]),
                 None,
                 Some(&RefTxInventory(&gateway)),
-            );
+            )?;
             if held_suppresses {
                 assert!(
                     responses.is_empty(),
@@ -237,16 +237,17 @@ fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
                     &Message::Inv(vec![item, unknown]),
                     None,
                     Some(&RefTxInventory(&gateway)),
-                ),
+                )?,
                 vec![Message::GetData(expected)]
             );
         }
     }
+    Ok(())
 }
 
 // P2P-01
 #[test]
-fn getdata_serves_mempool_bodies_but_never_held_orphans() {
+fn getdata_serves_mempool_bodies_but_never_held_orphans() -> Result<(), PeerError> {
     for orphan in [false, true] {
         let (gateway, tx) = gateway_holding_witness_tx(orphan);
         let item = Inventory::WTx(bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes()));
@@ -255,17 +256,18 @@ fn getdata_serves_mempool_bodies_but_never_held_orphans() {
             &Message::GetData(vec![item]),
             None,
             Some(&RefTxInventory(&gateway)),
-        );
+        )?;
         if orphan {
             assert_eq!(responses, vec![Message::NotFound(vec![item])]);
         } else {
             assert_eq!(responses, vec![Message::Tx((*tx).clone())]);
         }
     }
+    Ok(())
 }
 
 #[test]
-fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
+fn gateway_inventory_filters_and_serves_txid_and_wtxid() -> Result<(), PeerError> {
     let gateway = MempoolGateway::new(
         Arc::new(parking_lot::RwLock::new(Mempool::new(
             MempoolLimits::default(),
@@ -295,15 +297,13 @@ fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
         if wtxid_relay {
             peer.wtxid_relay.mark_peer_supported();
         }
-        assert_eq!(
-            dispatch_collect_full(
-                &mut peer,
-                &Message::Inv(vec![item]),
-                None,
-                Some(&RefTxInventory(&gateway))
-            ),
-            []
-        );
+        let responses = dispatch_collect_full(
+            &mut peer,
+            &Message::Inv(vec![item]),
+            None,
+            Some(&RefTxInventory(&gateway)),
+        )?;
+        assert_eq!(responses, []);
     }
 
     let mut stripped = tx.clone();
@@ -313,13 +313,14 @@ fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
     let missing = Inventory::WTx(bitcoin::Wtxid::from_byte_array([0xFF; 32]));
     let mut peer = ready_peer();
     peer.wtxid_relay.mark_peer_supported();
+    let responses = dispatch_collect_full(
+        &mut peer,
+        &Message::GetData(vec![txid_item, witness_txid_item, wtxid_item, missing]),
+        None,
+        Some(&RefTxInventory(&gateway)),
+    )?;
     assert_eq!(
-        dispatch_collect_full(
-            &mut peer,
-            &Message::GetData(vec![txid_item, witness_txid_item, wtxid_item, missing]),
-            None,
-            Some(&RefTxInventory(&gateway)),
-        ),
+        responses,
         vec![
             Message::Tx(stripped),
             Message::Tx(tx.clone()),
@@ -328,4 +329,5 @@ fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
         ],
     );
     assert_eq!(gateway.get_tx_by_wtxid(tx.wtxid()), Some(tx));
+    Ok(())
 }

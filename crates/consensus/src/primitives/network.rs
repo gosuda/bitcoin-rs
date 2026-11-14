@@ -15,12 +15,78 @@ pub struct HeadersSyncParams {
     pub redownload_buffer_size: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum IndexArtifactCapability {
+    TxLookup,
+    ScriptHistory,
+    ScriptLive,
+    CompactFilters,
+}
+
+impl IndexArtifactCapability {
+    pub const ALL: [Self; 4] = [
+        Self::TxLookup,
+        Self::ScriptHistory,
+        Self::ScriptLive,
+        Self::CompactFilters,
+    ];
+
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::TxLookup => 0,
+            Self::ScriptHistory => 1,
+            Self::ScriptLive => 2,
+            Self::CompactFilters => 3,
+        }
+    }
+
+    #[must_use]
+    pub const fn from_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Self::TxLookup),
+            1 => Some(Self::ScriptHistory),
+            2 => Some(Self::ScriptLive),
+            3 => Some(Self::CompactFilters),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::TxLookup => "txindex",
+            Self::ScriptHistory => "script_history",
+            Self::ScriptLive => "script_live",
+            Self::CompactFilters => "basic block filter index",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndexArtifactCommitment {
+    pub capability: IndexArtifactCapability,
+    pub sha256: [u8; 32],
+    pub size_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AssumeUtxoData {
     pub height: u32,
     pub block_hash: Hash256,
     pub hash_serialized: Hash256,
     pub chain_tx_count: u64,
+    pub index_commitments: [Option<IndexArtifactCommitment>; 4],
+}
+
+impl AssumeUtxoData {
+    #[must_use]
+    pub const fn index_commitment(
+        &self,
+        capability: IndexArtifactCapability,
+    ) -> Option<&IndexArtifactCommitment> {
+        self.index_commitments[capability.index()].as_ref()
+    }
 }
 
 const MAINNET_MINIMUM_CHAIN_WORK: [u8; 32] =
@@ -535,6 +601,7 @@ const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 5] = [
             "a2a5521b1b5ab65f67818e5e8eccabb7171a517f9e2382208f77687310768f96",
         ),
         chain_tx_count: 991_032_194,
+        index_commitments: [None; 4],
     },
     AssumeUtxoData {
         height: 880_000,
@@ -545,6 +612,7 @@ const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 5] = [
             "dbd190983eaf433ef7c15f78a278ae42c00ef52e0fd2a54953782175fbadcea9",
         ),
         chain_tx_count: 1_145_604_538,
+        index_commitments: [None; 4],
     },
     AssumeUtxoData {
         height: 910_000,
@@ -555,6 +623,7 @@ const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 5] = [
             "4daf8a17b4902498c5787966a2b51c613acdab5df5db73f196fa59a4da2f1568",
         ),
         chain_tx_count: 1_226_586_151,
+        index_commitments: [None; 4],
     },
     AssumeUtxoData {
         height: 935_000,
@@ -565,6 +634,7 @@ const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 5] = [
             "e4b90ef9eae834f56c4b64d2d50143cee10ad87994c614d7d04125e2a6025050",
         ),
         chain_tx_count: 1_305_397_408,
+        index_commitments: [None; 4],
     },
     AssumeUtxoData {
         height: 965_000,
@@ -575,6 +645,7 @@ const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 5] = [
             "4a8d794337118c0c615b574f817c7306c687584a537184b8d233df42bf477ec2",
         ),
         chain_tx_count: 1_429_611_231,
+        index_commitments: [None; 4],
     },
 ];
 
@@ -587,6 +658,7 @@ const TESTNET4_ASSUME_UTXO: [AssumeUtxoData; 1] = [AssumeUtxoData {
         "784fb5e98241de66fdd429f4392155c9e7db5c017148e66e8fdbc95746f8b9b5",
     ),
     chain_tx_count: 11_347_043,
+    index_commitments: [None; 4],
 }];
 
 const REGTEST_ASSUME_UTXO: [AssumeUtxoData; 2] = [
@@ -599,6 +671,7 @@ const REGTEST_ASSUME_UTXO: [AssumeUtxoData; 2] = [
             "86e9a1205b418b16dde3a18a78c730e30137e28466bda5dbf6b33ab8fc05447c",
         ),
         chain_tx_count: 111,
+        index_commitments: [None; 4],
     },
     AssumeUtxoData {
         height: 200,
@@ -609,6 +682,7 @@ const REGTEST_ASSUME_UTXO: [AssumeUtxoData; 2] = [
             "17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a",
         ),
         chain_tx_count: 201,
+        index_commitments: [None; 4],
     },
 ];
 

@@ -1,12 +1,12 @@
-//! `BRSIXART` artifact codec: the 73-byte header, `TxLookup` record framing,
-//! and the hashed 64 KiB streams that read and verify them.
+//! `BRSIXART` artifact codec: the 73-byte header, the `TxLookup` and `ScriptHistory` record
+//! framing, and the hashed 64 KiB streams that read and verify them.
 //!
 //! Layout (all integers little-endian except the height):
 //!
 //! | bytes | field |
 //! |---|---|
 //! | 0..8 | magic `BRSIXART` |
-//! | 8 | family (`1` `tx_lookup`, `2` `script_history`) |
+//! | 8 | family (`1` `tx_lookup`, `2` `script_history`, `3` `compact_filters`) |
 //! | 9..13 | artifact version |
 //! | 13..17 | index format version |
 //! | 17..21 | network magic, wire order |
@@ -22,10 +22,27 @@
 //! ascending `(txid[..8], height, txid[8..])` order: the stored-key order of the
 //! `TxConfirmed` family refined by the full id, so prefix collisions have a total
 //! order.
+//!
+//! A `ScriptHistory` record is `kind (1) || key || count (4, LE) || entries`. `kind` is `1` for
+//! the `Funding` family and `2` for `Spending`. For `Funding`, `key` is 12 bytes: the 8-byte
+//! script prefix then the history-inverted height. For `Spending`, `key` is 40 bytes: the spent
+//! outpoint's txid (32, LE) then its vout (4, BE) then the spending height (4, BE). `entries`
+//! holds `count` copies of one entry: a 71-byte `ScriptHistoryOccurrence` for `Funding`, a 6-byte
+//! `TxPosition` for `Spending`. Records appear in strictly ascending `(kind, key)` order, the
+//! key order of each family, so each family streams into `ingest_sorted` in one pass.
+//!
+//! A `CompactFilters` record is `height (4, BE) || block hash (32, LE) || filter hash (32, LE) ||
+//! filter header (32, LE) || filter length (4, LE) || filter bytes`. Records appear in strictly
+//! ascending height order, one per block from height zero to the base. Each filter hash is the
+//! dSHA256 of the filter bytes, and each filter header is dSHA256(filter hash || previous header),
+//! with the zero header before height zero. The live index stores these as hash-keyed rows.
 
 use super::manifest::BundleFamily;
-use crate::IndexError;
-use crate::types::{HEIGHT_SIZE, HashPrefixRow, TX_POSITION_SIZE, TxPosition, positions_are_valid};
+use crate::types::{
+    HASH_PREFIX_LEN, HASH_PREFIX_ROW_SIZE, HEIGHT_SIZE, SPENDING_RECORD_KEY_LEN,
+    ScriptHistoryOccurrence, TX_POSITION_SIZE, TxPosition, TxPositionValue, decode_history_height,
+    positions_are_valid,
+};
 use sha2::{Digest as _, Sha256};
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
@@ -33,7 +50,7 @@ use std::path::Path;
 use zerocopy::{FromBytes, IntoBytes};
 
 pub(super) const HEADER_LEN: usize = 73;
-pub(super) const ARTIFACT_VERSION: u32 = 1;
+pub(super) const ARTIFACT_VERSION: u32 = 2;
 pub(super) const IO_BUFFER_BYTES: usize = 64 << 10;
 pub(super) const CANCEL_POLL_RECORDS: u64 = 4_096;
 
@@ -60,6 +77,7 @@ impl ArtifactHeader {
         out[8] = match self.family {
             BundleFamily::TxLookup => 1,
             BundleFamily::ScriptHistory => 2,
+            BundleFamily::CompactFilters => 3,
         };
         out[9..13].copy_from_slice(&self.artifact_version.to_le_bytes());
         out[13..17].copy_from_slice(&self.index_format.to_le_bytes());
@@ -78,6 +96,7 @@ impl ArtifactHeader {
         let family = match bytes[8] {
             1 => BundleFamily::TxLookup,
             2 => BundleFamily::ScriptHistory,
+            3 => BundleFamily::CompactFilters,
             _ => return Err("unknown artifact family"),
         };
         let mut word = [0_u8; 4];
@@ -295,45 +314,242 @@ fn probe_end(reader: &mut impl Read) -> io::Result<bool> {
     }
 }
 
-type RowEmit<'a, E> = dyn FnMut(HashPrefixRow, &[u8]) -> Result<(), E> + 'a;
+pub(super) const FUNDING_KEY_LEN: usize = HASH_PREFIX_ROW_SIZE;
+pub(super) const SPENDING_KEY_LEN: usize = SPENDING_RECORD_KEY_LEN;
 
-const MAX_FOLDED_POSITIONS: usize = 131_072;
-
-#[derive(Default)]
-pub(super) struct RowAssembler {
-    row: Option<HashPrefixRow>,
-    positions: Vec<TxPosition>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(super) enum ScriptFamily {
+    Funding,
+    Spending,
 }
 
-impl RowAssembler {
-    pub(super) fn push(
-        &mut self,
-        record: &TxLookupRecord<'_>,
-        emit: &mut RowEmit<'_, IndexError>,
-    ) -> Result<(), IndexError> {
-        let mut prefix = [0_u8; 8];
-        prefix.copy_from_slice(&record.txid[..8]);
-        let row = HashPrefixRow::new(prefix, record.height);
-        if self.row != Some(row) {
-            self.flush(emit)?;
-            self.row = Some(row);
+impl ScriptFamily {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Funding => 1,
+            Self::Spending => 2,
         }
-        if self.positions.len().saturating_add(record.positions.len()) > MAX_FOLDED_POSITIONS {
-            return Err(IndexError::MutationSizeOverflow);
-        }
-        self.positions.extend_from_slice(record.positions);
-        Ok(())
     }
 
-    pub(super) fn flush<E>(&mut self, emit: &mut RowEmit<'_, E>) -> Result<(), E> {
-        let Some(row) = self.row.take() else {
-            return Ok(());
-        };
-        self.positions.sort_unstable();
-        let result = emit(row, self.positions.as_bytes());
-        self.positions.clear();
-        result
+    fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            1 => Some(Self::Funding),
+            2 => Some(Self::Spending),
+            _ => None,
+        }
     }
+
+    const fn key_len(self) -> usize {
+        match self {
+            Self::Funding => FUNDING_KEY_LEN,
+            Self::Spending => SPENDING_KEY_LEN,
+        }
+    }
+
+    const fn entry_len(self) -> usize {
+        match self {
+            Self::Funding => ScriptHistoryOccurrence::SIZE,
+            Self::Spending => TX_POSITION_SIZE,
+        }
+    }
+
+    const fn header_len(self) -> usize {
+        1 + self.key_len() + 4
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct ScriptRecord {
+    pub(super) family: ScriptFamily,
+    pub(super) key: Vec<u8>,
+    pub(super) value: Vec<u8>,
+}
+
+pub(super) fn write_script_record(
+    out: &mut impl Write,
+    family: ScriptFamily,
+    key: &[u8],
+    value: &[u8],
+) -> io::Result<u64> {
+    let entry_len = family.entry_len();
+    if key.len() != family.key_len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "script record key has the wrong length",
+        ));
+    }
+    if value.is_empty() || !value.len().is_multiple_of(entry_len) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "script record value is not a whole number of entries",
+        ));
+    }
+    let count = u32::try_from(value.len() / entry_len).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "script record carries over u32::MAX entries",
+        )
+    })?;
+    out.write_all(&[family.tag()])?;
+    out.write_all(key)?;
+    out.write_all(&count.to_le_bytes())?;
+    out.write_all(value)?;
+    Ok(u64::try_from(family.header_len() + value.len()).unwrap_or(u64::MAX))
+}
+
+pub(super) struct ScriptRecordReader<R> {
+    inner: R,
+    records_left: u64,
+    payload_left: u64,
+    base_height: u32,
+    floor: u32,
+    previous: Option<(ScriptFamily, Vec<u8>)>,
+    next_index: u64,
+}
+
+impl<R: Read> ScriptRecordReader<R> {
+    pub(super) fn new(inner: R, header: &ArtifactHeader, floor: u32) -> Self {
+        Self {
+            inner,
+            records_left: header.records,
+            payload_left: header.payload_bytes,
+            base_height: header.base_height,
+            floor,
+            previous: None,
+            next_index: 0,
+        }
+    }
+
+    pub(super) fn next_record(&mut self) -> Result<Option<ScriptRecord>, ReadFault> {
+        let record = self.next_index;
+        if self.records_left == 0 {
+            self.expect_end(record)?;
+            return Ok(None);
+        }
+        let framing = |reason: &'static str| ReadFault::Framing { record, reason };
+        let mut tag = [0_u8; 1];
+        read_record_bytes(&mut self.inner, &mut tag, record)?;
+        let family =
+            ScriptFamily::from_tag(tag[0]).ok_or_else(|| framing("unknown script family"))?;
+        let mut fixed = vec![0_u8; family.header_len() - 1];
+        read_record_bytes(&mut self.inner, &mut fixed, record)?;
+        let key = fixed[..family.key_len()].to_vec();
+        let mut count = [0_u8; 4];
+        count.copy_from_slice(&fixed[family.key_len()..]);
+        let count = usize::try_from(u32::from_le_bytes(count)).unwrap_or(usize::MAX);
+        if count == 0 {
+            return Err(framing("record carries no entries"));
+        }
+        let overrun = || framing("record overruns the declared payload");
+        let value_len = count.checked_mul(family.entry_len()).ok_or_else(overrun)?;
+        let total = family
+            .header_len()
+            .checked_add(value_len)
+            .ok_or_else(overrun)?;
+        if u64::try_from(total).map_or(true, |total| total > self.payload_left) {
+            return Err(overrun());
+        }
+        let mut value = vec![0_u8; value_len];
+        read_record_bytes(&mut self.inner, &mut value, record)?;
+        if self
+            .previous
+            .as_ref()
+            .is_some_and(|(previous_family, previous_key)| {
+                (*previous_family, previous_key.as_slice()) >= (family, key.as_slice())
+            })
+        {
+            return Err(framing("records are not strictly ascending"));
+        }
+        check_script_entries(family, &key, &value, self.base_height, self.floor)
+            .map_err(framing)?;
+        self.previous = Some((family, key.clone()));
+        self.records_left -= 1;
+        self.payload_left -= u64::try_from(total).unwrap_or(u64::MAX);
+        self.next_index += 1;
+        Ok(Some(ScriptRecord { family, key, value }))
+    }
+
+    fn expect_end(&mut self, record: u64) -> Result<(), ReadFault> {
+        let framing = |reason: &'static str| ReadFault::Framing { record, reason };
+        if self.payload_left != 0 {
+            return Err(framing("payload is longer than its records"));
+        }
+        match probe_end(&mut self.inner) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(framing("bytes follow the final record")),
+            Err(error) => Err(ReadFault::Io(error)),
+        }
+    }
+}
+
+pub(super) fn record_height(family: ScriptFamily, key: &[u8]) -> Option<u32> {
+    match family {
+        ScriptFamily::Funding => {
+            let bytes: [u8; HEIGHT_SIZE] = key.get(HASH_PREFIX_LEN..)?.try_into().ok()?;
+            Some(decode_history_height(bytes))
+        }
+        ScriptFamily::Spending => {
+            let bytes: [u8; 4] = key.get(key.len().checked_sub(4)?..)?.try_into().ok()?;
+            Some(u32::from_be_bytes(bytes))
+        }
+    }
+}
+
+pub(super) fn check_script_entries(
+    family: ScriptFamily,
+    key: &[u8],
+    value: &[u8],
+    base_height: u32,
+    floor: u32,
+) -> Result<(), &'static str> {
+    if key.len() != family.key_len() {
+        return Err("key has the wrong length");
+    }
+    let height = record_height(family, key).ok_or("key has no height")?;
+    if height > base_height {
+        return Err("height is above the bundle base");
+    }
+    if height < floor {
+        return Err("height is below the coverage floor");
+    }
+    match family {
+        ScriptFamily::Funding => check_funding_entries(key, value),
+        ScriptFamily::Spending => {
+            let positions = TxPositionValue::decode(value).ok_or("entries are not positions")?;
+            if positions_are_valid(positions) {
+                Ok(())
+            } else {
+                Err("positions are not strictly ascending inside one block")
+            }
+        }
+    }
+}
+
+fn check_funding_entries(key: &[u8], value: &[u8]) -> Result<(), &'static str> {
+    let occurrences =
+        ScriptHistoryOccurrence::decode_all(value).ok_or("entries are not history occurrences")?;
+    let prefix_matches = |occurrence: &ScriptHistoryOccurrence| {
+        occurrence.scripthash.to_byte_array()[..HASH_PREFIX_LEN] == key[..HASH_PREFIX_LEN]
+    };
+    if !occurrences.iter().all(prefix_matches) {
+        return Err("entry script does not match the record key");
+    }
+    if occurrences
+        .windows(2)
+        .any(|pair| occurrence_order(&pair[0]) > occurrence_order(&pair[1]))
+    {
+        return Err("entries are not in ascending order");
+    }
+    Ok(())
+}
+
+fn occurrence_order(occurrence: &ScriptHistoryOccurrence) -> (TxPosition, [u8; 32], [u8; 32], u8) {
+    (
+        occurrence.position,
+        occurrence.txid,
+        occurrence.scripthash.to_byte_array(),
+        occurrence.flags,
+    )
 }
 
 pub(super) struct HashingReader<R> {
@@ -384,7 +600,6 @@ pub(super) fn hash_file(path: &Path) -> io::Result<([u8; 32], u64)> {
 #[expect(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::IndexError;
     use std::io::Cursor;
 
     fn txid(prefix: u8, tail: u8) -> [u8; 32] {
@@ -461,48 +676,6 @@ mod tests {
         let mut bad_family = bytes;
         bad_family[8] = 9;
         assert!(ArtifactHeader::decode(&bad_family).is_err());
-    }
-
-    #[test]
-    fn prefix_collisions_order_by_full_txid_and_fold_into_one_sorted_row() {
-        let first = txid(1, 0x10);
-        let second = txid(1, 0x20);
-        let other = txid(2, 0x05);
-        let rows = [
-            (first, 5, vec![TxPosition::new(200, 60)]),
-            (second, 5, vec![TxPosition::new(100, 60)]),
-            (
-                other,
-                9,
-                vec![TxPosition::new(81, 60), TxPosition::new(300, 60)],
-            ),
-        ];
-        let (header, payload) = stream(&rows, 9);
-        let read = read_all(&header, &payload, 0).expect("ascending records frame");
-        assert_eq!(read, rows);
-
-        let mut reader = RecordReader::new(Cursor::new(payload.as_slice()), &header, 0);
-        let mut assembler = RowAssembler::default();
-        let mut folded: Vec<(HashPrefixRow, Vec<u8>)> = Vec::new();
-        let mut emit = |row: HashPrefixRow, value: &[u8]| -> Result<(), IndexError> {
-            folded.push((row, value.to_vec()));
-            Ok(())
-        };
-        while let Some(record) = reader.next_record().expect("frames") {
-            assembler.push(&record, &mut emit).expect("emit");
-        }
-        assembler.flush(&mut emit).expect("emit");
-        assert_eq!(folded.len(), 2);
-        assert_eq!(folded[0].0, HashPrefixRow::new([1; 8], 5));
-        assert_eq!(
-            folded[0].1,
-            [TxPosition::new(100, 60), TxPosition::new(200, 60)].as_bytes()
-        );
-        assert_eq!(folded[1].0, HashPrefixRow::new([2; 8], 9));
-        assert_eq!(
-            folded[1].1,
-            [TxPosition::new(81, 60), TxPosition::new(300, 60)].as_bytes()
-        );
     }
 
     #[test]
@@ -585,43 +758,6 @@ mod tests {
     }
 
     #[test]
-    fn folder_refuses_a_row_past_the_position_quota() {
-        const PER_RECORD: usize = 255;
-        let records = MAX_FOLDED_POSITIONS / PER_RECORD + 2;
-        let mut payload = Vec::new();
-        for suffix in 0..records {
-            let mut id = [0xAA_u8; 32];
-            id[8..12].copy_from_slice(
-                &u32::try_from(suffix)
-                    .expect("test count fits u32")
-                    .to_be_bytes(),
-            );
-            let per_record = u32::try_from(PER_RECORD).expect("test quota fits u32");
-            let positions: Vec<TxPosition> = (0..per_record)
-                .map(|index| TxPosition::new(index.saturating_mul(100), 60))
-                .collect();
-            write_record(&mut payload, &id, 7, &positions).expect("in-memory write");
-        }
-        let record_count = u64::try_from(records).expect("test count fits u64");
-        let payload_bytes = u64::try_from(payload.len()).expect("test payload fits u64");
-        let header_value = header(record_count, payload_bytes, 7);
-        let mut reader = RecordReader::new(Cursor::new(payload.as_slice()), &header_value, 0);
-        let mut assembler = RowAssembler::default();
-        let mut emit = |_: HashPrefixRow, _: &[u8]| -> Result<(), IndexError> { Ok(()) };
-        let mut refused = false;
-        while let Some(record) = reader.next_record().expect("frames") {
-            if matches!(
-                assembler.push(&record, &mut emit),
-                Err(IndexError::MutationSizeOverflow)
-            ) {
-                refused = true;
-                break;
-            }
-        }
-        assert!(refused, "folding past the quota must fail closed");
-    }
-
-    #[test]
     fn hashing_reader_digest_equals_the_one_shot_digest() {
         let bytes: Vec<u8> = (0..200_000_u32)
             .map(|value| value.to_le_bytes()[0])
@@ -633,5 +769,102 @@ mod tests {
         io::copy(&mut reader, &mut io::sink()).expect("in-memory read");
         let expected: [u8; 32] = Sha256::digest(&bytes).into();
         assert_eq!(reader.into_inner().finish(), expected);
+    }
+
+    #[test]
+    fn script_history_records_round_trip_and_refuse_disorder() {
+        use crate::types::{ScriptHash, encode_history_height};
+        let mut funding_key = vec![0x11_u8; FUNDING_KEY_LEN];
+        funding_key[HASH_PREFIX_LEN..].copy_from_slice(&encode_history_height(5));
+        let mut spending_key = vec![0x44_u8; SPENDING_KEY_LEN];
+        spending_key[SPENDING_KEY_LEN - 4..].copy_from_slice(&7_u32.to_be_bytes());
+        let mut scripthash = [0x22_u8; 32];
+        scripthash[..HASH_PREFIX_LEN].fill(0x11);
+        let first = ScriptHistoryOccurrence {
+            scripthash: ScriptHash::from_byte_array(scripthash),
+            txid: [0x01; 32],
+            position: TxPosition::new(81, 10),
+            flags: ScriptHistoryOccurrence::FUNDING,
+        };
+        let second = ScriptHistoryOccurrence {
+            scripthash: ScriptHash::from_byte_array(scripthash),
+            txid: [0x02; 32],
+            position: TxPosition::new(200, 20),
+            flags: ScriptHistoryOccurrence::FUNDING,
+        };
+        let funding = (
+            ScriptFamily::Funding,
+            funding_key,
+            ScriptHistoryOccurrence::encode_all(&[first, second]),
+        );
+        let spending = (
+            ScriptFamily::Spending,
+            spending_key,
+            TxPositionValue::encode(&[TxPosition::new(81, 10)]),
+        );
+        let frame = |records: &[&(ScriptFamily, Vec<u8>, Vec<u8>)]| {
+            let mut bytes = Vec::new();
+            let mut payload = 0_u64;
+            for (family, key, value) in records.iter().copied() {
+                payload += write_script_record(&mut bytes, *family, key, value).expect("record");
+            }
+            let header = ArtifactHeader {
+                family: BundleFamily::ScriptHistory,
+                artifact_version: ARTIFACT_VERSION,
+                index_format: 5,
+                network_magic: [0; 4],
+                base_height: 10,
+                base_hash: [0; 32],
+                records: u64::try_from(records.len()).expect("count"),
+                payload_bytes: payload,
+            };
+            (bytes, header)
+        };
+
+        let (bytes, header) = frame(&[&funding, &spending]);
+        let mut reader = ScriptRecordReader::new(Cursor::new(bytes.as_slice()), &header, 0);
+        for (family, key, value) in [&funding, &spending] {
+            let record = reader
+                .next_record()
+                .expect("record reads")
+                .expect("record present");
+            assert_eq!(record.family, *family);
+            assert_eq!(record.key, *key);
+            assert_eq!(record.value, *value);
+        }
+        assert!(
+            reader.next_record().expect("payload ends").is_none(),
+            "the declared records are the whole payload"
+        );
+
+        let (bytes, header) = frame(&[&spending, &funding]);
+        let mut reader = ScriptRecordReader::new(Cursor::new(bytes.as_slice()), &header, 0);
+        reader.next_record().expect("first record reads");
+        let disorder = reader.next_record();
+        assert!(
+            matches!(
+                disorder,
+                Err(ReadFault::Framing {
+                    record: 1,
+                    reason: "records are not strictly ascending",
+                })
+            ),
+            "a family out of key order must be refused: {disorder:?}"
+        );
+
+        let (bytes, mut header) = frame(&[&funding]);
+        header.base_height = 4;
+        let mut reader = ScriptRecordReader::new(Cursor::new(bytes.as_slice()), &header, 0);
+        let above = reader.next_record();
+        assert!(
+            matches!(
+                above,
+                Err(ReadFault::Framing {
+                    record: 0,
+                    reason: "height is above the bundle base",
+                })
+            ),
+            "a record above the base must be refused: {above:?}"
+        );
     }
 }

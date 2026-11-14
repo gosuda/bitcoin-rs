@@ -1655,17 +1655,15 @@ fn signature_cache_warmed_still_rejects_mutated_sighash_input() {
 }
 
 fn sigcache_p2wpkh_s_twins() -> (Tx, Tx, Vec<(OutPoint, TxOut)>) {
-    use bitcoin_hashes::{Hash as _, hash160};
+    use bitcoin_hashes::hash160;
     use bitcoin_rs_consensus::primitives::{Hash256, Sighash, SighashCache};
-    use secp256k1::{Message, PublicKey, SECP256K1, SecretKey, ecdsa};
+    use secp256k1::{Message, PublicKey, SecretKey, ecdsa};
 
-    let secret = match SecretKey::from_slice(&[11; 32]) {
+    let secret = match SecretKey::from_secret_bytes([11; 32]) {
         Ok(secret) => secret,
         Err(error) => panic!("fixed ecdsa secret: {error}"),
     };
-    let pubkey = PublicKey::from_secret_key(SECP256K1, &secret)
-        .serialize()
-        .to_vec();
+    let pubkey = PublicKey::from_secret_key(&secret).serialize().to_vec();
     let program_digest = hash160::Hash::hash(&pubkey);
     let mut program = Vec::with_capacity(22);
     program.push(0x00);
@@ -1709,18 +1707,20 @@ fn sigcache_p2wpkh_s_twins() -> (Tx, Tx, Vec<(OutPoint, TxOut)>) {
         Ok(digest) => digest,
         Err(error) => panic!("bip143 digest: {error}"),
     };
-    let mut low = SECP256K1.sign_ecdsa(&Message::from_digest(*digest.as_byte_array()), &secret);
+    let mut low = ecdsa::sign(Message::from_digest(*digest.as_byte_array()), &secret);
     low.normalize_s();
     let mut low_bytes = low.serialize_der().to_vec();
     low_bytes.push(0x01);
 
     let compact = low.serialize_compact();
-    let high_s = match SecretKey::from_slice(&compact[32..]) {
+    let mut scalar = [0u8; 32];
+    scalar.copy_from_slice(&compact[32..]);
+    let high_s = match SecretKey::from_secret_bytes(scalar) {
         Ok(s) => s,
         Err(error) => panic!("low-S s scalar: {error}"),
     }
     .negate()
-    .secret_bytes();
+    .to_secret_bytes();
     let mut twin = [0u8; 64];
     twin[..32].copy_from_slice(&compact[..32]);
     twin[32..].copy_from_slice(&high_s);

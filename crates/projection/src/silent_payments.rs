@@ -1,7 +1,7 @@
-use bitcoin_hashes::{Hash as _, hash160};
+use bitcoin_hashes::hash160;
 use bitcoin_rs_consensus::primitives::{BlockHash, Script, Tx, TxIn, Txid, consensus_bytes};
 use bitcoin_rs_storage::utxo::contract::{BlockSpends, BlockSpendsError};
-use secp256k1::{PublicKey, Scalar, Secp256k1};
+use secp256k1::{PublicKey, Scalar};
 use sha2::{Digest as _, Sha256};
 
 pub const MAX_BODY_BYTES: usize = 4_000_000;
@@ -51,16 +51,6 @@ pub fn transaction_tweak(
     tx: &Tx,
     prevouts: &[Option<&Script>],
     taproot_active: bool,
-) -> Result<Option<TransactionTweak>, TweakError> {
-    let secp = Secp256k1::verification_only();
-    transaction_tweak_with_ctx(tx, prevouts, taproot_active, &secp)
-}
-
-fn transaction_tweak_with_ctx<C: secp256k1::Verification>(
-    tx: &Tx,
-    prevouts: &[Option<&Script>],
-    taproot_active: bool,
-    secp: &Secp256k1<C>,
 ) -> Result<Option<TransactionTweak>, TweakError> {
     if tx.total_size() > MAX_BODY_BYTES {
         return Err(TweakError::ResourceLimit);
@@ -131,7 +121,7 @@ fn transaction_tweak_with_ctx<C: secp256k1::Verification>(
         return Err(TweakError::InvalidInputHash);
     }
     let tweak = sum
-        .mul_tweak(secp, &scalar)
+        .mul_tweak(&scalar)
         .map_err(|_| TweakError::InvalidInputHash)?
         .serialize();
     Ok(Some(TransactionTweak {
@@ -171,7 +161,6 @@ pub fn block_tweaks(
             transactions: Vec::new(),
         });
     }
-    let secp = Secp256k1::verification_only();
     let mut transactions = Vec::new();
     for (tx, coins) in view.block.txs.iter().zip(spent) {
         if tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null() {
@@ -195,7 +184,7 @@ pub fn block_tweaks(
             .iter()
             .map(|coin| Some(&coin.txout.script_pubkey))
             .collect();
-        match transaction_tweak_with_ctx(tx, &scripts, true, &secp) {
+        match transaction_tweak(tx, &scripts, true) {
             Ok(Some(tweak)) => transactions.push(tweak),
             Ok(None) => {}
             Err(TweakError::ResourceLimit) => return Err(BlockSpendsError::ResourceLimit),

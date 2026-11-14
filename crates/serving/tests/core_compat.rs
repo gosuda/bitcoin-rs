@@ -6,10 +6,11 @@ use crate::mining_fixture;
 
 use alloc::sync::Arc;
 
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{
     BlockImage, Hash256, Network, client_version, consensus_bytes,
 };
-use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_execution::chain::{NodeId, TipSnapshot};
 use bitcoin_rs_serving::Handler;
 use bitcoin_rs_serving::context::Context;
 use bitcoin_rs_serving::mining::{

@@ -105,6 +105,8 @@ pub enum ApplyError {
         "window prefix of {staged} block(s) is not covered by its coin workspace ({covered} block(s)); refusing a coin-less commit"
     )]
     WindowWorkspaceIncomplete { staged: usize, covered: usize },
+    #[error("staged image budget exhausted; retry later")]
+    StagedBudgetExhausted,
     #[error("coin store read: {0}")]
     CoinStoreRead(#[source] bitcoin_rs_storage::StorageError),
 }

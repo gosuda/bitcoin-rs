@@ -73,14 +73,15 @@ struct DurableHead {
 - No chainstate journal exists; coins and the durable head commit together in the engine store.
 - `commit_id` is strictly monotonic on disconnect as well as on connect.
 - A reorg lowers `height`, never `commit_id`.
-- AssumeUTXO activation and historical archive updates use the same transition reservation but separate recovery namespaces.
+- AssumeUTXO activation and historical checkpoint updates use the same transition reservation; activation publishes the snapshot-base checkpoint in the checkpoint root and writes no archive.
 - The manager holds a required persistent data directory.
-- Activation archive writes, full-revalidation marker checks, reservation cleanup, and historical checkpoint maintenance always use it.
+- Activation checkpoint writes, full-revalidation marker checks, and historical checkpoint maintenance always use the data directory.
 - The required path guarantees a directory was supplied, not filesystem health.
 - Missing or corrupt files fail at use.
 - Activation first syncs immutable `coins.dat` and `headers.dat` under `assumeutxo/<base_hash>/`.
 - Activation then commits the pinned base, count, and lifecycle in the head.
 - An unreferenced import is an orphan, never a checkpoint or activation authority.
+- Interrupted activation recovery MUST sync orphan checkpoint deletions in the checkpoint root before it clears the activation marker. A sync failure MUST retain the marker for retry.
 - Historical updates advance `commit_id` without changing the active tip.
 - Each new candidate body is synced and referenced as pending before validation.
 - Its locator becomes visible to derived readers only with the validated undo/progress batch.

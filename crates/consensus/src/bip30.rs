@@ -4,8 +4,6 @@ use crate::ConsensusError;
 
 pub const BIP34_IMPLIES_BIP30_LIMIT: u32 = 1_983_702;
 
-/// The two mainnet blocks that duplicate an earlier coinbase txid, as accepted
-/// by Bitcoin Core.
 pub const BIP30_DUPLICATE_TXID_EXCEPTIONS: [(u32, Hash256); 2] = [
     (
         91_842,

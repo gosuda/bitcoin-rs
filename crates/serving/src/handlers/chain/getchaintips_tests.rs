@@ -1,7 +1,8 @@
 use alloc::sync::Arc;
 
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_execution::chain::{NodeId, TipSnapshot};
 
 use super::*;
 

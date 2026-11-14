@@ -1,6 +1,7 @@
+use bitcoin_rs_consensus::header_rules::BlockHeader;
 use bitcoin_rs_execution::chain::header_sync::{next_work_required, validate_header_nbits};
 use bitcoin_rs_execution::chain::{
-    BlockHeader, BlockTree, ChainError, NodeStatus, accept_headers, current_unix_seconds,
+    BlockTree, ChainError, NodeStatus, accept_headers, current_unix_seconds,
 };
 
 use crate::support::chain::error::TestError;
@@ -496,21 +497,21 @@ fn pow_limit_bits(network: Network) -> u32 {
     target_to_compact_lossy(network.max_target())
 }
 
-fn target_to_compact_lossy(target: bitcoin_rs_execution::chain::ChainWork) -> u32 {
+fn target_to_compact_lossy(target: bitcoin_rs_consensus::header_rules::ChainWork) -> u32 {
     bitcoin::Target::from_be_bytes(target.to_be_bytes())
         .to_compact_lossy()
         .to_consensus()
 }
 
-fn decode_compact_to_target(bits: u32) -> bitcoin_rs_execution::chain::ChainWork {
-    bitcoin_rs_execution::chain::ChainWork::from_be_bytes(
+fn decode_compact_to_target(bits: u32) -> bitcoin_rs_consensus::header_rules::ChainWork {
+    bitcoin_rs_consensus::header_rules::ChainWork::from_be_bytes(
         bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits)).to_be_bytes(),
     )
 }
 
 fn scaled_pow_limit_bits(network: Network, divisor: u64) -> u32 {
     let limit = decode_compact_to_target(pow_limit_bits(network));
-    target_to_compact_lossy(limit / bitcoin_rs_execution::chain::ChainWork::from(divisor))
+    target_to_compact_lossy(limit / bitcoin_rs_consensus::header_rules::ChainWork::from(divisor))
 }
 
 fn retarget_bits_for_test(
@@ -521,8 +522,8 @@ fn retarget_bits_for_test(
 ) -> u32 {
     let actual_timespan = actual_timespan.clamp(expected_timespan / 4, expected_timespan * 4);
     let previous_target = decode_compact_to_target(previous_bits);
-    let actual = bitcoin_rs_execution::chain::ChainWork::from(actual_timespan);
-    let expected = bitcoin_rs_execution::chain::ChainWork::from(expected_timespan);
+    let actual = bitcoin_rs_consensus::header_rules::ChainWork::from(actual_timespan);
+    let expected = bitcoin_rs_consensus::header_rules::ChainWork::from(expected_timespan);
     let target = ((previous_target / expected) * actual)
         + (((previous_target % expected) * actual) / expected);
     target_to_compact_lossy(target.min(decode_compact_to_target(pow_limit_bits(network))))

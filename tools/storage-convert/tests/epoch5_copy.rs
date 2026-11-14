@@ -13,18 +13,18 @@ use super::support::oracle::{
 };
 
 #[test]
-fn epoch3_rocksdb_to_rocksdb_copies_current_epoch_verbatim() -> TestResult<()> {
+fn epoch5_rocksdb_to_rocksdb_copies_current_epoch_verbatim() -> TestResult<()> {
     let source_temp = tempdir()?;
     let dest_temp = tempdir()?;
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 4)?;
+    write_schema_marker(from_path, 5)?;
 
     let chainstate_data = vec![
         (
             ColumnFamily::UtxoMeta,
-            vec![(b"meta:head".to_vec(), b"head_payload_epoch3".to_vec())],
+            vec![(b"meta:head".to_vec(), b"head_payload_epoch5".to_vec())],
         ),
         (
             ColumnFamily::BlockBodies,
@@ -35,7 +35,7 @@ fn epoch3_rocksdb_to_rocksdb_copies_current_epoch_verbatim() -> TestResult<()> {
 
     let txindex_data = vec![(
         ColumnFamily::TxConfirmed,
-        vec![(b"tx_id_epoch3".to_vec(), b"confirmed_tx_bytes".to_vec())],
+        vec![(b"tx_id_epoch5".to_vec(), b"confirmed_tx_bytes".to_vec())],
     )];
     write_rocksdb_namespace(&from_path.join("txindex"), &txindex_data)?;
 
@@ -57,14 +57,14 @@ fn epoch3_rocksdb_to_rocksdb_copies_current_epoch_verbatim() -> TestResult<()> {
     let source_digest_after = recursive_dir_digest(from_path)?;
     if source_digest_before != source_digest_after {
         return Err(TestError::Assertion(
-            "source directory recursive digest changed during epoch 3 copy".into(),
+            "source directory recursive digest changed during epoch 5 copy".into(),
         ));
     }
 
     let dest_schema = fs::read_to_string(to_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema != "4\n" {
+    if dest_schema != "6\n" {
         return Err(TestError::Assertion(format!(
-            "expected destination CURRENT_SCHEMA '3\\n', got '{dest_schema}'"
+            "expected destination CURRENT_SCHEMA '6\\n', got '{dest_schema}'"
         )));
     }
 
@@ -104,15 +104,15 @@ fn epoch3_rocksdb_to_rocksdb_copies_current_epoch_verbatim() -> TestResult<()> {
         .collect();
     assert_independent_files_copied_and_ignored_skipped(&to_path, &expected_files)?;
 
-    if report.source_epoch != 4 {
+    if report.source_epoch != 5 {
         return Err(TestError::Assertion(format!(
-            "expected report source_epoch 4, got {}",
+            "expected report source_epoch 5, got {}",
             report.source_epoch
         )));
     }
-    if report.target_epoch != 4 {
+    if report.target_epoch != 6 {
         return Err(TestError::Assertion(format!(
-            "expected report target_epoch 4, got {}",
+            "expected report target_epoch 6, got {}",
             report.target_epoch
         )));
     }
@@ -156,13 +156,13 @@ fn epoch3_rocksdb_to_rocksdb_copies_current_epoch_verbatim() -> TestResult<()> {
 }
 
 #[test]
-fn epoch3_rocksdb_empty_key_empty_value_row_copies_exactly() -> TestResult<()> {
+fn epoch5_rocksdb_empty_key_empty_value_row_copies_exactly() -> TestResult<()> {
     let source_temp = tempdir()?;
     let dest_temp = tempdir()?;
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 4)?;
+    write_schema_marker(from_path, 5)?;
 
     let chainstate_data = vec![(ColumnFamily::UtxoMeta, vec![(Vec::new(), Vec::new())])];
     write_rocksdb_namespace(&from_path.join("chainstate"), &chainstate_data)?;
@@ -193,9 +193,9 @@ fn epoch3_rocksdb_empty_key_empty_value_row_copies_exactly() -> TestResult<()> {
     }
 
     let dest_schema = fs::read_to_string(to_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema != "4\n" {
+    if dest_schema != "6\n" {
         return Err(TestError::Assertion(format!(
-            "expected destination CURRENT_SCHEMA '3\\n', got '{dest_schema}'"
+            "expected destination CURRENT_SCHEMA '6\\n', got '{dest_schema}'"
         )));
     }
 

@@ -1,12 +1,9 @@
-use std::convert::Infallible;
 use std::io::{Cursor, Seek, Write};
 
 use crate::support::utxo::{TestError, TestResult};
-use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, TxOut};
-use bitcoin_rs_storage::checkpoint::CheckpointReference;
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, TxOut};
 use bitcoin_rs_storage::utxo::{
-    OfferOutcome, RawSeedError, SeedOfferCell, SeedProvenance, SeedSlot, SnapshotCoin,
-    SnapshotCoinObserver, UtxoSet, VerifiedSnapshotArtifact, read_snapshot_strict_v4,
+    SeedProvenance, SnapshotCoin, SnapshotCoinObserver, read_snapshot_strict_v4,
     read_snapshot_strict_v4_witnessed, write_snapshot_observed, write_snapshot_witnessed,
 };
 use sha2::{Digest, Sha256};
@@ -108,32 +105,6 @@ fn file_with(bytes: &[u8]) -> TestResult<std::fs::File> {
     Ok(file)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RawCoin {
-    txid: [u8; 32],
-    vout: u32,
-    script_pubkey: Vec<u8>,
-}
-
-fn raw_projection(
-    artifact: &mut VerifiedSnapshotArtifact,
-) -> Result<Vec<RawCoin>, RawSeedError<Infallible>> {
-    let mut coins = Vec::new();
-    artifact.for_each_coin_raw(
-        &mut |outpoint: &OutPoint, script: &[u8]| {
-            let outpoint = *outpoint;
-            coins.push(RawCoin {
-                txid: *outpoint.txid.as_bytes(),
-                vout: outpoint.vout,
-                script_pubkey: script.to_vec(),
-            });
-            Ok::<(), Infallible>(())
-        },
-        &|| false,
-    )?;
-    Ok(coins)
-}
-
 #[test]
 fn witnessed_write_matches_plain_bytes_and_mints_exact_witness() -> TestResult {
     let (set, tip, height) = fixture_set()?;
@@ -159,7 +130,7 @@ fn witnessed_write_matches_plain_bytes_and_mints_exact_witness() -> TestResult {
 }
 
 #[test]
-fn witnessed_read_accepts_exact_and_raw_traversal_replays_coins() -> TestResult {
+fn witnessed_read_accepts_exact_bytes_and_replays_the_same_coins() -> TestResult {
     let (set, tip, height) = fixture_set()?;
     let mut bytes = Vec::new();
     let (_, writer_observer, witness) =
@@ -178,25 +149,19 @@ fn witnessed_read_accepts_exact_and_raw_traversal_replays_coins() -> TestResult 
     assert_eq!(read_witness.record_count(), 2);
     assert_eq!(read_witness.output_count(), 3);
 
-    let mut artifact = VerifiedSnapshotArtifact::seal(
-        file,
+    let artifact = bitcoin_rs_storage::utxo::VerifiedSnapshotArtifact::seal(
         read_witness,
         SeedProvenance::AssumeUtxoArchive {
             base: tip.to_le_bytes(),
         },
     );
     assert_eq!(artifact.tip(), (height, tip));
-
-    let expected: Vec<RawCoin> = writer_observer
-        .coins
-        .iter()
-        .map(|coin| RawCoin {
-            txid: coin.txid.to_le_bytes(),
-            vout: coin.vout,
-            script_pubkey: coin.script_pubkey.clone(),
-        })
-        .collect();
-    assert_eq!(raw_projection(&mut artifact)?, expected);
+    assert_eq!(
+        artifact.provenance(),
+        SeedProvenance::AssumeUtxoArchive {
+            base: tip.to_le_bytes()
+        }
+    );
     Ok(())
 }
 
@@ -300,156 +265,7 @@ fn strict_loader_rejects_malformed_without_witness() -> TestResult {
 }
 
 #[test]
-fn tampered_or_truncated_artifact_yields_integrity() -> TestResult {
-    let (bytes, witness) = encoded_witnessed()?;
-    let first_script = 52 + 45 + 19;
-
-    let mut header_tip = bytes.clone();
-    header_tip[10] ^= 0x01;
-    let mut script_byte = bytes.clone();
-    script_byte[first_script] ^= 0x01;
-    let mut trailer_byte = bytes.clone();
-    let trailer_at = trailer_byte.len() - 10;
-    trailer_byte[trailer_at] ^= 0x01;
-    assert!(
-        read_snapshot_strict_v4(&mut Cursor::new(script_byte.clone())).is_ok(),
-        "script-flip fixture must still parse so the binding does the work"
-    );
-
-    let cases: Vec<(&str, Vec<u8>)> = vec![
-        ("header tip flip", header_tip),
-        ("script byte flip", script_byte),
-        ("trailer byte flip", trailer_byte),
-        ("one byte truncated", bytes[..bytes.len() - 1].to_vec()),
-        ("half truncated", bytes[..bytes.len() / 2].to_vec()),
-        ("trailing byte", {
-            let mut extra = bytes.clone();
-            extra.push(0x00);
-            extra
-        }),
-    ];
-    for (name, tampered) in &cases {
-        let file = file_with(tampered)?;
-        let mut artifact = VerifiedSnapshotArtifact::seal(
-            file,
-            witness,
-            SeedProvenance::AssumeUtxoArchive { base: [7_u8; 32] },
-        );
-        assert!(
-            matches!(raw_projection(&mut artifact), Err(RawSeedError::Integrity)),
-            "{name} did not yield Integrity"
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn same_fd_pins_bytes_despite_path_replace() -> TestResult {
-    let (bytes, _) = encoded_witnessed()?;
-    let (set, tip, height) = fixture_set()?;
-    let mut canonical = Vec::new();
-    let (_, writer_seen, _) = write_snapshot_witnessed(
-        &set,
-        &tip,
-        height,
-        &mut canonical,
-        RecordingObserver::default(),
-    )?;
-    assert_eq!(canonical, bytes);
-    let expected: Vec<RawCoin> = writer_seen
-        .coins
-        .iter()
-        .map(|coin| RawCoin {
-            txid: coin.txid.to_le_bytes(),
-            vout: coin.vout,
-            script_pubkey: coin.script_pubkey.clone(),
-        })
-        .collect();
-
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("coins.dat");
-    std::fs::write(&path, &bytes)?;
-    let mut file = std::fs::File::open(&path)?;
-    let (_, (), witness) = read_snapshot_strict_v4_witnessed(&mut file, ())?;
-    let mut artifact = VerifiedSnapshotArtifact::seal(
-        file,
-        witness,
-        SeedProvenance::AssumeUtxoArchive { base: [9_u8; 32] },
-    );
-
-    let garbage = vec![0x5A_u8; bytes.len()];
-    assert!(
-        read_snapshot_strict_v4(&mut Cursor::new(garbage.clone())).is_err(),
-        "replacement bytes must not parse as a snapshot"
-    );
-    let swap_path = dir.path().join("coins.dat.swap");
-    std::fs::write(&swap_path, &garbage)?;
-    std::fs::rename(&swap_path, &path)?;
-
-    assert_eq!(raw_projection(&mut artifact)?, expected);
-    Ok(())
-}
-
-#[test]
-fn grown_file_after_seal_yields_integrity() -> TestResult {
-    let (bytes, witness) = encoded_witnessed()?;
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("coins.dat");
-    std::fs::write(&path, &bytes)?;
-    let file = std::fs::File::open(&path)?;
-    let mut artifact = VerifiedSnapshotArtifact::seal(
-        file,
-        witness,
-        SeedProvenance::AssumeUtxoArchive { base: [13_u8; 32] },
-    );
-
-    let mut grown = std::fs::OpenOptions::new().append(true).open(&path)?;
-    grown.write_all(&[0xAA_u8; 1024])?;
-    drop(grown);
-
-    assert!(matches!(
-        raw_projection(&mut artifact),
-        Err(RawSeedError::Integrity)
-    ));
-    Ok(())
-}
-
-#[test]
-fn emit_failure_aborts_as_emit() -> TestResult {
-    #[derive(Debug)]
-    struct Boom;
-
-    impl std::fmt::Display for Boom {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("boom")
-        }
-    }
-
-    let (bytes, witness) = encoded_witnessed()?;
-    let file = file_with(&bytes)?;
-    let mut artifact = VerifiedSnapshotArtifact::seal(
-        file,
-        witness,
-        SeedProvenance::Checkpoint(CheckpointReference {
-            generation: 11,
-            manifest_sha256: [12_u8; 32],
-        }),
-    );
-    let mut calls = 0_u64;
-    let result = artifact.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| {
-            calls += 1;
-            Err(Boom)
-        },
-        &|| false,
-    );
-    assert!(matches!(result, Err(RawSeedError::Emit(Boom))));
-    assert_eq!(calls, 1);
-    Ok(())
-}
-
-#[test]
-fn empty_snapshot_mints_and_traverses_zero_coins() -> TestResult {
+fn empty_snapshot_mints_witness_and_decodes_zero_coins() -> TestResult {
     let set = bitcoin_rs_storage::utxo::UtxoSet::new();
     let tip = txid(99);
     let mut bytes = Vec::new();
@@ -459,214 +275,7 @@ fn empty_snapshot_mints_and_traverses_zero_coins() -> TestResult {
     assert_eq!(witness.output_count(), 0);
     assert_eq!(witness.byte_len(), u64::try_from(bytes.len())?);
 
-    let (load, (), read_witness) = read_snapshot_strict_v4_witnessed(&mut Cursor::new(&bytes), ())?;
+    let (load, (), _) = read_snapshot_strict_v4_witnessed(&mut Cursor::new(&bytes), ())?;
     assert_eq!(load.set.record_count(), 0);
-
-    let file = file_with(&bytes)?;
-    let mut artifact = VerifiedSnapshotArtifact::seal(
-        file,
-        read_witness,
-        SeedProvenance::Checkpoint(CheckpointReference {
-            generation: 3,
-            manifest_sha256: [4_u8; 32],
-        }),
-    );
-    let mut count = 0_u64;
-    artifact.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| {
-            count += 1;
-            Ok::<(), Infallible>(())
-        },
-        &|| false,
-    )?;
-    assert_eq!(count, 0);
-    Ok(())
-}
-
-fn tiny_artifact(tip_seed: u64, base_byte: u8) -> TestResult<VerifiedSnapshotArtifact> {
-    let set = UtxoSet::new();
-    let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
-        vout: 0,
-        value: txout(tip_seed + 1).value.to_sat(),
-        script_pubkey: txout(tip_seed + 1).script_pubkey.to_vec(),
-        coinbase: false,
-        height: 10,
-    };
-    let rec =
-        bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(txid(tip_seed), &[out])?;
-    set.insert_parsed_record(rec);
-    let tip = txid(tip_seed + 3);
-    let mut bytes = Vec::new();
-    let (_, (), witness) = write_snapshot_witnessed(&set, &tip, 11, &mut bytes, ())?;
-    let witness = witness.ok_or(TestError::Missing("tiny encode must mint a witness"))?;
-    let file = file_with(&bytes)?;
-    Ok(VerifiedSnapshotArtifact::seal(
-        file,
-        witness,
-        SeedProvenance::AssumeUtxoArchive {
-            base: [base_byte; 32],
-        },
-    ))
-}
-
-#[test]
-fn offer_without_demand_is_skipped_and_stores_nothing() -> TestResult {
-    let cell = SeedSlot::new();
-    assert!(!cell.is_wanted());
-    assert!(matches!(
-        cell.offer(tiny_artifact(21, 21)?),
-        OfferOutcome::Skipped
-    ));
-    assert!(cell.take().is_none());
-    assert!(!cell.is_wanted());
-    Ok(())
-}
-
-#[test]
-fn first_offer_wins_take_clears_demand() -> TestResult {
-    let cell = SeedSlot::new();
-    cell.want();
-    assert!(cell.is_wanted());
-    assert!(matches!(
-        cell.offer(tiny_artifact(31, 31)?),
-        OfferOutcome::Stored
-    ));
-    assert!(!cell.is_wanted());
-    assert!(matches!(
-        cell.offer(tiny_artifact(32, 32)?),
-        OfferOutcome::Skipped
-    ));
-
-    let mut taken = cell
-        .take()
-        .ok_or(TestError::Missing("queued artifact missing"))?;
-    assert_eq!(taken.tip(), (11, txid(34)));
-    assert!(cell.take().is_none());
-    assert!(!cell.is_wanted());
-    assert!(matches!(
-        cell.offer(tiny_artifact(33, 33)?),
-        OfferOutcome::Skipped
-    ));
-
-    let mut count = 0_u64;
-    taken.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| {
-            count += 1;
-            Ok::<(), Infallible>(())
-        },
-        &|| false,
-    )?;
-    assert_eq!(count, 1);
-    Ok(())
-}
-
-#[test]
-fn rest_drops_artifact_and_demand() -> TestResult {
-    let cell = SeedSlot::new();
-    assert!(cell.take().is_none());
-    cell.want();
-    cell.want();
-    assert!(cell.is_wanted());
-    assert!(cell.take().is_none());
-    assert!(cell.is_wanted());
-    cell.rest();
-    assert!(!cell.is_wanted());
-    assert!(cell.take().is_none());
-
-    cell.want();
-    assert!(matches!(
-        cell.offer(tiny_artifact(41, 41)?),
-        OfferOutcome::Stored
-    ));
-    cell.rest();
-    assert!(cell.take().is_none());
-    assert!(!cell.is_wanted());
-    Ok(())
-}
-
-#[test]
-fn cell_handles_are_thread_shareable() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    fn assert_send<T: Send>() {}
-    assert_send_sync::<SeedSlot>();
-    assert_send_sync::<SeedOfferCell>();
-    assert_send::<VerifiedSnapshotArtifact>();
-}
-
-#[test]
-fn seed_traversal_polls_cancellation_every_4096_coins() -> TestResult {
-    let set = UtxoSet::new();
-    for i in 0..9_000_u64 {
-        let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
-            vout: 0,
-            value: txout(i).value.to_sat(),
-            script_pubkey: txout(i).script_pubkey.to_vec(),
-            coinbase: false,
-            height: 1,
-        };
-        let rec = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
-            txid(200_000 + i),
-            &[out],
-        )?;
-        set.insert_parsed_record(rec);
-    }
-    let tip = txid(200_001);
-    let mut bytes = Vec::new();
-    let (_, (), witness) = write_snapshot_witnessed(&set, &tip, 7, &mut bytes, ())?;
-    let witness = witness.ok_or(TestError::Missing("valid encode must mint a witness"))?;
-    let mut file = file_with(&bytes)?;
-    let (_, (), read_witness) = read_snapshot_strict_v4_witnessed(&mut file, ())?;
-    let mut artifact = VerifiedSnapshotArtifact::seal(
-        file,
-        read_witness,
-        SeedProvenance::Checkpoint(CheckpointReference {
-            generation: 3,
-            manifest_sha256: [4_u8; 32],
-        }),
-    );
-    assert_eq!(witness.sha256(), read_witness.sha256());
-
-    let mut count = 0_u64;
-    let immediate = artifact.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| {
-            count += 1;
-            Ok::<(), Infallible>(())
-        },
-        &|| true,
-    );
-    assert!(
-        matches!(immediate, Err(RawSeedError::Cancelled)),
-        "entry poll must stop before any emit: {immediate:?}"
-    );
-    assert_eq!(count, 0, "a cancelled entry must not traverse");
-
-    let seen = std::cell::Cell::new(0_u64);
-    let mut emitted = 0_u64;
-    let mid = artifact.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| {
-            seen.set(seen.get() + 1);
-            emitted += 1;
-            Ok::<(), Infallible>(())
-        },
-        &|| seen.get() >= 5_000,
-    );
-    assert!(
-        matches!(mid, Err(RawSeedError::Cancelled)),
-        "mid-stream stop must report cancellation: {mid:?}"
-    );
-    assert!(
-        (4_096..9_000).contains(&emitted),
-        "cancellation must stop at a poll boundary with partial work: {emitted}"
-    );
-
-    let mut all = 0_u64;
-    artifact.for_each_coin_raw(
-        &mut |_: &OutPoint, _: &[u8]| {
-            all += 1;
-            Ok::<(), Infallible>(())
-        },
-        &|| false,
-    )?;
-    assert_eq!(all, 9_000, "retry after cancellation must replay all coins");
     Ok(())
 }

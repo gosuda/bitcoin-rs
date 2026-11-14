@@ -8,6 +8,7 @@ use hashbrown::{HashMap, hash_map::Entry};
 
 use crate::p2p::download_window::SyncBudget;
 use bitcoin_rs_wire::connection::PeerSource;
+use bitcoin_rs_wire::inbound::block_memory::BlockMemoryCredit;
 
 #[derive(Debug)]
 pub(crate) struct BlockStager {
@@ -31,9 +32,10 @@ struct ReceivedBlock {
     decoded_bytes: usize,
     source: Option<PeerSource>,
     gate_pending: bool,
+    credit: Option<BlockMemoryCredit>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct DrainedBlock {
     pub hash: Hash256,
     payload: BlockImage,
@@ -41,6 +43,7 @@ pub(crate) struct DrainedBlock {
     bytes: usize,
     source: Option<PeerSource>,
     gate_pending: bool,
+    credit: Option<BlockMemoryCredit>,
 }
 
 impl DrainedBlock {
@@ -132,6 +135,7 @@ impl BlockStager {
         self.received.keys().copied()
     }
 
+    #[cfg(test)]
     pub(crate) fn insert(
         &mut self,
         hash: Hash256,
@@ -139,6 +143,18 @@ impl BlockStager {
         payload: BlockImage,
         source: Option<PeerSource>,
         now: Instant,
+    ) -> StagedBlock {
+        self.insert_with_credit(hash, next_expected_hash, payload, source, now, None)
+    }
+
+    pub(crate) fn insert_with_credit(
+        &mut self,
+        hash: Hash256,
+        next_expected_hash: Option<Hash256>,
+        payload: BlockImage,
+        source: Option<PeerSource>,
+        now: Instant,
+        credit: Option<BlockMemoryCredit>,
     ) -> StagedBlock {
         let entry = match self.received.entry(hash) {
             Entry::Occupied(_) => return StagedBlock::AlreadyStaged,
@@ -164,6 +180,17 @@ impl BlockStager {
             return StagedBlock::DroppedForRetry { hash };
         }
 
+        let mut credit = credit;
+        if let Some(credit) = credit.as_mut()
+            && let Err(error) = credit.retain(retained)
+        {
+            tracing::debug!(
+                %error,
+                %hash,
+                retained,
+                "retained block exceeds its ingress reservation"
+            );
+        }
         entry.insert(ReceivedBlock {
             payload,
             received_at: now,
@@ -171,6 +198,7 @@ impl BlockStager {
             decoded_bytes,
             source,
             gate_pending: false,
+            credit,
         });
         self.received_order.push_back(hash);
         self.count_staged(bytes, decoded_bytes);
@@ -257,6 +285,7 @@ impl BlockStager {
                     decoded_bytes,
                     source: drained.source,
                     gate_pending,
+                    credit: drained.credit,
                 },
             );
             if let Some(previous) = previous {
@@ -283,6 +312,7 @@ impl BlockStager {
             bytes: entry.bytes,
             source: entry.source,
             gate_pending: entry.gate_pending,
+            credit: entry.credit,
         })
     }
 

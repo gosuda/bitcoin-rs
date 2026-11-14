@@ -20,7 +20,7 @@ The HEAD build used for this book was compiled without the `pool` feature, so no
 
 The pool config is immutable. `Ledger::create` refuses a non-empty namespace with `PathExists`; `Ledger::open` refuses a stored config that differs from the running one with `ConfigMismatch` and a missing schema with `NotALedger` (`store.rs:192`, `:214`). A policy change cannot reinterpret history; the operator must start a new ledger directory.
 
-Startup allocates a run epoch the first time a ledger handle opens (`allocate_run_epoch`, `store.rs:248`). The node adapter combines it with the protocol job id:
+Startup allocates a run epoch the first time a ledger handle opens (`allocate_run_epoch`, `store.rs`). The node adapter combines it with the protocol job id:
 
 ```rust
 job: (u64::from(run_epoch) << 32) | u64::from(share.job.get()),
@@ -30,12 +30,12 @@ job: (u64::from(run_epoch) << 32) | u64::from(share.job.get()),
 
 ## Share identity and idempotency
 
-A `ShareCredit` carries the header hash, the job, the account, the extranonce, the nonce, the header version, the header time, and the work (`crates/serving/src/mining/pool/ledger.rs:50`). Two keys decide what happens on a write:
+A `ShareCredit` carries the header hash, the job, the account, the extranonce, the nonce, the header version, the header time, and the work (`crates/serving/src/mining/pool/ledger.rs`). Two keys decide what happens on a write:
 
 - `header_hash` is the idempotency key. The same hash with the same work and the same tuple returns `ShareReceipt::Duplicate { seq }` and writes nothing.
-- `tuple_key()` is the identity key: `job BE || account BE || nonce BE || version BE || ntime BE || extranonce` (`ledger.rs:73`). The same tuple under a different header hash is `ShareIdentityConflict`.
+- `tuple_key()` is the identity key: `job BE || account BE || nonce BE || version BE || ntime BE || extranonce` (`ledger.rs`). The same tuple under a different header hash is `ShareIdentityConflict`.
 
-`credit_share` checks retired jobs first, then the header-hash index, then the retired-hash tombstone table, then the tuple index (`store.rs:1657`). Five outcomes are possible:
+`credit_share` checks retired jobs first, then the header-hash index, then the retired-hash tombstone table, then the tuple index (`store.rs`). Five outcomes are possible:
 
 | Situation | Result |
 | :--- | :--- |
@@ -45,15 +45,15 @@ A `ShareCredit` carries the header hash, the job, the account, the extranonce, t
 | same tuple, different hash | `ShareIdentityConflict { seq }` |
 | new hash and new tuple | `Credited { seq }`, indexes updated |
 
-`ShareConflict` and `JobRetired` are permanent: the node adapter maps them to `RecordOutcome::Rejected`, not a retry (`crates/node/src/pool/ledger.rs:822`). A version roll and an ntime roll produce different hashes and are credited separately; `version_and_ntime_rolls_are_distinct_shares_not_conflicts` pins that.
+`ShareConflict` and `JobRetired` are permanent: the node adapter maps them to `RecordOutcome::Rejected`, not a retry (`crates/node/src/pool/ledger.rs`). A version roll and an ntime roll produce different hashes and are credited separately; `version_and_ntime_rolls_are_distinct_shares_not_conflicts` pins that.
 
 `retire_job` removes the job's tuples from the live index and moves its hashes into `pplns_retired_hashes_v1` as tombstones (`store.rs:331`). The work already credited stays in the PPLNS window. Only new records for that job are refused.
 
 ## Rounds and observations
 
-A found block creates a `Round` in state `Pending` with the solving share sequence and a frozen PPLNS window (`record_found_block`, `store.rs:497`). The window is work-weighted: `collect_window` walks shares backward from the solving sequence until the accumulated work reaches `window_work` (`store.rs:1705`). A solving share older than the pruned boundary returns `WindowPruned`; the ledger refuses rather than paying from a truncated window.
+A found block creates a `Round` in state `Pending` with the solving share sequence and a frozen PPLNS window (`record_found_block`, `store.rs:497`). The window is work-weighted: `collect_window` walks shares backward from the solving sequence until the accumulated work reaches `window_work` (`store.rs`). A solving share older than the pruned boundary returns `WindowPruned`; the ledger refuses rather than paying from a truncated window.
 
-Round state has four values (`ledger.rs:219`):
+Round state has four values (`ledger.rs`):
 
 ```text
 Pending --canonical coinbase observed--> Immature --maturity--> Matured
@@ -63,15 +63,15 @@ Pending --canonical coinbase observed--> Immature --maturity--> Matured
 
 `reconcile_rounds_checked` observes every open round by exact block hash, not by height (`store.rs:650`). The chain view answers `Canonical { height }`, `Side`, or `Unknown`, and a height match is required for `Canonical`. A displaced matured round is orphaned and its allocations reversed; a round that returns is revived. `a_claim_the_chain_contradicts_is_surfaced_and_never_applied` covers a contradiction between the recorded coinbase and the chain.
 
-Reward fixing happens on the first canonical observation with a coinbase (`fix_reward`, `store.rs:2026`):
+Reward fixing happens on the first canonical observation with a coinbase (`fix_reward`, `store.rs`):
 
 1. The observed coinbase txid must equal the recorded txid.
 2. The observed outputs must sum to the claimed value, and no sum may exceed `MAX_MONEY_SAT`.
 3. The pool's share is the sum of outputs paying the configured reward script.
-4. `split_pool_fee` floors the basis-point fee; `split_reward` divides the net by work, floors each share, and distributes the integer residual by descending remainder, then ascending account id (`ledger.rs:288`, `:330`).
+4. `split_pool_fee` floors the basis-point fee; `split_reward` divides the net by work, floors each share, and distributes the integer residual by descending remainder, then ascending account id (`ledger.rs`).
 5. Allocations are stored per account under the round.
 
-Maturity uses `tip_height - block_height + 1` confirmations. Crediting happens once at maturity; `reverse_round_credits` consumes available balance first and records the shortfall as `deficit_sat` (`store.rs:2099`). A later credit clears deficit before adding available funds (`credit_round_allocations`, `store.rs:2080`). The invariant is:
+Maturity uses `tip_height - block_height + 1` confirmations. Crediting happens once at maturity; `reverse_round_credits` consumes available balance first and records the shortfall as `deficit_sat` (`store.rs`). A later credit clears deficit before adding available funds (`credit_round_allocations`, `store.rs`). The invariant is:
 
 ```text
 available + reserved + paid - deficit = credited matured allocations
@@ -79,11 +79,11 @@ available + reserved + paid - deficit = credited matured allocations
 
 per account. `check_invariants` recomputes it from tables (`store.rs:1343`). The node does not call it at startup; it is a test and operator verification path, so a corrupt ledger is found by the audit chain or by tests, not by a boot check.
 
-After the configured `reorg_watch_depth` without a canonical observation, an open round is marked `Orphaned` and removed from the open set (`apply_round_observation`, `store.rs:1850`). `unseen_rounds_stop_being_monitored_after_the_watch_depth` pins that boundary.
+After the configured `reorg_watch_depth` without a canonical observation, an open round is marked `Orphaned` and removed from the open set (`apply_round_observation`, `store.rs`). `unseen_rounds_stop_being_monitored_after_the_watch_depth` pins that boundary.
 
 ## Payout batches
 
-A batch moves through six states (`ledger.rs:932`):
+A batch moves through six states (`ledger.rs`):
 
 ```text
 Prepared -> ExternallySigned -> Broadcast -> Confirmed
@@ -95,7 +95,7 @@ Prepared -> ExternallySigned -> Broadcast -> Confirmed
 
 ### Prepare
 
-`prepare_payout_batch(idempotency_key, policy)` returns the existing batch when the key is known, otherwise selects balances at or above `min_payout_sat`, reserves them, and creates a batch whose id `compute_batch_id` derives from the domain string `btcrs.pool.payout-batch.v1`, the key, and the selected outputs (`store.rs:869`, `ledger.rs:915`). Selection stops at `MAX_PAYOUT_OUTPUT_WEIGHT_WU` (390,000 WU) and at `max_outputs`, so the resulting transaction stays under the 400,000 WU standard limit. The policy floor is at least the configured dust limit, and `max_outputs` is 1 through 2,500.
+`prepare_payout_batch(idempotency_key, policy)` returns the existing batch when the key is known, otherwise selects balances at or above `min_payout_sat`, reserves them, and creates a batch whose id `compute_batch_id` derives from the domain string `btcrs.pool.payout-batch.v1`, the key, and the selected outputs (`store.rs:869`, `ledger.rs`). Selection stops at `MAX_PAYOUT_OUTPUT_WEIGHT_WU` (390,000 WU) and at `max_outputs`, so the resulting transaction stays under the 400,000 WU standard limit. The policy floor is at least the configured dust limit, and `max_outputs` is 1 through 2,500.
 
 `preparing_a_batch_reserves_balances_atomically_and_never_double_allocates` pins that the same key returns the same batch and that balances cannot be reserved twice.
 
@@ -121,7 +121,7 @@ A receipt never broadcasts. `record_broadcast` requires that the chain already o
 - every signed transaction conclusively double-spent at the abandon depth: `Failed`, reservation released;
 - some transactions still possible: no decision.
 
-`a_batch_fails_only_when_every_signed_transaction_is_conclusively_double_spent` and `a_mid_reconcile_chain_transition_defers_a_permanent_fail` pin the asymmetry: a missing or inconclusive observation is never treated as nonpayment.
+`a_batch_fails_only_when_every_signed_transaction_is_conclusively_double_spent` and `an_aborted_reconcile_defers_a_permanent_fail` pin the asymmetry: a missing or inconclusive observation is never treated as nonpayment.
 
 `cancel_prepared` accepts only `Prepared` and only with an explicit `NeverHandedToSigner` or `SignerRevoked` basis; it releases the reservation and removes the batch from the active set (`store.rs:1113`). A failure, timeout, or rejection by the signer does not release anything by itself.
 
@@ -129,7 +129,7 @@ A receipt never broadcasts. `record_broadcast` requires that the chain already o
 
 Each public mutation runs `begin_write`, mutates one or more tables, calls `append_audit`, and commits once through `Ledger::commit` (`store.rs:309`). A commit either applies the whole operation or none of it. Idempotent replays are handled before the write transaction opens, so a retried `record_share` or `prepare_payout_batch` returns the first result without a second transaction.
 
-The audit table is a hash chain. `append_audit` hashes `"btcrs.pool.audit.v1" || previous || seq BE || body` and stores the chain value in `audit_head` in the same transaction (`store.rs:2356`). `verify_audit_chain` walks the table and returns the record count (`store.rs:1334`). Tests cover interrupted commits and lost replies with the `test-seam` fail plan:
+The audit table is a hash chain. `append_audit` hashes `"btcrs.pool.audit.v1" || previous || seq BE || body` and stores the chain value in `audit_head` in the same transaction (`store.rs`). `verify_audit_chain` walks the table and returns the record count (`store.rs:1334`). Tests cover interrupted commits and lost replies with the `test-seam` fail plan:
 
 | Fault | Expected result | Test |
 | :--- | :--- | :--- |
@@ -144,14 +144,14 @@ All four live in `crates/node/tests/support/pool_ledger_cases.rs`, which is comp
 
 `POOL-05` makes job retirement synchronous with block acceptance, not with the pending-share count.
 
-`PoolCore::submit_block_to_node` calls the node mining control. On `BlockStatus::Applied` it immediately calls `self.invalidate_active()` before returning the receipt (`crates/serving/src/mining/pool/core.rs:454`). `invalidate_active` marks every active job `Stale(Invalidated)`, clears the published job, and returns the invalidated ids (`core.rs:383`, `crates/serving/src/mining/pool/job.rs:1069`).
+`PoolCore::submit_block_to_node` calls the node mining control. On `BlockStatus::Applied` it immediately calls `self.invalidate_active()` before returning the receipt (`crates/serving/src/mining/pool/core.rs:454`). `invalidate_active` marks every active job `Stale(Invalidated)`, clears the published job, and returns the invalidated ids (`core.rs:383`, `crates/serving/src/mining/pool/job.rs`).
 
 Two consequences follow:
 
-- A job id that falls below the retained front is reported as `Stale { reason: Retired }` by `JobBook::locate` (`job.rs:1161`).
-- `validate` checks the `seen` set before the stale check for a replayed header, so a byte-identical replay keeps duplicate identity: `Stale` for new work on the job, `Duplicate` for the exact share already accepted (`job.rs:1193`).
+- A job id that falls below the retained front is reported as `Stale { reason: Retired }` by `JobBook::locate` (`job.rs`).
+- `validate` checks the `seen` set before the stale check for a replayed header, so a byte-identical replay keeps duplicate identity: `Stale` for new work on the job, `Duplicate` for the exact share already accepted (`job.rs`).
 
-The wire mapping is fixed. SV1 uses code 21 `"Stale share"` and code 22 `"Duplicate share"` (`crates/serving/src/mining/pool/stratum/sv1.rs:116`). SV2 answers `stale-share` and `duplicate-share`; `applied_sv2_block_retires_the_common_job_before_a_sibling_reaches_the_node` asserts `stale-share` on sequence 2 after an Applied block and `duplicate-share` for the replay.
+The wire mapping is fixed. SV1 uses code 21 `"Stale share"` and code 22 `"Duplicate share"` (`crates/serving/src/mining/pool/stratum/sv1.rs`). SV2 answers `stale-share` and `duplicate-share`; `applied_sv2_block_retires_the_common_job_before_a_sibling_reaches_the_node` asserts `stale-share` on sequence 2 after an Applied block and `duplicate-share` for the replay.
 
 On the ledger side, the retired job's later records are refused with `JobRetired(job)` and its header hashes stay reserved as tombstones, so a cross-job replay is `ShareConflict`, not a new credit (`a_retired_header_hash_is_never_credited_again`).
 
@@ -205,7 +205,7 @@ That test submits one winning nonce over a real SV1 connection, asserts the job 
 | `ReceiptError::NotConflicting` | replacement does not conflict with an earlier signed tx | no |
 | `LedgerUnavailable` | storage or an unexpected error in the node adapter | yes, the node retries |
 
-`LedgerUnavailable` is the node adapter's only retry class (`crates/node/src/pool/ledger.rs:816`). The core keeps failed records in its bounded outbox rather than answering success, which is why a queued write is not a committed share.
+`LedgerUnavailable` is the node adapter's only retry class (`crates/node/src/pool/ledger.rs`). The core keeps failed records in its bounded outbox rather than answering success, which is why a queued write is not a committed share.
 
 ## Where the invariants are proven
 

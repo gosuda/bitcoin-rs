@@ -1831,7 +1831,7 @@ fn dropped_tx_body_releases_solicitation_for_repoll() -> Result<(), crate::test_
         crate::p2p::PackageCapacity::new(100_000),
         std::sync::Arc::clone(&table),
         store,
-        bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+        bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
     );
     ingress.on_inbound_tx(owner, tx, None);
     let second = alternate_rx

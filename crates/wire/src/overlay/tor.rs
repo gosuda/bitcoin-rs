@@ -165,7 +165,7 @@ impl OverlayTransport {
         address: SocketAddr,
         mut key: Option<String>,
         shared: &crate::listener::ConnectionShared,
-        shutdown: &crate::latch::LatchReader,
+        shutdown: &bitcoin_rs_consensus::latch::LatchReader,
     ) {
         let cancelled = || shutdown.is_triggered() || shared.is_session_cancelled();
         let mut backoff = Duration::from_secs(1);
@@ -256,7 +256,7 @@ mod tests {
             std::sync::Arc::new(crate::NetworkActivity::from_shared(std::sync::Arc::new(
                 AtomicBool::new(true),
             ))),
-            crate::latch::LatchReader::fixture_never(),
+            bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
             None,
             bitcoin::p2p::Magic::REGTEST,
             crossbeam_channel::unbounded().0,
@@ -443,7 +443,7 @@ mod tests {
             },
         )));
         let shared = test_shared(&transport);
-        let latch = crate::latch::LatchWriter::new();
+        let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
         let shutdown = latch.reader();
         let worker_transport = std::sync::Arc::clone(&transport);
         let (joined_tx, joined_rx) = crossbeam_channel::bounded(1);

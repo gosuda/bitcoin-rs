@@ -57,7 +57,7 @@ pub struct MiningCoordinator {
     chainstate: Arc<Chainstate>,
     block_tree: BlockTreeReader,
     followers: ChainFollowers,
-    shutdown: bitcoin_rs_execution::chain::LatchReader,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
     service: MiningService,
 }
 
@@ -76,7 +76,10 @@ impl MiningCoordinator {
         let shutdown = chainstate.shutdown_reader();
         let service = MiningService::new(
             network,
-            Arc::new(AppliedTipAdapter { tip: applied_tip }),
+            Arc::new(AppliedTipAdapter {
+                tip: applied_tip,
+                epoch: followers.epoch(),
+            }),
             Arc::new(MempoolAdapter {
                 mempool,
                 chainstate: Arc::clone(&chainstate),
@@ -205,6 +208,14 @@ impl MiningCoordinator {
                 );
                 Ok(BlockValidationResult::Accepted)
             }
+            Err(ConnectMutationError::CommittedButMempoolSettlementRefused { outcome, source }) => {
+                tracing::error!(
+                    committed = %outcome.hash,
+                    %source,
+                    "submitblock committed but mempool settlement was refused; retry is forbidden"
+                );
+                Ok(BlockValidationResult::Accepted)
+            }
             Err(ConnectMutationError::NotCommitted(error)) => map_apply_error(error),
         }
     }
@@ -212,11 +223,19 @@ impl MiningCoordinator {
 
 struct AppliedTipAdapter {
     tip: TipReader,
+    epoch: crate::chain_effects::EpochCell,
 }
 
 impl AppliedTipSource for AppliedTipAdapter {
     fn applied_tip(&self) -> Option<TipSnapshot> {
         self.tip.load_full().map(|snapshot| (*snapshot).clone())
+    }
+
+    fn applied_epoch(&self) -> Option<bitcoin_rs_execution::chain::AppliedEpoch> {
+        self.epoch.current().or_else(|| {
+            self.applied_tip()
+                .map(|tip| bitcoin_rs_execution::chain::AppliedEpoch::new(tip, 0))
+        })
     }
 }
 
@@ -230,6 +249,15 @@ impl MempoolSnapshotSource for MempoolAdapter {
     fn current_revisions(&self) -> (u64, u64) {
         let mempool = self.mempool.read();
         (
+            mempool.sequence_number(),
+            mempool.fee_delta_sequence_number(),
+        )
+    }
+
+    fn settled_generation(&self) -> (u64, u64, u64) {
+        let mempool = self.mempool.read();
+        (
+            mempool.settled_at_commit(),
             mempool.sequence_number(),
             mempool.fee_delta_sequence_number(),
         )
@@ -256,13 +284,14 @@ impl MempoolSnapshotSource for MempoolAdapter {
 
     fn select_template_after(
         &self,
-        block: &Block,
+        block: &bitcoin_rs_consensus::primitives::BlockImage,
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError> {
         let pool = self.mempool.read();
         let source_sequences = (pool.sequence_number(), pool.fee_delta_sequence_number());
-        let plan = pool.plan_block_removals(block);
+        let facts = bitcoin_rs_mempool::TransitionFacts::from_block(block);
+        let plan = pool.plan_block_removals(&facts);
         let body = select_template_body_after(&pool, &plan, context, payout)
             .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
         let removals = plan
@@ -285,7 +314,7 @@ impl MempoolSnapshotSource for MempoolAdapter {
         &self,
         selection: &GenerateSelection,
         context: &CandidateContext,
-    ) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    ) -> Result<Arc<MempoolMiningSnapshot>, MiningControlError> {
         if !matches!(selection, GenerateSelection::Ordered(items) if items.iter().any(|item| matches!(item, GenerateTx::Raw(_))))
         {
             return snapshot_for_selection(
@@ -628,7 +657,9 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             | ChainError::BadVersion { .. }
             | ChainError::TimewarpAttack { .. }),
         ) => bitcoin_rs_serving::mining::chain_reject_reason(chain),
-        ApplyError::Shutdown | ApplyError::ConcurrentChainChange => {
+        ApplyError::Shutdown
+        | ApplyError::ConcurrentChainChange
+        | ApplyError::StagedBudgetExhausted => {
             return Err(MiningControlError::Unavailable(CompactString::from(
                 error.to_string(),
             )));

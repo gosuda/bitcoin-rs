@@ -51,7 +51,11 @@ fn pending_broadcast_index_tracks_flags_across_entry_lifecycle() -> Result<(), M
     pool.set_unbroadcast(second.wtxid(), true);
     pool.set_unbroadcast(first.wtxid(), false);
     assert_index(&pool);
-    pool.remove_for_block(&[second.as_ref()], &[second.txid()], 2, 1);
+    pool.remove_for_block(
+        &crate::settlement::TransitionFacts::from_txs(&[second.as_ref()]),
+        2,
+        1,
+    );
     assert_index(&pool);
     assert!(
         pool.derived.unbroadcast.is_empty(),
@@ -146,7 +150,11 @@ fn a_stale_rollback_cannot_revive_a_replaced_entry() -> Result<(), MempoolError>
     let wtxid = tx.wtxid();
     pool.insert_entry(MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0))?;
     pool.mark_broadcast(wtxid);
-    pool.remove_for_block(&[tx.as_ref()], &[tx.txid()], 2, 1);
+    pool.remove_for_block(
+        &crate::settlement::TransitionFacts::from_txs(&[tx.as_ref()]),
+        2,
+        1,
+    );
     pool.insert_entry(MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0))?;
 
     pool.restore_broadcast(wtxid);
@@ -245,7 +253,6 @@ fn aggregate_fees_stays_saturated_after_decrements() -> Result<(), MempoolError>
     let prioritised = tx(2, Vec::new());
     let prioritised_txid = prioritised.txid();
     let removed = tx(3, Vec::new());
-    let removed_txid = removed.txid();
 
     pool.insert_entry(MempoolEntry::new(
         Arc::new(tx(1, Vec::new())),
@@ -268,7 +275,11 @@ fn aggregate_fees_stays_saturated_after_decrements() -> Result<(), MempoolError>
     assert_eq!(pool.aggregate_fees(), u64::MAX);
     assert!(
         !pool
-            .remove_for_block(&[&removed], &[removed_txid], 8, 1)
+            .remove_for_block(
+                &crate::settlement::TransitionFacts::from_txs(&[&removed]),
+                8,
+                1
+            )
             .is_empty()
     );
     assert_eq!(pool.aggregate_fees(), u64::MAX);
@@ -314,8 +325,6 @@ fn fee_rate_aggregate_tracks_duplicate_rates_and_removals() -> Result<(), Mempoo
     let first = Arc::new(tx(10, Vec::new()));
     let second = Arc::new(tx(11, Vec::new()));
     let other_rate = Arc::new(tx(12, Vec::new()));
-    let first_txid = first.txid();
-    let second_txid = second.txid();
 
     pool.insert_entry(MempoolEntry::new(Arc::clone(&first), 100, 1_000, 1, 7, 0))?;
     pool.insert_entry(MempoolEntry::new(Arc::clone(&second), 200, 2_000, 2, 7, 0))?;
@@ -340,8 +349,12 @@ fn fee_rate_aggregate_tracks_duplicate_rates_and_removals() -> Result<(), Mempoo
     );
 
     assert_eq!(
-        pool.remove_for_block(&[first.as_ref()], &[first_txid], 4, 1)
-            .len(),
+        pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[first.as_ref()]),
+            4,
+            1
+        )
+        .len(),
         1
     );
     let ten_k = pool
@@ -356,8 +369,12 @@ fn fee_rate_aggregate_tracks_duplicate_rates_and_removals() -> Result<(), Mempoo
     );
 
     assert_eq!(
-        pool.remove_for_block(&[second.as_ref()], &[second_txid], 5, 1)
-            .len(),
+        pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[second.as_ref()]),
+            5,
+            1
+        )
+        .len(),
         1
     );
     assert!(!pool.derived.fee_rate_aggregates.contains_key(&10_000));
@@ -710,7 +727,11 @@ fn block_inclusion_keeps_unmined_descendants() -> Result<(), MempoolError> {
         .entry_id_by_txid(&child_txid)
         .expect("child id resolves");
 
-    let removed = pool.remove_for_block(&[&parent], &[parent_txid], 8, 1);
+    let removed = pool.remove_for_block(
+        &crate::settlement::TransitionFacts::from_txs(&[&parent]),
+        8,
+        1,
+    );
 
     assert_eq!(
         removed.changes,
@@ -1033,7 +1054,11 @@ fn mined_removal_clears_only_the_overlays_of_block_transactions() -> Result<(), 
     pool.prioritise(stranger_txid, 50)
         .expect("stranger delta applies");
 
-    let removed = pool.remove_for_block(&[&parent, &stranger], &[parent_txid, stranger_txid], 8, 1);
+    let removed = pool.remove_for_block(
+        &crate::settlement::TransitionFacts::from_txs(&[&parent, &stranger]),
+        8,
+        1,
+    );
 
     assert_eq!(removed.len(), 1, "only the mined parent leaves");
     assert_eq!(
@@ -1167,7 +1192,11 @@ fn admissions_and_mined_confirmations_feed_the_pool_owned_estimator() -> Result<
         "arrivals alone are not confirmation evidence"
     );
 
-    pool.remove_for_block(&[&first, &second], &[first_txid, second_txid], 8, 1);
+    pool.remove_for_block(
+        &crate::settlement::TransitionFacts::from_txs(&[&first, &second]),
+        8,
+        1,
+    );
     assert!(
         pool.estimate_fee_rate(2).is_some(),
         "the confirmations this pool observed itself answer the estimate"
@@ -1338,7 +1367,7 @@ fn a_replacement_that_would_be_shed_leaves_the_pool_unchanged() {
     );
     let replacement_txid = replacement.txid();
     let before = (
-        pool.mining_snapshot().entries,
+        pool.mining_snapshot().entries.clone(),
         pool.estimator_history(),
         pool.policy_stamp(),
     );
@@ -1431,8 +1460,8 @@ fn incremental_metadata_matches_the_full_recompute_after_removals() -> Result<()
             panic!("entry {victim} must be present in the fixture");
         };
         let tx = entry.tx.clone();
-        let txid = entry.txid;
-        let removed = pool.remove_for_block(&[&tx], &[txid], 8, 1);
+        let removed =
+            pool.remove_for_block(&crate::settlement::TransitionFacts::from_txs(&[&tx]), 8, 1);
         assert!(
             !removed.is_empty(),
             "entry {victim} must be present in the fixture"
@@ -1552,7 +1581,11 @@ fn running_totals_track_inserts_removals_and_prioritise() -> Result<(), MempoolE
         panic!("fixture must hold the victim entry");
     };
     let victim_tx = victim.tx.clone();
-    let removed = pool.remove_for_block(&[&victim_tx], &[victim_txid], 8, 1);
+    let removed = pool.remove_for_block(
+        &crate::settlement::TransitionFacts::from_txs(&[&victim_tx]),
+        8,
+        1,
+    );
     assert!(!removed.is_empty(), "the victim must actually be removed");
     assert!(
         outs.get(2).is_some_and(|out| pool.contains_txid(&out.txid)),
@@ -1657,7 +1690,7 @@ fn remove_for_block_stamps_the_floor_for_decay_even_when_empty() {
     .expect("high");
     crate::eviction::evict_lowest_fee_packages(&mut pool, unit()).expect("eviction");
     assert_eq!(pool.min_fee_sat_per_kvb(1_000), 3_000);
-    pool.remove_for_block(&[], &[], 8, 1_000);
+    pool.remove_for_block(&crate::settlement::TransitionFacts::from_txs(&[]), 8, 1_000);
     assert_eq!(pool.min_fee_sat_per_kvb(1_000 + 12 * 60 * 60), 1_500);
 }
 
@@ -1722,7 +1755,11 @@ fn expire_keeps_a_recycled_slot_with_a_fresh_timestamp() {
     pool.insert_entry(MempoolEntry::new(Arc::clone(&old), 100, 1_000, 0, 1, 0))
         .expect("old");
     let recycled = pool.entry_id_by_txid(&old_txid).expect("old id resolves");
-    pool.remove_for_block(&[old.as_ref()], &[old_txid], 1, 1);
+    pool.remove_for_block(
+        &crate::settlement::TransitionFacts::from_txs(&[old.as_ref()]),
+        1,
+        1,
+    );
     let now = crate::policy::MEMPOOL_EXPIRY_SECS + 1;
     let fresh = Arc::new(tx(52, Vec::new()));
     let fresh_txid = fresh.txid();
@@ -1903,6 +1940,115 @@ fn pool_expiry_projection_releases_surviving_neighbor_link_sides() -> Result<(),
             ))
         ),
         "one byte below the exact boundary must report mempool-full"
+    );
+    Ok(())
+}
+
+#[test]
+fn mining_snapshot_reuses_cache_until_mutation() -> Result<(), crate::test_error::TestError> {
+    let mut pool = Mempool::new(MempoolLimits::default());
+    let parent = tx(31, Vec::new());
+    let parent_id = OutPoint::new(parent.txid(), 0);
+    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7, 0))?;
+    pool.insert_entry(MempoolEntry::new(
+        Arc::new(tx(32, alloc::vec![parent_id])),
+        100,
+        2_000,
+        2,
+        7,
+        0,
+    ))?;
+    let first = pool.mining_snapshot();
+    let second = pool.mining_snapshot();
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "an unchanged mempool reuses its mining snapshot"
+    );
+    assert_eq!(first.entries.len(), 2, "the snapshot holds both entries");
+    assert_eq!(
+        first.sequence,
+        pool.sequence_number(),
+        "the snapshot carries the current mempool sequence"
+    );
+    pool.prioritise(first.entries[0].txid, 500)?;
+    let third = pool.mining_snapshot();
+    assert!(
+        !Arc::ptr_eq(&second, &third),
+        "a fee delta mutation invalidates the snapshot"
+    );
+    assert_eq!(
+        third.fee_delta_sequence,
+        pool.fee_delta_sequence_number(),
+        "the rebuilt snapshot carries the current fee delta sequence"
+    );
+    let lone = tx(33, Vec::new());
+    let lone_txid = lone.txid();
+    pool.insert_entry(MempoolEntry::new(Arc::new(lone), 100, 3_000, 3, 7, 0))?;
+    let fourth = pool.mining_snapshot();
+    assert!(
+        !Arc::ptr_eq(&third, &fourth),
+        "an entry mutation invalidates the snapshot"
+    );
+    assert_eq!(
+        fourth.entries.len(),
+        3,
+        "the rebuilt snapshot holds every entry"
+    );
+    assert_eq!(
+        fourth
+            .entries
+            .iter()
+            .map(|entry| entry.txid)
+            .collect::<HashSet<_>>(),
+        pool.iter_txids().into_iter().collect::<HashSet<_>>(),
+        "the rebuilt snapshot holds the pool contents after admission"
+    );
+    pool.remove_for_reorg(&[lone_txid]);
+    let fifth = pool.mining_snapshot();
+    assert!(
+        !Arc::ptr_eq(&fourth, &fifth),
+        "a removal invalidates the snapshot"
+    );
+    assert_eq!(
+        fifth.entries.len(),
+        2,
+        "the rebuilt snapshot drops the removed entry"
+    );
+    assert_eq!(
+        fifth
+            .entries
+            .iter()
+            .map(|entry| entry.txid)
+            .collect::<HashSet<_>>(),
+        pool.iter_txids().into_iter().collect::<HashSet<_>>(),
+        "the rebuilt snapshot holds the pool contents after removal"
+    );
+    pool.insert_entry(MempoolEntry::new(
+        Arc::new(tx(33, Vec::new())),
+        100,
+        3_000,
+        3,
+        7,
+        0,
+    ))?;
+    let sixth = pool.mining_snapshot();
+    assert!(
+        !Arc::ptr_eq(&fifth, &sixth),
+        "a reorg resurrection invalidates the snapshot"
+    );
+    assert_eq!(
+        sixth.entries.len(),
+        3,
+        "the rebuilt snapshot holds the resurrected entry"
+    );
+    assert_eq!(
+        sixth
+            .entries
+            .iter()
+            .map(|entry| entry.txid)
+            .collect::<HashSet<_>>(),
+        pool.iter_txids().into_iter().collect::<HashSet<_>>(),
+        "the rebuilt snapshot holds the pool contents after resurrection"
     );
     Ok(())
 }

@@ -53,3 +53,19 @@ pub(crate) struct ConversionReport {
     #[serde(default)]
     pub(crate) published_checkpoint: bool,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RebuildIndexReport {
+    pub(crate) datadir: String,
+    pub(crate) engine: String,
+    pub(crate) format_version: u32,
+    pub(crate) blocks: u64,
+    pub(crate) budget_refusals: u64,
+    pub(crate) families: Vec<FamilyResetReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FamilyResetReport {
+    pub(crate) family: String,
+    pub(crate) rows_removed: u64,
+}

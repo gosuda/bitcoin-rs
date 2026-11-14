@@ -102,14 +102,14 @@ fn state_at_stage(stage: Phase) -> State {
 // RCV-09
 #[test]
 fn node_exact_current_opens_without_alteration() {
-    let inputs = node_inputs(MarkerClassification::CurrentEpoch4, false);
+    let inputs = node_inputs(MarkerClassification::CurrentEpoch6, false);
     let s0 = State::init(inputs);
     assert!(safety(&s0));
     let s1 = step(&s0, Action::NodeOpenDirect);
     assert!(safety(&s1));
     assert_eq!(s1.outcome, Outcome::Success);
     assert!(s1.engine_opened());
-    assert_eq!(s1.source_marker, MarkerClassification::CurrentEpoch4);
+    assert_eq!(s1.source_marker, MarkerClassification::CurrentEpoch6);
     assert_eq!(s1.source_contents, [10, 20, 30, 40]);
     assert_eq!(s1.dest_marker, None);
     assert!(!s1.observed_final_sync);
@@ -133,14 +133,14 @@ fn node_absent_empty_initializes_marker_and_opens() {
     let s3 = step(&s2, Action::NodeInitRenameSuccess);
     assert!(safety(&s3));
     assert_eq!(s3.phase, Phase::NodeInitPendingSync);
-    assert_eq!(s3.source_marker, MarkerClassification::CurrentEpoch4);
+    assert_eq!(s3.source_marker, MarkerClassification::CurrentEpoch6);
     assert!(!s3.engine_opened());
 
     let s4 = step(&s3, Action::FinalSyncSuccess);
     assert!(safety(&s4));
     assert_eq!(s4.outcome, Outcome::Success);
     assert!(s4.engine_opened());
-    assert_eq!(s4.source_marker, MarkerClassification::CurrentEpoch4);
+    assert_eq!(s4.source_marker, MarkerClassification::CurrentEpoch6);
     assert_eq!(s4.source_contents, [10, 20, 30, 40]);
     assert!(s4.observed_final_sync);
 }
@@ -184,7 +184,7 @@ fn node_absent_empty_final_sync_fails_after_rename_publication_unknown() {
     let s4 = step(&s3, Action::FinalSyncFailure);
     assert!(safety(&s4));
     assert_eq!(s4.outcome, Outcome::PublicationUnknown);
-    assert_eq!(s4.source_marker, MarkerClassification::CurrentEpoch4);
+    assert_eq!(s4.source_marker, MarkerClassification::CurrentEpoch6);
     assert!(!s4.engine_opened());
     assert!(!s4.observed_final_sync);
 }
@@ -198,6 +198,10 @@ fn node_refuses_all_non_current_marker_classes() {
         (MarkerClassification::Malformed, false),
         (MarkerClassification::RetiredEpoch3, true),
         (MarkerClassification::RetiredEpoch3, false),
+        (MarkerClassification::RetiredEpoch4, true),
+        (MarkerClassification::RetiredEpoch4, false),
+        (MarkerClassification::RetiredEpoch5, true),
+        (MarkerClassification::RetiredEpoch5, false),
         (MarkerClassification::FutureEpoch, true),
         (MarkerClassification::FutureEpoch, false),
     ];
@@ -216,13 +220,13 @@ fn node_refuses_all_non_current_marker_classes() {
         assert!(!marker.is_current());
     }
 
-    assert!(MarkerClassification::CurrentEpoch4.is_current());
-    assert!(!MarkerClassification::CurrentEpoch4.refusal_names_converter());
+    assert!(MarkerClassification::CurrentEpoch6.is_current());
+    assert!(!MarkerClassification::CurrentEpoch6.refusal_names_converter());
 }
 
 #[test]
 fn node_out_of_turn_actions_stutter() {
-    let inputs = node_inputs(MarkerClassification::CurrentEpoch4, false);
+    let inputs = node_inputs(MarkerClassification::CurrentEpoch6, false);
     let s0 = State::init(inputs);
     let s1 = step(&s0, Action::ConvertAcceptAdmission);
     assert_eq!(s0, s1);
@@ -291,7 +295,9 @@ fn converter_refuses_non_convertible_markers() {
     }
 
     assert!(MarkerClassification::RetiredEpoch3.is_convertible());
-    assert!(MarkerClassification::CurrentEpoch4.is_convertible());
+    assert!(MarkerClassification::RetiredEpoch4.is_convertible());
+    assert!(MarkerClassification::RetiredEpoch5.is_convertible());
+    assert!(MarkerClassification::CurrentEpoch6.is_convertible());
 }
 
 // RCV-09, RCV-10
@@ -384,14 +390,14 @@ fn converter_final_sync_ambiguity() {
     let mut s = State::init(converter_inputs(MarkerClassification::RetiredEpoch3));
     s = run_pipeline(s);
     assert_eq!(s.phase, Phase::PublishedPendingSync);
-    assert_eq!(s.dest_marker, Some(MarkerClassification::CurrentEpoch4));
+    assert_eq!(s.dest_marker, Some(MarkerClassification::CurrentEpoch6));
     assert_eq!(s.dest_coins, 12);
     assert!(safety(&s));
 
     s = step(&s, Action::FinalSyncFailure);
     assert!(safety(&s));
     assert_eq!(s.outcome, Outcome::PublicationUnknown);
-    assert_eq!(s.dest_marker, Some(MarkerClassification::CurrentEpoch4));
+    assert_eq!(s.dest_marker, Some(MarkerClassification::CurrentEpoch6));
     assert_eq!(s.dest_cells, [5, 6, 7, 8]);
     assert_eq!(s.dest_coins, 12);
     assert!(s.required_files_durable);
@@ -403,14 +409,14 @@ fn converter_final_sync_ambiguity() {
 // RCV-09, RCV-10
 #[test]
 fn converter_successful_current_epoch_copy() {
-    let mut s = State::init(converter_inputs(MarkerClassification::CurrentEpoch4));
+    let mut s = State::init(converter_inputs(MarkerClassification::CurrentEpoch6));
     assert!(safety(&s));
     s = run_pipeline(s);
     s = step(&s, Action::FinalSyncSuccess);
 
     assert!(safety(&s));
     assert_eq!(s.outcome, Outcome::Success);
-    assert_eq!(s.dest_marker, Some(MarkerClassification::CurrentEpoch4));
+    assert_eq!(s.dest_marker, Some(MarkerClassification::CurrentEpoch6));
     assert_eq!(s.dest_cells, [5, 6, 7, 8]);
     assert_eq!(s.dest_coins, 12);
     assert!(s.required_files_durable);
@@ -419,7 +425,7 @@ fn converter_successful_current_epoch_copy() {
     assert!(s.has_success_receipt());
     assert!(s.observed_final_sync);
     assert_eq!(s.source_contents, [5, 6, 7, 8]);
-    assert_eq!(s.source_marker, MarkerClassification::CurrentEpoch4);
+    assert_eq!(s.source_marker, MarkerClassification::CurrentEpoch6);
     assert_eq!(s.dest_coins, s.inputs.oracle_coins(s.inputs.durable_head));
 }
 
@@ -433,13 +439,31 @@ fn converter_successful_retired_epoch3_migration() {
 
     assert!(safety(&s));
     assert_eq!(s.outcome, Outcome::Success);
-    assert_eq!(s.dest_marker, Some(MarkerClassification::CurrentEpoch4));
+    assert_eq!(s.dest_marker, Some(MarkerClassification::CurrentEpoch6));
     assert_eq!(s.dest_cells, [5, 6, 7, 8]);
     assert!(s.required_files_durable);
     assert!(s.scratch_deleted);
     assert!(s.has_success_receipt());
     assert!(s.observed_final_sync);
     assert_eq!(s.source_marker, MarkerClassification::RetiredEpoch3);
+    assert_eq!(s.source_contents, [5, 6, 7, 8]);
+}
+// RCV-09, RCV-10
+#[test]
+fn converter_successful_retired_epoch5_migration() {
+    let mut s = State::init(converter_inputs(MarkerClassification::RetiredEpoch5));
+    assert!(safety(&s));
+    s = run_pipeline(s);
+    s = step(&s, Action::FinalSyncSuccess);
+    assert!(safety(&s));
+    assert_eq!(s.outcome, Outcome::Success);
+    assert_eq!(s.dest_marker, Some(MarkerClassification::CurrentEpoch6));
+    assert_eq!(s.dest_cells, [5, 6, 7, 8]);
+    assert!(s.required_files_durable);
+    assert!(s.scratch_deleted);
+    assert!(s.has_success_receipt());
+    assert!(s.observed_final_sync);
+    assert_eq!(s.source_marker, MarkerClassification::RetiredEpoch5);
     assert_eq!(s.source_contents, [5, 6, 7, 8]);
 }
 
@@ -563,7 +587,7 @@ fn journal_is_never_copied() {
 // RCV-09, RCV-10
 #[test]
 fn terminal_outcomes_absorb_all_actions() {
-    let mut s = State::init(converter_inputs(MarkerClassification::CurrentEpoch4));
+    let mut s = State::init(converter_inputs(MarkerClassification::CurrentEpoch6));
     s = run_pipeline(s);
     s = step(&s, Action::FinalSyncSuccess);
     assert!(s.is_terminal());
@@ -602,7 +626,7 @@ fn invalid_actions_stutter() {
 fn empty_namespaces_representable_by_content_identity() {
     let inputs = ModelInputs {
         initial_source_contents: [0, 42, 0, 99],
-        ..converter_inputs(MarkerClassification::CurrentEpoch4)
+        ..converter_inputs(MarkerClassification::CurrentEpoch6)
     };
     let mut s = State::init(inputs);
     s = run_pipeline(s);
@@ -610,5 +634,5 @@ fn empty_namespaces_representable_by_content_identity() {
 
     assert_eq!(s.outcome, Outcome::Success);
     assert_eq!(s.dest_cells, [0, 42, 0, 99]);
-    assert_eq!(s.dest_marker, Some(MarkerClassification::CurrentEpoch4));
+    assert_eq!(s.dest_marker, Some(MarkerClassification::CurrentEpoch6));
 }

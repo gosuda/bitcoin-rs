@@ -6,17 +6,32 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_storage::assumeutxo::HistoricalCheckpointRef;
 use bitcoin_rs_storage::block_body::IndexedBlockBodyStore;
+use bitcoin_rs_storage::write_fault::WriteFaultStore;
 use bitcoin_rs_storage::{
     DurableHeadStore, FlatFileBlockStore, KvDurableHeadStore, KvUndoStore, RocksDbStore,
 };
 use parking_lot::RwLock;
+use sha2::Digest as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU32;
 
-fn open_persistent(dir: &Path, pinned: &AssumeUtxoData) -> TestResult<Arc<Chainstate>> {
+fn chainstate_store(dir: &Path) -> TestResult<Arc<WriteFaultStore>> {
     std::fs::create_dir_all(dir)?;
     crate::events::initialize_data_dir(dir)?;
-    let store = Arc::new(RocksDbStore::open(dir.join("chainstate"))?);
+    Ok(Arc::new(WriteFaultStore::new(Arc::new(
+        RocksDbStore::open(dir.join("chainstate"))?,
+    ))))
+}
+
+fn open_persistent(dir: &Path, pinned: &AssumeUtxoData) -> TestResult<Arc<Chainstate>> {
+    open_persistent_over(dir, pinned, chainstate_store(dir)?)
+}
+
+fn open_persistent_over(
+    dir: &Path,
+    pinned: &AssumeUtxoData,
+    store: Arc<WriteFaultStore>,
+) -> TestResult<Arc<Chainstate>> {
     let head_store = Arc::new(KvDurableHeadStore::new(store.clone()));
     let head = head_store.load()?;
     let files = Arc::new(match head.and_then(|head| head.body_extent) {
@@ -49,8 +64,23 @@ fn open_persistent(dir: &Path, pinned: &AssumeUtxoData) -> TestResult<Arc<Chains
             Arc::new(crate::events::ChainEventPublisher::detached(0)),
         )
     } else if let Some(head) = head.as_ref().filter(|h| h.height > 0) {
-        let initial = crate::assumeutxo_snapshot::load_verified(dir, Network::Regtest, pinned)?;
-        let tree = initial.tree;
+        let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir)?;
+        let config = crate::checkpoint::headers::HeaderCheckpointConfig {
+            network: Network::Regtest,
+            genesis: Network::Regtest.genesis_block_hash(),
+        };
+        let loaded = crate::checkpoint::load_checkpoint_from_dir_with_path(
+            &data,
+            Some(dir),
+            config,
+            bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT,
+        )?;
+        let crate::checkpoint::CheckpointLoad::Complete(restored) = loaded else {
+            return Err(TestError::Missing(
+                "ordinary restart needs its checkpoint header tree",
+            ));
+        };
+        let tree = restored.tree;
         let node_id = tree
             .lookup(head.tip)
             .ok_or(TestError::Missing("head tip missing from tree"))?;
@@ -88,7 +118,7 @@ fn open_persistent(dir: &Path, pinned: &AssumeUtxoData) -> TestResult<Arc<Chains
     active.commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(dyn_store, coins));
     active.block_body_store = Some(Arc::new(IndexedBlockBodyStore::new(store, files)));
     active.configure_checkpointing(dir, Arc::new(AtomicU32::new(0)))?;
-    crate::recover_snapshot_activation(&active)?;
+    crate::recover_snapshot_activation(&active, dir)?;
     crate::recover_disconnect_marker(&active)?;
     Ok(Arc::new(active))
 }
@@ -666,24 +696,44 @@ fn accepted_historical_generation(dir: &Path, fixture: &Fixture) -> TestResult<u
     }
 }
 
-fn remove_first_engine_coin(engine_dir: &Path) -> TestResult<(u64, u64)> {
+fn remove_first_engine_coin(engine_dir: &Path) -> TestResult<()> {
     use bitcoin_rs_storage::KvStore as _;
     let store = bitcoin_rs_storage::memory_kv::MemoryKvStore::open_checkpoint(engine_dir)?;
-    let (key, value) = {
+    let key = {
         let mut rows = store.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?;
         rows.next()
             .ok_or(TestError::Missing("engine image has no coins"))??
+            .0
     };
-    let record =
-        bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(value.into_boxed_slice())
-            .map_err(|_| TestError::Missing("bad coin record"))?;
-    let outputs = u64::try_from(record.outputs().count())?;
-    let amount: u64 = record.outputs().map(|out| out.value).sum();
     let mut batch = store.new_batch();
     batch.delete(bitcoin_rs_storage::ColumnFamily::Coins, &key);
     store.write_durable(batch)?;
     store.checkpoint(engine_dir)?;
-    Ok((outputs, amount))
+    Ok(())
+}
+fn resign_engine_image(generation_dir: &Path) -> TestResult<[u8; 32]> {
+    let chainstate = cap_std::fs::Dir::open_ambient_dir(
+        generation_dir.join("chainstate"),
+        cap_std::ambient_authority(),
+    )?;
+    let engine = bitcoin_rs_storage::checkpoint::digest_engine_dir(&chainstate)
+        .map_err(crate::CheckpointError::Store)?;
+    let manifest_path = generation_dir.join(bitcoin_rs_storage::checkpoint::MANIFEST_FILE);
+    let mut manifest: bitcoin_rs_storage::checkpoint::CheckpointManifestV1 =
+        sonic_rs::from_slice(&std::fs::read(&manifest_path)?)?;
+    manifest.engine = Some(engine);
+    let manifest_bytes = sonic_rs::to_vec(&manifest)?;
+    std::fs::write(&manifest_path, &manifest_bytes)?;
+    let root = generation_dir.parent().ok_or(TestError::Missing(
+        "historical generation has no checkpoint root",
+    ))?;
+    let current_path = root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE);
+    let mut current: bitcoin_rs_storage::checkpoint::CurrentV1 =
+        sonic_rs::from_slice(&std::fs::read(&current_path)?)?;
+    let manifest_sha256: [u8; 32] = sha2::Sha256::digest(&manifest_bytes).into();
+    current.manifest_sha256 = bitcoin_rs_consensus::primitives::hex::hex_encode(&manifest_sha256);
+    std::fs::write(&current_path, sonic_rs::to_vec(&current)?)?;
+    Ok(manifest_sha256)
 }
 
 fn accepted_generation_dir(dir: &Path, generation: u64) -> PathBuf {
@@ -699,9 +749,39 @@ fn historical_checkpoint_coin_stats_come_from_the_engine_image() -> TestResult {
     publish_unaccepted_historical_checkpoint(dir.path(), &fixture, &mut unaccepted)?;
     let accepted_stats = unaccepted.stats.clone();
     let generation = accepted_historical_generation(dir.path(), &fixture)?;
-    let (removed_outputs, removed_amount) = remove_first_engine_coin(
-        &accepted_generation_dir(dir.path(), generation).join("chainstate"),
-    )?;
+    let generation_dir = accepted_generation_dir(dir.path(), generation);
+    remove_first_engine_coin(&generation_dir.join("chainstate"))?;
+    let manifest_sha256 = resign_engine_image(&generation_dir)?;
+    {
+        use bitcoin_rs_storage::KvStore as _;
+        let live = bitcoin_rs_storage::RocksDbStore::open(dir.path().join("chainstate"))?;
+        let raw = live
+            .get(
+                bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+                bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY,
+            )?
+            .ok_or(TestError::Missing("live chainstate has no durable head"))?;
+        let mut head = bitcoin_rs_storage::DurableHead::decode(&raw)
+            .ok_or(TestError::Missing("live durable head is undecodable"))?;
+        match &mut head.assumeutxo {
+            AssumeUtxoDiskStatus::Validating {
+                checkpoint: Some(checkpoint),
+                ..
+            } => {
+                checkpoint.checkpoint.manifest_sha256 = manifest_sha256;
+            }
+            _ => {
+                return Err(TestError::Missing(
+                    "accepted historical checkpoint is not recorded as validating",
+                ));
+            }
+        }
+        live.put(
+            bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+            bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY,
+            &head.encode(),
+        )?;
+    }
     let active = open_persistent(dir.path(), &fixture.pinned)?;
     let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
         Network::Regtest,
@@ -715,12 +795,12 @@ fn historical_checkpoint_coin_stats_come_from_the_engine_image() -> TestResult {
     let restored = historical.coin_stats.snapshot();
     assert_eq!(
         restored.utxo_count,
-        accepted_stats.utxo_count - removed_outputs,
+        accepted_stats.utxo_count - 1,
         "coin count must follow the engine image, not the coinstats artifact"
     );
     assert_eq!(
         restored.total_amount,
-        accepted_stats.total_amount - removed_amount,
+        accepted_stats.total_amount - 50 * 100_000_000,
         "coin amount must follow the engine image"
     );
     assert_eq!(restored.tx_count, accepted_stats.tx_count);
@@ -845,6 +925,7 @@ fn snapshot_activation_preserves_full_revalidation_requirement() -> TestResult {
     Ok(())
 }
 
+// ARCH-07b
 #[test]
 fn snapshot_base_checkpoint_is_bound_to_the_pinned_commitment() -> TestResult {
     let fixture = Fixture::new()?;
@@ -890,51 +971,81 @@ fn snapshot_base_checkpoint_is_bound_to_the_pinned_commitment() -> TestResult {
 }
 
 #[test]
-fn snapshot_recovery_rejects_coin_height_alias() -> TestResult {
+fn snapshot_recovery_rejects_checkpoint_coin_mutation() -> TestResult {
+    use bitcoin_rs_storage::KvStore as _;
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
     let (active, manager) = activate(dir.path(), &fixture)?;
     drop(manager);
     drop(active);
-    let path = dir
+    let root = dir
         .path()
-        .join("assumeutxo")
-        .join(fixture.pinned.block_hash.to_string())
-        .join("coins.dat");
-    let mut bytes = std::fs::read(&path)?;
-    let offset = 52 + 45 + 12;
-    let height = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
-    assert!(height <= fixture.pinned.height);
-    bytes[offset..offset + 4].copy_from_slice(&(height | 0x8000_0000).to_le_bytes());
-    std::fs::write(&path, bytes)?;
+        .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT);
+    let current: bitcoin_rs_storage::checkpoint::CurrentV1 = sonic_rs::from_slice(&std::fs::read(
+        root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE),
+    )?)?;
+    let engine_dir = root.join(&current.directory).join("chainstate");
+    let store = bitcoin_rs_storage::RocksDbStore::open(&engine_dir)?;
+    let (key, value) = {
+        let mut rows = store.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?;
+        rows.next()
+            .ok_or(TestError::Missing("checkpoint engine has no coins"))??
+    };
+    let mut mutated = value.to_vec();
+    let last = mutated
+        .len()
+        .checked_sub(1)
+        .ok_or(TestError::Missing("empty coin"))?;
+    mutated[last] ^= 0x01;
+    let mut batch = store.new_batch();
+    batch.put(bitcoin_rs_storage::ColumnFamily::Coins, &key, &mutated);
+    store.write_durable(batch)?;
+    drop(store);
     assert!(
         crate::recovery::restore_snapshot(dir.path(), Network::Regtest, &fixture.pinned).is_err(),
-        "recovery must reject a commitment-preserving coin height mutation"
+        "recovery must reject a mutated checkpoint coin image"
     );
     Ok(())
 }
 
 #[test]
-fn committed_snapshot_corruption_fails_closed_but_orphan_import_is_ignored() -> TestResult {
+fn committed_snapshot_corruption_fails_closed_but_orphan_dir_is_ignored() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
     crate::events::initialize_data_dir(dir.path())?;
-    let _ =
-        crate::assumeutxo_snapshot::write_coins(dir.path(), &fixture.load()?.set, &fixture.pinned)?;
-    let cold = open_persistent(dir.path(), &fixture.pinned)?;
-    assert!(cold.applied_tip_snapshot().is_none());
-    drop(cold);
+    let orphan = dir
+        .path()
+        .join("assumeutxo")
+        .join(fixture.pinned.block_hash.to_string());
+    std::fs::create_dir_all(&orphan)?;
+    std::fs::write(orphan.join("coins.dat"), b"truncated snapshot")?;
     let (active, manager) = activate(dir.path(), &fixture)?;
     drop(manager);
     drop(active);
-    let coins = dir
+    assert_eq!(
+        std::fs::read(orphan.join("coins.dat"))?,
+        b"truncated snapshot",
+        "activation must not touch an operator-planted archive"
+    );
+    let restored =
+        crate::recovery::restore_snapshot(dir.path(), Network::Regtest, &fixture.pinned)?;
+    assert_eq!(
+        restored
+            .applied_tip
+            .as_ref()
+            .map(|tip| tip.height)
+            .ok_or(TestError::Missing("restored tip missing"))?,
+        fixture.pinned.height,
+        "an orphan archive must not move the snapshot base"
+    );
+    let root = dir
         .path()
-        .join("assumeutxo")
-        .join(fixture.pinned.block_hash.to_string())
-        .join("coins.dat");
-    std::fs::write(&coins, b"truncated snapshot")?;
+        .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT);
+    std::fs::write(
+        root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE),
+        b"corrupt",
+    )?;
     assert!(open_persistent(dir.path(), &fixture.pinned).is_err());
-    assert_eq!(std::fs::read(coins)?, b"truncated snapshot");
     Ok(())
 }
 
@@ -1029,7 +1140,6 @@ fn await_kill(dir: &Path) -> ! {
         std::thread::park_timeout(std::time::Duration::from_secs(1));
     }
 }
-
 #[test]
 fn crash_writer() -> TestResult {
     let Some(dir) = std::env::var_os("BITCOIN_RS_SNAPSHOT_KILL_DIR") else {
@@ -1053,11 +1163,6 @@ fn crash_writer() -> TestResult {
             .map(|block| block.header)
             .collect::<Vec<_>>(),
     )?;
-    if phase == "import" {
-        let _ =
-            crate::assumeutxo_snapshot::write_coins(&dir, &fixture.load()?.set, &fixture.pinned)?;
-        await_kill(&dir);
-    }
     let checkpoint_phase = phase.starts_with("checkpoint-");
     let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
         Network::Regtest,
@@ -1163,12 +1268,22 @@ fn verify_recovered_snapshot_phase(fixture: &Fixture, dir: &Path, phase: &str) -
         assert!(historical_root.join("CURRENT").exists());
         assert!(std::fs::read_dir(&historical_root)?.count() > 1);
     }
-    let active = open_persistent(dir, &fixture.pinned)?;
-    if phase == "import" {
-        assert!(active.applied_tip_snapshot().is_none());
-        return Ok(());
-    }
     if phase == "snapshot-ingest" {
+        assert!(
+            dir.join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT)
+                .join("CURRENT")
+                .is_file(),
+            "the snapshot-base checkpoint is published before the head commit"
+        );
+    }
+    let active = open_persistent(dir, &fixture.pinned)?;
+    if phase == "snapshot-ingest" {
+        assert!(
+            !dir.join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT)
+                .join("CURRENT")
+                .exists(),
+            "the rollback removes the checkpoint no head names"
+        );
         assert!(active.applied_tip_snapshot().is_none());
         assert!(
             active.durable_head.load()?.is_none(),
@@ -1271,7 +1386,6 @@ fn verify_recovered_snapshot_phase(fixture: &Fixture, dir: &Path, phase: &str) -
 fn process_death_recovers_each_snapshot_phase_from_the_committed_root() -> TestResult {
     let fixture = Fixture::new()?;
     for phase in [
-        "import",
         "snapshot-ingest",
         "activation",
         "foreground",
@@ -1523,7 +1637,7 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
 }
 
 #[test]
-fn import_finalize_remove_archive_seed_completes() -> TestResult {
+fn import_finalize_from_checkpoint_seed_completes() -> TestResult {
     let bad = Fixture::new()?;
     let bad_dir = tempfile::tempdir()?;
     let bad_manager = bad.manager(bad_dir.path())?;
@@ -1534,27 +1648,32 @@ fn import_finalize_remove_archive_seed_completes() -> TestResult {
         bad_manager.activate_pinned_snapshot(rejected.set, wrong, &bad.pinned),
         Err(AssumeUtxoError::SnapshotBlockHashMismatch { .. })
     ));
-    assert!(bad_manager.take_pending_activation_witness().is_none());
+    assert_no_checkpoint_published(bad_dir.path());
 
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
     fixture.activate(&manager)?;
-    let archive = dir
+    let current = dir
         .path()
-        .join("assumeutxo")
-        .join(fixture.pinned.block_hash.to_string());
-    assert!(archive.join("coins.dat").is_file());
+        .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT)
+        .join("CURRENT");
+    assert!(
+        current.is_file(),
+        "activation publishes the snapshot-base checkpoint"
+    );
 
-    let initial =
-        crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned)?;
+    std::fs::write(
+        dir.path()
+            .join(bitcoin_rs_storage::checkpoint::fs::CURRENT_SCHEMA_FILE),
+        bitcoin_rs_storage::checkpoint::fs::current_schema_bytes(),
+    )?;
+    let restored =
+        crate::recovery::restore_snapshot(dir.path(), Network::Regtest, &fixture.pinned)?;
     assert!(matches!(
-        initial.resume_source,
-        crate::recovery::ResumeSource::Snapshot
+        restored.resume_source,
+        crate::recovery::ResumeSource::Checkpoint
     ));
-    let mut seed = initial
-        .script_live_seed
-        .ok_or(TestError::Missing("restart recovery must mint a seed"))?;
     for block in &fixture.blocks {
         manager.step_historical(&BlockImage::from_local((*block).clone()))?;
     }
@@ -1562,19 +1681,337 @@ fn import_finalize_remove_archive_seed_completes() -> TestResult {
         manager.status()?,
         AssumeUtxoDiskStatus::Finalized { .. }
     ));
-    let _ = std::fs::remove_dir_all(&archive);
-    assert!(!archive.exists(), "the seed must not need its path");
+    assert_engine_matches_snapshot(&fixture.active, &fixture)?;
 
-    let expected = u64::try_from(initial.utxo.len())?;
-    assert!(expected > 0, "the fixture must hold live coins");
-    let mut seen = 0_u64;
-    seed.for_each_coin_raw(
-        &mut |_, _| {
-            seen += 1;
-            Ok::<(), std::convert::Infallible>(())
-        },
-        &|| false,
+    Ok(())
+}
+
+fn assert_no_checkpoint_published(dir: &std::path::Path) {
+    assert!(
+        !dir.join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT)
+            .join("CURRENT")
+            .is_file(),
+        "a rejected activation must not publish a checkpoint"
+    );
+}
+
+#[test]
+fn crash_mid_ingest_is_rolled_back_by_the_marker_and_the_retry_matches_the_snapshot() -> TestResult
+{
+    let mut fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let set = read_snapshot_strict_v4(&mut Cursor::new(&fixture.snapshot))?.set;
+    for seed in 0x40_u8..0x44 {
+        let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_owned_outputs(
+            Hash256::from_le_bytes(&[seed; 32]),
+            &[bitcoin_rs_storage::utxo::record::OwnedUtxoOut::new(
+                0,
+                1_000,
+                vec![0x51],
+                false,
+                1,
+            )],
+        )
+        .map_err(|_| TestError::Missing("synthetic coin record"))?;
+        set.insert_parsed_record(record);
+    }
+    let records = set.all_records();
+    assert!(
+        records.len() >= 3,
+        "the fixture must span at least three batches"
+    );
+    fixture.pinned.hash_serialized = set.lock_stable_view().hash_serialized_3()?;
+    let mut bytes = Cursor::new(Vec::new());
+    write_snapshot_observed(
+        &set,
+        &fixture.pinned.block_hash,
+        fixture.pinned.height,
+        &mut bytes,
+        (),
     )?;
-    assert_eq!(seen, expected);
+    fixture.snapshot = bytes.into_inner();
+    let mut stats = set.with_stable_view(|view| {
+        bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, fixture.pinned.height, true)
+    })?;
+    stats.tx_count = fixture.pinned.chain_tx_count;
+    fixture.stats = stats;
+    let record_bytes: usize = records
+        .iter()
+        .map(|record| bitcoin_rs_storage::COIN_KEY_LEN + record.bytes().len())
+        .sum();
+    let chunk = (record_bytes / 6).max(1);
+    let headers = fixture
+        .blocks
+        .iter()
+        .map(|block| block.header)
+        .collect::<Vec<_>>();
+    {
+        let store = chainstate_store(dir.path())?;
+        let active = open_persistent_over(dir.path(), &fixture.pinned, Arc::clone(&store))?;
+        active.admit_headers(&headers)?;
+        let manager =
+            AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?
+                .with_ingest_chunk_bytes(chunk);
+        let before = store.durable_batches();
+        store.fail_durable_batch(2);
+        let loaded = fixture.load()?;
+        let outcome = manager.activate_pinned_snapshot_with(
+            loaded.set,
+            loaded.tip_hash,
+            &fixture.pinned,
+            |_, _| {},
+            || true,
+        );
+        assert!(
+            matches!(
+                outcome,
+                Err(AssumeUtxoError::PartialIngestNotDiscarded { .. })
+            ),
+            "the crashed store cannot discard its staged coins: {outcome:?}"
+        );
+        assert!(store.is_dead());
+        assert!(active.is_closed_for_recovery());
+        assert_eq!(store.durable_batches() - before, 2);
+        assert!(!engine_coin_records(&active)?.is_empty());
+        assert!(
+            active
+                .commit_authority
+                .store()
+                .get(
+                    bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+                    bitcoin_rs_storage::SNAPSHOT_ACTIVATION_KEY,
+                )?
+                .is_some()
+        );
+    }
+    let store = chainstate_store(dir.path())?;
+    let reopened = open_persistent_over(dir.path(), &fixture.pinned, Arc::clone(&store))?;
+    assert!(engine_coin_records(&reopened)?.is_empty());
+    assert!(
+        reopened
+            .commit_authority
+            .store()
+            .get(
+                bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+                bitcoin_rs_storage::SNAPSHOT_ACTIVATION_KEY,
+            )?
+            .is_none()
+    );
+    reopened.admit_headers(&headers)?;
+    let manager =
+        AssumeUtxoManager::open(Network::Regtest, reopened.clone(), dir.path().to_path_buf())?
+            .with_ingest_chunk_bytes(chunk);
+    let loaded = fixture.load()?;
+    manager.activate_pinned_snapshot_with(
+        loaded.set,
+        loaded.tip_hash,
+        &fixture.pinned,
+        |_, _| {},
+        || true,
+    )?;
+    assert!(
+        store.durable_batches() >= 3,
+        "the retry ingests in at least three batches: {} batches for {} records of {record_bytes} bytes at chunk {chunk}",
+        store.durable_batches(),
+        records.len(),
+    );
+    assert_engine_matches_snapshot(&reopened, &fixture)
+}
+
+#[test]
+fn failed_orphan_cleanup_keeps_the_marker_and_the_next_boot_retries_the_rollback() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let store = chainstate_store(dir.path())?;
+    let active = open_persistent_over(dir.path(), &fixture.pinned, Arc::clone(&store))?;
+    active.admit_headers(
+        &fixture
+            .blocks
+            .iter()
+            .map(|block| block.header)
+            .collect::<Vec<_>>(),
+    )?;
+    let marker = bitcoin_rs_storage::SnapshotActivationMarker {
+        base_hash: fixture.pinned.block_hash,
+        coin_count: 0,
+        coin_digest: Hash256::from_le_bytes(&[0_u8; 32]),
+    };
+    active
+        .commit_authority
+        .begin_snapshot_activation(None, &marker)
+        .map_err(crate::assumeutxo::commit_error)?;
+
+    let root = dir
+        .path()
+        .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT);
+    std::fs::create_dir_all(&root)?;
+    let generation_name = "generation-000001";
+    let current = bitcoin_rs_storage::checkpoint::CurrentV1 {
+        format: bitcoin_rs_storage::checkpoint::CURRENT_FORMAT.to_owned(),
+        version: 1,
+        generation: 1,
+        directory: generation_name.to_owned(),
+        manifest_sha256: String::new(),
+    };
+    std::fs::write(
+        root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE),
+        sonic_rs::to_vec(&current)?,
+    )?;
+    let generation = root.join(generation_name);
+    std::fs::write(
+        &generation,
+        b"obstruction where the orphan generation belongs",
+    )?;
+
+    let marker_bytes = || -> TestResult<Option<Vec<u8>>> {
+        Ok(active
+            .commit_authority
+            .store()
+            .get(
+                bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+                bitcoin_rs_storage::SNAPSHOT_ACTIVATION_KEY,
+            )?
+            .map(|bytes| bytes.to_vec()))
+    };
+
+    let outcome = crate::recover_snapshot_activation(&active, dir.path());
+    assert!(
+        matches!(
+            &outcome,
+            Err(AssumeUtxoError::Storage(
+                bitcoin_rs_storage::StorageError::Io(error)
+            )) if error.kind() == std::io::ErrorKind::NotADirectory
+        ),
+        "a failed orphan cleanup must fail the recovery before the marker is cleared: {outcome:?}"
+    );
+    assert!(
+        marker_bytes()?.is_some(),
+        "a failed orphan cleanup must keep the activation marker durable"
+    );
+    assert!(
+        root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE)
+            .is_file(),
+        "a failed orphan cleanup must keep the orphan checkpoint root selected"
+    );
+
+    std::fs::remove_file(&generation)?;
+    crate::recover_snapshot_activation(&active, dir.path())?;
+    assert!(
+        marker_bytes()?.is_none(),
+        "a successful orphan cleanup must clear the activation marker"
+    );
+    assert!(
+        !root
+            .join(bitcoin_rs_storage::checkpoint::CURRENT_FILE)
+            .exists(),
+        "a successful orphan cleanup must remove the orphan CURRENT"
+    );
+    Ok(())
+}
+
+// RCV-03
+#[test]
+fn orphan_rollback_syncs_checkpoint_root_before_clearing_the_marker() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let store = chainstate_store(dir.path())?;
+    let active = open_persistent_over(dir.path(), &fixture.pinned, Arc::clone(&store))?;
+    active.admit_headers(
+        &fixture
+            .blocks
+            .iter()
+            .map(|block| block.header)
+            .collect::<Vec<_>>(),
+    )?;
+    let marker = bitcoin_rs_storage::SnapshotActivationMarker {
+        base_hash: fixture.pinned.block_hash,
+        coin_count: 0,
+        coin_digest: Hash256::from_le_bytes(&[0_u8; 32]),
+    };
+    let arm_marker = || -> TestResult<()> {
+        active
+            .commit_authority
+            .begin_snapshot_activation(None, &marker)
+            .map_err(crate::assumeutxo::commit_error)?;
+        Ok(())
+    };
+    let marker_bytes = || -> TestResult<Option<Vec<u8>>> {
+        Ok(active
+            .commit_authority
+            .store()
+            .get(
+                bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+                bitcoin_rs_storage::SNAPSHOT_ACTIVATION_KEY,
+            )?
+            .map(|bytes| bytes.to_vec()))
+    };
+    let root = dir
+        .path()
+        .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT);
+    std::fs::create_dir_all(&root)?;
+    let current = bitcoin_rs_storage::checkpoint::CurrentV1 {
+        format: bitcoin_rs_storage::checkpoint::CURRENT_FORMAT.to_owned(),
+        version: 1,
+        generation: 1,
+        directory: "generation-000001".to_owned(),
+        manifest_sha256: String::new(),
+    };
+    std::fs::write(
+        root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE),
+        sonic_rs::to_vec(&current)?,
+    )?;
+    arm_marker()?;
+
+    crate::assumeutxo::inject_orphan_root_sync_failure("injected checkpoint root sync failure");
+    let outcome = crate::recover_snapshot_activation(&active, dir.path());
+    assert!(
+        matches!(
+            &outcome,
+            Err(AssumeUtxoError::Storage(
+                bitcoin_rs_storage::StorageError::Io(_)
+            ))
+        ),
+        "a failed checkpoint root sync must keep the recovery fail-closed: {outcome:?}"
+    );
+    assert!(
+        marker_bytes()?.is_some(),
+        "a failed checkpoint root sync must keep the activation marker durable"
+    );
+    assert!(
+        !root
+            .join(bitcoin_rs_storage::checkpoint::CURRENT_FILE)
+            .exists(),
+        "the orphan deletion lands before the root sync decides the marker clear"
+    );
+
+    crate::assumeutxo::inject_orphan_root_sync_failure("injected checkpoint root sync failure");
+    let outcome = crate::recover_snapshot_activation(&active, dir.path());
+    assert!(
+        matches!(
+            &outcome,
+            Err(AssumeUtxoError::Storage(
+                bitcoin_rs_storage::StorageError::Io(_)
+            ))
+        ),
+        "a failed retry root sync must keep the recovery fail-closed: {outcome:?}"
+    );
+    assert!(
+        marker_bytes()?.is_some(),
+        "a failed retry root sync must keep the activation marker durable"
+    );
+
+    crate::recover_snapshot_activation(&active, dir.path())?;
+    assert!(
+        marker_bytes()?.is_none(),
+        "a retry without CURRENT must sync the existing checkpoint root and clear the marker"
+    );
+
+    arm_marker()?;
+    std::fs::remove_dir_all(&root)?;
+    crate::recover_snapshot_activation(&active, dir.path())?;
+    assert!(
+        marker_bytes()?.is_none(),
+        "a missing checkpoint root has nothing to sync and must clear the marker"
+    );
     Ok(())
 }

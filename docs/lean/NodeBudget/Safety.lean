@@ -1,6 +1,7 @@
 /-
 Safety invariants of the NodeBudget accounting model.
-Rust owner: crates/node/src/budget.rs.
+Rust reference model: crates/node/src/budget_model.rs (all seven owners).
+Rust implementation: crates/node/src/budget.rs.
 
 Anchors: Tony Hoare, John Carmack, Dieter Rams.
 
@@ -25,22 +26,26 @@ structure State where
   indexBuilder : Nat
   stagedImages : Nat
   queryViews : Nat
+  peerOutbound : Nat
   reservedCoinCache : Nat
   reservedEngineCache : Nat
   reservedFactsQueue : Nat
   reservedIndexBuilder : Nat
   reservedStagedImages : Nat
   reservedQueryViews : Nat
+  reservedPeerOutbound : Nat
   ingressRefused : Bool
   consensusInvalid : Bool
   isMdbx : Bool
 
 def totalCharges (s : State) : Nat :=
-  s.coinCache + s.engineCache + s.factsQueue + s.indexBuilder + s.stagedImages + s.queryViews
+  s.coinCache + s.engineCache + s.factsQueue + s.indexBuilder + s.stagedImages + s.queryViews +
+  s.peerOutbound
 
 def totalReserved (s : State) : Nat :=
   s.reservedCoinCache + s.reservedEngineCache + s.reservedFactsQueue +
-  s.reservedIndexBuilder + s.reservedStagedImages + s.reservedQueryViews
+  s.reservedIndexBuilder + s.reservedStagedImages + s.reservedQueryViews +
+  s.reservedPeerOutbound
 
 def totalCommitted (s : State) : Nat :=
   totalCharges s + totalReserved s
@@ -56,12 +61,14 @@ def init (isMdbx : Bool) : State :=
     indexBuilder := 0,
     stagedImages := 0,
     queryViews := 0,
+    peerOutbound := 0,
     reservedCoinCache := 0,
     reservedEngineCache := 0,
     reservedFactsQueue := 0,
     reservedIndexBuilder := 0,
     reservedStagedImages := 0,
     reservedQueryViews := 0,
+    reservedPeerOutbound := 0,
     ingressRefused := false,
     consensusInvalid := false,
     isMdbx := isMdbx }
@@ -85,6 +92,9 @@ inductive Action
   | releaseCoinCache (amt : Nat)
   | growEngineCache (amt : Nat)
   | shrinkEngineCache (amt : Nat)
+  | reservePeerOutbound (amt : Nat)
+  | allocatePeerOutbound (amt : Nat)
+  | releasePeerOutbound (amt : Nat)
   | stutter
 
 def step (s : State) : Action → State
@@ -164,6 +174,19 @@ def step (s : State) : Action → State
   | .shrinkEngineCache amt =>
     if ¬s.isMdbx ∧ amt ≤ s.engineCache then
       { s with engineCache := s.engineCache - amt }
+    else s
+  | .reservePeerOutbound amt =>
+    if totalCommitted s + amt ≤ totalBudget then
+      { s with reservedPeerOutbound := s.reservedPeerOutbound + amt }
+    else s
+  | .allocatePeerOutbound amt =>
+    if amt ≤ s.reservedPeerOutbound then
+      { s with reservedPeerOutbound := s.reservedPeerOutbound - amt,
+               peerOutbound := s.peerOutbound + amt }
+    else s
+  | .releasePeerOutbound amt =>
+    if amt ≤ s.peerOutbound then
+      { s with peerOutbound := s.peerOutbound - amt }
     else s
   | .stutter => s
 

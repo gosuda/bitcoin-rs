@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::Write as _;
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -9,20 +8,18 @@ use bitcoin_rs_consensus::primitives::{
     Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, hex::hex_encode,
 };
 use bitcoin_rs_storage::checkpoint::{
-    CHECKPOINT_ROOT, COINSTATS_ARTIFACT_LEN, COINSTATS_FILE, COINSTATS_MAGIC, COINSTATS_VERSION,
-    CURRENT_FILE, CheckpointManifestV1, CheckpointTipV1, CoinStatsArtifactV1, CurrentV1,
-    HEADER_CODEC, HEADERS_FILE, HeadersArtifactV1, MANIFEST_FILE, MANIFEST_FORMAT,
-    MANIFEST_VERSION, UTXO_CODEC, UTXO_VERSION, UtxoArtifactV1,
+    CHECKPOINT_ROOT, COINSTATS_FILE, CURRENT_FILE, CheckpointManifestV1, CurrentV1, HEADERS_FILE,
+    MANIFEST_FILE,
 };
 const UTXO_FILE: &str = "utxo-v4.dat";
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::pruning::{block_body_key, block_undo_key};
 use bitcoin_rs_storage::utxo::contract::{
-    BlockChangeInputs, SpentOutputLookup, build_block_changes, encode_undo_record,
+    BlockChangeInputs, SpentOutputLookup, build_block_changes,
 };
-use bitcoin_rs_storage::utxo::record::UtxoRecord;
-use bitcoin_rs_storage::utxo::stats::CoinStatsAccumulator;
-use bitcoin_rs_storage::utxo::{UtxoCoin, UtxoSet, write_snapshot_witnessed};
+use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
+use bitcoin_rs_storage::utxo::snapshot::{SnapshotLoad, read_snapshot_strict_v4};
+use bitcoin_rs_storage::utxo::{UtxoCoin, UtxoSet};
 use bitcoin_rs_storage::{ColumnFamily, FlatFileBlockStore, KvStore, RocksDbStore};
 use sha2::{Digest, Sha256};
 
@@ -30,9 +27,37 @@ use super::support::error::{TestError, TestResult};
 use super::support::harness::{parse_report, recursive_dir_digest, run_converter};
 use super::support::oracle::write_schema_marker;
 
-const CURRENT_FORMAT: &str = "bitcoin-rs-chainstate-current";
-const CURRENT_VERSION: u32 = 1;
-
+fn encode_undo_v1(
+    batch: &bitcoin_rs_storage::utxo::contract::UndoBatch,
+    block_hash: Hash256,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(1);
+    out.extend_from_slice(&block_hash.to_le_bytes());
+    let restores = batch.restores();
+    let restore_len = u32::try_from(restores.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&restore_len.to_le_bytes());
+    for add in restores {
+        let outpoint = add.outpoint;
+        let txid = outpoint.txid;
+        let vout = outpoint.vout;
+        out.extend_from_slice(txid.as_bytes());
+        out.extend_from_slice(&vout.to_le_bytes());
+        add.txout.consensus_encode(&mut out);
+        out.push(u8::from(add.coinbase));
+        out.extend_from_slice(&add.height.to_le_bytes());
+    }
+    let removes = batch.removes();
+    let remove_len = u32::try_from(removes.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&remove_len.to_le_bytes());
+    for outpoint in removes {
+        let txid = outpoint.txid;
+        let vout = outpoint.vout;
+        out.extend_from_slice(txid.as_bytes());
+        out.extend_from_slice(&vout.to_le_bytes());
+    }
+    out
+}
 struct MapSpentLookup<'a>(&'a HashMap<OutPoint, UtxoCoin>);
 
 impl SpentOutputLookup for MapSpentLookup<'_> {
@@ -41,143 +66,102 @@ impl SpentOutputLookup for MapSpentLookup<'_> {
     }
 }
 
-pub(crate) fn create_checkpoint_fixture(
-    root: &Path,
-    tip_hash: Hash256,
-    height: u32,
-    txids: &[Hash256],
-) -> TestResult<UtxoSet> {
-    let set = UtxoSet::new();
-    for (i, txid) in txids.iter().enumerate() {
-        let vout = 0u32;
-        let idx = u64::try_from(i).map_err(|e| TestError::Assertion(e.to_string()))?;
-        let sat = 50_000u64.saturating_mul(idx.saturating_add(1));
-        let tag = u8::try_from(i).map_err(|e| TestError::Assertion(e.to_string()))?;
-        let out = bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
-            vout,
-            value: sat,
-            script_pubkey: vec![0x76, 0xa9, 0x14, tag, 0x88, 0xac],
-            coinbase: true,
-            height,
-        };
-        let record = UtxoRecord::from_owned_outputs(*txid, &[out])
-            .map_err(|e| TestError::Assertion(e.to_string()))?;
-        set.insert_parsed_record(record);
+pub(crate) struct Epoch3FixtureAnchor {
+    pub tip: Hash256,
+    pub snapshot: SnapshotLoad,
+}
+
+fn fixture_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/epoch3-regtest")
+}
+
+fn copy_fixture(from: &Path, to: &Path) -> TestResult<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let destination = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_fixture(&entry.path(), &destination)?;
+        } else {
+            fs::copy(entry.path(), destination)?;
+        }
     }
+    Ok(())
+}
 
-    let gen_dir = root.join(CHECKPOINT_ROOT).join("gen-00000000000000000001");
-    fs::create_dir_all(&gen_dir)?;
+/// Stages the checked-in canonical epoch-3 regtest datadir at `root` and
+/// returns the anchored checkpoint facts read back from the staged manifest
+/// and snapshot, so callers never invent tip, height, or count values.
+pub(crate) fn stage_canonical_epoch3_source(root: &Path) -> TestResult<Epoch3FixtureAnchor> {
+    copy_fixture(&fixture_dir(), root)?;
+    let generation = root.join(CHECKPOINT_ROOT).join("gen-00000000000000000001");
+    let manifest: CheckpointManifestV1 =
+        sonic_rs::from_slice(&fs::read(generation.join(MANIFEST_FILE))?)
+            .map_err(|error| TestError::Assertion(format!("fixture manifest: {error}")))?;
+    let tip = Hash256::from_str_be(&manifest.applied_tip.hash)
+        .map_err(|error| TestError::Assertion(format!("fixture applied tip: {error}")))?;
+    let utxo = manifest
+        .utxo
+        .as_ref()
+        .ok_or_else(|| TestError::Assertion("fixture manifest lacks a utxo payload".into()))?;
+    let mut snapshot_file = File::open(generation.join(&utxo.file))?;
+    let snapshot = read_snapshot_strict_v4(&mut snapshot_file)
+        .map_err(|error| TestError::Assertion(format!("fixture snapshot: {error}")))?;
+    if snapshot.height != manifest.applied_tip.height || snapshot.tip_hash != tip {
+        return Err(TestError::Assertion(
+            "fixture snapshot contradicts its manifest anchor".into(),
+        ));
+    }
+    Ok(Epoch3FixtureAnchor { tip, snapshot })
+}
 
-    let utxo_path = gen_dir.join(UTXO_FILE);
-    let mut utxo_file = File::create(&utxo_path)?;
-    let (trailer, _, witness) = write_snapshot_witnessed(
-        &set,
-        &tip_hash,
-        height,
-        &mut utxo_file,
-        CoinStatsAccumulator::with_parallel_muhash(height),
-    )
-    .map_err(|e| TestError::Assertion(e.to_string()))?;
-    let witness = witness.ok_or_else(|| TestError::Assertion("snapshot witness failed".into()))?;
-
-    let headers_path = gen_dir.join(HEADERS_FILE);
-    let mut headers_file = File::create(&headers_path)?;
-    let dummy_headers = vec![0x42u8; 80];
-    headers_file.write_all(&dummy_headers)?;
-    let headers_sha256 = hex_encode(&Sha256::digest(&dummy_headers));
-
-    let coinstats_path = gen_dir.join(COINSTATS_FILE);
-    let mut coinstats_file = File::create(&coinstats_path)?;
-    let coinstats_len =
-        usize::try_from(COINSTATS_ARTIFACT_LEN).map_err(|e| TestError::Assertion(e.to_string()))?;
-    let mut dummy_coinstats = vec![0u8; coinstats_len];
-    dummy_coinstats[..8].copy_from_slice(&COINSTATS_MAGIC);
-    dummy_coinstats[8..12].copy_from_slice(&COINSTATS_VERSION.to_le_bytes());
-    coinstats_file.write_all(&dummy_coinstats)?;
-    let coinstats_sha256 = hex_encode(&Sha256::digest(&dummy_coinstats));
-
-    let trailer_sha256 = hex_encode(&Sha256::digest(trailer));
-
-    let coin_count = u64::try_from(txids.len()).map_err(|e| TestError::Assertion(e.to_string()))?;
-    let total_amount = (0..coin_count)
-        .map(|idx| 50_000_u64.saturating_mul(idx.saturating_add(1)))
-        .sum::<u64>();
-    let bogo_size = coin_count.saturating_mul(56);
-    let chain_tx_count = 100_u64;
-    let headers_len =
-        u64::try_from(dummy_headers.len()).map_err(|e| TestError::Assertion(e.to_string()))?;
-    let zero_hash_bytes = [0u8; 32];
-    let manifest = CheckpointManifestV1 {
-        format: MANIFEST_FORMAT.to_string(),
-        version: MANIFEST_VERSION,
-        generation: 1,
-        network: "regtest".to_string(),
-        network_magic: "fabfb5da".to_string(),
-        genesis_hash: hex_encode(&zero_hash_bytes),
-        applied_tip: CheckpointTipV1 {
-            height,
-            hash: tip_hash.to_string_be(),
-            chainwork: hex_encode(&zero_hash_bytes),
-            chain_tx_count,
+/// First coin of the staged snapshot in a deterministic (txid, vout) order,
+/// returned with the same owned fields the converter reconstructs.
+fn first_snapshot_coin(snapshot: &SnapshotLoad) -> TestResult<(Hash256, OwnedUtxoOut)> {
+    let mut records = snapshot.set.all_records();
+    records.sort_by_key(|record| record.txid().to_le_bytes());
+    let record = records
+        .first()
+        .ok_or_else(|| TestError::Assertion("fixture snapshot holds no coin records".into()))?;
+    let coin = record
+        .outputs()
+        .next()
+        .ok_or_else(|| TestError::Assertion("fixture snapshot record holds no outputs".into()))?;
+    Ok((
+        record.txid(),
+        OwnedUtxoOut {
+            vout: coin.vout,
+            value: coin.value,
+            script_pubkey: coin.script_pubkey.to_vec(),
+            coinbase: coin.coinbase,
+            height: coin.height,
         },
-        best_header_tip: CheckpointTipV1 {
-            height,
-            hash: tip_hash.to_string_be(),
-            chainwork: hex_encode(&zero_hash_bytes),
-            chain_tx_count,
-        },
-        headers: HeadersArtifactV1 {
-            file: HEADERS_FILE.to_string(),
-            codec: HEADER_CODEC.to_string(),
-            version: 1,
-            bytes: headers_len,
-            sha256: headers_sha256,
-            header_count: 1,
-            best_chain_sha256: hex_encode(&zero_hash_bytes),
-            applied_chain_sha256: hex_encode(&zero_hash_bytes),
-        },
-        utxo: Some(UtxoArtifactV1 {
-            file: UTXO_FILE.to_string(),
-            codec: UTXO_CODEC.to_string(),
-            version: UTXO_VERSION,
-            bytes: witness.byte_len(),
-            sha256: hex_encode(&witness.sha256()),
-            record_count: witness.record_count(),
-            output_count: witness.output_count(),
-            muhash_trailer_sha256: trailer_sha256,
-        }),
-        coinstats: CoinStatsArtifactV1 {
-            file: COINSTATS_FILE.to_string(),
-            codec: bitcoin_rs_storage::checkpoint::COINSTATS_CODEC.to_string(),
-            version: COINSTATS_VERSION,
-            bytes: COINSTATS_ARTIFACT_LEN,
-            sha256: coinstats_sha256,
-            height,
-            total_amount,
-            bogo_size,
-            tx_count: chain_tx_count,
-            utxo_count: coin_count,
-            muhash: hex_encode(&trailer),
-        },
-    };
+    ))
+}
 
-    let manifest_bytes = sonic_rs::to_vec(&manifest)?;
-    let manifest_path = gen_dir.join(MANIFEST_FILE);
-    fs::write(&manifest_path, &manifest_bytes)?;
-    let manifest_digest_hex = hex_encode(&Sha256::digest(&manifest_bytes));
+fn read_durable_head(store: &RocksDbStore) -> TestResult<DurableHead> {
+    let raw = store
+        .get(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY)?
+        .ok_or_else(|| TestError::Assertion("staged source lacks a durable head".into()))?;
+    DurableHead::decode(&raw)
+        .ok_or_else(|| TestError::Assertion("staged durable head is undecodable".into()))
+}
 
-    let current = CurrentV1 {
-        format: CURRENT_FORMAT.to_string(),
-        version: CURRENT_VERSION,
-        generation: 1,
-        directory: "gen-00000000000000000001".to_string(),
-        manifest_sha256: manifest_digest_hex,
-    };
-    let current_bytes = sonic_rs::to_vec(&current)?;
-    let current_path = root.join(CHECKPOINT_ROOT).join(CURRENT_FILE);
-    fs::write(current_path, current_bytes)?;
-
-    Ok(set)
+/// Moves the staged canonical head to a real suffix block without touching
+/// the source's commit id or assumeutxo state.
+fn promote_durable_head(
+    store: &RocksDbStore,
+    base: &DurableHead,
+    height: u32,
+    tip: Hash256,
+    chain_tx_count: u64,
+) -> TestResult<DurableHead> {
+    let mut head = *base;
+    head.height = height;
+    head.tip = tip;
+    head.chain_tx_count = chain_tx_count;
+    store.put(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY, &head.encode())?;
+    Ok(head)
 }
 
 fn append_block_and_undo(
@@ -268,7 +252,7 @@ fn append_block_and_undo(
         utxo_set.insert_parsed_record(record);
     }
 
-    let undo_bytes = encode_undo_record(&undo, block_hash_256);
+    let undo_bytes = encode_undo_v1(&undo, block_hash_256);
     batch.put(
         ColumnFamily::UndoData,
         &block_undo_key(height, block_hash_256),
@@ -286,54 +270,38 @@ fn missing_block_data_reports_first_missing_height() -> TestResult<()> {
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 3)?;
-
-    let txid1 = Hash256::from_le_bytes(&[1u8; 32]);
-    let checkpoint_tip = Hash256::from_le_bytes(&[100u8; 32]);
-    let utxo_set = create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
+    let anchor = stage_canonical_epoch3_source(from_path)?;
     let cs_store = RocksDbStore::open(from_path.join("chainstate"))?;
+    let base_head = read_durable_head(&cs_store)?;
+    let suffix_height = base_head
+        .height
+        .checked_add(1)
+        .ok_or_else(|| TestError::Assertion("suffix height overflow".into()))?;
 
-    let cb_101 = Tx {
-        version: 1,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: Script::from_bytes(vec![0x01, 0x65]),
-            sequence: Sequence::MAX,
-            witness: Witness::default(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey: Script::default(),
-        }],
-        lock_time: LockTime::ZERO,
-    };
-    let (_block_101, hash_101) = append_block_and_undo(
+    let (_block, block_hash) = append_block_and_undo(
         from_path,
         &cs_store,
-        101,
-        checkpoint_tip,
-        vec![cb_101],
-        &utxo_set,
+        suffix_height,
+        anchor.tip,
+        vec![coinbase_tx(0x65, 50_000)],
+        &anchor.snapshot.set,
     )?;
 
-    let durable_head = DurableHead {
-        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
-        commit_id: 1,
-        height: 101,
-        tip: hash_101,
-        chain_tx_count: 101,
-        body_extent: None,
-        undo_extent: None,
-    };
-    cs_store.put(
-        ColumnFamily::UtxoMeta,
-        DURABLE_HEAD_KEY,
-        &durable_head.encode(),
+    promote_durable_head(
+        &cs_store,
+        &base_head,
+        suffix_height,
+        block_hash,
+        base_head.chain_tx_count.saturating_add(1),
     )?;
 
     let mut del_batch = cs_store.new_batch();
-    del_batch.delete(ColumnFamily::UndoData, &block_undo_key(101, hash_101));
+    del_batch.delete(
+        ColumnFamily::UndoData,
+        &block_undo_key(suffix_height, block_hash),
+    );
     cs_store.write_durable(del_batch)?;
+    drop(cs_store);
 
     let from_str = from_path
         .to_str()
@@ -348,10 +316,11 @@ fn missing_block_data_reports_first_missing_height() -> TestResult<()> {
             "converter should fail when block data is missing".into(),
         ));
     }
+    let expected = format!("height {suffix_height}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.contains("height 101") && !stderr.contains("101") {
+    if !stderr.contains(&expected) {
         return Err(TestError::Assertion(format!(
-            "expected stderr to report missing height 101, got: {stderr}"
+            "expected stderr to report missing {expected}, got: {stderr}"
         )));
     }
 
@@ -417,29 +386,8 @@ fn replay_with_checkpoint_at_durable_head() -> TestResult<()> {
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 3)?;
-
-    let txid1 = Hash256::from_le_bytes(&[5u8; 32]);
-    let checkpoint_tip = nonuniform_hash(0x31);
-    create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
-
-    let cs_store = RocksDbStore::open(from_path.join("chainstate"))?;
-    let durable_head = DurableHead {
-        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
-        commit_id: 1,
-        height: 100,
-        tip: checkpoint_tip,
-        chain_tx_count: 100,
-        body_extent: None,
-        undo_extent: None,
-    };
-    cs_store.put(
-        ColumnFamily::UtxoMeta,
-        DURABLE_HEAD_KEY,
-        &durable_head.encode(),
-    )?;
-    drop(cs_store);
-
+    let anchor = stage_canonical_epoch3_source(from_path)?;
+    let (txid1, _coin_out) = first_snapshot_coin(&anchor.snapshot)?;
     let from_str = from_path
         .to_str()
         .ok_or_else(|| TestError::Assertion("utf8".into()))?;
@@ -449,13 +397,12 @@ fn replay_with_checkpoint_at_durable_head() -> TestResult<()> {
     let output = run_converter(&["--from", from_str, "--to", to_str])?;
     let report = parse_report(&output)?;
 
-    if report.source_epoch != 3 || report.target_epoch != 4 {
+    if report.source_epoch != 3 || report.target_epoch != 6 {
         return Err(TestError::Assertion("unexpected report epochs".into()));
     }
-
     let dest_schema = fs::read_to_string(to_path.join("CURRENT_SCHEMA"))?;
-    if dest_schema != "4\n" {
-        return Err(TestError::Assertion("expected 4\n".into()));
+    if dest_schema != "6\n" {
+        return Err(TestError::Assertion("expected 6\n".into()));
     }
 
     let dest_store = RocksDbStore::open(to_path.join("chainstate"))?;
@@ -469,6 +416,28 @@ fn replay_with_checkpoint_at_durable_head() -> TestResult<()> {
     Ok(())
 }
 
+fn assert_engine_digest_matches_image(generation_dir: &Path) -> TestResult<()> {
+    let manifest: CheckpointManifestV1 =
+        sonic_rs::from_slice(&fs::read(generation_dir.join(MANIFEST_FILE))?)?;
+    let Some(expected) = manifest.engine.as_ref() else {
+        return Err(TestError::Assertion(
+            "converted generation manifest lacks an engine digest".into(),
+        ));
+    };
+    let chainstate = cap_std::fs::Dir::open_ambient_dir(
+        generation_dir.join("chainstate"),
+        cap_std::ambient_authority(),
+    )?;
+    let actual = bitcoin_rs_storage::checkpoint::digest_engine_dir(&chainstate)
+        .map_err(|error| TestError::Assertion(error.to_string()))?;
+    if actual != *expected {
+        return Err(TestError::Assertion(
+            "converted generation manifest digest does not match its image".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[test]
 fn converted_datadir_drops_old_checkpoint_coin_image() -> TestResult<()> {
     let source_temp = tempdir()?;
@@ -476,27 +445,9 @@ fn converted_datadir_drops_old_checkpoint_coin_image() -> TestResult<()> {
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 3)?;
-
-    let txid1 = Hash256::from_le_bytes(&[7u8; 32]);
-    let checkpoint_tip = nonuniform_hash(0x42);
-    create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
-
+    stage_canonical_epoch3_source(from_path)?;
     let cs_store = RocksDbStore::open(from_path.join("chainstate"))?;
-    let durable_head = DurableHead {
-        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
-        commit_id: 1,
-        height: 100,
-        tip: checkpoint_tip,
-        chain_tx_count: 100,
-        body_extent: None,
-        undo_extent: None,
-    };
-    cs_store.put(
-        ColumnFamily::UtxoMeta,
-        DURABLE_HEAD_KEY,
-        &durable_head.encode(),
-    )?;
+    let durable_head = read_durable_head(&cs_store)?;
     drop(cs_store);
 
     let from_str = from_path
@@ -527,6 +478,11 @@ fn converted_datadir_drops_old_checkpoint_coin_image() -> TestResult<()> {
             converted.height, converted.tip, durable_head.height, durable_head.tip
         )));
     }
+    assert_engine_digest_matches_image(
+        &to_path
+            .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT)
+            .join("gen-00000000000000000001"),
+    )?;
     Ok(())
 }
 
@@ -537,28 +493,8 @@ fn converted_historical_checkpoint_carries_engine_coins() -> TestResult<()> {
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 3)?;
-
-    let txid1 = Hash256::from_le_bytes(&[13u8; 32]);
-    let checkpoint_tip = nonuniform_hash(0x64);
-    create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
-
-    let cs_store = RocksDbStore::open(from_path.join("chainstate"))?;
-    let durable_head = DurableHead {
-        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
-        commit_id: 1,
-        height: 100,
-        tip: checkpoint_tip,
-        chain_tx_count: 100,
-        body_extent: None,
-        undo_extent: None,
-    };
-    cs_store.put(
-        ColumnFamily::UtxoMeta,
-        DURABLE_HEAD_KEY,
-        &durable_head.encode(),
-    )?;
-    drop(cs_store);
+    let anchor = stage_canonical_epoch3_source(from_path)?;
+    let (txid1, coin_out) = first_snapshot_coin(&anchor.snapshot)?;
 
     let gen_name = "gen-00000000000000000001";
     let historical_source = from_path
@@ -587,6 +523,7 @@ fn converted_historical_checkpoint_carries_engine_coins() -> TestResult<()> {
             "converted historical generation must not carry utxo-v4.dat".into(),
         ));
     }
+    assert_engine_digest_matches_image(&converted_gen)?;
     let engine = RocksDbStore::open(converted_gen.join("chainstate"))?;
     let stored = engine
         .get(ColumnFamily::Coins, &txid1.to_le_bytes())?
@@ -596,17 +533,8 @@ fn converted_historical_checkpoint_carries_engine_coins() -> TestResult<()> {
             )
         })?;
     let stored_bytes: &[u8] = &stored;
-    let expected = UtxoRecord::from_owned_outputs(
-        txid1,
-        &[bitcoin_rs_storage::utxo::record::OwnedUtxoOut {
-            vout: 0,
-            value: 50_000,
-            script_pubkey: vec![0x76, 0xa9, 0x14, 0, 0x88, 0xac],
-            coinbase: true,
-            height: 100,
-        }],
-    )
-    .map_err(|e| TestError::Assertion(e.to_string()))?;
+    let expected = UtxoRecord::from_owned_outputs(txid1, &[coin_out])
+        .map_err(|e| TestError::Assertion(e.to_string()))?;
     if stored_bytes != expected.bytes() {
         return Err(TestError::Assertion(
             "historical engine coin must hold the checkpoint's coin record".into(),
@@ -627,14 +555,6 @@ fn find_file_named(root: &Path, name: &str) -> TestResult<Option<std::path::Path
         }
     }
     Ok(None)
-}
-
-fn nonuniform_hash(seed: u8) -> Hash256 {
-    let mut bytes = [0_u8; 32];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = seed.wrapping_add(u8::try_from(index).unwrap_or(u8::MAX));
-    }
-    Hash256::from_le_bytes(&bytes)
 }
 
 fn coinbase_tx(tag: u8, value: u64) -> Tx {
@@ -661,36 +581,30 @@ fn replay_refuses_when_head_does_not_descend_from_checkpoint() -> TestResult<()>
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 3)?;
-
-    let txid1 = Hash256::from_le_bytes(&[10u8; 32]);
-    let checkpoint_tip = Hash256::from_le_bytes(&[100u8; 32]);
-    let utxo_set = create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
+    let anchor = stage_canonical_epoch3_source(from_path)?;
     let cs_store = RocksDbStore::open(from_path.join("chainstate"))?;
+    let base_head = read_durable_head(&cs_store)?;
+    let suffix_height = base_head
+        .height
+        .checked_add(1)
+        .ok_or_else(|| TestError::Assertion("suffix height overflow".into()))?;
 
     let foreign_parent = Hash256::from_le_bytes(&[7u8; 32]);
     let (_block, block_hash) = append_block_and_undo(
         from_path,
         &cs_store,
-        101,
+        suffix_height,
         foreign_parent,
         vec![coinbase_tx(0xc3, 50_000)],
-        &utxo_set,
+        &anchor.snapshot.set,
     )?;
 
-    let durable_head = DurableHead {
-        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
-        commit_id: 1,
-        height: 101,
-        tip: block_hash,
-        chain_tx_count: 101,
-        body_extent: None,
-        undo_extent: None,
-    };
-    cs_store.put(
-        ColumnFamily::UtxoMeta,
-        DURABLE_HEAD_KEY,
-        &durable_head.encode(),
+    promote_durable_head(
+        &cs_store,
+        &base_head,
+        suffix_height,
+        block_hash,
+        base_head.chain_tx_count.saturating_add(1),
     )?;
     drop(cs_store);
 
@@ -760,10 +674,7 @@ fn checkpoint_utxo_digest_mismatch_refuses() -> TestResult<()> {
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 3)?;
-    let txid1 = Hash256::from_le_bytes(&[11u8; 32]);
-    let checkpoint_tip = Hash256::from_le_bytes(&[100u8; 32]);
-    create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
+    stage_canonical_epoch3_source(from_path)?;
     rewrite_manifest(from_path, |manifest| {
         if let Some(utxo) = manifest.utxo.as_mut() {
             utxo.sha256 = hex_encode(&[0u8; 32]);
@@ -786,10 +697,7 @@ fn checkpoint_coinstats_mismatch_refuses() -> TestResult<()> {
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 3)?;
-    let txid1 = Hash256::from_le_bytes(&[12u8; 32]);
-    let checkpoint_tip = Hash256::from_le_bytes(&[100u8; 32]);
-    create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
+    stage_canonical_epoch3_source(from_path)?;
     rewrite_manifest(from_path, |manifest| {
         manifest.coinstats.total_amount = manifest.coinstats.total_amount.saturating_add(1);
     })?;
@@ -810,27 +718,7 @@ fn corrupt_headers_or_coinstats_artifact_refuses_publish() -> TestResult<()> {
         let dest_temp = tempdir()?;
         let from_path = source_temp.path();
         let to_path = dest_temp.path().join("converted");
-
-        write_schema_marker(from_path, 3)?;
-        let txid1 = Hash256::from_le_bytes(&[16u8; 32]);
-        let checkpoint_tip = nonuniform_hash(0x41);
-        create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
-        let cs_store = RocksDbStore::open(from_path.join("chainstate"))?;
-        let durable_head = DurableHead {
-            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
-            commit_id: 1,
-            height: 100,
-            tip: checkpoint_tip,
-            chain_tx_count: 100,
-            body_extent: None,
-            undo_extent: None,
-        };
-        cs_store.put(
-            ColumnFamily::UtxoMeta,
-            DURABLE_HEAD_KEY,
-            &durable_head.encode(),
-        )?;
-        drop(cs_store);
+        stage_canonical_epoch3_source(from_path)?;
 
         let artifact_path = from_path
             .join(CHECKPOINT_ROOT)
@@ -866,32 +754,27 @@ fn durable_head_tx_count_mismatch_refuses() -> TestResult<()> {
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 3)?;
-    let txid1 = Hash256::from_le_bytes(&[13u8; 32]);
-    let checkpoint_tip = Hash256::from_le_bytes(&[100u8; 32]);
-    let utxo_set = create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
+    let anchor = stage_canonical_epoch3_source(from_path)?;
     let cs_store = RocksDbStore::open(from_path.join("chainstate"))?;
+    let base_head = read_durable_head(&cs_store)?;
+    let suffix_height = base_head
+        .height
+        .checked_add(1)
+        .ok_or_else(|| TestError::Assertion("suffix height overflow".into()))?;
     let (_block, block_hash) = append_block_and_undo(
         from_path,
         &cs_store,
-        101,
-        checkpoint_tip,
+        suffix_height,
+        anchor.tip,
         vec![coinbase_tx(0xd4, 50_000)],
-        &utxo_set,
+        &anchor.snapshot.set,
     )?;
-    let durable_head = DurableHead {
-        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
-        commit_id: 1,
-        height: 101,
-        tip: block_hash,
-        chain_tx_count: 102,
-        body_extent: None,
-        undo_extent: None,
-    };
-    cs_store.put(
-        ColumnFamily::UtxoMeta,
-        DURABLE_HEAD_KEY,
-        &durable_head.encode(),
+    promote_durable_head(
+        &cs_store,
+        &base_head,
+        suffix_height,
+        block_hash,
+        base_head.chain_tx_count.saturating_add(2),
     )?;
     drop(cs_store);
 
@@ -911,39 +794,41 @@ fn durable_head_tip_without_block_data_refuses() -> TestResult<()> {
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 3)?;
-    let txid1 = Hash256::from_le_bytes(&[14u8; 32]);
-    let checkpoint_tip = Hash256::from_le_bytes(&[100u8; 32]);
-    let utxo_set = create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
+    let anchor = stage_canonical_epoch3_source(from_path)?;
     let cs_store = RocksDbStore::open(from_path.join("chainstate"))?;
-    let (_block, _block_hash) = append_block_and_undo(
+    let base_head = read_durable_head(&cs_store)?;
+    let suffix_height = base_head
+        .height
+        .checked_add(1)
+        .ok_or_else(|| TestError::Assertion("suffix height overflow".into()))?;
+    let (_block, block_hash) = append_block_and_undo(
         from_path,
         &cs_store,
-        101,
-        checkpoint_tip,
+        suffix_height,
+        anchor.tip,
         vec![coinbase_tx(0xe5, 50_000)],
-        &utxo_set,
+        &anchor.snapshot.set,
     )?;
-    let durable_head = DurableHead {
-        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
-        commit_id: 1,
-        height: 101,
-        tip: Hash256::from_le_bytes(&[0xeeu8; 32]),
-        chain_tx_count: 101,
-        body_extent: None,
-        undo_extent: None,
-    };
-    cs_store.put(
-        ColumnFamily::UtxoMeta,
-        DURABLE_HEAD_KEY,
-        &durable_head.encode(),
+    promote_durable_head(
+        &cs_store,
+        &base_head,
+        suffix_height,
+        block_hash,
+        base_head.chain_tx_count.saturating_add(1),
     )?;
+    let mut del_batch = cs_store.new_batch();
+    del_batch.delete(
+        ColumnFamily::BlockBodies,
+        &block_body_key(suffix_height, block_hash),
+    );
+    cs_store.write_durable(del_batch)?;
     drop(cs_store);
 
     let stderr = run_conversion_expecting_failure(from_path, &to_path)?;
-    if !stderr.contains("height 101") && !stderr.contains("101") {
+    let expected = format!("height {suffix_height}");
+    if !stderr.contains(&expected) {
         return Err(TestError::Assertion(format!(
-            "expected stderr to report the missing head block, got: {stderr}"
+            "expected stderr to report the missing head block at {expected}, got: {stderr}"
         )));
     }
     Ok(())
@@ -957,10 +842,7 @@ fn bip30_overwrite_row_without_block_data_refuses() -> TestResult<()> {
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_schema_marker(from_path, 3)?;
-    let txid1 = Hash256::from_le_bytes(&[15u8; 32]);
-    let checkpoint_tip = Hash256::from_le_bytes(&[100u8; 32]);
-    create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
+    stage_canonical_epoch3_source(from_path)?;
     let cs_store = RocksDbStore::open(from_path.join("chainstate"))?;
 
     let coinbase = coinbase_tx(0xf6, 50_000);
@@ -992,22 +874,7 @@ fn bip30_overwrite_row_without_block_data_refuses() -> TestResult<()> {
     cs_store.put(
         ColumnFamily::UndoData,
         &block_undo_key(height, exception_hash),
-        &encode_undo_record(&undo, exception_hash),
-    )?;
-
-    let durable_head = DurableHead {
-        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
-        commit_id: 1,
-        height: 100,
-        tip: checkpoint_tip,
-        chain_tx_count: 100,
-        body_extent: None,
-        undo_extent: None,
-    };
-    cs_store.put(
-        ColumnFamily::UtxoMeta,
-        DURABLE_HEAD_KEY,
-        &durable_head.encode(),
+        &encode_undo_v1(&undo, exception_hash),
     )?;
     drop(cs_store);
 

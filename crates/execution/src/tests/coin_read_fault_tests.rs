@@ -42,7 +42,7 @@ impl PoisonedStore {
         })
     }
 
-    fn poison_get(&self, key: &CoinKey) {
+    fn poison_key(&self, key: &CoinKey) {
         self.poisoned_keys.lock().insert(key.as_bytes().to_vec());
     }
 
@@ -111,8 +111,14 @@ impl KvStore for PoisonedStore {
         cf: ColumnFamily,
         keys: &[&[u8]],
     ) -> Result<Vec<Option<bitcoin_rs_storage::Bytes>>, StorageError> {
-        if cf == ColumnFamily::Coins && self.fail_multi_get.load(Ordering::SeqCst) {
-            return Err(Self::injected());
+        if cf == ColumnFamily::Coins {
+            if self.fail_multi_get.load(Ordering::SeqCst) {
+                return Err(Self::injected());
+            }
+            let poisoned = self.poisoned_keys.lock();
+            if keys.iter().any(|key| poisoned.contains(*key)) {
+                return Err(Self::injected());
+            }
         }
         self.inner.multi_get(cf, keys)
     }
@@ -251,8 +257,7 @@ fn commit_genesis_head(chain: &Chainstate) -> TestResult {
 #[test]
 fn validate_block_reports_coin_read_errors() -> TestResult {
     let fixture = coin_read_fixture()?;
-    fixture.store.poison_get(&fixture.coin_key);
-
+    fixture.store.poison_key(&fixture.coin_key);
     let Err(error) = fixture.chain.validate_block(&fixture.payload) else {
         return Err(TestError::UnexpectedSuccess(
             "a coin read failure must not read as a valid block",
@@ -298,8 +303,7 @@ fn window_prepare_coin_read_error_is_fatal() -> TestResult {
 #[test]
 fn coin_read_error_never_invalidates_the_block() -> TestResult {
     let fixture = coin_read_fixture()?;
-    fixture.store.poison_get(&fixture.coin_key);
-
+    fixture.store.poison_key(&fixture.coin_key);
     let result = {
         let _fault = crate::window::prepare_fault::arm();
         fixture.chain.apply_window(&[&fixture.payload])

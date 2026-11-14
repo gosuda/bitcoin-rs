@@ -258,14 +258,14 @@ fn prometheus_handle(identity: &EvidenceIdentity) -> Result<PrometheusHandle, Ru
 pub(crate) struct MetricsServer {
     #[cfg(test)]
     local_addr: SocketAddr,
-    cancel: bitcoin_rs_execution::chain::LatchWriter,
+    cancel: bitcoin_rs_consensus::latch::LatchWriter,
     thread: Option<JoinHandle<()>>,
 }
 
 impl MetricsServer {
     pub(crate) fn bind(
         addr: SocketAddr,
-        shutdown: impl Into<bitcoin_rs_execution::chain::LatchReader>,
+        shutdown: impl Into<bitcoin_rs_consensus::latch::LatchReader>,
         identity: &EvidenceIdentity,
     ) -> Result<Self, RunError> {
         let shutdown = shutdown.into();
@@ -316,7 +316,7 @@ impl Drop for MetricsServer {
 
 pub(crate) fn start_metrics(
     bind: Option<SocketAddr>,
-    shutdown: impl Into<bitcoin_rs_execution::chain::LatchReader>,
+    shutdown: impl Into<bitcoin_rs_consensus::latch::LatchReader>,
     identity: &EvidenceIdentity,
 ) -> Result<Option<MetricsServer>, RunError> {
     let shutdown = shutdown.into();
@@ -327,7 +327,7 @@ pub(crate) fn start_metrics(
 fn serve_metrics(
     listener: &TcpListener,
     handle: &PrometheusHandle,
-    cancel: &bitcoin_rs_execution::chain::LatchReader,
+    cancel: &bitcoin_rs_consensus::latch::LatchReader,
 ) {
     let Ok(local_addr) = listener.local_addr() else {
         return;
@@ -380,14 +380,14 @@ pub(crate) fn publish_txindex_readiness(source: &dyn DerivedIndexCapabilitySourc
 
 pub(crate) fn spawn_readiness_sampler(
     source: Arc<dyn DerivedIndexCapabilitySource>,
-    shutdown: bitcoin_rs_execution::chain::LatchReader,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<JoinHandle<()>, RunError> {
     spawn_readiness_sampler_polling(source, shutdown, READINESS_SAMPLE_INTERVAL)
 }
 
 fn spawn_readiness_sampler_polling(
     source: Arc<dyn DerivedIndexCapabilitySource>,
-    shutdown: bitcoin_rs_execution::chain::LatchReader,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
     interval: Duration,
 ) -> Result<JoinHandle<()>, RunError> {
     std::thread::Builder::new()

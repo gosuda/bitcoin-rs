@@ -184,8 +184,11 @@ Nothing below the owner facade can interpret or copy the same data again.
 ### `CMT-06`: Output ownership and recovery records
 
 - The block bytes are the sole owner of created outputs.
-- Recovery records must contain only data that block bytes do not hold, including overwritten coin records.
-
+- Recovery records MUST contain only spent coins.
+- Recovery records MUST NOT contain created outpoints.
+- The node MUST derive created outputs from block bytes.
+- The undo codec version MUST be 2.
+- The converter MUST recode version 1 rows to version 2 offline.
 ### `CMT-07`: Publication protocol in configured engine
 
 - The block archive, the recovery records, and the index segments can live in separate physical streams.
@@ -281,6 +284,8 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 - A script identity must be stored once per segment dictionary.
 - A posting entry must hold an occurrence reference and flags, not a full script hash and transaction id.
+- A sealed posting chunk must be keyed by `gen_id` (BE8), `script_id` (BE4), and the inverted absolute ordinal of its first posting (BE4), so that a forward scan from a cursor's ordinal yields chunks newest first. A chunk must never split a run of postings that share one ordinal, and its first posting must carry delta zero.
+- A chunk must hold at most 4 KiB of encoded postings, except a chunk holding one transaction's postings for one script, which may be larger because a same-ordinal run is never split.
 
 ### `PRJ-09`: Bounded external sort for bulk construction
 
@@ -306,6 +311,7 @@ Nothing below the owner facade can interpret or copy the same data again.
 ### `QRY-02`: Mutation-isolated query traversal
 
 - A query must traverse its serving view without observing concurrent mutations in progress.
+- `DerivedIndexQuery::transaction_block` MUST return the transaction body, occurrence height, and occurrence block hash from one captured read prefix. A caller MUST resolve confirmation metadata by that block hash. It MUST NOT join the occurrence height to a later active-chain publication.
 
 ### `QRY-03`: Extension stability for historical queries
 
@@ -315,6 +321,7 @@ Nothing below the owner facade can interpret or copy the same data again.
 ### `QRY-04`: Provenance metadata in query responses
 
 - Each query answer must report the block hash, height, coverage range, and verification state of its serving view.
+- At view capture, read the current committed historical validation position. If that position is below the captured epoch, report `AssumedHistory` with its height and hash. If no historical chainstate exists, report `ChainVerified`. Do not use the applied tip as the historical validation position.
 
 ### `QRY-05`: Explicit coverage and unavailable status
 
@@ -350,7 +357,15 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 ### `SNP-02`: Snapshot manifest contents
 
-- The snapshot manifest must declare: the network and genesis hash, base block identity, schema versions, UTXO commitment, logical commitments for each index capability, coverage ranges, artifact sizes, hashes, and validation provenance.
+- The snapshot manifest must declare `manifest_version`. The node accepts only version 1.
+- The snapshot manifest must declare the network name and the genesis block hash.
+- The snapshot manifest must declare the base block hash and the base block height.
+- The snapshot manifest must declare one index format schema version for all index artifacts. The node refuses a manifest whose schema version is not its compiled index format version.
+- The snapshot manifest must declare the UTXO commitment, and the SHA-256 hash and size in bytes of the UTXO artifact.
+- For each index capability that the manifest commits, the snapshot manifest must declare the SHA-256 hash and size in bytes of the artifact. The node refuses a manifest whose artifact hash differs from its index commitment.
+- For each index capability, the snapshot manifest must declare a coverage floor. The coverage range of the capability runs from the floor to the base height, inclusive. A missing coverage floor counts as 0.
+- The snapshot manifest must declare `historical_verified_height` as validation provenance. The node refuses a manifest whose `historical_verified_height` is greater than the base height.
+- The coverage floor of the compact filter index must be 0. The node refuses to attach a compact filter artifact whose coverage floor is not 0.
 
 ### `SNP-03`: Independent artifact authentication
 
@@ -364,20 +379,25 @@ Nothing below the owner facade can interpret or copy the same data again.
 - A file checksum does not prove consensus trust.
 - Activation requires an independently trusted commitment compiled into the node software.
 
-### `SNP-05`: Direct index segment attachment
+### `SNP-05`: Streaming index segment re-encode
 
-- An immutable index artifact must attach directly as a serving segment after verification.
-- The node must not decode an index artifact and rewrite it row by row.
+- A verified index artifact attaches through one streaming re-encode into a sealed segment.
+- The re-encode holds no more than the stated spill budget of decoded rows in memory at once and spills sorted runs to scratch for the merge.
+- The node must not write artifact rows one by one into the live store.
+- Digest, header, and base verification precede the attach.
 
 ### `SNP-06`: Unified streaming decode for coin store and live index
 
 - The live-output projection base must be constructed during the same streaming snapshot decode that populates the coin store.
 - The node must not traverse snapshot coins a second time.
+- Snapshot seed staging MUST bound resident rows and use fixed-size spill cursors. Spilled rows MUST NOT retain resident descriptors for each row. Delivery MUST preserve decode order.
 
 ### `SNP-07`: Atomically gated snapshot publication
 
 - Neither the coin store nor the index base can be published before the UTXO commitment is verified.
 - The node must discard temporary data from an invalid snapshot.
+- Closing a rejected seed session MUST wake the worker after the abort transition, and requesting publish MUST wake it after the pending transition is visible; closing a session MUST wake the worker after `closed` is stored even when the phase already left `Seeding`. The callback MUST run without the phase, queue, or wake lock held.
+- An aborted or rejected seed MUST preserve an already-published ScriptLive base; a seed whose tip exceeds the published watermark replaces that base only at publish time.
 
 ### `SNP-08`: Single historical block interpreter
 
@@ -412,14 +432,28 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 ### `BUD-04`: Bounded scheduling domains
 
-- CPU work must use one bounded scheduling domain.
-- Blocking storage operations must be isolated from verification workers.
-- The node must not nest worker thread pools or construct per-input task graphs.
+- CPU work must use one bounded scheduling domain. The node sets one global rayon pool at startup to the lower of the available parallelism and 4 threads. If the process configured the global pool before startup, the node keeps that pool.
+- Window parse runs on the global pool as one parallel map over the block payloads.
+- Script checks run on the global pool as one parallel map over all input checks of a batch, when the batch has at least 32 checks. Otherwise they run on the calling thread.
+- Projection catch-up prepares blocks on the global pool when no background CPU share table is configured or when it holds a background permit. Otherwise it prepares them on the calling thread.
+- UTXO statistics MuHash lanes run on the global pool for large batches.
+- Background CPU permits count the background operations in flight. The node grants at most the total workers minus the foreground reserve.
+- Historical validation holds one background permit while it runs, when one is free. Otherwise it runs without a permit.
+- Bulk scoring holds one background permit while it runs, when one is free. It runs on the calling thread.
+- Blocking storage operations must run on the calling thread. Projection catch-up is the exception: when it runs in parallel, its pool workers read undo records from storage.
+- The node must not nest worker thread pools or construct per-input task graphs. The node builds one worker pool, and script checks form one flat map with no dependency graph.
 
 ### `BUD-05`: Reserved foreground progress
 
 - Foreground chain progress must have reserved execution capacity.
 - Historical validation and background projections receive bounded, fair service.
+- Network ingress MUST leave `foreground_reserve` outside its admission ceiling within `StagedImages`.
+- The ingress check MUST use current `StagedImages` charges and reservations.
+- The check and reservation MUST occur under one ledger lock.
+- Ingress MUST report `staged_images.saturating_sub(foreground_reserve)` as its capacity.
+- Execution MAY reserve against the full staged-images owner cap.
+
+Proof: `crates/node/src/budget/tests.rs::saturated_ingress_preserves_execution_headroom_and_recovers_after_release` checks execution credit at ingress saturation and resumed ingress admission after release.
 
 ### `BUD-06`: Unified retained memory budget
 
@@ -430,6 +464,7 @@ Nothing below the owner facade can interpret or copy the same data again.
 ### `BUD-07`: Work refusal on budget exhaustion
 
 - When a resource budget is exhausted, the owner must release resources or refuse new work.
+- A refused coin-cache charge MUST release eligible resident records before one retry. Eviction MUST release their ledger charges before the retry.
 - The component must not add unbounded memory buffering.
 
 ### `MPS-01`: Mempool dependency graph and settlement
@@ -447,11 +482,17 @@ Nothing below the owner facade can interpret or copy the same data again.
 - Mining template generation must consume a matched pair: one applied epoch and one settled mempool generation.
 - A template must never combine a new chain state with an obsolete dependency graph.
 
-### `MPS-04`: Bounded event delivery
+### `MPS-04`: Event delivery
 
 - Notifications describe committed blocks.
 - Notifications do not guarantee availability of intermediate UTXO states.
-- Event observers must use bounded delivery channels with explicit gap detection.
+- Chain consumers pull the chain feed. The node keeps no event queue for them. A poll sets `gap` when the epoch changes, when the sequence is not consecutive, or when the tips are not adjacent.
+- A replay call returns at most the requested number of steps. The node refuses a step limit of 0 or more than 256.
+- Mempool observers are synchronous callbacks. The mempool delivers committed mutations to observers in commit order, one at a time.
+- A mutation that an observer commits during a callback is delivered after that callback returns.
+- The mempool delivery queue holds at most 100 producer envelopes. A producer that finds a full queue waits until the drain thread makes room. A reentrant mutation from the drain thread never waits. It queues past the bound, up to 108 envelopes. Past that ceiling the mutation is refused with DeliveryQueueFull before it commits. Nothing is committed and nothing is dropped.
+- An observer panic does not roll back the committed mutation. Delivery continues with the next queued mutation.
+- Each committed change has a sequence number. A subscriber detects a gap when a sequence number is skipped.
 
 ### `MOD-01`: Owner crates and exclusive responsibilities
 

@@ -3,11 +3,8 @@ use super::{
     fixture::mine_regtest, next_work_required, validate_contextual_header,
 };
 use crate::chain::test_error::TestError;
-use crate::chain::{
-    ChainError,
-    node::{BlockHeader, NodeStatus},
-    tree::BlockTree,
-};
+use crate::chain::{ChainError, node::NodeStatus, tree::BlockTree};
+use bitcoin_rs_consensus::header_rules::BlockHeader;
 
 use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
 

@@ -1,5 +1,5 @@
 use bitcoin_rs_storage::StorageBackend;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::error::ConvertError;
@@ -7,17 +7,20 @@ use crate::error::ConvertError;
 #[derive(Parser, Debug)]
 #[command(
     name = "bitcoin-rs-storage-convert",
-    about = "Offline datadir storage migration and format conversion tool"
+    about = "Offline datadir storage migration and format conversion tool",
+    subcommand_negates_reqs = true
 )]
 pub(crate) struct CliArgs {
+    #[command(subcommand)]
+    pub(crate) command: Option<Command>,
+
     /// Path to the source datadir.
     #[arg(long = "from", value_name = "DIR")]
-    pub(crate) from: PathBuf,
+    pub(crate) from: Option<PathBuf>,
 
     /// Path to the destination datadir.
     #[arg(long = "to", value_name = "DIR")]
-    pub(crate) to: PathBuf,
-
+    pub(crate) to: Option<PathBuf>,
     /// Target storage engine (rocksdb, surrealkv, mdbx).
     #[arg(long = "to-engine", value_name = "ENGINE", default_value = "rocksdb")]
     pub(crate) to_engine: String,
@@ -29,6 +32,39 @@ pub(crate) struct CliArgs {
     /// Path to the destination pool datadir (optional, requires --pool-from).
     #[arg(long = "pool-to", value_name = "DIR")]
     pub(crate) pool_to: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum Command {
+    /// Rebuild the derived-index projection from the retained block archive
+    /// and its undo rows, then publish one sealed generation.
+    RebuildIndex {
+        /// Datadir whose `txindex` namespace is rebuilt in place.
+        #[arg(long = "datadir", value_name = "DIR")]
+        datadir: PathBuf,
+
+        /// Builder memory budget in MiB; the builder spills sorted runs beyond it.
+        #[arg(long = "budget-mb", value_name = "MIB", default_value_t = 64)]
+        budget_mb: u64,
+    },
+}
+
+impl CliArgs {
+    /// The convert-mode roots; `None` when the invoked subcommand replaces
+    /// the default conversion flow.
+    pub(crate) fn convert_roots(&self) -> Result<(&PathBuf, &PathBuf), ConvertError> {
+        let Some(from) = self.from.as_ref() else {
+            return Err(ConvertError::InvalidOperation(
+                "--from is required for datadir conversion".into(),
+            ));
+        };
+        let Some(to) = self.to.as_ref() else {
+            return Err(ConvertError::InvalidOperation(
+                "--to is required for datadir conversion".into(),
+            ));
+        };
+        Ok((from, to))
+    }
 }
 
 impl CliArgs {

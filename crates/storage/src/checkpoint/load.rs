@@ -3,8 +3,8 @@ use super::fs::{CheckpointRoot, open_file, read_file};
 use super::{
     COINSTATS_ARTIFACT_LEN, COINSTATS_MAGIC, COINSTATS_VERSION, CURRENT_FILE, CURRENT_FORMAT,
     CURRENT_VERSION, CheckpointError, CheckpointIdentity, CheckpointLoadError,
-    CheckpointManifestV1, CurrentV1, MANIFEST_FILE, MANIFEST_FORMAT, MANIFEST_VERSION,
-    MAX_CHECKPOINT_METADATA_BYTES, MAX_CHECKPOINT_PAYLOAD_BYTES,
+    CheckpointManifestV1, CurrentV1, EngineArtifactV1, MANIFEST_FILE, MANIFEST_FORMAT,
+    MANIFEST_VERSION, MAX_CHECKPOINT_METADATA_BYTES, MAX_CHECKPOINT_PAYLOAD_BYTES,
 };
 use bitcoin_rs_consensus::primitives::hex::hex_encode;
 use cap_std::fs::{Dir, File};
@@ -130,7 +130,39 @@ pub fn read_manifest(
             "checkpoint network, magic, or genesis does not match configuration".to_owned(),
         ));
     }
+    validate_engine_records(manifest.engine.as_ref())?;
     Ok(manifest)
+}
+
+fn validate_engine_records(engine: Option<&EngineArtifactV1>) -> Result<(), CheckpointError> {
+    let Some(engine) = engine else {
+        return Ok(());
+    };
+    let mut seen = std::collections::HashSet::new();
+    for record in &engine.files {
+        if !is_relative_image_path(&record.file) {
+            return Err(CheckpointError::Invalid(format!(
+                "checkpoint engine image path {:?} is not a relative file path",
+                record.file
+            )));
+        }
+        if !seen.insert(record.file.as_str()) {
+            return Err(CheckpointError::Invalid(format!(
+                "checkpoint engine image path {:?} is recorded twice",
+                record.file
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn is_relative_image_path(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    path.split('/').all(|component| {
+        !component.is_empty() && component != "." && component != ".." && !component.contains('\\')
+    })
 }
 
 pub(crate) fn open_regular_file(
@@ -279,4 +311,24 @@ pub fn open_current_checkpoint_at(
         generation_dir,
         reference: current.reference().map_err(classify_checkpoint_error)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_relative_image_path;
+
+    #[test]
+    fn engine_image_paths_follow_slash_separated_format() {
+        assert!(is_relative_image_path("MANIFEST-000001"));
+        assert!(is_relative_image_path("a/b"));
+        assert!(!is_relative_image_path(""));
+        assert!(!is_relative_image_path("/a"));
+        assert!(!is_relative_image_path("a/"));
+        assert!(!is_relative_image_path("a//b"));
+        assert!(!is_relative_image_path("a/./b"));
+        assert!(!is_relative_image_path("a/../b"));
+        assert!(!is_relative_image_path(".."));
+        assert!(!is_relative_image_path("a\\b"));
+        assert!(!is_relative_image_path("\\"));
+    }
 }

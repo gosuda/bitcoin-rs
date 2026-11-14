@@ -78,6 +78,11 @@ pub struct CapabilitySnapshot {
 
 pub trait DerivedIndexCapabilitySource: Send + Sync {
     fn capability(&self) -> CapabilityStatus;
+
+    /// SNP-09: coverage per projection, indexed by `IndexCapability::index`.
+    fn capability_coverage(&self) -> [Option<u32>; 4] {
+        [None; 4]
+    }
 }
 
 #[must_use]

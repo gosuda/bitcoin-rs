@@ -99,7 +99,14 @@ fn bitcoin_conf_is_applied_before_environment_and_cli() {
 }
 
 #[test]
-fn removed_chainstate_journal_table_fails_as_unknown_key() {
+fn removed_chainstate_journal_table_fails_as_unknown_key() -> Result<(), TestError> {
+    let accepted = load_file(
+        "--config",
+        "persist_mempool = false\n",
+        &[],
+        std::iter::empty(),
+    )?;
+    assert!(!accepted.persist_mempool);
     let result = load_file(
         "--config",
         "[chainstate_journal]\nblocks = 10\n",
@@ -115,6 +122,7 @@ fn removed_chainstate_journal_table_fails_as_unknown_key() {
         ),
         "a removed [chainstate_journal] table must fail the TOML load as a parse error"
     );
+    Ok(())
 }
 
 #[test]
@@ -695,5 +703,13 @@ fn version_flag_short_circuits_with_the_node_version_line() {
         reported,
         env!("CARGO_PKG_VERSION"),
         "the notice reports the workspace version: {notice:?}"
+    );
+    assert!(
+        notice.contains("bitcoin-rs") && notice.contains(env!("CARGO_PKG_VERSION")),
+        "the notice carries this node's name and version: {notice:?}"
+    );
+    assert!(
+        !notice.contains("Bitcoin Core") && !notice.contains("v31."),
+        "no Core identity or version is imitated: {notice:?}"
     );
 }

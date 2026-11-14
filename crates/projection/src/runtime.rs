@@ -1,8 +1,7 @@
 use arc_swap::ArcSwap;
 
-use bitcoin_rs_execution::chain::{
-    BlockTree, BlockTreeReader, LatchReader, LatchWriter, TipReader, TipSnapshot,
-};
+use bitcoin_rs_consensus::latch::{LatchReader, LatchWriter};
+use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 
 use crate::{
@@ -20,12 +19,11 @@ use crate::capabilities::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
 };
 use crate::query_api::{
-    AtPrefix, DerivedIndexInfo, DerivedIndexQuery, HistoricalQueryError, ScriptHistoryRecord,
-    ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError,
+    Answer, DerivedIndexInfo, DerivedIndexQuery, ScriptHistoryRecord, ScriptIndexQuery,
+    ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TransactionBlock, TxQueryError,
     TxUnavailableCause,
 };
 
-use bitcoin_rs_storage::utxo::snapshot::{SeedOfferCell, VerifiedSnapshotArtifact};
 use bitcoin_rs_storage::{
     PrefixScanLimit,
     block_body::BlockBodyStore,
@@ -64,14 +62,34 @@ mod query;
 mod reconciliation;
 mod rollback;
 mod startup;
-pub use startup::open_derived_index_store_on_worker;
+pub use startup::{open_derived_index_store_on_worker, open_derived_index_store_with_scratch};
 
 pub use capability::DerivedIndexCapability;
+use query::IndexProgress;
 pub(crate) use query::QueryEngineLive;
-pub use query::{DEFAULT_SCRIPTHASH_LIMIT, DerivedIndexQueryEngine};
-use query::{IndexProgress, map_historical_error};
+pub use query::{DEFAULT_SCRIPTHASH_LIMIT, DerivedIndexQueryEngine, HistoricalVerifiedReader};
 
-#[derive(Debug)]
+const NO_HISTORICAL_BASE: u64 = u64::MAX;
+
+/// Why ScriptLive is down. `HistoryPruned` is terminal: pruned undo history
+/// does not return, so the group stays down until the artifact is replaced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ScriptLiveOutage {
+    HistoryPruned,
+    Failed(CompactString),
+}
+
+impl ScriptLiveOutage {
+    pub(crate) fn reason(&self) -> CompactString {
+        match self {
+            Self::HistoryPruned => DerivedIndexWorkerError::ScriptLiveHistoryPruned
+                .to_string()
+                .into(),
+            Self::Failed(reason) => reason.clone(),
+        }
+    }
+}
+
 pub struct DerivedIndexRuntime {
     revision: AtomicU64,
     pub(super) shutdown: AtomicBool,
@@ -80,15 +98,21 @@ pub struct DerivedIndexRuntime {
     wake_tx: Sender<()>,
     failure_message: RwLock<Option<CompactString>>,
     compact_filter_failure: RwLock<Option<CompactString>>,
-    script_live_failure: RwLock<Option<CompactString>>,
+    script_live_failure: RwLock<Option<ScriptLiveOutage>>,
+    tx_lookup_failure: RwLock<Option<CompactString>>,
+    undo_gap: RwLock<Option<(u32, Hash256)>>,
     script_history_failure: RwLock<Option<CompactString>>,
     phase: arc_swap::ArcSwap<ReconcilePhase>,
+    script_live_seed: Arc<crate::snapshot_seed::ScriptLiveSeedState>,
+    historical_base: AtomicU64,
+    historical_next: AtomicU64,
 }
 
 impl DerivedIndexRuntime {
     #[must_use]
-    pub fn new(wake_tx: Sender<()>) -> Self {
-        Self {
+    pub fn new(wake_tx: Sender<()>) -> Arc<Self> {
+        let script_live_seed = Arc::new(crate::snapshot_seed::ScriptLiveSeedState::new());
+        let runtime = Arc::new(Self {
             revision: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             cancel: LatchWriter::new(),
@@ -96,10 +120,27 @@ impl DerivedIndexRuntime {
             wake_tx,
             failure_message: RwLock::new(None),
             compact_filter_failure: RwLock::new(None),
+            tx_lookup_failure: RwLock::new(None),
             script_live_failure: RwLock::new(None),
+            undo_gap: RwLock::new(None),
             script_history_failure: RwLock::new(None),
             phase: arc_swap::ArcSwap::from_pointee(ReconcilePhase::FORWARD),
-        }
+            script_live_seed,
+            historical_base: AtomicU64::new(NO_HISTORICAL_BASE),
+            historical_next: AtomicU64::new(0),
+        });
+        let weak = Arc::downgrade(&runtime);
+        runtime.script_live_seed.set_wake(Arc::new(move || {
+            if let Some(runtime) = weak.upgrade() {
+                runtime.wake();
+            }
+        }));
+        runtime
+    }
+
+    #[must_use]
+    pub fn script_live_seed(&self) -> &Arc<crate::snapshot_seed::ScriptLiveSeedState> {
+        &self.script_live_seed
     }
 
     pub(crate) fn publish_phase(&self, phase: ReconcilePhase) {
@@ -122,46 +163,82 @@ impl DerivedIndexRuntime {
         let _receiver_gone = self.wake_tx.try_send(());
     }
 
-    pub(crate) fn publish_failed(&self, message: impl Into<CompactString>) {
+    /// SNP-08: the snapshot base and the first height whose historical facts
+    /// are not yet produced. Heights from `next` through `base` take their
+    /// facts from historical validation instead of block bodies.
+    pub fn set_historical_window(&self, base: u32, next: u32) {
+        self.historical_next
+            .store(u64::from(next), Ordering::SeqCst);
+        self.historical_base
+            .store(u64::from(base), Ordering::SeqCst);
+        self.wake();
+    }
+
+    /// SNP-08: records that historical facts through `height` were offered to
+    /// the facts queue. Called after the offer, so a height below `next` always
+    /// has its facts queued or repaired from its body.
+    pub fn note_historical_facts(&self, height: u32) {
+        self.historical_next
+            .fetch_max(u64::from(height) + 1, Ordering::SeqCst);
+        self.wake();
+    }
+
+    pub(crate) fn awaits_historical_facts(&self, height: u32) -> bool {
+        let base = self.historical_base.load(Ordering::SeqCst);
+        let height = u64::from(height);
+        base != NO_HISTORICAL_BASE
+            && height <= base
+            && height >= self.historical_next.load(Ordering::SeqCst)
+    }
+
+    pub fn publish_failed(&self, message: impl Into<CompactString>) {
         *self.failure_message.write() = Some(message.into());
         self.failed.store(true, Ordering::Release);
     }
 
-    fn fail_capability(
+    fn fail_capability<T>(
         &self,
         capability: IndexCapabilities,
-        failure: &RwLock<Option<CompactString>>,
+        failure: &RwLock<Option<T>>,
+        value: T,
         error: &DerivedIndexWorkerError,
         message: &str,
     ) {
         tracing::error!(%error, message);
-        *failure.write() = Some(error.to_string().into());
+        *failure.write() = Some(value);
         self.publish_leg(capability, ReconcileLeg::Forward);
         self.wake();
     }
 
-    pub(crate) fn fail_compact_filters(&self, error: &DerivedIndexWorkerError) {
+    pub fn fail_compact_filters(&self, error: &DerivedIndexWorkerError) {
         self.fail_capability(
             IndexCapabilities::COMPACT_FILTERS,
             &self.compact_filter_failure,
+            error.to_string().into(),
             error,
             "compact filter index unavailable; other indexes continue",
         );
     }
 
-    pub(crate) fn fail_script_live(&self, error: &DerivedIndexWorkerError) {
+    pub fn fail_script_live(&self, error: &DerivedIndexWorkerError) {
+        let outage = match error {
+            DerivedIndexWorkerError::ScriptLiveHistoryPruned => ScriptLiveOutage::HistoryPruned,
+            other => ScriptLiveOutage::Failed(other.to_string().into()),
+        };
         self.fail_capability(
             IndexCapabilities::SCRIPT_LIVE,
             &self.script_live_failure,
+            outage,
             error,
             "ScriptLive index unavailable; other indexes continue",
         );
     }
 
-    pub(crate) fn fail_script_history(&self, error: &DerivedIndexWorkerError) {
+    pub fn fail_script_history(&self, error: &DerivedIndexWorkerError) {
         self.fail_capability(
             IndexCapabilities::SCRIPT_HISTORY,
             &self.script_history_failure,
+            error.to_string().into(),
             error,
             "ScriptHistory index unavailable; other indexes continue",
         );
@@ -171,9 +248,59 @@ impl DerivedIndexRuntime {
         self.script_live_failure.write().take();
     }
 
+    /// SNP-10: TxLookup fails as one capability, never as the whole runtime.
+    pub fn fail_tx_lookup(&self, error: &DerivedIndexWorkerError) {
+        self.fail_capability(
+            IndexCapabilities::TX_LOOKUP,
+            &self.tx_lookup_failure,
+            error.to_string().into(),
+            error,
+            "TxLookup paused at a missing undo record; other indexes continue",
+        );
+    }
+
+    pub(crate) fn stop_undo_group(
+        &self,
+        capabilities: IndexCapabilities,
+        error: &DerivedIndexWorkerError,
+    ) {
+        let filters = capabilities.contains(IndexCapability::CompactFilters);
+        let history = capabilities.contains(IndexCapability::ScriptHistory);
+        let script_live = capabilities.contains(IndexCapability::ScriptLive);
+        if let DerivedIndexWorkerError::UndoUnavailable { height, hash } = error
+            && (filters || history || script_live)
+        {
+            *self.undo_gap.write() = Some((*height, *hash));
+        }
+        if filters {
+            self.fail_compact_filters(error);
+        }
+        if history {
+            self.fail_script_history(error);
+        }
+        if filters || history {
+            self.fail_tx_lookup(error);
+        }
+        if script_live {
+            self.fail_script_live(error);
+        }
+    }
+
+    pub(crate) fn undo_gap(&self) -> Option<(u32, Hash256)> {
+        *self.undo_gap.read()
+    }
+
+    pub(crate) fn clear_undo_group(&self) {
+        self.undo_gap.write().take();
+        self.tx_lookup_failure.write().take();
+        self.script_history_failure.write().take();
+        self.compact_filter_failure.write().take();
+        self.script_live_failure.write().take();
+    }
+
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn script_live_failure(&self) -> Option<CompactString> {
+    pub(crate) fn script_live_failure(&self) -> Option<ScriptLiveOutage> {
         self.script_live_failure.read().clone()
     }
 
@@ -243,9 +370,12 @@ impl DerivedIndexQuery for DerivedIndexQueryAdapter {
         engine.outpoint_value(outpoint)
     }
 
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
         let engine = self.load_engine()?;
-        engine.transaction_height(txid)
+        engine.transaction_block(txid)
     }
 
     fn index_info(&self) -> Result<DerivedIndexInfo, TxQueryError> {
@@ -390,25 +520,25 @@ impl DerivedIndexQueryAdapter {
     pub fn transaction_at_prefix(
         &self,
         txid: &Txid,
-    ) -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError> {
-        let engine = self.load_engine().map_err(map_historical_error)?;
-        engine.transaction_at_prefix(txid)
+    ) -> Result<Answer<Option<(u32, Tx)>>, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.transaction_at_answer(txid)
     }
 
     pub fn script_history_at_prefix(
         &self,
         script: ScriptHash,
-    ) -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError> {
-        let engine = self.load_engine().map_err(map_historical_error)?;
-        engine.script_history_at_prefix(script)
+    ) -> Result<Answer<ScriptIndexSnapshot>, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.script_history_at_answer(script)
     }
 
     pub fn spender_at_prefix(
         &self,
         outpoint: OutPoint,
-    ) -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError> {
-        let engine = self.load_engine().map_err(map_historical_error)?;
-        engine.spender_at_prefix(outpoint)
+    ) -> Result<Answer<Option<SpendingRecord>>, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.spender_at_answer(outpoint)
     }
 
     fn load_engine(&self) -> Result<Arc<DerivedIndexQueryEngine>, TxQueryError> {
@@ -440,10 +570,13 @@ pub struct DerivedIndexOpenSpec {
     #[expect(clippy::type_complexity)]
     pub open_store:
         Arc<dyn Fn(&Path) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> + Send + Sync>,
-    pub seed_slot: Option<SeedOfferCell>,
-    pub utxo: Option<bitcoin_rs_storage::utxo::UtxoReader>,
-    pub chain_transition: Option<bitcoin_rs_execution::chain::StableRead>,
     pub bundle: crate::portable::IndexBundleDirective,
+    pub facts_rx:
+        Option<crossbeam_channel::Receiver<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>>>,
+    pub facts_charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+    pub query_charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+    pub facts_gap: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub cpu: Option<Arc<bitcoin_rs_storage::budget::CpuShares>>,
 }
 
 pub struct DerivedIndexWorker {
@@ -458,6 +591,12 @@ pub struct OpenDerivedIndex {
     pub(crate) writer: Arc<dyn TxIndexWriter>,
     pub(crate) reader: Arc<dyn crate::IndexReader>,
     pub(crate) batch_limits: PreparedBatchLimits,
+}
+
+impl OpenDerivedIndex {
+    pub fn writer(&self) -> &dyn TxIndexWriter {
+        self.writer.as_ref()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -480,7 +619,15 @@ pub trait IndexAheadSink: Send + Sync {
 }
 
 pub(crate) struct UndoScripts {
-    scripts: hashbrown::HashMap<([u8; 32], u32), Vec<u8>>,
+    coins: hashbrown::HashMap<([u8; 32], u32), UndoCoin>,
+}
+
+#[derive(Clone)]
+pub(crate) struct UndoCoin {
+    script: Vec<u8>,
+    value: u64,
+    height: u32,
+    coinbase: bool,
 }
 
 impl UndoScripts {
@@ -489,20 +636,30 @@ impl UndoScripts {
         hash: Hash256,
     ) -> Result<Self, bitcoin_rs_storage::utxo::contract::UndoCodecError> {
         let batch = bitcoin_rs_storage::utxo::contract::decode_undo_record(bytes, hash)?;
-        let mut scripts = hashbrown::HashMap::with_capacity(batch.restores().len());
+        let mut coins = hashbrown::HashMap::with_capacity(batch.restores().len());
         for add in batch.restores() {
-            scripts.insert(
+            coins.insert(
                 (add.outpoint.txid.0.to_le_bytes(), add.outpoint.vout),
-                add.txout.script_pubkey.as_bytes().to_vec(),
+                UndoCoin {
+                    script: add.txout.script_pubkey.as_bytes().to_vec(),
+                    value: add.txout.value.to_sat(),
+                    height: add.height,
+                    coinbase: add.coinbase,
+                },
             );
         }
-        Ok(Self { scripts })
+        Ok(Self { coins })
     }
 }
 
-impl crate::SpentCoinScripts for UndoScripts {
-    fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]> {
-        self.scripts.get(&(*txid, vout)).map(Vec::as_slice)
+impl crate::SpentCoins for UndoScripts {
+    fn spent_coin(&self, txid: &[u8; 32], vout: u32) -> Option<crate::SpentCoin<'_>> {
+        self.coins.get(&(*txid, vout)).map(|coin| crate::SpentCoin {
+            script: &coin.script[..],
+            value: coin.value,
+            height: coin.height,
+            coinbase: coin.coinbase,
+        })
     }
 }
 
@@ -577,13 +734,13 @@ struct Worker {
     quiet_period: Duration,
     batch_delay: Duration,
     rollback_rebuild_cutover: u32,
-    seed_slot: Option<SeedOfferCell>,
-    seed_bundle: parking_lot::Mutex<Option<SeedBundle>>,
-}
-
-pub(crate) struct SeedBundle {
-    pub(crate) artifact: Option<VerifiedSnapshotArtifact>,
-    pub(crate) lease: Option<HistoryLease>,
+    seed_history_lease: parking_lot::Mutex<Option<HistoryLease>>,
+    facts_rx: Option<Receiver<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>>>,
+    facts_charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+    facts_gap: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    cpu: Option<Arc<bitcoin_rs_storage::budget::CpuShares>>,
+    buffered_facts:
+        parking_lot::Mutex<hashbrown::HashMap<([u8; 32], u32), bitcoin_rs_storage::CommittedBlock>>,
 }
 
 struct PendingForward {
@@ -628,6 +785,7 @@ enum ChunkAction {
     Stalled,
     Progressed,
     MissingBody,
+    AwaitingFacts,
 }
 
 enum ForwardLeg {
@@ -667,6 +825,8 @@ pub enum DerivedIndexWorkerError {
     Index(#[from] IndexError),
     #[error("txindex worker: retained history unavailable: {0}")]
     HistoryUnavailable(#[from] HistoryUnavailable),
+    #[error("txindex worker: tx lookup artifact unavailable: {0}")]
+    ArtifactUnavailable(String),
     #[error("txindex worker: missing body at height {height}, hash {hash}")]
     MissingBody { height: u32, hash: Hash256 },
     #[error("txindex worker: body store missing")]
@@ -703,6 +863,9 @@ mod supervisor_tests;
 #[cfg(test)]
 #[expect(clippy::expect_used, clippy::panic)]
 mod recovery_tests;
+
+#[cfg(test)]
+mod seed_session_tests;
 
 #[cfg(test)]
 mod tests;

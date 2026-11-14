@@ -1,3 +1,4 @@
+mod digest;
 mod format;
 pub mod fs;
 mod load;
@@ -5,11 +6,11 @@ mod publish;
 
 #[cfg(test)]
 mod tests;
-
+pub use digest::{ENGINE_IMAGE_DIR, digest_engine_dir, verify_engine_artifact};
 pub use format::{decode_hex, network_name};
 pub use fs::{
-    CURRENT_SCHEMA_FILE, create_file, current_schema_bytes, ensure_current_schema, open_data_dir,
-    read_file, sync_dir,
+    CURRENT_SCHEMA_FILE, CURRENT_SCHEMA_VERSION, create_file, current_schema_bytes,
+    ensure_current_schema, open_data_dir, read_file, sync_dir,
 };
 pub use load::open_checkpoint_generation_at;
 pub use load::open_current_checkpoint_at;
@@ -142,6 +143,28 @@ pub struct UtxoArtifactV1 {
     pub output_count: u64,
     pub muhash_trailer_sha256: String,
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EngineFileV1 {
+    /// Engine image file path relative to the image directory, `/`-separated.
+    pub file: String,
+    /// Content bytes of the file.
+    pub bytes: u64,
+    /// SHA-256 of the file content encoded as lowercase hex.
+    pub sha256: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EngineArtifactV1 {
+    /// Directory holding the engine image, relative to the generation dir.
+    pub dir: String,
+    /// Total content bytes of every recorded image file.
+    pub bytes: u64,
+    /// SHA-256 over the sorted per-file records, encoded as lowercase hex.
+    pub sha256: String,
+    /// One record per image file, sorted by `file`.
+    pub files: Vec<EngineFileV1>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoinStatsArtifactV1 {
@@ -176,6 +199,8 @@ pub struct CheckpointManifestV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub utxo: Option<UtxoArtifactV1>,
     pub coinstats: CoinStatsArtifactV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<EngineArtifactV1>,
 }
 
 #[derive(Debug, Error)]

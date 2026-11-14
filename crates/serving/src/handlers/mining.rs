@@ -384,7 +384,7 @@ fn parse_generateblock_transactions(
         ));
     };
     let mut transactions = Vec::with_capacity(entries.len());
-    let mut snapshot: Option<MempoolMiningSnapshot> = None;
+    let mut snapshot: Option<Arc<MempoolMiningSnapshot>> = None;
     for entry in entries {
         let Some(text) = entry.as_str() else {
             return Err(RpcError::InvalidType(

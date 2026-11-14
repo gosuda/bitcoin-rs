@@ -1,4 +1,5 @@
-use bitcoin_rs_execution::chain::{BlockHeader, BlockTree, NodeId, NodeStatus, plan_reorg};
+use bitcoin_rs_consensus::header_rules::BlockHeader;
+use bitcoin_rs_execution::chain::{BlockTree, NodeId, NodeStatus, plan_reorg};
 
 use crate::support::chain::error::TestError;
 use crate::support::chain::pow_oracle;

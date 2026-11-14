@@ -262,7 +262,7 @@ mod tests {
             tip_id: bitcoin_rs_execution::chain::NodeId::new(tip_id),
             chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
             height,
-            chainwork: bitcoin_rs_execution::chain::ChainWork::from(u64::from(height) + 1),
+            chainwork: bitcoin_rs_consensus::header_rules::ChainWork::from(u64::from(height) + 1),
             hash: Hash256::from_le_bytes(&[hash_byte; 32]),
         })
     }

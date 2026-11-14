@@ -1,6 +1,7 @@
 use bitcoin_rs_consensus::primitives::{Block, BlockImage, Header, Tx};
 
 pub mod block_memory;
+pub use block_memory::BlockMemory;
 pub use block_memory::BlockMemoryCredit;
 
 pub struct InboundBlock {

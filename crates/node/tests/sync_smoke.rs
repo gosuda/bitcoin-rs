@@ -17,6 +17,7 @@ use parking_lot::RwLock;
 
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 
+// SYNC-02
 #[test]
 fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestError> {
     let genesis = regtest_genesis_block()?;
@@ -29,7 +30,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestErr
     let peer_table = Arc::new(bitcoin_rs_wire::PeerTable::new());
     let (inbound_headers_tx, inbound_headers_rx) = unbounded::<bitcoin_rs_wire::InboundHeaders>();
     let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_wire::InboundBlock>();
-    let (handles, _coin_stats) = apply_handles_with_coin_stats(
+    let (handles, coin_stats) = apply_handles_with_coin_stats(
         Network::Regtest,
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
@@ -37,15 +38,21 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestErr
     );
     let handles = Arc::new(handles);
     let ibd = handles.ibd_latch();
-    let sync = bitcoin_rs_node::sync::block_sync(
-        Arc::clone(&handles),
-        bitcoin_rs_node::ChainFollowers::noop(),
-        Arc::clone(&peer_table),
+    let sync = bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
+        handles: Arc::clone(&handles),
+        followers: bitcoin_rs_node::ChainFollowers::noop(),
+        peer_table,
         inbound_headers_rx,
         inbound_blocks_rx,
-        Arc::clone(&ibd),
-        None,
-    );
+        ibd,
+        assumeutxo: None,
+        budget: Arc::new(
+            bitcoin_rs_node::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(16),
+                1,
+            ),
+        ),
+    });
 
     inbound_headers_tx
         .send(bitcoin_rs_wire::InboundHeaders {
@@ -69,7 +76,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestErr
     assert_eq!(applied.height, 2);
     assert_eq!(applied.hash, block_two.block_hash().0);
     let expected_stats = expected_coin_stats(&[&genesis, &block_one, &block_two])?;
-    assert_engine_coin_stats(&handles, &expected_stats)?;
+    assert_engine_coin_stats(&handles, &coin_stats.snapshot(), &expected_stats)?;
     assert_eq!(block_tree.read().len(), 3);
     Ok(())
 }
@@ -89,7 +96,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
     let applied_tip = Arc::new(ArcSwapOption::empty());
     let (inbound_headers_tx, inbound_headers_rx) = unbounded();
     let (inbound_blocks_tx, inbound_blocks_rx) = unbounded();
-    let (handles, _coin_stats, _utxo) = apply_handles_with_coin_stats_and_utxo(
+    let (handles, coin_stats, _utxo) = apply_handles_with_coin_stats_and_utxo(
         Network::Regtest,
         chain_tip,
         applied_tip,
@@ -98,15 +105,21 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
     let handles = Arc::new(handles);
     let followers = bitcoin_rs_node::ChainFollowers::noop();
     let block_log = followers.block_log_reader();
-    let sync = bitcoin_rs_node::sync::block_sync(
-        Arc::clone(&handles),
+    let sync = bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
+        handles: Arc::clone(&handles),
         followers,
-        Arc::new(bitcoin_rs_wire::PeerTable::new()),
+        peer_table: Arc::new(bitcoin_rs_wire::PeerTable::new()),
         inbound_headers_rx,
         inbound_blocks_rx,
-        handles.ibd_latch(),
-        None,
-    );
+        ibd: handles.ibd_latch(),
+        assumeutxo: None,
+        budget: Arc::new(
+            bitcoin_rs_node::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(16),
+                1,
+            ),
+        ),
+    });
     sync.tick();
     let before = handles.chain_snapshot();
     assert_eq!(
@@ -138,7 +151,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
             .ok_or_else(|| TestError::message("missing applied tip"))?;
         assert_eq!((applied.height, applied.hash), (0, genesis.block_hash().0));
         assert_eq!(handles.chain_snapshot(), before);
-        assert_engine_coin_stats(&handles, &genesis_stats)?;
+        assert_engine_coin_stats(&handles, &coin_stats.snapshot(), &genesis_stats)?;
         assert!(
             handles
                 .utxo_reader()
@@ -194,7 +207,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
     assert_eq!(after.epoch, before.epoch);
     assert_eq!(after.sequence, before.sequence + 2);
     let expected_stats = expected_coin_stats(&[&genesis, &block_one, &block_two])?;
-    assert_engine_coin_stats(&handles, &expected_stats)?;
+    assert_engine_coin_stats(&handles, &coin_stats.snapshot(), &expected_stats)?;
     for (height, block) in [&block_one, &block_two].iter().enumerate() {
         assert_eq!(
             handles
@@ -229,7 +242,7 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats() -> Result<()
     let peer_table = Arc::new(bitcoin_rs_wire::PeerTable::new());
     let (inbound_headers_tx, inbound_headers_rx) = unbounded::<bitcoin_rs_wire::InboundHeaders>();
     let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_wire::InboundBlock>();
-    let (handles, _coin_stats, _utxo) = apply_handles_with_coin_stats_and_utxo(
+    let (handles, coin_stats, _utxo) = apply_handles_with_coin_stats_and_utxo(
         Network::Regtest,
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
@@ -237,15 +250,21 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats() -> Result<()
     );
     let handles = Arc::new(handles);
     let ibd = handles.ibd_latch();
-    let sync = bitcoin_rs_node::sync::block_sync(
-        Arc::clone(&handles),
-        bitcoin_rs_node::ChainFollowers::noop(),
-        Arc::clone(&peer_table),
+    let sync = bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
+        handles: Arc::clone(&handles),
+        followers: bitcoin_rs_node::ChainFollowers::noop(),
+        peer_table,
         inbound_headers_rx,
         inbound_blocks_rx,
-        Arc::clone(&ibd),
-        None,
-    );
+        ibd,
+        assumeutxo: None,
+        budget: Arc::new(
+            bitcoin_rs_node::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(16),
+                1,
+            ),
+        ),
+    });
 
     inbound_headers_tx
         .send(bitcoin_rs_wire::InboundHeaders {
@@ -299,7 +318,7 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats() -> Result<()
 
     let block_refs: Vec<&Block> = fixture.blocks.iter().collect();
     let expected_stats = expected_coin_stats(&block_refs)?;
-    assert_engine_coin_stats(&handles, &expected_stats)?;
+    assert_engine_coin_stats(&handles, &coin_stats.snapshot(), &expected_stats)?;
     Ok(())
 }
 
@@ -399,7 +418,11 @@ fn expected_coin_stats(blocks: &[&Block]) -> Result<CoinStats, TestError> {
 /// coinstats identity: `scan_coin_stats` and incremental insert/remove
 /// bookkeeping carry removals in different internal accumulator fields, so
 /// raw-struct equality is not the identity.
-fn assert_engine_coin_stats(handles: &Chainstate, expected: &CoinStats) -> Result<(), TestError> {
+fn assert_engine_coin_stats(
+    handles: &Chainstate,
+    listener: &CoinStats,
+    expected: &CoinStats,
+) -> Result<(), TestError> {
     let reader = handles.utxo_reader();
     let snapshot = reader.scan_coin_snapshot()?;
     let coins = UtxoSet::new();
@@ -425,6 +448,7 @@ fn assert_engine_coin_stats(handles: &Chainstate, expected: &CoinStats) -> Resul
     assert_eq!(scanned.total_amount, expected.total_amount);
     assert_eq!(scanned.bogo_size, expected.bogo_size);
     assert_eq!(scanned.utxo_count, expected.utxo_count);
+    assert_eq!(listener.tx_count, expected.tx_count);
     assert_eq!(
         scanned.muhash.finalize_hash(),
         expected.muhash.finalize_hash(),

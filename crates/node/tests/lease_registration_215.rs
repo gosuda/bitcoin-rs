@@ -32,15 +32,21 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
         )),
     );
     let ibd = handles.ibd_latch();
-    bitcoin_rs_node::sync::block_sync(
-        Arc::new(handles),
-        bitcoin_rs_node::ChainFollowers::noop(),
+    bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
+        handles: Arc::new(handles),
+        followers: bitcoin_rs_node::ChainFollowers::noop(),
         peer_table,
-        headers_rx,
-        blocks_rx,
+        inbound_headers_rx: headers_rx,
+        inbound_blocks_rx: blocks_rx,
         ibd,
-        None,
-    )
+        assumeutxo: None,
+        budget: Arc::new(
+            bitcoin_rs_node::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(16),
+                1,
+            ),
+        ),
+    })
 }
 
 fn info(addr: SocketAddr) -> PeerInfo {

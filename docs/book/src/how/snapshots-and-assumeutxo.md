@@ -32,27 +32,19 @@ The RPC path is `loadtxoutset` (`crates/serving/src/handlers/chain.rs`), which r
 1. The manager refuses unless disk status is `Uninitialized` (`require_unactivated`) and no full-revalidation marker exists (`AssumeUtxoError::AlreadyActive`, `FullRevalidationRequired`).
 2. `install_snapshot` (`crates/execution/src/lib.rs:590`) takes admission and the chain-transition lock and checks the tip is settled: the durable head and the applied tip must name the same `(hash, height, tx count)`. A mismatch fails closed and returns `SnapshotTipNotSettled`; this is the "validating head refusal" in reverse, refusing activation while a head transition is unsettled.
 3. The snapshot base must carry more accumulated chainwork than the current tip (`ActivationBehindTip`).
-4. Height, base hash, and commitment are rechecked against the pin inside the same transition exclusion, then the coins replace the live UTXO set, CoinStats is reset with the pinned tx count, and the durable head commits a new row carrying `AssumeUtxoDiskStatus::Validating` and attestation `AssumeValid` (`crates/execution/src/assumeutxo.rs:606-660`).
-5. The manager creates the `Historical` counterpart chainstate at genesis and the node continues.
+4. The installed coins are scanned; the scan must reproduce the pinned `hash_serialized`, or activation fails before anything is published. The snapshot-base checkpoint is then published (see below).
+5. The durable head commits a row carrying `AssumeUtxoDiskStatus::Validating` and attestation `AssumeValid`, which makes the checkpoint live. The manager creates the `Historical` counterpart chainstate at genesis and the node continues.
 
-The node now serves the chain from the snapshot while the historical chainstate revalidates from genesis. The RPC `getchainstates` projects this lifecycle: it reports the active and historical chainstates, their roles, heights, and validation progress as one coherent view (`crates/serving/src/registry.rs`, `API-33`). When history reaches the base height, the reconstructed `hash_serialized` and cumulative tx count must match the pinned metadata; the manager then marks the disk status `Finalized`, attests the durable head `Full`, and the active role decays from `AssumedActive` to `Ordinary` (`assumeutxo.rs:802-850`). On any historical failure the node marks itself `Failed` and refuses subsequent startups rather than serving an unverified base: `trusted_anchor` maps `Failed` to `SnapshotArchiveError::PreviouslyFailed` (`crates/execution/src/assumeutxo_snapshot.rs:315-333`).
+The node now serves the chain from the snapshot while the historical chainstate revalidates from genesis. The RPC `getchainstates` projects this lifecycle: it reports the active and historical chainstates, their roles, heights, and validation progress as one coherent view (`crates/serving/src/registry.rs`, `API-33`). When history reaches the base height, the reconstructed `hash_serialized` and cumulative tx count must match the pinned metadata; the manager then marks the disk status `Finalized`, attests the durable head `Full`, and the active role decays from `AssumedActive` to `Ordinary` (`assumeutxo.rs:802-850`). On any historical failure the node marks itself `Failed` and refuses subsequent startups rather than serving an unverified base: `trusted_anchor` maps `Failed` to `SnapshotAnchorError::PreviouslyFailed` (`crates/execution/src/assumeutxo_snapshot.rs`).
 
-## The on-disk snapshot archive
+## The snapshot-base checkpoint
 
-Activation and every later startup read from `$DATA/assumeutxo/<base-hash>/` (`DIRECTORY`, `crates/execution/src/assumeutxo_snapshot.rs:24`). Two files:
+Activation publishes a checkpoint at the snapshot base before the durable head commits the base. The checkpoint holds the engine coin image, the header tree up to the base, and the coin statistics scanned from the installed coins. Activation refuses before publishing if that scan does not reproduce the pinned `hash_serialized`. The checkpoint `CURRENT` file is written last, so a crash before it leaves no checkpoint the head names.
 
-```
-assumeutxo/
-+- <base-hash>/
-   +- headers.dat   # (height + 1) * 80 bytes of headers, base first
-   +- coins.dat     # the UTXO coins in Core v2 framing, plus a v4 witness
-```
+At boot the node resumes from that checkpoint. A base without its checkpoint refuses to open. The retired `assumeutxo/` coin and header archive is not written, read, or copied; datadirs that still hold it convert with `bitcoin-rs-storage-convert` (`4 -> 5`), which verifies the archive before publishing the checkpoint.
 
-`install_verified` writes both under the same transition exclusion that commits the durable head row (`write_coins_sealed`, `assumeutxo_snapshot.rs:278`; `write_headers`, line 299). The witness minted by the coins write is sealed into `VerifiedSnapshotArtifact` on the next startup read and offered to the index seeder, the same mechanism the checkpoint seed offer uses.
+Readers of the checkpoint open files with `O_NOFOLLOW` on Unix and require a regular file.
 
-At boot, `load_verified` (`assumeutxo_snapshot.rs:348`) replays `headers.dat` through `accept_headers` in `HistoricalReplay` mode, requires the archive to end exactly at the pinned block and height, then reads `coins.dat` with the strict v4 witnessed reader and rechecks height, base hash, and `hash_serialized_3` against the pin before trusting the set.
-
-The directory also holds transient reservation files named `.coins.dat.<pid>.<n>.tmp` and `.headers.dat.<pid>.<n>.tmp` while a writer is in flight. A recovered manager probes them, recognizes only native v4 names matching the pinned base, and reclaims or deletes them; `cleanup_reservations` never touches an unknown fragment, and startup never resets the accepted head to clean one up. Readers open files with `O_NOFOLLOW` on Unix and require a regular file.
 
 ## What "attest" means
 

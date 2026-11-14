@@ -1,7 +1,6 @@
 use crate::NodeConfig;
 use crate::config::ConfigError;
 use crate::run::RunError;
-use crate::snapshot::SnapshotImportError;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_execution::chain::TipSnapshot;
 use bitcoin_rs_execution::events::ChainEventPublisher;
@@ -11,7 +10,7 @@ pub(crate) use bitcoin_rs_execution::recovery::ResumeSource;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_projection::runtime::DEFAULT_BATCH_LIMITS;
 use bitcoin_rs_projection::runtime::OpenDerivedIndex;
-use bitcoin_rs_projection::runtime::open_derived_index_store_on_worker;
+use bitcoin_rs_projection::runtime::open_derived_index_store_with_scratch;
 use bitcoin_rs_serving::context::PruneService;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
@@ -96,8 +95,11 @@ pub struct NodeState {
     recovery_reporter: Arc<storage::RecoveryReporter>,
     pub(crate) snapshots: Arc<crate::snapshot::SnapshotControl>,
     block_announce_rx: Mutex<Option<crate::p2p::block_announce::BlockAnnounceReceiver>>,
-    shutdown: Arc<bitcoin_rs_execution::chain::LatchWriter>,
-    _p2p_shutdown_guard: bitcoin_rs_execution::chain::HookGuard,
+    shutdown: Arc<bitcoin_rs_consensus::latch::LatchWriter>,
+    _p2p_shutdown_guard: bitcoin_rs_consensus::latch::HookGuard,
+    block_memory: Arc<bitcoin_rs_wire::inbound::block_memory::BlockMemory>,
+    #[cfg(any(test, feature = "test-seam"))]
+    budget: Arc<crate::budget::NodeBudget>,
 }
 
 impl Drop for NodeState {
@@ -130,6 +132,17 @@ impl NodeState {
         &self.config.data_dir
     }
 
+    #[must_use]
+    pub fn block_memory(&self) -> Arc<bitcoin_rs_wire::inbound::block_memory::BlockMemory> {
+        Arc::clone(&self.block_memory)
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn budget(&self) -> Arc<crate::budget::NodeBudget> {
+        Arc::clone(&self.budget)
+    }
     #[cfg(test)]
     pub(crate) const fn resume_source(&self) -> ResumeSource {
         self.resume_source
@@ -271,12 +284,12 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn shutdown_reader(&self) -> bitcoin_rs_execution::chain::LatchReader {
+    pub fn shutdown_reader(&self) -> bitcoin_rs_consensus::latch::LatchReader {
         self.shutdown.reader()
     }
 
     #[must_use]
-    pub fn shutdown_writer(&self) -> Arc<bitcoin_rs_execution::chain::LatchWriter> {
+    pub fn shutdown_writer(&self) -> Arc<bitcoin_rs_consensus::latch::LatchWriter> {
         Arc::clone(&self.shutdown)
     }
 
@@ -329,11 +342,21 @@ impl NodeState {
         self.snapshots.manager.chainstates_summary()
     }
 
-    pub fn activate_assumeutxo_snapshot_file(
+    pub fn import_manifest(
         &self,
         path: impl AsRef<std::path::Path>,
-    ) -> core::result::Result<(), SnapshotImportError> {
-        self.snapshots.import_native(path.as_ref())
+    ) -> core::result::Result<crate::snapshot::SnapshotImport, crate::snapshot::SnapshotImportError>
+    {
+        self.snapshots.import_manifest(path.as_ref())
+    }
+
+    pub fn three_positions(
+        &self,
+    ) -> core::result::Result<
+        crate::snapshot::ThreePositions,
+        bitcoin_rs_serving::context::SnapshotControlError,
+    > {
+        self.snapshots.three_positions()
     }
 
     #[must_use]
@@ -390,7 +413,24 @@ impl NodeState {
 
     pub fn start_index_workers(&mut self) -> core::result::Result<(), IndexWorkerError> {
         let history = self.storage.bounded_history();
-        self.derived_index.start(&self.chainstate, history)
+        let manager = Arc::clone(&self.snapshots.manager);
+        let historical_verified = Arc::new(move || {
+            manager
+                .status()
+                .map(|status| match status {
+                    bitcoin_rs_execution::AssumeUtxoDiskStatus::Validating {
+                        historical_height,
+                        historical_hash,
+                        ..
+                    } => Some((historical_height, historical_hash)),
+                    _ => None,
+                })
+                .map_err(|error| {
+                    bitcoin_rs_projection::TxQueryError::Storage(error.to_string().into())
+                })
+        });
+        self.derived_index
+            .start(&self.chainstate, history, historical_verified)
     }
 
     #[must_use]
@@ -426,7 +466,7 @@ fn build_derived_index_open_spec(
     txindex_cache_bytes: u64,
     epoch: u64,
     guard: &bitcoin_rs_storage::StoreGuard,
-    seed_slot: Option<bitcoin_rs_storage::utxo::SeedOfferCell>,
+    budget: &Arc<crate::budget::NodeBudget>,
 ) -> core::result::Result<Option<bitcoin_rs_projection::runtime::DerivedIndexOpenSpec>, ConfigError>
 {
     let enabled = derived_index_capabilities(config);
@@ -443,6 +483,7 @@ fn build_derived_index_open_spec(
     let backend = config.storage.backend;
     let cache_bytes = txindex_cache_bytes;
     let guard = Arc::clone(guard);
+    let seal_scratch = config.data_dir.join("seal-scratch");
     Ok(Some(bitcoin_rs_projection::runtime::DerivedIndexOpenSpec {
         scripthash_limit: config.indexes.scripthash_limit,
         data_dir: config.data_dir.clone(),
@@ -458,13 +499,22 @@ fn build_derived_index_open_spec(
                 dir,
                 Some(cache_bytes),
                 &guard,
-                DerivedIndexComposer { backend, epoch },
+                DerivedIndexComposer {
+                    backend,
+                    epoch,
+                    seal_scratch: seal_scratch.clone(),
+                },
             )
         }),
-        utxo: None,
-        chain_transition: None,
         bundle: index_bundle_directive(config)?,
-        seed_slot,
+        facts_rx: None,
+        facts_charge: None,
+        query_charge: Some(bitcoin_rs_storage::budget::ChargeHandle::new(
+            budget.clone(),
+            bitcoin_rs_storage::budget::BudgetOwner::QueryViews,
+        )),
+        facts_gap: None,
+        cpu: None,
     }))
 }
 
@@ -477,16 +527,121 @@ fn index_bundle_directive(
         network: config.network,
     };
     match (&config.indexes.bundle_import, &config.indexes.bundle_export) {
-        (None, None) => Ok(IndexBundleDirective::None),
+        (None, None) => match config.assumeutxo_manifest.as_deref() {
+            Some(path) => {
+                manifest_attach_directive(path, config.network, derived_index_capabilities(config))
+            }
+            None => Ok(IndexBundleDirective::None),
+        },
         (Some(dir), None) => Ok(IndexBundleDirective::Restore(request(dir))),
         (None, Some(dir)) => Ok(IndexBundleDirective::Export(request(dir))),
         (Some(_), Some(_)) => Err(ConfigError::IndexBundleImportExportExclusive),
     }
 }
+fn manifest_attach_directive(
+    manifest_path: &std::path::Path,
+    network: bitcoin_rs_consensus::primitives::Network,
+    enabled: bitcoin_rs_projection::IndexCapabilities,
+) -> Result<bitcoin_rs_projection::portable::IndexBundleDirective, ConfigError> {
+    use bitcoin_rs_consensus::primitives::IndexArtifactCapability;
+    use bitcoin_rs_execution::manifest::CapabilityTrust;
+    use bitcoin_rs_projection::IndexCapability;
+    use bitcoin_rs_projection::portable::{IndexBundleDirective, ManifestArtifactTarget};
+    let bytes = match read_bounded_manifest(manifest_path) {
+        Ok(b) => b,
+        Err(err) => {
+            tracing::debug!(path = %manifest_path.display(), %err, "could not read manifest for index directive");
+            return Ok(IndexBundleDirective::None);
+        }
+    };
+    let manifest = match bitcoin_rs_execution::manifest::SnapshotManifest::parse(&bytes) {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::debug!(path = %manifest_path.display(), %err, "could not parse manifest for index directive");
+            return Ok(IndexBundleDirective::None);
+        }
+    };
+    if manifest.schema != bitcoin_rs_projection::index_format_version() {
+        tracing::debug!(
+            path = %manifest_path.display(),
+            manifest_schema = manifest.schema,
+            "manifest schema differs from the node index format; no index artifact attach"
+        );
+        return Ok(IndexBundleDirective::None);
+    }
+    let Some(anchor) = network.assume_utxo_for_height(manifest.base_height) else {
+        return Ok(IndexBundleDirective::None);
+    };
+    let genesis = network.genesis_block_hash().to_le_bytes();
+    let Ok(trust) = manifest.verify_against_anchor(network, genesis, anchor) else {
+        return Ok(IndexBundleDirective::None);
+    };
+    let dir = manifest_path.parent().unwrap_or(manifest_path);
+    let mut attachments = Vec::new();
+    for (index, cap_trust) in trust.capability_trust.iter().enumerate() {
+        let CapabilityTrust::Trusted(_) = cap_trust else {
+            continue;
+        };
+        let Some(capability) = IndexArtifactCapability::from_index(index) else {
+            continue;
+        };
+        let Ok(artifact_path) = manifest.artifact_path(dir, index + 1) else {
+            continue;
+        };
+        let target = Box::new(ManifestArtifactTarget {
+            artifact_path,
+            base_height: manifest.base_height,
+            base_hash: manifest.base_hash,
+            floor: manifest.coverage[index].unwrap_or(0),
+            network,
+            index_format: manifest.schema,
+            sha256: manifest.artifact_sha256(capability),
+            size_bytes: manifest.artifact_size(capability),
+            chain_tx_count: anchor.chain_tx_count,
+        });
+        let (projection, directive) = match capability {
+            IndexArtifactCapability::TxLookup => (
+                IndexCapability::TxLookup,
+                IndexBundleDirective::AttachManifestArtifact(target),
+            ),
+            IndexArtifactCapability::ScriptHistory => (
+                IndexCapability::ScriptHistory,
+                IndexBundleDirective::AttachManifestScriptHistory(target),
+            ),
+            IndexArtifactCapability::CompactFilters => (
+                IndexCapability::CompactFilters,
+                IndexBundleDirective::AttachManifestCompactFilters(target),
+            ),
+            IndexArtifactCapability::ScriptLive => continue,
+        };
+        if enabled.contains(projection) {
+            attachments.push(directive);
+        }
+    }
+    Ok(IndexBundleDirective::Manifest(attachments))
+}
+
+fn read_bounded_manifest(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_MANIFEST_BYTES) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "manifest is larger than 1 MiB",
+        ));
+    }
+    Ok(bytes)
+}
 
 struct DerivedIndexComposer {
     backend: StorageBackend,
     epoch: u64,
+    seal_scratch: std::path::PathBuf,
 }
 
 impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
@@ -499,7 +654,7 @@ impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
     {
         let _ = self.backend;
         let batch_limits = DEFAULT_BATCH_LIMITS;
-        open_derived_index_store_on_worker(store, batch_limits, self.epoch)
+        open_derived_index_store_with_scratch(store, batch_limits, self.epoch, self.seal_scratch)
     }
 }
 

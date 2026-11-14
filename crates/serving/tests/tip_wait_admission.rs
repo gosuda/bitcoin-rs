@@ -6,11 +6,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use bitcoin_rs_consensus::latch::{LatchReader, LatchWriter};
 use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_execution::Chainstate;
-use bitcoin_rs_execution::chain::{
-    ActiveTipWait, LatchReader, LatchWriter, TipSnapshot, TipWaitCondition,
-};
+use bitcoin_rs_execution::chain::{ActiveTipWait, TipSnapshot, TipWaitCondition};
 use bitcoin_rs_serving::{Auth, Handler, RpcServer, context::Context};
 use parking_lot::{Condvar, Mutex};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};

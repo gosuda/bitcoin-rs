@@ -22,7 +22,7 @@ impl DerivedIndexCapability {
         Self {
             lifecycle,
             runtime,
-            enabled: enabled.without(crate::IndexCapability::CompactFilters),
+            enabled,
         }
     }
 
@@ -53,14 +53,14 @@ impl DerivedIndexCapability {
         let script_live_outage = runtime.script_live_failure.read().clone();
         let script_history_outage = runtime.script_history_failure.read().clone();
         let unavailable = [
-            (IndexCapability::ScriptLive, script_live_outage.as_ref()),
+            (IndexCapability::ScriptLive, script_live_outage.is_some()),
             (
                 IndexCapability::ScriptHistory,
-                script_history_outage.as_ref(),
+                script_history_outage.is_some(),
             ),
         ]
         .into_iter()
-        .filter_map(|(capability, reason)| reason.map(|_| capability))
+        .filter_map(|(capability, down)| down.then_some(capability))
         .collect::<IndexCapabilities>();
         let observed = if unavailable.is_empty() {
             phase
@@ -73,7 +73,10 @@ impl DerivedIndexCapability {
                 to_height,
             };
         }
-        if let Some(reason) = script_live_outage.or(script_history_outage) {
+        let reason = script_live_outage
+            .map(|outage| outage.reason())
+            .or(script_history_outage);
+        if let Some(reason) = reason {
             let servable = enabled
                 .iter()
                 .filter(|capability| !unavailable.contains(*capability))
@@ -142,10 +145,31 @@ impl DerivedIndexCapability {
         loop {
             attempts += 1;
             match engine.index_progress_for(required) {
-                Err(TxQueryError::Retry) if attempts < PROGRESS_READ_ATTEMPTS => {}
+                Err(TxQueryError::Retry(_)) if attempts < PROGRESS_READ_ATTEMPTS => {}
                 result => return result,
             }
         }
+    }
+
+    /// SNP-09: one independent coverage value per enabled projection.
+    #[must_use]
+    pub fn capability_coverage(&self) -> [Option<u32>; 4] {
+        let mut coverage = [None; 4];
+        for capability in self.enabled.iter() {
+            coverage[capability.index()] = self.coverage_of(capability);
+        }
+        coverage
+    }
+
+    fn coverage_of(&self, capability: IndexCapability) -> Option<u32> {
+        let lifecycle = self.lifecycle.as_ref()?.load();
+        let engine = match &**lifecycle {
+            DerivedIndexLifecycle::Serving(engine) => engine,
+            _ => return None,
+        };
+        Self::progress(engine, IndexCapabilities::NONE.insert(capability))
+            .ok()
+            .map(|progress| progress.processed_height)
     }
 }
 
@@ -159,5 +183,9 @@ impl DerivedIndexCapabilitySource for DerivedIndexCapability {
             _ => CapabilityState::Disabled,
         };
         derived_index_status(enabled, state)
+    }
+
+    fn capability_coverage(&self) -> [Option<u32>; 4] {
+        self.capability_coverage()
     }
 }

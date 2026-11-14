@@ -52,24 +52,30 @@ refuses a lease over deleted history.
 
 ## Cache budget
 
-`dbcache` is one process-wide budget, clamped to `[16 MiB, 1 TiB]`.
+`dbcache` is one cache budget, clamped to `[16 MiB, 1 TiB]`.
 `cache_budget::split_cache_budget_with_txindex` first divides it across the
-persistent namespaces: txindex receives 20%, floored to whole bytes, and
-chainstate receives the remainder.
+persistent namespaces. Txindex receives 20%, floored to whole bytes.
+Chainstate receives the remainder.
 `cache_budget::split_cache_budget_without_txindex` gives the whole budget to
 chainstate when the transaction index is disabled.
 
-The chainstate allowance is then split equally between the storage engine and
-the `CoinStore` cache. The engine receives half, floored to whole bytes; coins
-receive the remainder, including the extra byte when the allowance is odd.
-The backend receives only the engine share through `open_with_cache`; RocksDB
-uses it to size its LRU block cache. MDBX ignores the engine share; that share
-is not reassigned to coins. The txindex share is unchanged.
+`cache_budget::split_chainstate_cache_budget` then splits the chainstate allowance
+equally between the storage engine and the `CoinStore` cache.
+It returns a `ChainstateCacheBudget`. The engine receives half, floored to whole
+bytes. Coins receive the remainder, including the extra byte when the allowance
+is odd. The backend receives only the engine share through `open_with_cache`.
+RocksDB uses it to size its LRU block cache. MDBX ignores the engine share.
+That share is not reassigned to coins. The txindex share is unchanged.
+
+The node ledger uses these engine and coin shares as the corresponding owner
+caps, not the full `dbcache` for each owner.
+Engine cache sampling and `CoinStore` charges remain separate.
+The other owner budgets and the foreground reserve are unchanged.
 
 The startup log's `chainstate_cache_bytes` field reports the full chainstate
 allowance before the engine/coin split, not either owner's capacity.
 `txindex_cache_bytes` and `total_cache_bytes` retain their namespace and total
-budget meanings. These are cache allowances, not a process RSS limit.
+budget meanings. Cache allowances and resident accounting do not limit process RSS.
 
 ## Store guard
 

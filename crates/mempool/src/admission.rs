@@ -198,7 +198,7 @@ fn build_admission_request(
 }
 
 pub(crate) fn batch_requests(
-    txs: &[Tx],
+    txs: &[Arc<Tx>],
     mempool_inputs: Vec<Option<HashMap<OutPoint, TxOut>>>,
     chain: &dyn AdmissionChain,
     max_feerate_sat_per_kvb: Option<u64>,
@@ -207,8 +207,55 @@ pub(crate) fn batch_requests(
     (generation, sequence): (u64, u64),
     mode: crate::gateway::AdmissionMode,
 ) -> Option<Vec<AdmissionRequest>> {
-    let mut package_outputs = HashMap::new();
+    batch_requests_impl(
+        txs,
+        mempool_inputs,
+        chain,
+        max_feerate_sat_per_kvb,
+        time,
+        origin,
+        (generation, sequence),
+        mode,
+    )
+    .map(|(requests, _)| requests)
+}
+
+#[cfg(test)]
+pub(crate) fn batch_requests_package_clone_count(
+    txs: &[Arc<Tx>],
+    mempool_inputs: Vec<Option<HashMap<OutPoint, TxOut>>>,
+    chain: &dyn AdmissionChain,
+    max_feerate_sat_per_kvb: Option<u64>,
+    time: u64,
+    origin: AdmissionOrigin,
+    (generation, sequence): (u64, u64),
+    mode: crate::gateway::AdmissionMode,
+) -> Option<(Vec<AdmissionRequest>, u64)> {
+    batch_requests_impl(
+        txs,
+        mempool_inputs,
+        chain,
+        max_feerate_sat_per_kvb,
+        time,
+        origin,
+        (generation, sequence),
+        mode,
+    )
+}
+
+fn batch_requests_impl(
+    txs: &[Arc<Tx>],
+    mempool_inputs: Vec<Option<HashMap<OutPoint, TxOut>>>,
+    chain: &dyn AdmissionChain,
+    max_feerate_sat_per_kvb: Option<u64>,
+    time: u64,
+    origin: AdmissionOrigin,
+    (generation, sequence): (u64, u64),
+    mode: crate::gateway::AdmissionMode,
+) -> Option<(Vec<AdmissionRequest>, u64)> {
+    let mut package_outputs: HashMap<OutPoint, TxOut> = HashMap::new();
     let mut requests = Vec::with_capacity(txs.len());
+    let mut package_output_clones = 0_u64;
     for (tx, mempool_inputs) in txs.iter().zip(mempool_inputs) {
         let snapshot = if mempool_inputs.is_some() {
             chain.snapshot(tx)?
@@ -220,16 +267,20 @@ pub(crate) fn batch_requests(
         }
         let mut available = snapshot.prevouts.into_iter().collect::<HashMap<_, _>>();
         available.extend(mempool_inputs.unwrap_or_default());
-        available.extend(
-            package_outputs
-                .iter()
-                .map(|(outpoint, output): (&OutPoint, &TxOut)| (*outpoint, output.clone())),
-        );
+        for input in tx.inputs.iter() {
+            if available.contains_key(&input.previous_output) {
+                continue;
+            }
+            if let Some(output) = package_outputs.get(&input.previous_output) {
+                package_output_clones += 1;
+                available.insert(input.previous_output, output.clone());
+            }
+        }
         let (prevouts, _) = combine_input_facts(tx, &available, &HashMap::new());
         let context =
             crate::accounting::prepared_context(tx, &prevouts, prevouts.len() != tx.inputs.len());
         requests.push(AdmissionRequest {
-            tx: Arc::new(tx.clone()),
+            tx: Arc::clone(tx),
             context,
             prevouts,
             prevout_meta: snapshot.prevout_meta,
@@ -250,7 +301,7 @@ pub(crate) fn batch_requests(
             }
         }
     }
-    Some(requests)
+    Some((requests, package_output_clones))
 }
 
 impl MempoolGateway {
@@ -305,8 +356,9 @@ impl MempoolGateway {
                         .collect::<Vec<_>>(),
                 )
             };
+            let shared: Vec<Arc<Tx>> = txs.iter().map(|tx| Arc::new(tx.clone())).collect();
             let Some(requests) = batch_requests(
-                txs,
+                &shared,
                 mempool_inputs,
                 chain,
                 max_feerate_sat_per_kvb,
@@ -554,6 +606,7 @@ impl MempoolGateway {
                 }
                 Err(AdmitError::Policy(reason)) => return Err(SubmitError::Policy(reason)),
                 Err(AdmitError::Consensus) => return Err(SubmitError::Consensus),
+                Err(AdmitError::DeliveryQueueFull) => return Err(SubmitError::RetryExhausted),
             }
         }
         Err(SubmitError::RetryExhausted)

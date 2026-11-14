@@ -7,11 +7,12 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin::hex::DisplayHex;
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
-use bitcoin_rs_execution::chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
+use bitcoin_rs_execution::chain::{NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_projection::block_log::BlockRecord;
 use bitcoin_rs_serving::context::{ChainControl, ChainControlError, Context};
@@ -54,7 +55,12 @@ fn compact_filter_rpc_exposes_only_enabled_ready_data() -> Result<(), TestError>
     impl CompactFilterQuery for Filters {
         fn block_filter(&self, _: Hash256) -> Result<Option<BasicFilter>, TxQueryError> {
             if !self.0.load(Ordering::Acquire) {
-                return Err(TxQueryError::Retry);
+                return Err(TxQueryError::Retry(
+                    bitcoin_rs_projection::RetryReason::TipMoved {
+                        expected_commit: 0,
+                        current_commit: 1,
+                    },
+                ));
             }
             let mut header = [0; 32];
             header[0] = 1;
@@ -77,6 +83,10 @@ fn compact_filter_rpc_exposes_only_enabled_ready_data() -> Result<(), TestError>
             Ok(DerivedIndexInfo {
                 synced: self.0.load(Ordering::Acquire),
                 best_block_height: 0,
+                applied_height: 0,
+                historical_height: 0,
+                verified_height: 0,
+                coverage_height: 0,
             })
         }
     }
@@ -330,7 +340,7 @@ fn getblockhash_zero_returns_mainnet_genesis_on_fresh_context() -> Result<(), Te
 #[test]
 fn getblockchaininfo_reports_the_apply_halt_fact() -> Result<(), TestError> {
     let mut ctx = Context::new();
-    let closed = bitcoin_rs_execution::chain::LatchWriter::new();
+    let closed = bitcoin_rs_consensus::latch::LatchWriter::new();
     ctx.chain.closed_for_recovery = closed.reader();
     let ctx = Arc::new(ctx);
     let handler = Handler::new(Arc::clone(&ctx));
@@ -377,7 +387,7 @@ impl ChainControl for RecordingChainControl {
     fn dump_txoutset(
         &self,
         _path: &std::path::Path,
-        _cancellation: &bitcoin_rs_execution::chain::LatchReader,
+        _cancellation: &bitcoin_rs_consensus::latch::LatchReader,
     ) -> Result<
         bitcoin_rs_serving::context::SnapshotExport,
         bitcoin_rs_serving::context::SnapshotControlError,
@@ -393,7 +403,7 @@ impl ChainControl for RecordingChainControl {
         &self,
         _check_level: u8,
         _nblocks: u32,
-        _cancellation: &bitcoin_rs_execution::chain::LatchReader,
+        _cancellation: &bitcoin_rs_consensus::latch::LatchReader,
     ) -> Result<bool, ChainControlError> {
         match &self.verify_error {
             Some(error) => Err(error.clone()),
@@ -577,6 +587,10 @@ fn getindexinfo_returns_txindex_when_indexer_is_available() -> Result<(), TestEr
         info: bitcoin_rs_serving::context::DerivedIndexInfo {
             synced: true,
             best_block_height: 7,
+            applied_height: 7,
+            historical_height: 7,
+            verified_height: 7,
+            coverage_height: 7,
         },
     }));
     let handler = Handler::new(Arc::new(ctx));
@@ -632,6 +646,10 @@ fn getindexinfo_named_request_returns_only_that_index() -> Result<(), TestError>
         info: bitcoin_rs_serving::context::DerivedIndexInfo {
             synced: true,
             best_block_height: 7,
+            applied_height: 7,
+            historical_height: 7,
+            verified_height: 7,
+            coverage_height: 7,
         },
     }));
     let handler = Handler::new(Arc::new(ctx));
@@ -884,6 +902,10 @@ fn fee_stats_context(values: Option<HashMap<OutPoint, u64>>) -> (Arc<Context>, T
             info: bitcoin_rs_serving::context::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 7,
+                applied_height: 7,
+                historical_height: 7,
+                verified_height: 7,
+                coverage_height: 7,
             },
         }));
     }
@@ -1047,6 +1069,10 @@ impl Fixture {
             info: bitcoin_rs_serving::context::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 7,
+                applied_height: 7,
+                historical_height: 7,
+                verified_height: 7,
+                coverage_height: 7,
             },
         }));
         let block_hex = consensus_bytes(&block).to_lower_hex_string();

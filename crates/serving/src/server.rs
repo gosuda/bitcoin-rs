@@ -107,14 +107,14 @@ impl RpcServer {
 
     pub fn serve_with_shutdown(
         self,
-        shutdown: impl Into<bitcoin_rs_execution::chain::LatchReader>,
+        shutdown: impl Into<bitcoin_rs_consensus::latch::LatchReader>,
     ) -> io::Result<()> {
         self.serve_surface_with_shutdown(shutdown, RpcSurface::Shared)
     }
 
     pub fn serve_surface_with_shutdown(
         self,
-        shutdown: impl Into<bitcoin_rs_execution::chain::LatchReader>,
+        shutdown: impl Into<bitcoin_rs_consensus::latch::LatchReader>,
         surface: RpcSurface,
     ) -> io::Result<()> {
         self.serve_accept_loop(&shutdown.into(), surface, mio::net::TcpListener::accept)
@@ -122,7 +122,7 @@ impl RpcServer {
 
     fn serve_accept_loop(
         self,
-        shutdown: &bitcoin_rs_execution::chain::LatchReader,
+        shutdown: &bitcoin_rs_consensus::latch::LatchReader,
         surface: RpcSurface,
         accept: impl FnMut(&mio::net::TcpListener) -> io::Result<(mio::net::TcpStream, SocketAddr)>,
     ) -> io::Result<()> {
@@ -137,7 +137,7 @@ impl RpcServer {
     #[cfg(test)]
     fn serve_accept_loop_observed(
         self,
-        shutdown: &bitcoin_rs_execution::chain::LatchReader,
+        shutdown: &bitcoin_rs_consensus::latch::LatchReader,
         surface: RpcSurface,
         accept: impl FnMut(&mio::net::TcpListener) -> io::Result<(mio::net::TcpStream, SocketAddr)>,
         connections: Arc<ConnectionTracker>,
@@ -147,7 +147,7 @@ impl RpcServer {
 
     fn serve_accept_loop_with_connections(
         self,
-        shutdown: &bitcoin_rs_execution::chain::LatchReader,
+        shutdown: &bitcoin_rs_consensus::latch::LatchReader,
         surface: RpcSurface,
         mut accept: impl FnMut(&mio::net::TcpListener) -> io::Result<(mio::net::TcpStream, SocketAddr)>,
         connections: Arc<ConnectionTracker>,
@@ -290,7 +290,7 @@ impl RpcServer {
 }
 
 fn wait_for_accept_readiness(
-    shutdown: &bitcoin_rs_execution::chain::LatchReader,
+    shutdown: &bitcoin_rs_consensus::latch::LatchReader,
     readiness: &mut mio::Poll,
     events: &mut mio::Events,
 ) -> io::Result<()> {
@@ -305,7 +305,7 @@ fn wait_for_accept_readiness(
     Ok(())
 }
 
-fn wait_accept_backoff(shutdown: &bitcoin_rs_execution::chain::LatchReader) -> bool {
+fn wait_accept_backoff(shutdown: &bitcoin_rs_consensus::latch::LatchReader) -> bool {
     if shutdown.is_triggered() {
         return false;
     }
@@ -369,7 +369,7 @@ impl Drop for ConnectionPermit {
 struct AcceptContext {
     active: Arc<Mutex<ActiveConnections>>,
     connections: Arc<ConnectionTracker>,
-    shutdown: bitcoin_rs_execution::chain::LatchReader,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
     surface: RpcSurface,
 }
 

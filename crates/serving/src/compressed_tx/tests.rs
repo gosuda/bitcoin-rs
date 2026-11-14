@@ -1069,7 +1069,7 @@ fn production_resolver_resolves_through_block_bodies() {
         }
     }
 
-    struct StubTxIndex(Txid);
+    struct StubTxIndex(Tx, bitcoin_rs_projection::TransactionBlock);
     impl bitcoin_rs_projection::DerivedIndexQuery for StubTxIndex {
         fn transaction(
             &self,
@@ -1083,11 +1083,14 @@ fn production_resolver_resolves_through_block_bodies() {
         ) -> Result<Option<u64>, bitcoin_rs_projection::TxQueryError> {
             Ok(None)
         }
-        fn transaction_height(
+        fn transaction_block(
             &self,
             txid: &Txid,
-        ) -> Result<Option<u32>, bitcoin_rs_projection::TxQueryError> {
-            Ok((self.0 == *txid).then_some(100))
+        ) -> Result<
+            Option<(Tx, bitcoin_rs_projection::TransactionBlock)>,
+            bitcoin_rs_projection::TxQueryError,
+        > {
+            Ok((self.0.txid() == *txid).then(|| (self.0.clone(), self.1)))
         }
         fn index_info(
             &self,
@@ -1096,6 +1099,10 @@ fn production_resolver_resolves_through_block_bodies() {
             Ok(bitcoin_rs_projection::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 100,
+                applied_height: 100,
+                historical_height: 100,
+                verified_height: 100,
+                coverage_height: 100,
             })
         }
     }
@@ -1127,12 +1134,16 @@ fn production_resolver_resolves_through_block_bodies() {
     let mut ctx = Context::new();
     ctx.compressed_transactions = true;
     ctx.chain.block_body_source = Some(Arc::new(StubBody(body)));
-    ctx.indexes.derived_index = Some(Arc::new(StubTxIndex(prev_tx.txid())));
+    ctx.indexes.derived_index = Some(Arc::new(StubTxIndex(
+        prev_tx.clone(),
+        bitcoin_rs_projection::TransactionBlock {
+            height: 100,
+            hash: block.block_hash().into(),
+        },
+    )));
     ctx.chain
         .add_block(bitcoin_rs_projection::block_log::BlockRecord {
-            hash: bitcoin_rs_consensus::primitives::BlockHash::from(
-                bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[9_u8; 32]),
-            ),
+            hash: block.block_hash(),
             height: 100,
             body_size: 0,
             header: None,
@@ -1141,7 +1152,7 @@ fn production_resolver_resolves_through_block_bodies() {
         });
     let ctx = Arc::new(ctx);
     let raw_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(&consensus_bytes(&tx));
-    let latch = bitcoin_rs_execution::chain::LatchReader::fixture_never();
+    let latch = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     let compressed = compressrawtransaction(&ctx, &json!([raw_hex]), &latch).unwrap();
     assert!(
         compressed
@@ -1589,7 +1600,7 @@ fn production_resolver_clones_only_the_requested_output() {
         }
     }
 
-    struct StubTxIndex(Txid);
+    struct StubTxIndex(Tx, bitcoin_rs_projection::TransactionBlock);
     impl bitcoin_rs_projection::DerivedIndexQuery for StubTxIndex {
         fn transaction(
             &self,
@@ -1603,11 +1614,14 @@ fn production_resolver_clones_only_the_requested_output() {
         ) -> Result<Option<u64>, bitcoin_rs_projection::TxQueryError> {
             Ok(None)
         }
-        fn transaction_height(
+        fn transaction_block(
             &self,
             txid: &Txid,
-        ) -> Result<Option<u32>, bitcoin_rs_projection::TxQueryError> {
-            Ok((self.0 == *txid).then_some(100))
+        ) -> Result<
+            Option<(Tx, bitcoin_rs_projection::TransactionBlock)>,
+            bitcoin_rs_projection::TxQueryError,
+        > {
+            Ok((self.0.txid() == *txid).then(|| (self.0.clone(), self.1)))
         }
         fn index_info(
             &self,
@@ -1616,6 +1630,10 @@ fn production_resolver_clones_only_the_requested_output() {
             Ok(bitcoin_rs_projection::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 100,
+                applied_height: 100,
+                historical_height: 100,
+                verified_height: 100,
+                coverage_height: 100,
             })
         }
     }
@@ -1652,12 +1670,16 @@ fn production_resolver_clones_only_the_requested_output() {
 
     let mut ctx = Context::new();
     ctx.chain.block_body_source = Some(Arc::new(StubBody(body)));
-    ctx.indexes.derived_index = Some(Arc::new(StubTxIndex(txid)));
+    ctx.indexes.derived_index = Some(Arc::new(StubTxIndex(
+        funding.clone(),
+        bitcoin_rs_projection::TransactionBlock {
+            height: 100,
+            hash: block.block_hash().into(),
+        },
+    )));
     ctx.chain
         .add_block(bitcoin_rs_projection::block_log::BlockRecord {
-            hash: bitcoin_rs_consensus::primitives::BlockHash::from(
-                bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[9_u8; 32]),
-            ),
+            hash: block.block_hash(),
             height: 100,
             body_size: 0,
             header: None,
@@ -1665,7 +1687,7 @@ fn production_resolver_clones_only_the_requested_output() {
             time: 0,
         });
     let ctx = Arc::new(ctx);
-    let latch = bitcoin_rs_execution::chain::LatchReader::fixture_never();
+    let latch = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     let mut resolver = crate::context::RpcPrevoutResolver::new(&ctx, latch).unwrap();
 
     for (vout, expected) in funding.outputs.iter().enumerate() {
@@ -1817,7 +1839,7 @@ fn five_heights_cycling_loads_each_body_once() {
     let ctx = Arc::new(ctx);
     let spend = cycling_spend(&txids, 10);
 
-    let latch = bitcoin_rs_execution::chain::LatchReader::fixture_never();
+    let latch = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     let mut resolver = crate::context::RpcPrevoutResolver::new(&ctx, latch).unwrap();
     let (compressed, warnings) = compress_transaction(
         &spend,
@@ -1830,7 +1852,7 @@ fn five_heights_cycling_loads_each_body_once() {
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_loads(&source, &heights, 1);
 
-    let latch = bitcoin_rs_execution::chain::LatchReader::fixture_never();
+    let latch = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     let mut resolver = crate::context::RpcPrevoutResolver::new(&ctx, latch).unwrap();
     let plan = super::decompress_prepare(&compressed, &mut resolver).unwrap();
     let restored = super::decompress_finalize(plan, &resolver).unwrap();
@@ -1847,7 +1869,7 @@ fn cumulative_body_budget_fails_closed_past_grouped_heights() {
     let ctx = Arc::new(ctx);
     let spend = cycling_spend(&txids, 10);
 
-    let latch = bitcoin_rs_execution::chain::LatchReader::fixture_never();
+    let latch = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     let mut resolver = crate::context::RpcPrevoutResolver::new(&ctx, latch).unwrap();
     let error = compress_transaction(
         &spend,

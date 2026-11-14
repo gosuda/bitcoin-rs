@@ -7,11 +7,12 @@ use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::layout::{ParsedBlock, ParsedTransaction};
 use bitcoin_rs_consensus::primitives::{
     BlockHash, BlockImage, Hash256, Header, Network, deserialize,
 };
-use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader};
+use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use parking_lot::Mutex;
 #[cfg(test)]
@@ -436,7 +437,7 @@ impl ChainQuery for ActiveChainQuery {
         let progress = StreamProgress {
             emitted,
             halted,
-            retry: matches!(result, Err(bitcoin_rs_projection::TxQueryError::Retry)),
+            retry: matches!(result, Err(bitcoin_rs_projection::TxQueryError::Retry(_))),
         };
         if let Some(serving) = evaluate_stream_progress(pending, &bounds, end, progress)? {
             return Ok(serving);

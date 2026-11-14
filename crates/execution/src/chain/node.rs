@@ -1,10 +1,7 @@
 use crate::chain::ChainTxCount;
-use bitcoin_rs_consensus::primitives::{Hash256, Header};
-use ruint::Uint;
+use bitcoin_rs_consensus::primitives::Hash256;
 
-pub type ChainWork = Uint<256, 4>;
-
-pub type BlockHeader = Header;
+use bitcoin_rs_consensus::header_rules::{BlockHeader, ChainWork};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]

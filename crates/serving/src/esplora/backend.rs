@@ -6,7 +6,7 @@ use bitcoin_rs_mempool::MempoolEntry;
 
 use super::http::{dispatch_error, query_limit};
 use super::model::{Outspend, TransactionValue};
-use super::projection::{ParentSource, Projection};
+use super::projection::{ParentSource, Projection, TxSource};
 use super::public::{block_transaction_values, outspend, outspends_for_transaction};
 use crate::context::Context;
 use crate::handlers::Handler;
@@ -51,6 +51,7 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Option<Respons
 
 fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
     let projection = Projection::new(ctx);
+    let view = projection.capture_chain_view();
     let record = match projection.required_block_record(hash) {
         Ok(record) => record,
         Err(response) => return response,
@@ -62,7 +63,18 @@ fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    block_transaction_values(ctx, &record, &block, 0, usize::MAX).map_or_else(|r| r, json_ok)
+    let (values, source) = match block_transaction_values(ctx, &record, &block, 0, usize::MAX) {
+        Ok(values) => values,
+        Err(response) => return response,
+    };
+    let response = json_ok(values);
+    match source {
+        TxSource::Confirmed => response,
+        TxSource::Joined => match projection.ensure_chain_view(view.as_ref()) {
+            Ok(()) => response,
+            Err(unavailable) => unavailable,
+        },
+    }
 }
 
 fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Response {
@@ -103,7 +115,7 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
             batch.iter().map(|(_, tx)| (tx.as_ref(), None)),
             Some(ParentSource::Selected(&parents)),
         ) {
-            Ok(batch) => values.extend(batch),
+            Ok((batch, _)) => values.extend(batch),
             Err(response) => return response,
         }
     }
@@ -171,7 +183,7 @@ fn internal_transactions_scoped(ctx: &Context, body: &[u8], scope: TransactionSc
                     .gateway
                     .read()
                     .transaction_by_txid(id)
-                    .map(|transaction| ((*transaction).clone(), None))
+                    .map(|transaction| ((*transaction).clone(), None, TxSource::Joined))
             } else {
                 match projection.transaction(id) {
                     Ok(transaction) => transaction,
@@ -184,10 +196,10 @@ fn internal_transactions_scoped(ctx: &Context, body: &[u8], scope: TransactionSc
             transactions
                 .get(id)
                 .and_then(Option::as_ref)
-                .map(|(tx, status)| (tx, *status))
+                .map(|(tx, status, _)| (tx, *status))
         });
         match projection.transaction_values(selected, None) {
-            Ok(batch) => values.extend(batch),
+            Ok((batch, _)) => values.extend(batch),
             Err(response) => return response,
         }
     }
@@ -205,7 +217,7 @@ fn internal_outspends_by_txid(ctx: &Context, body: &[u8]) -> Response {
             Txid::from_str(&id).ok().map_or(Ok(Vec::new()), |id| {
                 projection
                     .transaction(&id)?
-                    .map_or(Ok(Vec::new()), |(transaction, _)| {
+                    .map_or(Ok(Vec::new()), |(transaction, _, _)| {
                         outspends_for_transaction(&projection, &transaction)
                     })
             })
@@ -239,7 +251,7 @@ fn internal_outspend(
     let Ok(vout) = text_vout.parse::<u32>() else {
         return Ok(Outspend::unspent());
     };
-    let Some((transaction, _)) = projection.transaction(&txid)? else {
+    let Some((transaction, _, _)) = projection.transaction(&txid)? else {
         return Ok(Outspend::unspent());
     };
     let Some(_) = transaction

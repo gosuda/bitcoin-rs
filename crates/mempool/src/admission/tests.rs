@@ -652,7 +652,7 @@ fn no_chain_invalid_attempt_rebuilds_after_its_parent_leaves_the_pool()
             .recv_timeout(std::time::Duration::from_secs(5))
             .is_ok()
     );
-    gateway.clear(AdmissionOrigin::Rpc);
+    gateway.clear(AdmissionOrigin::Rpc)?;
     let sequence = gateway.read().sequence_number();
     assert!(release_tx.send(()).is_ok());
     let Ok(result) = worker.join() else {
@@ -1615,11 +1615,10 @@ fn preview_matches_submission_and_has_no_side_effects() -> Result<(), crate::tes
     assert_eq!(preview_gateway.read().estimator_last_decayed_height(), None);
     preview_gateway.remove_for_block(
         AdmissionOrigin::Block,
-        &[valid.as_ref(), &second],
-        &[valid.txid(), second.txid()],
+        &crate::settlement::TransitionFacts::from_txs(&[valid.as_ref(), &second]),
         2,
         0,
-    );
+    )?;
     assert_eq!(preview_gateway.read().estimate_fee_rate(2), None);
     assert_eq!(observer.0.load(Ordering::SeqCst), 0);
     let submitted = gateway();
@@ -2150,7 +2149,10 @@ fn one_entry_ceiling() -> u64 {
     unit + unit / 2
 }
 
-fn seed_rolling_floor_via_capacity_eviction(gateway: &Arc<MempoolGateway>, now: u64) {
+fn seed_rolling_floor_via_capacity_eviction(
+    gateway: &Arc<MempoolGateway>,
+    now: u64,
+) -> Result<(), crate::test_error::TestError> {
     let markers = [100u8, 101, 102, 103, 104];
     let funded = Coins(
         markers
@@ -2186,8 +2188,12 @@ fn seed_rolling_floor_via_capacity_eviction(gateway: &Arc<MempoolGateway>, now: 
         .collect();
     if !residents.is_empty() {
         let refs: Vec<&Tx> = residents.iter().map(AsRef::as_ref).collect();
-        let ids: Vec<Txid> = residents.iter().map(|tx| tx.txid()).collect();
-        gateway.remove_for_block(AdmissionOrigin::Rpc, &refs, &ids, 2, now);
+        gateway.remove_for_block(
+            AdmissionOrigin::Rpc,
+            &crate::settlement::TransitionFacts::from_txs(&refs),
+            2,
+            now,
+        )?;
     }
     assert!(
         gateway.read().is_empty(),
@@ -2198,6 +2204,7 @@ fn seed_rolling_floor_via_capacity_eviction(gateway: &Arc<MempoolGateway>, now: 
         floor_after > min_relay,
         "the rolling floor must survive block settlement within the decay grace, got {floor_after}"
     );
+    Ok(())
 }
 
 #[test]
@@ -2319,7 +2326,8 @@ fn reconsider_disconnected_does_not_register_with_the_estimator() {
 
 #[test]
 #[expect(clippy::expect_used)]
-fn reconsider_disconnected_admits_below_floor_then_trims_once() {
+fn reconsider_disconnected_admits_below_floor_then_trims_once()
+-> Result<(), crate::test_error::TestError> {
     let ceiling = one_entry_ceiling();
     let limits = crate::MempoolLimits {
         max_total_bytes: ceiling,
@@ -2334,7 +2342,7 @@ fn reconsider_disconnected_admits_below_floor_then_trims_once() {
         None,
     ));
     let now = unix_time_secs();
-    seed_rolling_floor_via_capacity_eviction(&gateway, now);
+    seed_rolling_floor_via_capacity_eviction(&gateway, now)?;
     log.0.lock().clear();
     let (parent, child) = witness_parent_and_child();
     let parent_txid = parent.txid();
@@ -2383,7 +2391,7 @@ fn reconsider_disconnected_admits_below_floor_then_trims_once() {
         "no size trim may run during the walk"
     );
 
-    let swept = gateway.remove_for_reorg(&change, &chain).expect("sweep");
+    let swept = gateway.remove_for_reorg(&change, &chain, 1).expect("sweep");
     assert!(swept.is_empty(), "the funded family stays supported");
 
     let trimmed = gateway
@@ -2398,6 +2406,7 @@ fn reconsider_disconnected_admits_below_floor_then_trims_once() {
     );
 
     assert_reorg_publication_order(&log.0.lock(), &[parent_txid, child_txid], child_txid);
+    Ok(())
 }
 
 #[expect(clippy::expect_used)]
@@ -2458,7 +2467,8 @@ fn assert_reorg_publication_order(batches: &[ReorgBatch], admissions: &[Txid], t
 
 #[test]
 #[expect(clippy::expect_used)]
-fn reconsider_control_refuses_fresh_relay_below_floor() {
+fn reconsider_control_refuses_fresh_relay_below_floor() -> Result<(), crate::test_error::TestError>
+{
     let ceiling = one_entry_ceiling();
     let limits = crate::MempoolLimits {
         max_total_bytes: ceiling,
@@ -2471,7 +2481,7 @@ fn reconsider_control_refuses_fresh_relay_below_floor() {
         None,
     ));
     let now = unix_time_secs();
-    seed_rolling_floor_via_capacity_eviction(&control, now);
+    seed_rolling_floor_via_capacity_eviction(&control, now)?;
     let floor = control.read().min_fee_sat_per_kvb(now);
     assert!(
         floor > control.read().min_relay_fee_sat_per_kvb(),
@@ -2507,6 +2517,7 @@ fn reconsider_control_refuses_fresh_relay_below_floor() {
         )),
         "fresh relay must meet the rolling floor"
     );
+    Ok(())
 }
 
 #[test]
@@ -2551,7 +2562,7 @@ fn remove_for_reorg_sweeps_only_unsupported_residents() {
     let change = gateway.begin_chain_change().expect("fence");
 
     let result = gateway
-        .remove_for_reorg(&change, &chain)
+        .remove_for_reorg(&change, &chain, 1)
         .expect("generation held");
     change.finish().expect("finish");
 
@@ -2587,7 +2598,7 @@ fn remove_for_reorg_refuses_a_moved_generation() {
     gateway.force_chain_generation(2);
 
     assert_eq!(
-        gateway.remove_for_reorg(&change, &Coins(vec![])),
+        gateway.remove_for_reorg(&change, &Coins(vec![]), 1),
         Err(crate::ChainChangeError::GenerationMoved)
     );
     assert!(gateway.read().contains_txid(&parent_txid));
@@ -2672,7 +2683,7 @@ fn reorg_methods_refuse_a_guard_from_another_gateway() {
     let guard_b = gateway_b.begin_chain_change().expect("fence on b");
 
     assert_eq!(
-        gateway_a.remove_for_reorg(&guard_b, &Coins(vec![])),
+        gateway_a.remove_for_reorg(&guard_b, &Coins(vec![]), 1),
         Err(crate::ChainChangeError::ForeignGuard),
         "a foreign guard cannot sweep this gateway's pool"
     );
@@ -2705,7 +2716,7 @@ fn independent_spend(marker: u8) -> (Arc<Tx>, Coins) {
 }
 
 #[test]
-fn expiry_capacity_ordering_under_pressure() {
+fn expiry_capacity_ordering_under_pressure() -> Result<(), crate::test_error::TestError> {
     for package in [false, true] {
         for fee in [100, 11_000] {
             for expire_first in [false, true] {
@@ -2729,7 +2740,7 @@ fn expiry_capacity_ordering_under_pressure() {
                 let fresh_id = fresh.txid();
                 let now = unix_time_secs();
                 if expire_first {
-                    gateway.expire(AdmissionOrigin::Rpc, now);
+                    gateway.expire(AdmissionOrigin::Rpc, now)?;
                 }
                 let result = if package {
                     gateway
@@ -2772,6 +2783,7 @@ fn expiry_capacity_ordering_under_pressure() {
             }
         }
     }
+    Ok(())
 }
 
 fn insert_stale(gateway: &MempoolGateway, tx: Arc<Tx>) {
@@ -2961,4 +2973,125 @@ fn chain_change_fence_skips_expiry_for_a_non_reorg_origin() {
     assert!(matches!(outcome, Ok(SubmitOutcome::Committed(_))));
     assert!(gateway.read().contains_txid(&stale_txid));
     assert!(gateway.read().contains_txid(&fresh_txid));
+}
+
+#[test]
+fn batch_requests_chain_package_shares_bodies_and_resolves_incrementally() {
+    const PACKAGE_LEN: usize = 25;
+    const CONFIRMED_VALUE: u64 = 10_000;
+    const OUTPUT_VALUE: u64 = 9_000;
+    let confirmed = OutPoint::new(Txid(Hash256::from_le_bytes(&[8; 32])), 0);
+    let chain = Coins(vec![(
+        confirmed,
+        TxOut {
+            value: Amount::from_sat(CONFIRMED_VALUE),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
+        },
+    )]);
+    let mut txs = Vec::with_capacity(PACKAGE_LEN);
+    let mut parent = confirmed;
+    let mut marker = 1_u8;
+    for _ in 0..PACKAGE_LEN {
+        let tx = standard_spend(parent, marker);
+        parent = OutPoint::new(tx.txid(), 0);
+        marker = marker.wrapping_add(1);
+        txs.push(tx);
+    }
+    let shared: Vec<Arc<Tx>> = txs.iter().map(|tx| Arc::new(tx.clone())).collect();
+    let mempool_inputs = vec![Some(HashMap::new()); PACKAGE_LEN];
+    let Some((requests, package_output_clones)) = batch_requests_package_clone_count(
+        &shared,
+        mempool_inputs,
+        &chain,
+        None,
+        0,
+        AdmissionOrigin::Rpc,
+        (7, 11),
+        crate::gateway::AdmissionMode::PackageSubmit,
+    ) else {
+        panic!("a chain package resolves against its confirmed coin and package parents");
+    };
+    assert_eq!(
+        requests.len(),
+        PACKAGE_LEN,
+        "every package member yields one admission request"
+    );
+    assert_eq!(
+        shared.len(),
+        25,
+        "the chain fixture holds twenty five bodies"
+    );
+    for body in &shared {
+        assert_eq!(
+            Arc::strong_count(body),
+            2,
+            "each package body is allocated once and shared with its request"
+        );
+    }
+    let mut oracle_outputs = HashMap::new();
+    oracle_outputs.insert(
+        confirmed,
+        TxOut {
+            value: Amount::from_sat(CONFIRMED_VALUE),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
+        },
+    );
+    let mut in_package_refs = 0_u64;
+    for (index, request) in requests.iter().enumerate() {
+        let tx = &txs[index];
+        assert!(
+            Arc::ptr_eq(&request.tx, &shared[index]),
+            "request shares the submitted body instead of deep-cloning it"
+        );
+        let mut expected_prevouts = Vec::with_capacity(tx.inputs.len());
+        let mut input_value = 0_u64;
+        for input in &tx.inputs {
+            let Some(output) = oracle_outputs.get(&input.previous_output) else {
+                panic!("the policy oracle resolves every package input");
+            };
+            input_value += output.value.to_sat();
+            expected_prevouts.push((input.previous_output, output.clone()));
+            if input.previous_output != confirmed {
+                in_package_refs += 1;
+            }
+        }
+        assert_eq!(
+            request.prevouts, expected_prevouts,
+            "request prevouts match the policy oracle"
+        );
+        let output_value: u64 = tx.outputs.iter().map(|output| output.value.to_sat()).sum();
+        assert_eq!(
+            request.context.fee,
+            input_value.saturating_sub(output_value),
+            "request fee follows inputs minus outputs"
+        );
+        assert!(
+            !request.context.missing_inputs,
+            "a chain package resolves every input"
+        );
+        assert_eq!(request.origin, AdmissionOrigin::Rpc);
+        assert_eq!(
+            (request.expected_generation, request.expected_sequence),
+            (7, 11)
+        );
+        assert_eq!(request.height, 1);
+        let txid = tx.txid();
+        for (vout, output) in tx.outputs.iter().enumerate() {
+            if let Ok(vout) = u32::try_from(vout) {
+                oracle_outputs.insert(OutPoint::new(txid, vout), output.clone());
+            }
+        }
+    }
+    assert_eq!(
+        OUTPUT_VALUE, 9_000,
+        "chain children carry no fee, so the oracle only prices the confirmed parent spend"
+    );
+    assert_eq!(
+        in_package_refs, 24,
+        "a twenty five transaction chain spends twenty four package outputs"
+    );
+    assert_eq!(
+        package_output_clones, 24,
+        "incremental resolution clones one package output per in-package spend"
+    );
 }

@@ -10,7 +10,7 @@ use cap_std::fs::{Dir, File, OpenOptions};
 pub const CURRENT_SCHEMA_FILE: &str = "CURRENT_SCHEMA";
 pub const DATA_DIR_LOCK_FILE: &str = ".lock";
 const CURRENT_SCHEMA_TEMP_FILE: &str = ".CURRENT_SCHEMA.tmp";
-const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 pub fn open_data_dir(path: &Path) -> io::Result<Dir> {
     Dir::open_ambient_dir(path, ambient_authority())
@@ -58,7 +58,7 @@ pub fn ensure_current_schema(data: &Dir) -> io::Result<()> {
     }
 }
 
-fn validate_current_schema(bytes: &[u8]) -> io::Result<()> {
+fn validate_current_schema(bytes: &[u8]) -> Result<(), io::Error> {
     if bytes == current_schema_bytes().as_slice() {
         return Ok(());
     }

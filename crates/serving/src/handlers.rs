@@ -33,7 +33,7 @@ pub fn live_registry() -> impl Iterator<Item = &'static str> {
 #[derive(Debug)]
 pub struct Handler {
     ctx: Arc<Context>,
-    stop: bitcoin_rs_execution::chain::LatchWriter,
+    stop: bitcoin_rs_consensus::latch::LatchWriter,
     blocking_requests: parking_lot::Mutex<(usize, usize)>,
 }
 
@@ -42,7 +42,7 @@ impl Handler {
     pub fn new(ctx: Arc<Context>) -> Self {
         Self {
             ctx,
-            stop: bitcoin_rs_execution::chain::LatchWriter::new(),
+            stop: bitcoin_rs_consensus::latch::LatchWriter::new(),
             blocking_requests: parking_lot::Mutex::new((0, 16)),
         }
     }

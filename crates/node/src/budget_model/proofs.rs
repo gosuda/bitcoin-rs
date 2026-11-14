@@ -4,10 +4,10 @@ use super::{
 };
 
 fn any_budget_state() -> BudgetState {
-    let mut charges = [0u32; 6];
-    let mut reserved = [0u32; 6];
+    let mut charges = [0u32; 7];
+    let mut reserved = [0u32; 7];
     let mut i = 0;
-    while i < 6 {
+    while i < 7 {
         let c: u32 = kani::any();
         let r: u32 = kani::any();
         kani::assume(c <= 4);
@@ -33,19 +33,21 @@ fn any_budget_state() -> BudgetState {
         is_mdbx,
         total_budget,
         foreground_reserve,
+        owner_caps: [total_budget; 7],
     }
 }
 
 fn any_owner() -> AllocationOwner {
     let tag: u8 = kani::any();
-    kani::assume(tag < 6);
+    kani::assume(tag < 7);
     match tag {
         0 => AllocationOwner::CoinCache,
         1 => AllocationOwner::EngineCache,
         2 => AllocationOwner::FactsQueue,
         3 => AllocationOwner::IndexBuilder,
         4 => AllocationOwner::StagedImages,
-        _ => AllocationOwner::QueryViews,
+        5 => AllocationOwner::QueryViews,
+        _ => AllocationOwner::PeerOutbound,
     }
 }
 
@@ -62,7 +64,7 @@ fn any_bg_owner() -> AllocationOwner {
 fn any_action() -> Action {
     let tag: u8 = kani::any();
     let amt: u32 = kani::any();
-    kani::assume(tag < 16);
+    kani::assume(tag < 18);
     kani::assume(amt <= 2);
     match tag {
         0 => Action::ReserveIngress(amt),
@@ -80,6 +82,9 @@ fn any_action() -> Action {
         12 => Action::ReserveEngineCache(amt),
         13 => Action::AllocateEngineCache(amt),
         14 => Action::ReleaseEngineCache(amt),
+        15 => Action::ReservePeerOutbound(amt),
+        16 => Action::AllocatePeerOutbound(amt),
+        17 => Action::ReleasePeerOutbound(amt),
         _ => Action::Stutter,
     }
 }

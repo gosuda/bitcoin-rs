@@ -13,7 +13,7 @@ use bitcoin_rs_consensus::{
     verify_transaction,
 };
 use hashbrown::{HashMap, HashSet};
-use parking_lot::{Mutex, RwLock, RwLockReadGuard};
+use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::mpsc;
@@ -95,6 +95,8 @@ pub enum ChainChangeError {
     GenerationMoved,
     #[error("chain change guard belongs to another gateway")]
     ForeignGuard,
+    #[error("mempool delivery queue is full")]
+    DeliveryQueueFull,
 }
 
 pub struct AdmissionRequest {
@@ -128,6 +130,8 @@ pub enum AdmitError {
     GenerationChanged,
     #[error("mempool sequence changed before admission")]
     MempoolChanged,
+    #[error("mempool delivery queue is full")]
+    DeliveryQueueFull,
     #[error(transparent)]
     Policy(#[from] crate::standardness::AcceptanceRejectReason),
     #[error("consensus verification failed")]
@@ -542,10 +546,37 @@ fn retains_rejected_body(pool: &Mempool, tx: &Tx, error: AdmitError) -> bool {
             crate::standardness::AcceptanceRejectReason::MissingInputs
         ) && crate::admission::has_unspendable_input(pool, tx))
 }
+/// The delivery queue holds at most this many producer envelopes.
+/// The drain thread may queue DELIVERY_REENTRANT_ALLOWANCE envelopes past the bound.
+pub(crate) const DELIVERY_QUEUE_CAPACITY: usize = 100;
+/// The drain thread may queue this many envelopes past the bound.
+pub(crate) const DELIVERY_REENTRANT_ALLOWANCE: usize = 8;
+
+std::thread_local! {
+    static IN_DRAIN: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
 
 struct PublishState {
     queue: VecDeque<MutationEnvelope>,
     draining: bool,
+    reserved: usize,
+    waiters: usize,
+    high_water: usize,
+}
+
+struct DrainScope;
+
+impl DrainScope {
+    fn enter() -> Self {
+        IN_DRAIN.with(|active| active.set(true));
+        Self
+    }
+}
+
+impl Drop for DrainScope {
+    fn drop(&mut self) {
+        IN_DRAIN.with(|active| active.set(false));
+    }
 }
 
 #[cfg(test)]
@@ -568,6 +599,7 @@ pub struct MempoolGateway {
     observer: Option<Arc<CompositeObserver>>,
     commit_order: Mutex<()>,
     publish: Mutex<PublishState>,
+    publish_ready: Condvar,
     pub(crate) extra_txn: Mutex<ExtraTxnRing>,
     chain_generation: AtomicU64,
     engine: ValidationEngine,
@@ -606,7 +638,11 @@ impl MempoolGateway {
             publish: Mutex::new(PublishState {
                 queue: VecDeque::new(),
                 draining: false,
+                reserved: 0,
+                waiters: 0,
+                high_water: 0,
             }),
+            publish_ready: Condvar::new(),
             extra_txn: Mutex::new(ExtraTxnRing::default()),
             chain_generation: AtomicU64::new(0),
             engine,
@@ -767,6 +803,7 @@ impl MempoolGateway {
                         .map_err(RbfError::into_pool_error)
                 },
                 |result| Some(result),
+                || crate::MempoolError::DeliveryQueueFull,
             );
             if !matches!(result, Err(MempoolError::StalePolicy)) {
                 return result;
@@ -809,6 +846,7 @@ impl MempoolGateway {
                 origin,
                 move |pool| pool.commit_pool_change(plan),
                 |result| Some(result),
+                || crate::RbfError::from(crate::MempoolError::DeliveryQueueFull),
             );
             if !matches!(result, Err(RbfError::StalePlan)) {
                 return result;
@@ -908,6 +946,7 @@ impl MempoolGateway {
                 AdmitOutcome::AlreadyKnown => None,
                 AdmitOutcome::Committed(result) => Some(result),
             },
+            || AdmitError::DeliveryQueueFull,
         )?;
         if matches!(outcome, AdmitOutcome::Committed(_)) {
             if let (Some((wtxid, flags)), Some(cache)) = (cache_key, self.script_cache()) {
@@ -1140,6 +1179,7 @@ impl MempoolGateway {
         &self,
         change: &ChainChangeGuard,
         chain: &dyn crate::admission::AdmissionChain,
+        commit_id: u64,
     ) -> Result<MutationResult, ChainChangeError> {
         if !change.owns(self) {
             return Err(ChainChangeError::ForeignGuard);
@@ -1207,30 +1247,69 @@ impl MempoolGateway {
                 if fence.current(self) != Some(change.odd_generation()) {
                     return Err(ChainChangeError::GenerationMoved);
                 }
-                Ok(pool.remove_for_reorg(&failing))
+                Ok(pool.settle_for_reorg(&failing, commit_id))
             },
             |result| Some(result),
+            || ChainChangeError::DeliveryQueueFull,
         )
     }
 
     pub fn remove_for_block(
         &self,
         origin: AdmissionOrigin,
-        block_txs: &[&Tx],
-        block_txids: &[Txid],
+        facts: &crate::settlement::TransitionFacts,
         height: u32,
         now: u64,
-    ) -> MutationResult {
-        self.commit_infallible(origin, |pool| {
-            pool.remove_for_block(block_txs, block_txids, height, now)
-        })
+    ) -> Result<MutationResult, MempoolError> {
+        self.commit(
+            origin,
+            |pool| Ok(pool.remove_for_block(facts, height, now)),
+            |result| Some(result),
+            || MempoolError::DeliveryQueueFull,
+        )
     }
 
-    pub fn expire(&self, origin: AdmissionOrigin, now: u64) -> Option<MutationResult> {
+    pub fn settle_block_facts(
+        &self,
+        origin: AdmissionOrigin,
+        facts: &crate::settlement::TransitionFacts,
+        commit_id: u64,
+        height: u32,
+        now: u64,
+    ) -> Result<MutationResult, MempoolError> {
+        self.commit(
+            origin,
+            |pool| Ok(pool.settle_for_block(facts, commit_id, height, now)),
+            |result| Some(result),
+            || MempoolError::DeliveryQueueFull,
+        )
+    }
+
+    #[must_use]
+    pub fn settled_at_commit(&self) -> u64 {
+        self.pool.read().settled_at_commit()
+    }
+
+    #[must_use]
+    pub fn settled_generation(&self) -> (u64, u64, u64) {
+        self.pool.read().settled_generation()
+    }
+
+    pub fn expire(
+        &self,
+        origin: AdmissionOrigin,
+        now: u64,
+    ) -> Result<Option<MutationResult>, MempoolError> {
         if !self.pool.read().has_expired_entries(now) {
-            return None;
+            return Ok(None);
         }
-        Some(self.commit_infallible(origin, |pool| pool.expire(now)))
+        Some(self.commit(
+            origin,
+            |pool| Ok(pool.expire(now)),
+            |result| Some(result),
+            || MempoolError::DeliveryQueueFull,
+        ))
+        .transpose()
     }
 
     #[cfg(any(test, feature = "test-seam"))]
@@ -1238,10 +1317,13 @@ impl MempoolGateway {
         &self,
         origin: AdmissionOrigin,
         threshold_sat_per_kvb: u64,
-    ) -> MutationResult {
-        self.commit_infallible(origin, |pool| {
-            pool.evict_below_fee_rate(threshold_sat_per_kvb)
-        })
+    ) -> Result<MutationResult, MempoolError> {
+        self.commit(
+            origin,
+            |pool| Ok(pool.evict_below_fee_rate(threshold_sat_per_kvb)),
+            |result| Some(result),
+            || MempoolError::DeliveryQueueFull,
+        )
     }
 
     #[must_use]
@@ -1263,12 +1345,18 @@ impl MempoolGateway {
                     .map_err(RbfError::into_pool_error)
             },
             |result| Some(result),
+            || crate::MempoolError::DeliveryQueueFull,
         )
     }
 
     #[cfg(any(test, feature = "test-seam"))]
-    pub fn clear(&self, origin: AdmissionOrigin) -> MutationResult {
-        self.commit_infallible(origin, Mempool::clear)
+    pub fn clear(&self, origin: AdmissionOrigin) -> Result<MutationResult, MempoolError> {
+        self.commit(
+            origin,
+            |pool| Ok(Mempool::clear(pool)),
+            |result| Some(result),
+            || MempoolError::DeliveryQueueFull,
+        )
     }
 
     pub fn prioritise(&self, txid: Txid, fee_delta: i64) -> Result<(), PrioritiseError> {
@@ -1326,16 +1414,56 @@ impl MempoolGateway {
         self.read().prioritised_transactions()
     }
 
+    fn in_drain() -> bool {
+        IN_DRAIN.with(|active| active.get())
+    }
+
+    fn reserve_delivery(&self) -> bool {
+        if self.observer.is_none() || Self::in_drain() {
+            return false;
+        }
+        let mut publish = self.publish.lock();
+        publish.waiters += 1;
+        while publish.queue.len() + publish.reserved >= DELIVERY_QUEUE_CAPACITY {
+            self.publish_ready.wait(&mut publish);
+        }
+        publish.waiters -= 1;
+        publish.reserved += 1;
+        true
+    }
+
+    fn release_reservation(&self) {
+        let mut publish = self.publish.lock();
+        publish.reserved -= 1;
+        drop(publish);
+        self.publish_ready.notify_one();
+    }
+
+    fn reentrant_ceiling_reached(&self) -> bool {
+        let publish = self.publish.lock();
+        publish.queue.len() + publish.reserved
+            >= DELIVERY_QUEUE_CAPACITY + DELIVERY_REENTRANT_ALLOWANCE
+    }
+
+    fn reentrant_over_ceiling(&self) -> bool {
+        self.observer.is_some() && Self::in_drain() && self.reentrant_ceiling_reached()
+    }
+
     pub(crate) fn commit<T, E>(
         &self,
         origin: AdmissionOrigin,
         mutate: impl FnOnce(&mut Mempool) -> Result<T, E>,
         mutation: impl FnOnce(&T) -> Option<&MutationResult>,
+        refused: impl FnOnce() -> E,
     ) -> Result<T, E> {
+        if self.reentrant_over_ceiling() {
+            return Err(refused());
+        }
         let bodies_wanted = self
             .observer
             .as_ref()
             .is_some_and(|observer| observer.wants_bodies());
+        let reserved = self.reserve_delivery();
         let order = self.commit_order.lock();
         let mut elected = false;
         let mut pending = None;
@@ -1344,7 +1472,11 @@ impl MempoolGateway {
             pool.accepted_capture = bodies_wanted.then(Vec::new);
             let outcome = mutate(&mut pool);
             let captured = pool.accepted_capture.take().unwrap_or_default();
-            let outcome = outcome?;
+            let outcome = outcome.inspect_err(|_| {
+                if reserved {
+                    self.release_reservation();
+                }
+            })?;
             if let Some(result) = mutation(&outcome) {
                 if matches!(origin, AdmissionOrigin::Rpc | AdmissionOrigin::Esplora) {
                     for change in &result.changes {
@@ -1367,13 +1499,19 @@ impl MempoolGateway {
         if let Some((result, captured)) = pending {
             let transactions = Self::join_accepted_bodies(&result, captured, bodies_wanted);
             let mut publish = self.publish.lock();
+            if reserved {
+                publish.reserved -= 1;
+            }
             publish.queue.push_back(MutationEnvelope {
                 origin,
                 result,
                 accepted_transactions: transactions,
             });
+            publish.high_water = publish.high_water.max(publish.queue.len());
             elected = !publish.draining;
             publish.draining = true;
+        } else if reserved {
+            self.release_reservation();
         }
         drop(order);
         if elected {
@@ -1526,27 +1664,19 @@ impl MempoolGateway {
         }
     }
 
-    fn commit_infallible(
-        &self,
-        origin: AdmissionOrigin,
-        mutate: impl FnOnce(&mut Mempool) -> MutationResult,
-    ) -> MutationResult {
-        let Ok(result) = self.commit(
-            origin,
-            |pool| Ok::<_, core::convert::Infallible>(mutate(pool)),
-            |result| Some(result),
-        );
-        result
-    }
-
     fn drain(&self) {
+        let _scope = DrainScope::enter();
         loop {
             let envelope = {
                 let mut publish = self.publish.lock();
                 if let Some(envelope) = publish.queue.pop_front() {
+                    drop(publish);
+                    self.publish_ready.notify_one();
                     envelope
                 } else {
                     publish.draining = false;
+                    drop(publish);
+                    self.publish_ready.notify_one();
                     return;
                 }
             };
@@ -1565,6 +1695,24 @@ impl MempoolGateway {
                 );
             }
         }
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn publish_high_water(&self) -> usize {
+        self.publish.lock().high_water
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn publish_len(&self) -> usize {
+        self.publish.lock().queue.len()
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn publish_waiters(&self) -> usize {
+        self.publish.lock().waiters
     }
 
     #[cfg(any(test, feature = "test-seam"))]

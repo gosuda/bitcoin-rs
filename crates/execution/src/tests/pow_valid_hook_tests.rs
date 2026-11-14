@@ -68,7 +68,11 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> TestResult {
     calls.lock().expect("hook calls").clear();
 
     let stale = mined_child(genesis_tip.hash.into(), 1)?;
-    let _ = handles.apply_block(&BlockImage::from_local(stale));
+    let stale_result: Result<_, ApplyError> = handles.apply_block(&BlockImage::from_local(stale));
+    assert!(
+        matches!(stale_result, Err(ApplyError::PrevHashMismatch { .. })),
+        "a stale-parent block must fail before the hook"
+    );
     assert!(
         calls.lock().expect("hook calls").is_empty(),
         "a stale-parent block never announces early"

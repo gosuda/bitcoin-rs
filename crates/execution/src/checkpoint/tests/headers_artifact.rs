@@ -207,6 +207,13 @@ fn utxo_payload_generation_is_refused_and_names_the_converter() -> TestResult {
         ));
     };
     assert!(
+        matches!(
+            error,
+            bitcoin_rs_storage::checkpoint::CheckpointLoadError::UtxoPayloadRetired { .. }
+        ),
+        "a generation carrying a utxo payload must be refused as retired, got: {error:?}"
+    );
+    assert!(
         error.to_string().contains("bitcoin-rs-storage-convert"),
         "the refusal must name the converter, got: {error}"
     );
@@ -281,5 +288,125 @@ fn authenticated_inner_header_version_is_fatal() -> TestResult {
         load_checkpoint(dir.path(), config()),
         Err(super::super::CheckpointLoadError::Corrupt(_))
     ));
+    Ok(())
+}
+
+fn applied_stats(height: u32) -> CoinStats {
+    let mut stats = CoinStats::new();
+    stats.height = height;
+    stats
+}
+
+fn generation_files(
+    data_dir: &Path,
+) -> TestResult<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {
+    let root = data_dir.join(CHECKPOINT_ROOT);
+    let current_path = root.join(CURRENT_FILE);
+    let current: CurrentV1 = sonic_rs::from_slice(&fs::read(&current_path)?)?;
+    let generation = root.join(&current.directory);
+    Ok((
+        current_path,
+        generation.join(HEADERS_FILE),
+        generation.join(MANIFEST_FILE),
+    ))
+}
+
+fn write_generation_with_side_leaf(data_dir: &Path) -> TestResult<Hash256> {
+    let (mut tree, best, applied) = chain_with_applied_height(3, 1)?;
+    let applied_tip = tip_snapshot(&tree, applied)?;
+    let fork_parent = tree
+        .node_at_height_from(best, 1)
+        .ok_or(TestError::Missing("height one missing"))?;
+    let parent_hash = tree.node(fork_parent)?.hash;
+    let leaf = side_leaf(parent_hash, 0)?;
+    accept_headers(
+        &mut tree,
+        core::slice::from_ref(&leaf),
+        NETWORK,
+        crate::chain::current_unix_seconds(),
+        crate::chain::HeaderValidationMode::LiveAdmission,
+    )?;
+    super::super::write_checkpoint(
+        data_dir,
+        config(),
+        &RwLock::new(tree),
+        &UtxoSet::new(),
+        &CoinStatsListener::new(applied_stats(applied.height)),
+        Some(&applied_tip),
+    )?;
+    Ok(parent_hash)
+}
+
+fn side_leaf(parent_hash: Hash256, salt: u32) -> TestResult<Header> {
+    let mut header = mined_regtest_header(BlockHash(parent_hash), 2)?;
+    header.time = header.time.saturating_add(100 + salt);
+    mine_header_to_declared_target(&mut header)?;
+    Ok(header)
+}
+
+const SIDE_HEADER_NONCE_LOW_BYTE: usize = 76;
+
+// RCV-01, RCV-04
+#[test]
+fn side_header_nonce_flip_with_valid_pow_is_refused_by_manifest_sha() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    write_generation_with_side_leaf(dir.path())?;
+    let (current_path, headers_path, manifest_path) = generation_files(dir.path())?;
+    let current_bytes = fs::read(&current_path)?;
+    let manifest_bytes = fs::read(&manifest_path)?;
+    let manifest: CheckpointManifestV1 = sonic_rs::from_slice(&manifest_bytes)?;
+    let mut bytes = fs::read(&headers_path)?;
+    let side_count_at =
+        headers::HEADER_PREFIX_LEN + 80 * usize::try_from(manifest.headers.header_count)?;
+    let side_header_at = side_count_at + 8;
+    let side = bytes[side_header_at..side_header_at + 80].to_vec();
+    let mask = (1_u8..=u8::MAX)
+        .find(|mask| {
+            let mut candidate = side.clone();
+            candidate[SIDE_HEADER_NONCE_LOW_BYTE] ^= mask;
+            header_from_row(&candidate)
+                .is_ok_and(|header| compact_is_met_by(header.bits, header.compute_hash().0))
+        })
+        .ok_or(TestError::Missing("no nonce flip keeps proof of work"))?;
+    bytes[side_header_at + SIDE_HEADER_NONCE_LOW_BYTE] ^= mask;
+    fs::write(&headers_path, &bytes)?;
+
+    assert!(matches!(
+        load_checkpoint(dir.path(), config()),
+        Err(CheckpointLoadError::Corrupt(_))
+    ));
+    assert_eq!(fs::read(&headers_path)?, bytes);
+    assert_eq!(fs::read(&manifest_path)?, manifest_bytes);
+    assert_eq!(fs::read(&current_path)?, current_bytes);
+    Ok(())
+}
+
+// RCV-01, RCV-04
+#[test]
+fn appended_valid_side_header_is_refused_by_manifest_length() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let parent_hash = write_generation_with_side_leaf(dir.path())?;
+    let (current_path, headers_path, manifest_path) = generation_files(dir.path())?;
+    let current_bytes = fs::read(&current_path)?;
+    let manifest_bytes = fs::read(&manifest_path)?;
+    let manifest: CheckpointManifestV1 = sonic_rs::from_slice(&manifest_bytes)?;
+    let mut bytes = fs::read(&headers_path)?;
+    let side_count_at =
+        headers::HEADER_PREFIX_LEN + 80 * usize::try_from(manifest.headers.header_count)?;
+    let count = u64::from_le_bytes(bytes[side_count_at..side_count_at + 8].try_into()?);
+    let incremented = count
+        .checked_add(1)
+        .ok_or(TestError::Missing("side count overflow"))?;
+    bytes[side_count_at..side_count_at + 8].copy_from_slice(&incremented.to_le_bytes());
+    bytes.extend_from_slice(&headers::encode_header(&side_leaf(parent_hash, 1)?)?);
+    fs::write(&headers_path, &bytes)?;
+
+    assert!(matches!(
+        load_checkpoint(dir.path(), config()),
+        Err(CheckpointLoadError::Corrupt(_))
+    ));
+    assert_eq!(fs::read(&headers_path)?, bytes);
+    assert_eq!(fs::read(&manifest_path)?, manifest_bytes);
+    assert_eq!(fs::read(&current_path)?, current_bytes);
     Ok(())
 }

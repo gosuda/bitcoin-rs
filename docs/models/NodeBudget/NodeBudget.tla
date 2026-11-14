@@ -26,8 +26,9 @@ CONSTANTS
   \* @type: Bool;
   IsMdbx
 
-Owners == { "coin_cache", "engine_cache", "facts_queue", "index_builder", "staged_images", "query_views" }
-ForegroundOwners == { "coin_cache", "engine_cache", "staged_images" }
+Owners == { "coin_cache", "engine_cache", "facts_queue", "index_builder",
+            "staged_images", "query_views", "peer_outbound" }
+ForegroundOwners == { "coin_cache", "engine_cache", "staged_images", "peer_outbound" }
 BackgroundOwners == { "facts_queue", "index_builder", "query_views" }
 
 VARIABLES
@@ -46,11 +47,13 @@ vars == << charges, reserved, blockStatus, blockConsensusValid, blockRefused >>
 
 TotalCharges ==
   charges["coin_cache"] + charges["engine_cache"] + charges["facts_queue"] +
-  charges["index_builder"] + charges["staged_images"] + charges["query_views"]
+  charges["index_builder"] + charges["staged_images"] + charges["query_views"] +
+  charges["peer_outbound"]
 
 TotalReserved ==
   reserved["coin_cache"] + reserved["engine_cache"] + reserved["facts_queue"] +
-  reserved["index_builder"] + reserved["staged_images"] + reserved["query_views"]
+  reserved["index_builder"] + reserved["staged_images"] + reserved["query_views"] +
+  reserved["peer_outbound"]
 
 TotalCommitted == TotalCharges + TotalReserved
 
@@ -142,6 +145,22 @@ AdjustEngineCache(amt) ==
              /\ UNCHANGED reserved
   /\ UNCHANGED << blockStatus, blockConsensusValid, blockRefused >>
 
+ReservePeerOutbound(amt) ==
+  /\ TotalCommitted + amt <= TotalBudget
+  /\ reserved' = [reserved EXCEPT !["peer_outbound"] = @ + amt]
+  /\ UNCHANGED << charges, blockStatus, blockConsensusValid, blockRefused >>
+
+AllocatePeerOutbound(amt) ==
+  /\ reserved["peer_outbound"] >= amt
+  /\ reserved' = [reserved EXCEPT !["peer_outbound"] = @ - amt]
+  /\ charges' = [charges EXCEPT !["peer_outbound"] = @ + amt]
+  /\ UNCHANGED << blockStatus, blockConsensusValid, blockRefused >>
+
+ReleasePeerOutbound(amt) ==
+  /\ charges["peer_outbound"] >= amt
+  /\ charges' = [charges EXCEPT !["peer_outbound"] = @ - amt]
+  /\ UNCHANGED << reserved, blockStatus, blockConsensusValid, blockRefused >>
+
 Stutter ==
   UNCHANGED vars
 
@@ -157,6 +176,9 @@ Next ==
   \/ \E amt \in 1..2 : AllocateCoinCache(amt)
   \/ \E amt \in 1..2 : ReleaseCoinCache(amt)
   \/ \E amt \in 1..2 : AdjustEngineCache(amt)
+  \/ \E amt \in 1..2 : ReservePeerOutbound(amt)
+  \/ \E amt \in 1..2 : AllocatePeerOutbound(amt)
+  \/ \E amt \in 1..2 : ReleasePeerOutbound(amt)
   \/ Stutter
 
 TypeOK ==

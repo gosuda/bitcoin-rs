@@ -8,7 +8,9 @@ mod chain_effects;
 pub mod config;
 mod embed;
 mod event_loop;
+pub mod facts_queue;
 pub mod options;
+pub use facts_queue::FactsQueue;
 
 mod lifecycle;
 pub mod metrics;
@@ -41,6 +43,7 @@ pub mod test_support;
 #[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 pub use test_support::TestError;
+pub mod budget;
 pub mod sync;
 #[cfg(not(feature = "test-seam"))]
 #[allow(
@@ -77,7 +80,7 @@ pub use chain_feed::{
 };
 pub use embed::{Node, NodeError};
 
-pub use snapshot::SnapshotImportError;
+pub use snapshot::{SnapshotImport, SnapshotImportError, ThreePositions};
 pub use state::{DataDirLockError, open::NodeOpenError, open::StartupVerificationPaths};
 
 pub use mining::MiningCoordinator;

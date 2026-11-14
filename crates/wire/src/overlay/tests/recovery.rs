@@ -94,7 +94,7 @@ fn reply(stream: &mut BufReader<TcpStream>, response: &str) {
 }
 
 fn with_owner<T>(config: OverlayConfig, fixture: impl FnOnce(&Arc<OverlayTransport>) -> T) {
-    struct StopOnDrop(crate::latch::LatchWriter);
+    struct StopOnDrop(bitcoin_rs_consensus::latch::LatchWriter);
     impl Drop for StopOnDrop {
         fn drop(&mut self) {
             self.0.trigger();
@@ -102,7 +102,7 @@ fn with_owner<T>(config: OverlayConfig, fixture: impl FnOnce(&Arc<OverlayTranspo
     }
     let owner = Arc::new(OverlayTransport::new(Arc::new(config)));
     let shared = shared(&owner);
-    let shutdown = crate::latch::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let reader = shutdown.reader();
     std::thread::scope(|scope| {
         let worker = scope.spawn(|| {

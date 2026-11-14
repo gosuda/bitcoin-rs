@@ -3,12 +3,16 @@ use std::sync::Arc;
 
 use crate::support::{TestError, common::MemoryStore};
 use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid, encode};
+use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
+use bitcoin_rs_projection::segment::publish_sealed;
 use bitcoin_rs_projection::types::ScriptHistoryOccurrence;
 use bitcoin_rs_projection::{
-    IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer, ScriptHash,
-    ScriptHashRow, SpendingPrefixRow, SpentCoinScripts,
+    IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer,
+    PreparedBatch, PreparedBatchLimits, ScriptHash, SpentCoin, SpentCoins, TxIndexScanRow,
 };
-use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit};
+use bitcoin_rs_storage::budget::UnboundedBudget;
+use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
+use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, PrefixScanLimit, RocksDbStore};
 
 const BLOCKS: u32 = 12;
 
@@ -32,9 +36,14 @@ struct ChainScripts {
     by_txid: HashMap<[u8; 32], Vec<u8>>,
 }
 
-impl SpentCoinScripts for ChainScripts {
-    fn script_bytes(&self, txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
-        self.by_txid.get(txid).map(Vec::as_slice)
+impl SpentCoins for ChainScripts {
+    fn spent_coin(&self, txid: &[u8; 32], _vout: u32) -> Option<SpentCoin<'_>> {
+        self.by_txid.get(txid).map(|script| SpentCoin {
+            script,
+            value: 0,
+            height: 0,
+            coinbase: false,
+        })
     }
 }
 
@@ -349,7 +358,7 @@ fn failed_fenced_write_publishes_no_watermark_and_no_rows() -> Result<(), TestEr
         });
     assert!(batch.try_push(first).is_ok(), "first block is admitted");
     writer.commit_forward(batch)?;
-    let committed_rows = store.count(ColumnFamily::Funding);
+    let committed_rows = store.count(ColumnFamily::TxDir);
 
     let second = writer.prepare_block_with_spent_scripts(
         IndexCapabilities::HISTORICAL,
@@ -378,48 +387,170 @@ fn failed_fenced_write_publishes_no_watermark_and_no_rows() -> Result<(), TestEr
         "no newer watermark is published"
     );
     assert_eq!(
-        store.count(ColumnFamily::Funding),
+        store.count(ColumnFamily::TxDir),
         committed_rows,
         "no row of the failed batch is visible"
     );
     Ok(())
 }
 
-#[test]
-fn corrupt_or_truncated_funding_row_key_fails_loudly() -> Result<(), TestError> {
-    let chain = build_chain();
-    let store = Arc::new(MemoryStore::default());
-    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    commit_chain(&mut writer, &chain)?;
-    let script = ScriptHash::from_script_bytes(&script_for(0));
-    let prefix = ScriptHashRow::scan_prefix(script);
-    let mut truncated_key = Vec::from(prefix);
-    truncated_key.extend_from_slice(&[0x01, 0x02, 0x03]);
-    assert_eq!(truncated_key.len(), 11);
-    store.put(ColumnFamily::Funding, &truncated_key, &[0x42])?;
-    let indexer = Indexer::new(Arc::clone(&store));
-    let result = indexer.iter_funding_rows(script);
-    assert!(
-        matches!(result, Err(IndexError::InvalidPrefixRowLength { len: 11 })),
-        "corrupt prefix row key must fail loudly, got: {result:?}"
-    );
-    Ok(())
+fn coinbase_txid(height: u32) -> [u8; 32] {
+    let mut txid = [0xC0; 32];
+    txid[..4].copy_from_slice(&height.to_be_bytes());
+    txid
 }
 
+fn spend_txid(height: u32) -> [u8; 32] {
+    let mut txid = [0x5E; 32];
+    txid[..4].copy_from_slice(&height.to_be_bytes());
+    txid
+}
+
+fn block_hash(height: u32) -> [u8; 32] {
+    let mut hash = [0xB1; 32];
+    hash[..4].copy_from_slice(&height.to_be_bytes());
+    hash
+}
+
+fn facts_chain(blocks: u32) -> Vec<CommittedBlock> {
+    let mut chain = Vec::with_capacity(usize::try_from(blocks).unwrap_or(0));
+    for height in 0..blocks {
+        let mut txs = vec![TxFacts {
+            txid: coinbase_txid(height),
+            offset: 81,
+            len: 100,
+            inputs: Vec::new(),
+            outputs: vec![CreatedOutput {
+                vout: 0,
+                value: 50_0000_0000,
+                script: Bytes::from(script_for(height)),
+            }],
+        }];
+        if height > 0 {
+            txs.push(TxFacts {
+                txid: spend_txid(height),
+                offset: 181,
+                len: 150,
+                inputs: vec![SpentPrevout {
+                    txid: coinbase_txid(height - 1),
+                    vout: 0,
+                    value: 50_0000_0000,
+                    script: Bytes::from(script_for(height - 1)),
+                    height: height - 1,
+                    coinbase: true,
+                }],
+                outputs: vec![CreatedOutput {
+                    vout: 0,
+                    value: 49_0000_0000,
+                    script: Bytes::from(script_for(height)),
+                }],
+            });
+        }
+        chain.push(CommittedBlock {
+            height,
+            hash: block_hash(height),
+            parent_hash: if height == 0 {
+                [0; 32]
+            } else {
+                block_hash(height - 1)
+            },
+            header: [0; 80],
+            txs,
+        });
+    }
+    chain
+}
+
+fn segment_rows(rows: Vec<TxIndexScanRow>) -> Vec<(u32, Vec<u8>)> {
+    let mut pairs: Vec<(u32, Vec<u8>)> = rows
+        .into_iter()
+        .map(|row| (row.row.height(), row.value))
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+// PRJ-06, PRJ-07
 #[test]
-fn corrupt_or_truncated_spending_row_key_fails_loudly() -> Result<(), TestError> {
-    let store = Arc::new(MemoryStore::default());
-    let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x55; 32])), 0);
-    let prefix = SpendingPrefixRow::row(&outpoint, 0).prefix;
-    let mut truncated_key = Vec::from(prefix);
-    truncated_key.extend_from_slice(&[0x01, 0x02]);
-    assert_eq!(truncated_key.len(), 10);
-    store.put(ColumnFamily::Spending, &truncated_key, &[0x42])?;
-    let indexer = Indexer::new(Arc::clone(&store));
-    let result = indexer.iter_spending_rows(&outpoint);
-    assert!(
-        matches!(result, Err(IndexError::InvalidPrefixRowLength { len: 10 })),
-        "corrupt spending row key must fail loudly, got: {result:?}"
-    );
+fn segment_reads_match_bulk_build() -> Result<(), TestError> {
+    let blocks = facts_chain(BLOCKS);
+    let caps = IndexCapabilities::HISTORICAL.with_compact_filters(true);
+    let live_store = Arc::new(MemoryStore::default());
+    let mut writer = IndexWriter::open(Arc::clone(&live_store), 1)?;
+    for block in &blocks {
+        let prepared = writer.prepare_block_from_facts(caps, block.clone())?;
+        let mut batch = PreparedBatch::new(PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+        assert!(
+            batch.try_push(prepared).is_ok(),
+            "one block per batch is admitted"
+        );
+        writer.commit_forward(batch)?;
+    }
+    let live_indexer = Indexer::new(Arc::clone(&live_store));
+    let live = live_indexer.snapshot()?;
+
+    let bulk_dir = tempfile::tempdir()?;
+    let scratch = tempfile::tempdir()?;
+    let bulk_store = Arc::new(RocksDbStore::open(bulk_dir.path())?);
+    let coverage = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    )
+    .build_and_ingest(bulk_store.as_ref(), 1, &blocks)
+    .map_err(|e| e.to_string())?;
+    let tx_count: usize = blocks.iter().map(|block| block.txs.len()).sum();
+    publish_sealed(
+        bulk_store.as_ref(),
+        1,
+        coverage,
+        u32::try_from(tx_count)?,
+        caps,
+    )?;
+    let bulk_indexer = Indexer::new(Arc::clone(&bulk_store));
+    let bulk = bulk_indexer.snapshot()?;
+
+    let mut funding_seen = 0_usize;
+    let mut tx_seen = 0_usize;
+    let mut spend_seen = 0_usize;
+    for seed in 0..BLOCKS {
+        let scripthash = ScriptHash::from_script_bytes(&script_for(seed));
+        let expected = segment_rows(bulk.funding_rows(scripthash, SCAN_ALL)?.rows);
+        let actual = segment_rows(live.funding_rows(scripthash, SCAN_ALL)?.rows);
+        funding_seen += actual.len();
+        assert_eq!(actual, expected, "funding rows for script seed {seed}");
+    }
+    assert!(funding_seen > 0, "the fixture produces funding rows");
+
+    for height in 0..BLOCKS {
+        let txid = Txid(Hash256::from_le_bytes(&coinbase_txid(height)));
+        let expected = segment_rows(bulk.transaction_rows(&txid, SCAN_ALL)?.rows);
+        let actual = segment_rows(live.transaction_rows(&txid, SCAN_ALL)?.rows);
+        tx_seen += actual.len();
+        assert_eq!(actual, expected, "transaction rows at height {height}");
+
+        let outpoint = OutPoint::new(txid, 0);
+        let expected = segment_rows(bulk.spending_rows(&outpoint, SCAN_ALL)?.rows);
+        let actual = segment_rows(live.spending_rows(&outpoint, SCAN_ALL)?.rows);
+        spend_seen += actual.len();
+        assert_eq!(actual, expected, "spending rows at height {height}");
+
+        let hash = block_hash(height);
+        let live_filter = live.compact_filter(height, &hash)?;
+        assert!(
+            live_filter.is_some(),
+            "live serves the compact filter at height {height}"
+        );
+        assert_eq!(
+            live_filter,
+            bulk.compact_filter(height, &hash)?,
+            "compact filter at height {height}"
+        );
+    }
+    assert!(tx_seen > 0, "the fixture produces transaction rows");
+    assert!(spend_seen > 0, "the fixture produces spending rows");
     Ok(())
 }

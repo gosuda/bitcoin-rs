@@ -1,4 +1,4 @@
-use bitcoin_rs_execution::chain::{LatchReader, LatchWriter};
+use bitcoin_rs_consensus::latch::{LatchReader, LatchWriter};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;

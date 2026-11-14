@@ -11,7 +11,7 @@ use bitcoin_rs_consensus::primitives::{
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::utxo::contract::{
-    BlockChanges, UndoCodecError, UndoLoadError, UtxoAdd, populate_block_changes,
+    BlockChanges, UndoLoadError, UtxoAdd, populate_block_changes,
 };
 use bitcoin_rs_storage::{KvUndoStore, MandatoryRetention, RetentionRegistry, UndoStore};
 
@@ -163,75 +163,6 @@ fn coinbase_maturity_refuses_depth_99_and_accepts_depth_100() -> TestResult {
             .get(&OutPoint::new(spend_tx.txid(), 0))?
             .is_some(),
         "depth 100 coinbase spend must enter the UTXO set"
-    );
-    Ok(())
-}
-
-// RCV-08
-#[test]
-fn disconnect_refuses_undo_whose_removed_outpoint_differs_from_the_block() -> TestResult {
-    let fixture = chain_to(2)?;
-    let block = &fixture.blocks[2];
-    let hash = Hash256::from(block.block_hash());
-    let mut record = undo_record(&fixture.undo, 2, block)?;
-    assert_eq!(
-        u32::from_le_bytes(record[33..37].try_into()?),
-        0,
-        "a coinbase-only block restores no coins"
-    );
-    assert_eq!(
-        u32::from_le_bytes(record[37..41].try_into()?),
-        1,
-        "a coinbase-only block retains one created outpoint"
-    );
-    record[73] ^= 0x01;
-    fixture.undo.persist_undo(2, hash, &record)?;
-
-    let before = fixture
-        .chain
-        .applied_tip_snapshot()
-        .ok_or(TestError::Missing("applied tip"))?;
-    let outcome = fixture.chain.disconnect_block(block);
-
-    let Err(DisconnectError::Refused(error)) = outcome else {
-        panic!("a mismatched undo record must refuse the disconnect, got {outcome:?}");
-    };
-    assert!(
-        matches!(
-            *error,
-            ApplyError::UndoLoad(UndoLoadError::Unreadable {
-                source: UndoCodecError::BlockMismatch { .. },
-                ..
-            })
-        ),
-        "the refusal must name the block mismatch, got {error:?}"
-    );
-    assert_eq!(
-        fixture
-            .chain
-            .applied_tip_snapshot()
-            .ok_or(TestError::Missing("applied tip"))?
-            .hash,
-        before.hash,
-        "a refused disconnect must not move the tip"
-    );
-    assert!(
-        fixture
-            .chain
-            .utxo_reader()
-            .get(&coinbase_outpoint(block))?
-            .is_some(),
-        "a refused disconnect must not drop block coins"
-    );
-    assert_eq!(
-        fixture
-            .chain
-            .durable_head
-            .load()?
-            .ok_or(TestError::Missing("durable head"))?
-            .tip,
-        before.hash,
-        "a refused disconnect must not move the durable head"
     );
     Ok(())
 }

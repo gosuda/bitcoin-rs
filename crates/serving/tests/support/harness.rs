@@ -59,7 +59,7 @@ impl NodeHarness {
 
 pub(crate) struct ServerHarness {
     address: SocketAddr,
-    shutdown: bitcoin_rs_execution::chain::LatchWriter,
+    shutdown: bitcoin_rs_consensus::latch::LatchWriter,
     join: Option<JoinHandle<()>>,
     transition: bitcoin_rs_execution::chain::StableRead,
 }
@@ -118,7 +118,7 @@ impl ServerHarness {
             false,
         )?;
         let address = server.local_addr()?;
-        let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+        let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
         let flag = shutdown.reader();
         let join = std::thread::spawn(move || {
             let _ignored = server.serve_with_shutdown(flag);

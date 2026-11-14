@@ -26,14 +26,17 @@ fn should_publish_checkpoint(
 
 fn spawn_chainstate_maintenance_worker(
     publisher: Arc<CheckpointPublisher>,
-    shutdown: crate::chain::LatchReader,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
 ) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("bitcoin-rs-execution-maintenance".into())
         .spawn(move || maintenance_loop(&publisher, &shutdown))
 }
 
-fn maintenance_loop(publisher: &CheckpointPublisher, shutdown: &crate::chain::LatchReader) {
+fn maintenance_loop(
+    publisher: &CheckpointPublisher,
+    shutdown: &bitcoin_rs_consensus::latch::LatchReader,
+) {
     let ticker = crossbeam_channel::tick(Duration::from_secs(1));
     let mut last_attempt: Option<Instant> = None;
     loop {

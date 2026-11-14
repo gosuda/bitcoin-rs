@@ -100,9 +100,10 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
         let tx = derived_index.transaction(&txid).map_err(RpcError::from)?;
         if let Some(tx) = tx {
             let record = derived_index
-                .transaction_height(&txid)
+                .transaction_block(&txid)
                 .map_err(RpcError::from)?
-                .and_then(|height| {
+                .and_then(|(_, identity)| {
+                    let height = identity.height;
                     if verbose == 2 && ctx.chain.block_undo_source.is_some() {
                         ctx.chain
                             .block_hash_at_height_in_view(&view, height)
@@ -294,7 +295,7 @@ fn txout_typed(
 pub(crate) fn gettxoutproof(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     let array = params_array(params)?;
     let Some(txids_value) = array.first() else {
@@ -357,7 +358,7 @@ const MAX_OUTPUTS_PER_BLOCK: u32 = 111_111;
 fn block_from_utxo(
     ctx: &Arc<Context>,
     ordered: &[Txid],
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Option<BlockRecord>, RpcError> {
     for txid in ordered {
         if cancellation.is_triggered() {
@@ -377,7 +378,7 @@ fn block_from_utxo(
 fn block_via_index(
     ctx: &Arc<Context>,
     txid: Option<&Txid>,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Option<BlockRecord>, RpcError> {
     let Some(txid) = txid else {
         return Ok(None);
@@ -388,10 +389,10 @@ fn block_via_index(
     let Some(derived_index) = ctx.indexes.derived_index.as_ref() else {
         return Ok(None);
     };
-    match derived_index.transaction_height(txid) {
-        Ok(Some(height)) => ctx
+    match derived_index.transaction_block(txid) {
+        Ok(Some((_, identity))) => ctx
             .chain
-            .block_by_height(height)
+            .block_by_height(identity.height)
             .map(Some)
             .ok_or_else(|| RpcError::CoreInternal("Transaction index corrupt".to_owned())),
         Ok(None) => Ok(None),
@@ -427,7 +428,7 @@ fn proof_from_single_record(
     ctx: &Arc<Context>,
     record: &bitcoin_rs_projection::block_log::BlockRecord,
     wanted: &hashbrown::HashSet<Txid>,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     if cancellation.is_triggered() {
         return Err(proof_interrupted());
@@ -651,7 +652,7 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
 pub(crate) fn decoderawtransaction(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     let raw = required_str(params, 0, "raw transaction is required")?;
     if cancellation.is_triggered() {
@@ -670,7 +671,7 @@ pub(crate) fn decoderawtransaction(
 pub(crate) fn compressrawtransaction(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     if !ctx.compressed_transactions {
         return Err(RpcError::MethodDisabled(
@@ -709,7 +710,7 @@ pub(crate) fn compressrawtransaction(
 pub(crate) fn decompressrawtransaction(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     if !ctx.compressed_transactions {
         return Err(RpcError::MethodDisabled(

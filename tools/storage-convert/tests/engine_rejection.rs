@@ -240,7 +240,7 @@ fn non_utf8_filename_only_namespace_is_rejected_and_preserves_source() -> TestRe
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
-    let source_temp = tempdir()?;
+    let source_temp = tempfile::tempdir_in("/tmp")?;
     let dest_temp = tempdir()?;
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");

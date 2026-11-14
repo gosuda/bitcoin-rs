@@ -1,4 +1,6 @@
+use super::write::commit_overhead_bytes;
 use super::{capability::IndexCapabilities, capability::IndexWatermark, rows::PendingRows};
+use crate::segment::tail::PreparedTail;
 
 pub(crate) use super::rows::IndexRowBytes;
 
@@ -17,6 +19,8 @@ pub struct PreparedBlock {
     pub(crate) family_bytes: IndexRowBytes,
     pub(super) capabilities: IndexCapabilities,
     pub(super) rows: PendingRows,
+    pub(super) committed: Box<bitcoin_rs_storage::CommittedBlock>,
+    pub(super) tail: PreparedTail,
 }
 
 impl PreparedBlock {
@@ -65,7 +69,12 @@ impl PreparedBatch {
             return Err(block);
         };
         let new_rows = self.row_count.checked_add(block.row_count);
-        let new_bytes = self.encoded_bytes.checked_add(block.encoded_bytes);
+        let base_bytes = if self.blocks.is_empty() {
+            commit_overhead_bytes(capabilities)
+        } else {
+            self.encoded_bytes
+        };
+        let new_bytes = base_bytes.checked_add(block.encoded_bytes);
 
         let fits = new_rows.is_some_and(|rows| rows <= self.limits.max_rows)
             && new_bytes.is_some_and(|bytes| bytes <= self.limits.max_bytes);

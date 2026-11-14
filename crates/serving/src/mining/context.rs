@@ -1,4 +1,5 @@
-use bitcoin_rs_consensus::primitives::{Block, BlockImage, CompactTarget, Hash256, Network, Txid};
+use alloc::sync::Arc;
+use bitcoin_rs_consensus::primitives::{BlockImage, CompactTarget, Hash256, Network, Txid};
 use bitcoin_rs_consensus::{LocktimeRule, locktime_cutoff};
 use bitcoin_rs_execution::chain::{
     BlockTree, ChainError, TipSnapshot, candidate_version, header_sync, node::NodeId,
@@ -24,10 +25,18 @@ pub trait MempoolSequenceWake: Send + Sync {
 
 pub trait AppliedTipSource: Send + Sync {
     fn applied_tip(&self) -> Option<TipSnapshot>;
+    fn applied_epoch(&self) -> Option<bitcoin_rs_execution::chain::AppliedEpoch> {
+        self.applied_tip()
+            .map(|tip| bitcoin_rs_execution::chain::AppliedEpoch::new(tip, 0))
+    }
 }
 
 pub trait MempoolSnapshotSource: Send + Sync {
     fn current_revisions(&self) -> (u64, u64);
+    fn settled_generation(&self) -> (u64, u64, u64) {
+        let (sequence, fee_delta_sequence) = self.current_revisions();
+        (0, sequence, fee_delta_sequence)
+    }
     fn select_template(
         &self,
         expected_sequences: Option<(u64, u64)>,
@@ -37,7 +46,7 @@ pub trait MempoolSnapshotSource: Send + Sync {
     ) -> Result<Option<SelectedBody>, MiningControlError>;
     fn select_template_after(
         &self,
-        block: &Block,
+        block: &BlockImage,
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError>;
@@ -45,7 +54,7 @@ pub trait MempoolSnapshotSource: Send + Sync {
         &self,
         selection: &GenerateSelection,
         context: &CandidateContext,
-    ) -> Result<MempoolMiningSnapshot, MiningControlError>;
+    ) -> Result<Arc<MempoolMiningSnapshot>, MiningControlError>;
     fn pooled_transaction_count(&self) -> u64;
     fn min_relay_fee_sat_per_kvb(&self) -> u64;
 }

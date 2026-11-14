@@ -167,6 +167,7 @@ pub struct ListenerExtras {
     pub ibd: Option<(Arc<dyn IbdState>, Network)>,
     pub block_sync: Option<Arc<dyn BlockSyncObserver>>,
     pub block_announcer: Option<Arc<dyn BlockAnnounceObserver>>,
+    pub block_memory: Option<Arc<crate::inbound::block_memory::BlockMemory>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -183,7 +184,7 @@ pub struct ConnectionShared {
     pub(crate) address_book: Option<Arc<crate::addrman::AddressBook>>,
     pub(crate) feeler: bool,
     pub activity: Arc<crate::NetworkActivity>,
-    pub session_cancel: crate::latch::LatchReader,
+    pub session_cancel: bitcoin_rs_consensus::latch::LatchReader,
     pub peer_ready: PeerReadyHandle,
     pub magic: Magic,
     pub headers_tx: Sender<crate::InboundHeaders>,
@@ -240,7 +241,7 @@ impl ConnectionShared {
         peer_table: Arc<crate::PeerTable>,
         banned: impl Into<crate::BannedReader>,
         activity: Arc<crate::NetworkActivity>,
-        session_cancel: crate::latch::LatchReader,
+        session_cancel: bitcoin_rs_consensus::latch::LatchReader,
         peer_ready: PeerReadyHandle,
         magic: Magic,
         headers_tx: Sender<crate::InboundHeaders>,
@@ -276,7 +277,7 @@ impl ConnectionShared {
             relay_offers: RelayOffers::default(),
             overlay: Arc::new(crate::overlay::OverlayTransport::new(Arc::default())),
             shared_outbound: Arc::new(crate::connection::SharedOutboundBudget::new()),
-            block_memory: Arc::default(),
+            block_memory: extras.block_memory.unwrap_or_default(),
             dial_routes: crate::DialRoutes::default(),
             #[cfg(test)]
             test_keepalive_intervals: std::sync::OnceLock::new(),
@@ -657,7 +658,7 @@ pub fn bind_listener(addr: std::net::SocketAddr) -> Result<TcpListener, Listener
 
 pub fn serve(
     listener: TcpListener,
-    shutdown: impl Into<crate::latch::LatchReader>,
+    shutdown: impl Into<bitcoin_rs_consensus::latch::LatchReader>,
     shared: ConnectionShared,
 ) -> Result<(), ListenerError> {
     let shutdown = shutdown.into();
@@ -681,7 +682,7 @@ fn loopback_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
 fn accept_connections(
     addr: std::net::SocketAddr,
     listener: &TcpListener,
-    shutdown: &crate::latch::LatchReader,
+    shutdown: &bitcoin_rs_consensus::latch::LatchReader,
     shared: &ConnectionShared,
 ) {
     let mut accept_backoff = ACCEPT_BACKOFF_INITIAL;
@@ -2606,6 +2607,7 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
                     &sink,
                     peer_addr,
                     shared,
+                    memory_credit,
                 );
             }
             _ => {}
@@ -2788,6 +2790,7 @@ pub fn process_compact_wire_message(
     sink: &ProductionSink<'_>,
     peer_addr: impl Into<crate::PeerRemote>,
     shared: &ConnectionShared,
+    memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
 ) {
     let peer_addr = peer_addr.into();
     let lease = sink.lease;
@@ -2822,7 +2825,8 @@ pub fn process_compact_wire_message(
         None
     };
     let source = lease.source(peer_addr.endpoint());
-    if let Some((hash, follow_up)) = handle_compact_outcome(outcome, sink, peer_addr, shared)
+    if let Some((hash, follow_up)) =
+        handle_compact_outcome(outcome, sink, peer_addr, shared, memory_credit)
         && let Some(sync) = shared.block_sync.as_ref()
     {
         sync.enqueue_owned_body_fetch(source, hash, &mut || sink.send(follow_up.clone()).is_ok());
@@ -2837,13 +2841,14 @@ fn handle_compact_outcome(
     sink: &ProductionSink<'_>,
     peer_addr: impl Into<crate::PeerRemote>,
     shared: &ConnectionShared,
+    memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
 ) -> Option<(bitcoin_rs_consensus::primitives::Hash256, crate::Message)> {
     let peer_addr = peer_addr.into();
     let lease = sink.lease;
     match outcome {
         crate::compact_blocks::Outcome::Complete(image) => {
             tracing::info!(peer_addr = %peer_addr, hash = %image.block_hash(), "p2p compact block reconstructed");
-            shared.send_block(lease, peer_addr, image, None);
+            shared.send_block(lease, peer_addr, image, memory_credit);
             None
         }
         crate::compact_blocks::Outcome::RequestMissing(request) => {
@@ -3054,7 +3059,7 @@ pub fn test_shared(
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(true),
         ))),
-        crate::latch::LatchWriter::new().reader(),
+        bitcoin_rs_consensus::latch::LatchWriter::new().reader(),
         None,
         Magic::BITCOIN,
         headers_tx,
@@ -3460,7 +3465,7 @@ mod resilient_accept_tests {
         .expect("bind listener");
         let addr = listener.local_addr().expect("local_addr");
 
-        let shutdown = crate::latch::LatchWriter::new();
+        let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
         let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
         let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
@@ -3509,7 +3514,7 @@ mod inbound_admission_tests {
         let mut shared = test_shared(Arc::clone(&peer_table), headers_tx, blocks_tx);
         shared.max_inbound = 1;
 
-        let shutdown = crate::latch::LatchWriter::new();
+        let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
         let serve_shutdown = shutdown.reader();
         let handle = std::thread::spawn(move || serve(listener, serve_shutdown, shared));
 
@@ -3848,7 +3853,7 @@ mod address_tests {
             book.learn_dns("seed", &[target.into()], now - 31 * 86400);
             shared.address_book = Some(Arc::clone(&book));
             if cancelled {
-                let session_cancel = crate::latch::LatchWriter::new();
+                let session_cancel = bitcoin_rs_consensus::latch::LatchWriter::new();
                 session_cancel.trigger();
                 shared.session_cancel = session_cancel.reader();
             }

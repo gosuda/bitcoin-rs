@@ -40,7 +40,7 @@ pub enum IndexCapability {
 impl IndexCapability {
     /// INVARIANT: this order is load-bearing; the query-refusal text and the
     /// index-ahead capability label follow it.
-    pub(crate) const ALL: [Self; 4] = [
+    pub const ALL: [Self; 4] = [
         Self::TxLookup,
         Self::ScriptHistory,
         Self::ScriptLive,
@@ -74,12 +74,20 @@ impl IndexCapability {
         }
     }
 
-    pub(super) const fn column_families(self) -> &'static [ColumnFamily] {
+    pub(crate) const fn column_families(self) -> &'static [ColumnFamily] {
         match self {
-            Self::TxLookup => &[ColumnFamily::TxConfirmed],
-            Self::ScriptHistory => &[ColumnFamily::Funding, ColumnFamily::Spending],
+            Self::TxLookup => &[ColumnFamily::TxConfirmed, ColumnFamily::TxDir],
+            Self::ScriptHistory => &[
+                ColumnFamily::TxDir,
+                ColumnFamily::Funding,
+                ColumnFamily::Spending,
+                ColumnFamily::ScriptDict,
+                ColumnFamily::ScriptPost,
+                ColumnFamily::SpendDir,
+                ColumnFamily::ScriptStats,
+            ],
             Self::ScriptLive => &[ColumnFamily::ScriptLive],
-            Self::CompactFilters => &[],
+            Self::CompactFilters => &[ColumnFamily::Filters],
         }
     }
 
@@ -129,7 +137,7 @@ impl IndexCapabilities {
         Self(IndexCapability::TxLookup.bit() | IndexCapability::ScriptHistory.bit());
 
     #[must_use]
-    pub(crate) const fn contains(self, capability: IndexCapability) -> bool {
+    pub const fn contains(self, capability: IndexCapability) -> bool {
         self.0 & capability.bit() != 0
     }
 
@@ -164,11 +172,11 @@ impl IndexCapabilities {
             .collect()
     }
 
-    pub(super) const fn to_mask(self) -> u8 {
+    pub(crate) const fn to_mask(self) -> u8 {
         self.0
     }
 
-    pub(super) fn from_mask(mask: u8) -> Result<Self, IndexError> {
+    pub(crate) fn from_mask(mask: u8) -> Result<Self, IndexError> {
         if mask == 0 || mask & !0b1111 != 0 {
             return Err(IndexError::InvalidResetMarker);
         }
@@ -278,7 +286,7 @@ impl IndexWatermark {
     }
 }
 
-pub(super) fn read_coverage_floor(
+pub(crate) fn read_coverage_floor(
     snapshot: &dyn KvSnapshot,
     capability: IndexCapability,
 ) -> Result<u32, IndexError> {
@@ -338,6 +346,17 @@ pub(super) fn put_selected_watermarks(
             batch.delete(ColumnFamily::UtxoMeta, key);
         }
     }
+}
+
+pub(crate) fn put_bulk_publish_marks(
+    batch: &mut BufferedWriteBatch,
+    capabilities: IndexCapabilities,
+    watermark: IndexWatermark,
+    floor: u32,
+) {
+    let segment_caps = capabilities.without(IndexCapability::ScriptLive);
+    put_selected_watermarks(batch, segment_caps, Some(watermark));
+    put_selected_floors(batch, segment_caps, floor);
 }
 
 #[cfg(test)]

@@ -64,6 +64,8 @@ pub enum NodeOpenError {
     ZmqBind(#[from] bitcoin_rs_serving::zmq::ZmqBindError),
     #[error(transparent)]
     Apply(Box<bitcoin_rs_execution::ApplyError>),
+    #[error(transparent)]
+    Snapshot(#[from] crate::snapshot::SnapshotImportError),
     #[error("create data_dir {path}")]
     CreateDataDir {
         path: PathBuf,
@@ -220,7 +222,24 @@ impl NodeState {
         let txindex_cache_bytes = cache_shares[1].bytes;
         let cache_allocation =
             bitcoin_rs_storage::split_chainstate_cache_budget(chainstate_cache_bytes);
-        let (storage, block_files) = NodeStorage::open(&config, cache_allocation, &data_dir_guard)?;
+        let budget = Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            cache_allocation,
+            crate::lifecycle::worker_shares(),
+        ));
+        let window_limits_source: bitcoin_rs_execution::WindowLimitsSource = {
+            let budget = Arc::clone(&budget);
+            Arc::new(move || budget.window_limits())
+        };
+        let (storage, block_files) = NodeStorage::open(
+            &config,
+            cache_allocation,
+            &data_dir_guard,
+            Arc::clone(&budget),
+        )?;
+        budget.set_mdbx(storage.kind() == bitcoin_rs_storage::StorageBackend::Mdbx.as_str());
+        let engine_cache_probe = storage.engine_cache_probe();
+        budget.set_engine_cache_source(Some(Box::new(move || engine_cache_probe())));
+        budget.sample_engine_cache();
         let undo_store = storage.undo_store();
         let durable_head = storage.durable_head();
 
@@ -239,7 +258,7 @@ impl NodeState {
             Arc::new(crate::NoOpZmqPublisher)
         };
         let head = durable_head.load()?;
-        let bitcoin_rs_execution::recovery::RestoredState { initial, engine } = {
+        let restored = {
             bitcoin_rs_execution::recovery::require_full_script_attestation(
                 &config.data_dir,
                 config.validation.mode,
@@ -249,19 +268,22 @@ impl NodeState {
                     .stored_prune_height()
                     .is_some_and(|height| height > 0),
             )?;
+            let in_flight = storage.commit_authority().in_flight_snapshot_activation()?;
             bitcoin_rs_execution::recovery::prepare_initial_state_with_engine(
                 &config.data_dir,
                 config.network,
                 head.as_ref(),
+                in_flight.as_ref(),
             )?
         };
+        let engine = restored.engine.clone();
+        let bitcoin_rs_execution::recovery::RestoredState { initial, .. } = restored;
         let InitialChainstate {
             utxo: mut utxo_set,
             coin_stats: initial_coin_stats,
             tree: mut block_tree_value,
             applied_tip: restored_applied_tip,
             resume_source,
-            script_live_seed,
         } = initial;
         if block_tree_value.is_empty() {
             let genesis = config.network.genesis_block();
@@ -384,43 +406,50 @@ impl NodeState {
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: storage.mandatory_retention(),
+            window_limits: window_limits_source,
             history: storage.bounded_history(),
             role: bitcoin_rs_execution::ChainstateRole::Ordinary,
         });
-        let seed_offer: Option<bitcoin_rs_storage::utxo::SeedOfferCell> =
-            if !derived_index_capabilities(&config).is_empty()
-                && config.indexes.script_index.is_enabled()
-            {
-                Some(std::sync::Arc::new(
-                    bitcoin_rs_storage::utxo::SeedSlot::new(),
-                ))
-            } else {
-                None
-            };
+        chainstate.set_prevout_charge(bitcoin_rs_storage::budget::ChargeHandle::new(
+            budget.clone(),
+            bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
+        ));
         let derived_index_open_spec = build_derived_index_open_spec(
             &config,
             txindex_cache_bytes,
             epoch,
             &data_dir_guard,
-            seed_offer.clone(),
+            &budget,
         )?;
-        if let Some(cell) = seed_offer.as_ref() {
-            cell.want();
-            if let Some(artifact) = script_live_seed {
-                let _ = cell.offer(artifact);
-            }
-        }
+        let (facts_queue, facts_parts) = if derived_index_open_spec.is_some() {
+            let ledger: Arc<dyn bitcoin_rs_storage::budget::BudgetCharge> = budget.clone();
+            let charge = bitcoin_rs_storage::budget::ChargeHandle::new(
+                ledger,
+                bitcoin_rs_storage::budget::BudgetOwner::FactsQueue,
+            );
+            let queue = Arc::new(crate::facts_queue::FactsQueue::new(
+                crate::facts_queue::DEFAULT_FACTS_QUEUE_CAPACITY,
+                charge,
+            ));
+            budget.add_reclaimer(queue.reclaimer());
+            let rx = queue.receiver();
+            let charge = queue.charge_handle();
+            let gap = queue.gap_handle();
+            (Some(queue), Some((rx, charge, gap)))
+        } else {
+            (None, None)
+        };
         let derived_index_parts = match derived_index_open_spec {
             Some(mut spec) => {
-                spec.utxo = Some(bitcoin_rs_storage::utxo::UtxoReader::with_coin_store(
-                    Arc::clone(&utxo),
-                    storage.coins(),
-                ));
-                spec.chain_transition = Some(transition.stable_read());
+                if let Some((rx, charge, gap)) = facts_parts {
+                    spec.facts_rx = Some(rx);
+                    spec.facts_charge = Some(charge);
+                    spec.facts_gap = Some(gap);
+                }
+                spec.cpu = Some(budget.cpu());
+
                 let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-                let runtime = Arc::new(bitcoin_rs_projection::runtime::DerivedIndexRuntime::new(
-                    wake_tx,
-                ));
+                let runtime = bitcoin_rs_projection::runtime::DerivedIndexRuntime::new(wake_tx);
                 let body_source: Arc<dyn BlockBodySource> =
                     Arc::new(StoredBlockBodySource::new(Arc::clone(&block_body_store)));
                 let lifecycle: Arc<
@@ -464,7 +493,7 @@ impl NodeState {
         } else {
             P2P_OUTBOUND_FULL_RELAY_SLOTS
         };
-        let p2p_shutdown = Arc::new(bitcoin_rs_wire::latch::LatchWriter::new());
+        let p2p_shutdown = Arc::new(bitcoin_rs_consensus::latch::LatchWriter::new());
         let p2p_shutdown_guard = chainstate.shutdown_reader().on_cancel({
             let p2p_shutdown = Arc::clone(&p2p_shutdown);
             move || p2p_shutdown.trigger()
@@ -515,6 +544,9 @@ impl NodeState {
             },
             p2p_shutdown.reader(),
         ));
+        p2p.set_outbound_ledger(Arc::new(crate::budget::BudgetedOutboundLedger::new(
+            Arc::clone(&budget),
+        )));
         let peer_table = p2p.table();
         let inbound_headers_rx = p2p
             .take_inbound_headers_receiver()
@@ -561,11 +593,13 @@ impl NodeState {
             derived_index_parts
                 .as_ref()
                 .map(|(runtime, _, _, _)| Arc::clone(runtime)),
+            facts_queue.clone(),
             Arc::clone(&mining_generation),
             Some(Arc::clone(&mempool_gateway)),
         )
         .with_block_announcer(Some(block_announce_queue));
         chainstate.set_capture_flags(followers.needs_rawtx(), followers.needs_block_bytes());
+        chainstate.set_committed_facts_consumer(followers.wants_committed_facts());
         let durable_tip_height = Arc::new(AtomicU32::new(
             chainstate
                 .applied_tip_reader()
@@ -574,11 +608,11 @@ impl NodeState {
                 .map_or(0, |tip| tip.height),
         ));
         chainstate.configure_checkpointing(&config.data_dir, Arc::clone(&durable_tip_height))?;
-        bitcoin_rs_execution::recover_snapshot_activation(&chainstate).map_err(|error| {
-            NodeOpenError::AssumeUtxoOpen {
+        bitcoin_rs_execution::recover_snapshot_activation(&chainstate, &config.data_dir).map_err(
+            |error| NodeOpenError::AssumeUtxoOpen {
                 error: Box::new(error),
-            }
-        })?;
+            },
+        )?;
         if engine.is_some() || resume_source == ResumeSource::Cold {
             bitcoin_rs_execution::recovery::install_engine_checkpoint(
                 &chainstate,
@@ -699,18 +733,29 @@ impl NodeState {
                 error: Box::new(error),
             })?,
         );
-        let sync = Arc::new(crate::sync::block_sync(
-            Arc::clone(&chainstate),
-            followers.clone(),
-            Arc::clone(&peer_table),
+        let sync = Arc::new(crate::sync::block_sync(crate::sync::BlockSyncInputs {
+            handles: Arc::clone(&chainstate),
+            followers: followers.clone(),
+            peer_table: Arc::clone(&peer_table),
             inbound_headers_rx,
             inbound_blocks_rx,
-            Arc::clone(&ibd),
-            Some(Arc::clone(&assumeutxo)),
+            ibd: Arc::clone(&ibd),
+            assumeutxo: Some(Arc::clone(&assumeutxo)),
+            budget: Arc::clone(&budget),
+        }));
+        let staged_cap = usize::try_from(budget.caps().staged_images).unwrap_or(usize::MAX);
+        let sync_budget = if config.p2p.fast_sync {
+            fast_sync_budget(config.network).with_byte_ceiling(staged_cap)
+        } else {
+            crate::p2p::default_sync_budget(config.network).with_byte_ceiling(staged_cap)
+        };
+        sync.install_budget(sync_budget);
+        let ingress_ledger = Arc::new(crate::budget::BudgetedIngressLedger::new(Arc::clone(
+            &budget,
+        )));
+        let block_memory = Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
+            ingress_ledger,
         ));
-        if config.p2p.fast_sync {
-            sync.install_budget(fast_sync_budget(config.network));
-        }
         let prune_service = if config.storage.prune_target_mb > 0 {
             Some(storage.deferred.prune_service(
                 Arc::clone(&block_files),
@@ -729,14 +774,34 @@ impl NodeState {
             total_cache_bytes = cache_budget,
             "opened storage backend with effective cache capacities"
         );
+        let script_live_seed = derived_index_parts
+            .as_ref()
+            .filter(|_| {
+                derived_index_capabilities(&config)
+                    .contains(bitcoin_rs_projection::IndexCapability::ScriptLive)
+            })
+            .map(|(runtime, _, _, _)| Arc::clone(runtime.script_live_seed()));
+        if let Some(seed) = script_live_seed.as_ref() {
+            seed.set_spill_dir(&config.data_dir);
+        }
+        let derived_index_runtime = derived_index_parts
+            .as_ref()
+            .map(|(runtime, _, _, _)| Arc::clone(runtime));
         let snapshots = Arc::new(crate::snapshot::SnapshotControl::new(
             assumeutxo,
             Arc::clone(&chainstate),
             followers.clone(),
             config.data_dir.clone(),
             config.network,
-            seed_offer,
+            script_live_seed,
+            derived_index_runtime,
+            Some(Arc::clone(&derived_index_status)),
         ));
+        snapshots.wire_historical_facts(facts_queue.clone());
+        if let Some(manifest_path) = config.assumeutxo_manifest.as_ref() {
+            snapshots.admit_startup_manifest(manifest_path)?;
+        }
+        snapshots.sync_historical_window()?;
         verify_startup_window(&chainstate, &config.data_dir)?;
         let shutdown = Arc::new(chainstate.shutdown_reader().child());
         Ok(Self {
@@ -764,6 +829,9 @@ impl NodeState {
             block_announce_rx: Mutex::new(Some(block_announce_rx)),
             shutdown,
             _p2p_shutdown_guard: p2p_shutdown_guard,
+            block_memory,
+            #[cfg(any(test, feature = "test-seam"))]
+            budget,
         })
     }
 }

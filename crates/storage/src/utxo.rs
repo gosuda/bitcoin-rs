@@ -18,11 +18,13 @@ pub mod stats;
 pub(crate) mod test_support;
 mod undo_codec;
 
+pub use compress::{
+    compress_amount, decompress_amount, read_varint, varint_len, write_varint_into,
+};
 pub use record::UtxoRecord;
 pub use set::{UtxoCoin, UtxoError, UtxoMemoryReport, UtxoReader, UtxoScan, UtxoSet, UtxoSetView};
 pub use snapshot::{
-    OfferOutcome, RawSeedError, SeedOfferCell, SeedProvenance, SeedSlot, SnapshotCoin,
-    SnapshotCoinObserver, SnapshotLoad, V4Witness, VerifiedSnapshotArtifact,
-    read_snapshot_strict_v4, read_snapshot_strict_v4_observed, read_snapshot_strict_v4_witnessed,
-    write_snapshot_observed, write_snapshot_witnessed,
+    PairObserver, SeedProvenance, SnapshotCoin, SnapshotCoinObserver, SnapshotLoad, V4Witness,
+    VerifiedSnapshotArtifact, read_snapshot_strict_v4, read_snapshot_strict_v4_observed,
+    read_snapshot_strict_v4_witnessed, write_snapshot_observed, write_snapshot_witnessed,
 };

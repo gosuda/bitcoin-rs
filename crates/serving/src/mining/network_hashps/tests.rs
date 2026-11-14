@@ -41,7 +41,7 @@ fn snapshot(tree: &BlockTree, tip_id: NodeId) -> TipSnapshot {
     }
 }
 
-fn work_to_f64(work: bitcoin_rs_execution::chain::ChainWork) -> f64 {
+fn work_to_f64(work: bitcoin_rs_consensus::header_rules::ChainWork) -> f64 {
     let bytes: [u8; 32] = work.to_be_bytes();
     bytes
         .iter()

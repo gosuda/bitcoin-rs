@@ -263,6 +263,7 @@ fn deliver_compact_block(
         &sink,
         addr,
         shared,
+        None,
     );
     Ok(())
 }

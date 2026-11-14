@@ -1,8 +1,9 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use crate::chain::{ChainWork, NodeStatus};
+use crate::chain::NodeStatus;
 use arc_swap::ArcSwapOption;
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Block, BlockImage, Hash256, Network};
 use bitcoin_rs_storage::DurableHead;
 use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
@@ -114,6 +115,7 @@ impl Fixture {
             block_hash: tip.hash,
             hash_serialized: snapshot_set.lock_stable_view().hash_serialized_3()?,
             chain_tx_count: tip.chain_tx_count.to_wire(),
+            index_commitments: [None; 4],
         };
         let mut stats = snapshot_set.with_stable_view(|view| {
             bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, tip.height, true)
@@ -186,70 +188,39 @@ fn engine_coin_set(chain: &Chainstate) -> TestResult<UtxoSet> {
 }
 
 #[test]
-fn untrusted_snapshot_cannot_assert_its_own_commitment() -> TestResult {
-    let active = chainstate();
-    let dir = tempfile::tempdir()?;
-    let manager = AssumeUtxoManager::open(
-        Network::Regtest,
-        Arc::clone(&active),
-        dir.path().to_path_buf(),
-    )?;
+fn untrusted_snapshot_height_and_tx_count_fail_the_trust_anchor() -> TestResult {
     let pinned = Network::Regtest
         .assume_utxo_for_height(110)
         .ok_or(TestError::Missing("missing pin"))?;
-    for (height, hash) in [
-        (1234, pinned.block_hash),
-        (110, Hash256::default()),
-        (110, pinned.block_hash),
-    ] {
-        let Err(error) = manager.activate_snapshot_state(UtxoSet::new(), hash, height) else {
-            return Err(TestError::UnexpectedSuccess("untrusted snapshot accepted"));
-        };
-        match height {
-            1234 => assert!(matches!(
-                error,
-                AssumeUtxoError::UntrustedSnapshotHeight(1234)
-            )),
-            _ if hash == pinned.block_hash => assert!(matches!(
-                error,
-                AssumeUtxoError::SnapshotCommitmentMismatch { .. }
-            )),
-            _ => assert!(matches!(
-                error,
-                AssumeUtxoError::SnapshotBlockHashMismatch { .. }
-            )),
-        }
-        assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
-        assert!(active.applied_tip_snapshot().is_none());
-        assert_eq!(active.role(), ChainstateRole::Ordinary);
-    }
-    Ok(())
-}
-
-#[test]
-fn snapshot_rejects_coin_height_alias_with_identical_commitment() -> TestResult {
-    let fixture = Fixture::new()?;
-    let mut bytes = fixture.snapshot.clone();
-    let offset = 52 + 45 + 12;
-    let height = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
-    assert!(height <= fixture.pinned.height);
-    bytes[offset..offset + 4].copy_from_slice(&(height | 0x8000_0000).to_le_bytes());
-    let forged = read_snapshot_strict_v4(&mut Cursor::new(&bytes))?;
-    assert_eq!(
-        forged.set.lock_stable_view().hash_serialized_3()?,
-        fixture.pinned.hash_serialized,
-        "the encoded commitment aliases the high height bit"
-    );
-    let dir = tempfile::tempdir()?;
-    let manager = fixture.manager(dir.path())?;
+    assert!(Network::Regtest.assume_utxo_for_height(1234).is_none());
+    let unpinned_height = AssumeUtxoDiskStatus::Validating {
+        base_height: 1234,
+        base_hash: pinned.block_hash,
+        expected_hash_serialized: pinned.hash_serialized,
+        chain_tx_count: pinned.chain_tx_count,
+        historical_height: 0,
+        historical_hash: Network::Regtest.genesis_block_hash(),
+        pending: None,
+        checkpoint: None,
+    };
     assert!(matches!(
-        manager.activate_pinned_snapshot(forged.set, forged.tip_hash, &fixture.pinned),
-        Err(AssumeUtxoError::Utxo(
-            bitcoin_rs_storage::utxo::UtxoError::SnapshotCoinHeightOutOfRange { .. }
-        ))
+        crate::assumeutxo_snapshot::trusted_anchor(Network::Regtest, &unpinned_height),
+        Err(crate::SnapshotAnchorError::UnrecognizedBase)
     ));
-    assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
-    assert!(fixture.active.applied_tip_snapshot().is_none());
+    let miscounted = AssumeUtxoDiskStatus::Validating {
+        base_height: pinned.height,
+        base_hash: pinned.block_hash,
+        expected_hash_serialized: pinned.hash_serialized,
+        chain_tx_count: pinned.chain_tx_count + 1,
+        historical_height: 0,
+        historical_hash: Network::Regtest.genesis_block_hash(),
+        pending: None,
+        checkpoint: None,
+    };
+    assert!(matches!(
+        crate::assumeutxo_snapshot::trusted_anchor(Network::Regtest, &miscounted),
+        Err(crate::SnapshotAnchorError::TrustAnchorTxCount)
+    ));
     Ok(())
 }
 
@@ -270,24 +241,17 @@ fn snapshot_rejects_invalid_base_and_descendant_before_persistence() -> TestResu
         }
         let before_stats = fixture.active.coin_stats.snapshot();
         let before_coins = fixture.active.utxo.lock_stable_view().hash_serialized_3()?;
-        let persisted = AtomicBool::new(false);
         let loaded = fixture.load()?;
-        let result = fixture.active.install_snapshot(
-            loaded.set,
-            fixture.stats.clone(),
-            &fixture.pinned,
-            |_, _, _, _| {
-                persisted.store(true, Ordering::Relaxed);
-                Ok(())
-            },
-        );
+        let dir = tempfile::tempdir()?;
+        let manager = fixture.manager(dir.path())?;
+        let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
         assert!(matches!(
             result,
             Err(AssumeUtxoError::Apply(ApplyError::Chain(
                 crate::chain::ChainError::KnownInvalidHeader { hash }
             ))) if hash == fixture.pinned.block_hash
         ));
-        assert!(!persisted.load(Ordering::Relaxed));
+        assert!(!dir.path().join("assumeutxo").exists());
         assert!(fixture.active.durable_head.load()?.is_none());
         assert!(fixture.active.applied_tip_snapshot().is_none());
         assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
@@ -330,12 +294,9 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
         (loaded.tip_hash, loaded.height),
         (fixture.pinned.block_hash, fixture.pinned.height)
     );
-    let (commitment, verified_stats) = loaded.set.with_stable_view(|view| {
-        Ok::<_, bitcoin_rs_storage::utxo::UtxoError>((
-            view.hash_serialized_3_at_height(fixture.pinned.height)?,
-            bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, fixture.pinned.height, true)?,
-        ))
-    })?;
+    let commitment = loaded
+        .set
+        .with_stable_view(|view| view.hash_serialized_3_at_height(fixture.pinned.height))?;
     assert_eq!(commitment, fixture.pinned.hash_serialized);
     let fork = competing_snapshot_headers()?;
     let fork_root = {
@@ -356,16 +317,7 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
     };
     let before_stats = fixture.active.coin_stats.snapshot();
     let before_coins = fixture.active.utxo.lock_stable_view().hash_serialized_3()?;
-    let persisted = AtomicBool::new(false);
-    let result = fixture.active.install_snapshot(
-        loaded.set,
-        verified_stats,
-        &fixture.pinned,
-        |_, _, _, _| {
-            persisted.store(true, Ordering::Relaxed);
-            Ok(())
-        },
-    );
+    let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
     assert!(matches!(
         result,
         Err(AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain {
@@ -376,7 +328,7 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
             && base_height == fixture.pinned.height
             && best == fork[2].block_hash().0
     ));
-    assert!(!persisted.load(Ordering::Relaxed));
+    assert!(!dir.path().join("assumeutxo").exists());
     assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
     assert!(manager.historical_chainstate().is_none());
     assert!(fixture.active.durable_head.load()?.is_none());
@@ -428,17 +380,10 @@ fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
         assert!(tip.chainwork > base.chainwork);
         assert_eq!(tip.hash, harder.block_hash().0);
     }
-    let persisted = AtomicBool::new(false);
     let loaded = fixture.load()?;
-    let result = fixture.active.install_snapshot(
-        loaded.set,
-        fixture.stats.clone(),
-        &fixture.pinned,
-        |_, _, _, _| {
-            persisted.store(true, Ordering::Relaxed);
-            Ok(())
-        },
-    );
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
     assert!(matches!(
         result,
         Err(AssumeUtxoError::SnapshotBaseNotOnBestHeaderChain {
@@ -449,7 +394,7 @@ fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
             && base_height == fixture.pinned.height
             && best == harder.block_hash().0
     ));
-    assert!(!persisted.load(Ordering::Relaxed));
+    assert!(!dir.path().join("assumeutxo").exists());
     assert!(fixture.active.durable_head.load()?.is_none());
     assert!(fixture.active.applied_tip_snapshot().is_none());
     assert_eq!(fixture.active.role(), ChainstateRole::Ordinary);
@@ -617,6 +562,7 @@ fn snapshot_work_fixture(
         block_hash: snapshot.tip_hash,
         hash_serialized: snapshot.set.lock_stable_view().hash_serialized_3()?,
         chain_tx_count: stats.tx_count,
+        index_commitments: [None; 4],
     };
     let mut encoded = Vec::new();
     write_snapshot_observed(
@@ -969,9 +915,6 @@ fn historical_replay_preserves_active_durable_head_and_notifications() -> TestRe
     Ok(())
 }
 
-/// Independent oracle for the historical chainstate's coin statistics: a full
-/// scan of the engine `coins` keyspace at `height`, with the transaction count
-/// taken from the connected tip instead of any listener.
 fn scanned_historical_stats(
     historical: &Chainstate,
     height: u32,
@@ -984,9 +927,6 @@ fn scanned_historical_stats(
     Ok(stats)
 }
 
-/// Compares every field. A rolling `MuHash` and a scanned one are the same
-/// value in different raw numerator and denominator form, so the digest is
-/// compared after `finalize`.
 fn assert_same_stats(actual: &CoinStats, expected: &CoinStats, height: u32) {
     assert_eq!(
         (
@@ -1012,9 +952,6 @@ fn assert_same_stats(actual: &CoinStats, expected: &CoinStats, height: u32) {
     );
 }
 
-/// Genesis plus 101 coinbase blocks. The last block also spends the height-1
-/// coinbase output, which is mature at height 101, so the historical replay
-/// removes a coin as well as adding them.
 fn spending_chain() -> TestResult<(Vec<Block>, bitcoin_rs_consensus::primitives::OutPoint)> {
     use crate::chain::regtest_fixture::{
         coinbase, mined_block_with_prev_hash, mined_regtest_child_at,
@@ -1578,14 +1515,20 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("genesis missing"))?;
     let reader = fixture.active.chain_progress_reader();
-    let loaded = fixture.load()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    let mut reader = Some(reader);
     let mut observed = None;
+    let loaded = fixture.load()?;
     let result = std::thread::scope(|scope| {
-        fixture.active.install_snapshot(
+        manager.activate_pinned_snapshot_with(
             loaded.set,
-            fixture.stats.clone(),
+            loaded.tip_hash,
             &fixture.pinned,
-            |_, _, _, _| {
+            |_, _| {
+                let Some(reader) = reader.take() else {
+                    return;
+                };
                 let (sent, received) = std::sync::mpsc::sync_channel(1);
                 scope.spawn(move || {
                     let progress = reader.progress(
@@ -1597,12 +1540,8 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
                 observed = received
                     .recv_timeout(std::time::Duration::from_secs(1))
                     .ok();
-                Err(AssumeUtxoError::Storage(
-                    bitcoin_rs_storage::StorageError::InvalidOperation(
-                        "simulated persistence refusal",
-                    ),
-                ))
             },
+            || false,
         )
     });
     assert!(result.is_err());
@@ -1653,19 +1592,6 @@ fn lifecycle_report_refuses_contention_without_waiting_for_the_transition() -> T
     Ok(())
 }
 
-#[test]
-fn activation_stages_witness_only_after_durable_commit() -> TestResult {
-    let fixture = Fixture::new()?;
-    let dir = tempfile::tempdir()?;
-    let manager = fixture.manager(dir.path())?;
-    assert!(manager.take_pending_activation_witness().is_none());
-    fixture.activate(&manager)?;
-    let staged = manager.take_pending_activation_witness();
-    assert!(staged.is_some(), "activation must stage a witness");
-    assert!(manager.take_pending_activation_witness().is_none());
-    Ok(())
-}
-
 // RCV-02
 #[test]
 fn activation_attests_the_snapshot_base_as_assume_valid() -> TestResult {
@@ -1691,7 +1617,7 @@ fn activation_attests_the_snapshot_base_as_assume_valid() -> TestResult {
 }
 
 #[test]
-fn activation_failure_leaves_no_staged_witness() -> TestResult {
+fn activation_failure_publishes_no_checkpoint() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
@@ -1703,13 +1629,21 @@ fn activation_failure_leaves_no_staged_witness() -> TestResult {
         result,
         Err(AssumeUtxoError::SnapshotBlockHashMismatch { .. })
     ));
-    assert!(manager.take_pending_activation_witness().is_none());
+    assert_no_checkpoint(dir.path());
     fixture.head.fail.store(true, Ordering::Release);
     let loaded = fixture.load()?;
     let result = manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned);
     assert!(result.is_err());
-    assert!(manager.take_pending_activation_witness().is_none());
+    assert_no_checkpoint(dir.path());
     Ok(())
+}
+
+fn assert_no_checkpoint(dir: &std::path::Path) {
+    let current = dir.join("chainstate-checkpoints").join("CURRENT");
+    assert!(
+        !current.is_file(),
+        "a failed activation must not publish a checkpoint"
+    );
 }
 
 #[test]
@@ -1749,50 +1683,288 @@ fn activation_offer_only_on_full_success() -> TestResult {
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
     fixture.activate(&manager)?;
-
-    let staged = manager.take_pending_activation_witness();
-    assert!(staged.is_some(), "activation must stage a witness");
-    let _ = staged;
-    assert!(manager.take_pending_activation_witness().is_none());
-
     let retry = fixture.load()?;
     assert!(matches!(
         manager.activate_pinned_snapshot(retry.set, retry.tip_hash, &fixture.pinned),
         Err(AssumeUtxoError::AlreadyActive)
     ));
-    assert!(manager.take_pending_activation_witness().is_none());
-
+    assert_restores_at_snapshot_base(dir.path(), &fixture.pinned)?;
     drop(manager);
     let reopened = fixture.manager(dir.path())?;
     assert!(matches!(
         reopened.status()?,
         AssumeUtxoDiskStatus::Validating { .. }
     ));
-    let initial =
-        crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned)?;
-    assert!(initial.script_live_seed.is_some());
+    drop(reopened);
+    assert_restores_at_snapshot_base(dir.path(), &fixture.pinned)?;
+    Ok(())
+}
+fn assert_restores_at_snapshot_base(dir: &std::path::Path, pinned: &AssumeUtxoData) -> TestResult {
+    std::fs::write(
+        dir.join(bitcoin_rs_storage::checkpoint::fs::CURRENT_SCHEMA_FILE),
+        bitcoin_rs_storage::checkpoint::fs::current_schema_bytes(),
+    )
+    .map_err(TestError::Io)?;
+    let restored = crate::recovery::restore_snapshot(dir, Network::Regtest, pinned)?;
+    assert!(
+        matches!(
+            restored.resume_source,
+            crate::recovery::ResumeSource::Checkpoint
+        ),
+        "restart must resume from the published checkpoint"
+    );
+    assert_eq!(
+        restored.coin_stats.tx_count, pinned.chain_tx_count,
+        "restored coin statistics must equal the pinned transaction count"
+    );
+    let root = dir.join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT);
+    let current: bitcoin_rs_storage::checkpoint::CurrentV1 = sonic_rs::from_slice(&std::fs::read(
+        root.join(bitcoin_rs_storage::checkpoint::CURRENT_FILE),
+    )?)
+    .map_err(TestError::Sonic)?;
+    let engine = bitcoin_rs_storage::open_checkpoint_store(
+        &root.join(&current.directory).join("chainstate"),
+    )?;
+    let coins = UtxoSet::new();
+    for row in engine.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
+        let (_key, value) = row?;
+        coins.insert_parsed_record(bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
+            value.into_boxed_slice(),
+        )?);
+    }
+    assert_eq!(
+        coins
+            .lock_stable_view()
+            .hash_serialized_3_at_height(pinned.height)?,
+        pinned.hash_serialized,
+        "restored coin statistics must equal the pinned hash"
+    );
     Ok(())
 }
 
-// RCV-01, RCV-04
+// ARCH-07b
 #[test]
-fn rejects_assumeutxo_snapshot_with_truncated_headers() -> TestResult {
+fn restart_without_checkpoint_at_snapshot_base_refuses() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
     fixture.activate(&manager)?;
     drop(manager);
-    let path = dir
-        .path()
-        .join("assumeutxo")
-        .join(fixture.pinned.block_hash.to_string());
-    std::fs::write(path.join("headers.dat"), [0_u8; 10])?;
-    let result =
-        crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned);
+    std::fs::remove_dir_all(dir.path().join("chainstate-checkpoints"))?;
+    std::fs::write(
+        dir.path()
+            .join(bitcoin_rs_storage::checkpoint::fs::CURRENT_SCHEMA_FILE),
+        bitcoin_rs_storage::checkpoint::fs::current_schema_bytes(),
+    )?;
+    let result = crate::recovery::restore_snapshot(dir.path(), Network::Regtest, &fixture.pinned);
+    assert!(
+        matches!(
+            result,
+            Err(crate::recovery::RecoveryError::PinnedCheckpointMismatch)
+        ),
+        "a snapshot base without its checkpoint must fail closed"
+    );
+    Ok(())
+}
+
+fn engine_coin_records(
+    chain: &Chainstate,
+) -> TestResult<std::collections::BTreeMap<Vec<u8>, Vec<u8>>> {
+    let mut records = std::collections::BTreeMap::new();
+    for item in chain
+        .commit_authority
+        .store()
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+    {
+        let (key, value) = item?;
+        records.insert(key.to_vec(), value.to_vec());
+    }
+    Ok(records)
+}
+
+fn assert_engine_matches_snapshot(chain: &Chainstate, fixture: &Fixture) -> TestResult {
+    let file = read_snapshot_strict_v4(&mut Cursor::new(&fixture.snapshot))?;
+    let file_records = file.set.all_records();
+    let engine = engine_coin_records(chain)?;
+    assert_eq!(
+        engine.len(),
+        file_records.len(),
+        "one engine row per snapshot record"
+    );
+    for record in &file_records {
+        let txid = record.txid().to_le_bytes();
+        let stored = engine
+            .get(txid.as_slice())
+            .ok_or(TestError::Missing("snapshot coin absent from the engine"))?;
+        assert_eq!(
+            stored.as_slice(),
+            record.bytes(),
+            "engine row equals file record"
+        );
+    }
+    let mut outputs = 0_u64;
+    let mut amount = 0_u64;
+    for stored in engine.values() {
+        let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
+            stored.clone().into_boxed_slice(),
+        )
+        .map_err(|_| TestError::Missing("bad coin record"))?;
+        for output in record.outputs() {
+            outputs += 1;
+            amount += output.value;
+        }
+    }
+    assert_eq!(
+        outputs, fixture.stats.utxo_count,
+        "coin count equals manifest"
+    );
+    assert_eq!(
+        amount, fixture.stats.total_amount,
+        "total amount equals manifest"
+    );
+    Ok(())
+}
+
+#[test]
+fn activation_streams_every_snapshot_coin_into_the_engine() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    let loaded = fixture.load()?;
+    let activated = manager.activate_pinned_snapshot_with(
+        loaded.set,
+        loaded.tip_hash,
+        &fixture.pinned,
+        |_, _| {},
+        || true,
+    )?;
+    assert_eq!(activated.base_hash, fixture.pinned.block_hash);
+    assert_engine_matches_snapshot(&fixture.active, &fixture)
+}
+
+// SNP-08
+#[test]
+fn historical_facts_hook_receives_facts_on_step_historical() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let called = Arc::new(AtomicBool::new(false));
+    let called_clone = Arc::clone(&called);
+    manager.set_historical_facts_hook(Arc::new(move |facts| {
+        if facts.blocks.iter().any(|block| block.height == 0) {
+            called_clone.store(true, Ordering::SeqCst);
+        }
+    }));
+    let genesis = BlockImage::from_local(Network::Regtest.genesis_block());
+    let outcome = manager.step_historical(&genesis)?;
+    assert_eq!(outcome.height, 0);
+    assert!(called.load(Ordering::SeqCst));
+    manager.clear_historical_facts_hook();
+    Ok(())
+}
+
+fn core_varint(mut value: u64) -> TestResult<Vec<u8>> {
+    let mut digits = vec![u8::try_from(value & 0x7f)?];
+    value >>= 7;
+    while value > 0 {
+        value -= 1;
+        digits.push(0x80 | u8::try_from(value & 0x7f)?);
+        value >>= 7;
+    }
+    digits.reverse();
+    Ok(digits)
+}
+
+fn core_snapshot_with_coin_code(pinned: &AssumeUtxoData, code: u64) -> TestResult<Vec<u8>> {
+    let mut bytes = b"utxo\xff".to_vec();
+    bytes.extend_from_slice(&2_u16.to_le_bytes());
+    bytes.extend_from_slice(&Network::Regtest.magic());
+    bytes.extend_from_slice(&pinned.block_hash.to_le_bytes());
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.extend_from_slice(&[0x11; 32]);
+    bytes.push(0x01);
+    bytes.push(0x00);
+    bytes.extend(core_varint(code)?);
+    bytes.push(0x00);
+    bytes.push(0x07);
+    bytes.push(0x51);
+    Ok(bytes)
+}
+
+// SNP-07
+#[test]
+fn core_snapshot_rejects_coin_height_beyond_base_before_activation() -> TestResult {
+    let pinned = Network::Regtest
+        .assume_utxo_for_height(110)
+        .ok_or(TestError::Missing("missing pin"))?;
+    let active = chainstate();
+    let mut blocks = vec![Network::Regtest.genesis_block()];
+    for height in 1..=2 {
+        blocks.push(crate::chain::regtest_fixture::mined_regtest_child_at(
+            blocks
+                .last()
+                .ok_or(TestError::Missing("missing predecessor"))?
+                .block_hash(),
+            height,
+        )?);
+    }
+    for block in &blocks {
+        active
+            .lock_transition()?
+            .into_transition()
+            .connect(&BlockImage::from_local((*block).clone()))?;
+    }
+    assert!(active.has_durable_head()?);
+    let coins_before = engine_coin_set(&active)?
+        .lock_stable_view()
+        .hash_serialized_3()?;
+    let dir = tempfile::tempdir()?;
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        Arc::clone(&active),
+        dir.path().to_path_buf(),
+    )?;
+    let alias_of_base =
+        core_snapshot_with_coin_code(pinned, u64::from(0x8000_0000_u32 | 110) << 1)?;
+    let Err(error) =
+        manager.activate_core_snapshot(&mut Cursor::new(alias_of_base), None, |_, _| {}, || true)
+    else {
+        return Err(TestError::UnexpectedSuccess(
+            "a coin height at or above 2^31 was activated",
+        ));
+    };
     assert!(matches!(
-        result,
-        Err(crate::assumeutxo_snapshot::SnapshotArchiveError::HeaderArchiveLength)
+        error,
+        AssumeUtxoError::Codec(
+            bitcoin_rs_storage::utxo::core_snapshot::SnapshotError::VarIntOverflow
+        )
     ));
+    let past_base = core_snapshot_with_coin_code(pinned, 111 << 1)?;
+    let Err(error) =
+        manager.activate_core_snapshot(&mut Cursor::new(past_base), None, |_, _| {}, || true)
+    else {
+        return Err(TestError::UnexpectedSuccess(
+            "a coin height above the base was activated",
+        ));
+    };
+    assert!(matches!(
+        error,
+        AssumeUtxoError::Codec(
+            bitcoin_rs_storage::utxo::core_snapshot::SnapshotError::InvalidHeight {
+                height: 111,
+                base_height: 110,
+            }
+        )
+    ));
+    assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
+    assert_no_checkpoint(dir.path());
+    assert_eq!(
+        engine_coin_set(&active)?
+            .lock_stable_view()
+            .hash_serialized_3()?,
+        coins_before
+    );
     Ok(())
 }
 

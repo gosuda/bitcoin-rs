@@ -361,7 +361,9 @@ fn policy_eviction_publishes_r_frames_in_commit_order() {
         .insert_entry(AdmissionOrigin::Rpc, sequence_entry(&child))
         .expect("child in");
     publisher.sequence_bodies.lock().clear();
-    gateway.evict_below_fee_rate(AdmissionOrigin::Rpc, 10_001);
+    gateway
+        .evict_below_fee_rate(AdmissionOrigin::Rpc, 10_001)
+        .expect("eviction commits");
     let bodies = publisher.sequence_bodies.lock();
     assert_eq!(
         *bodies,
@@ -379,12 +381,18 @@ fn block_inclusion_suppresses_r_frames() {
     use bitcoin_rs_mempool::AdmissionOrigin;
     let (gateway, publisher) = wired_sequence_gateway();
     let mined = sequence_tx(4);
-    let mined_txid = mined.txid();
     gateway
         .insert_entry(AdmissionOrigin::Rpc, sequence_entry(&mined))
         .expect("in");
     publisher.sequence_bodies.lock().clear();
-    gateway.remove_for_block(AdmissionOrigin::Rpc, &[&mined], &[mined_txid], 8, 1);
+    gateway
+        .remove_for_block(
+            AdmissionOrigin::Rpc,
+            &bitcoin_rs_mempool::TransitionFacts::from_txs(&[&mined]),
+            8,
+            1,
+        )
+        .expect("block settlement commits");
     assert!(
         publisher.sequence_bodies.lock().is_empty(),
         "Core suppresses `R` on block inclusion; the block `C` event covers it"

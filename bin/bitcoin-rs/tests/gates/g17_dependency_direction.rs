@@ -49,7 +49,7 @@ pub fn observe_sync(chain: &dyn SyncChain) -> Option<Arc<TipSnapshot>> {
 }
 ";
 
-// ARCH-01, ARCH-02, ARCH-03, ARCH-04, FEAT-02, MOD-01, MOD-03, MOD-05
+// ARCH-01, ARCH-02, ARCH-04, FEAT-02, MOD-03, MOD-05
 #[test]
 fn workspace_dependency_direction_is_one_way() {
     let graph = WorkspaceGraph::from_cargo_metadata();

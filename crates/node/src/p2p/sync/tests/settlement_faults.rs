@@ -131,6 +131,74 @@ fn fatal_settlement_raises_the_halt_signal_exactly_once() -> TestResult {
 }
 
 #[test]
+fn fatal_window_failure_schedules_no_retry() -> TestResult {
+    let (mut tree, blocks) = mined_chain(5, 0)?;
+    let chain_tip = tree.tip_handle();
+    let block_tree = Arc::new(RwLock::new(tree));
+    let applied_tip = Arc::new(ArcSwapOption::empty());
+    let peers = Arc::new(PeerTable::new());
+    let (_headers_tx, headers_rx) = unbounded();
+    let (_blocks_tx, blocks_rx) = unbounded();
+    let chain = Arc::new(TestChain::new(
+        chain_tip,
+        Arc::clone(&applied_tip),
+        Arc::clone(&block_tree),
+    ));
+    let chain_ref: Arc<dyn SyncChain> = chain.clone();
+    let sync = BlockSync::new(
+        chain_ref,
+        Arc::clone(&peers),
+        headers_rx,
+        blocks_rx,
+        crate::p2p::sync::syncing_ibd_latch(),
+    );
+    install_budget(
+        &sync,
+        super::super::SyncBudget {
+            max_pending_blocks: 2,
+            getdata_batch_limit: 2,
+            ..super::super::default_sync_budget(Network::Regtest)
+        },
+    );
+    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
+    let _rx = connect_peer(&peers, synthetic_peer(addr, 100));
+    sync.tick();
+    assert_eq!(
+        sync.scheduler.lock().window.pending_len(),
+        2,
+        "the first tick must hold two requested bodies as pending"
+    );
+    stage_body(&sync, &blocks[0]);
+    stage_body(&sync, &blocks[1]);
+    let failed = Hash256::from_le_bytes(blocks[0].block_hash().as_bytes());
+    *chain.scripted_commit_failure.lock() =
+        Some((failed, super::super::chain::WindowApplyDisposition::Fatal));
+    assert_eq!(
+        sync.apply_buffered_blocks(None),
+        (0, 1),
+        "the fatal settlement stops the window at the failed block"
+    );
+    assert!(
+        chain.closed_for_recovery(),
+        "a fatal settlement must close the chain for recovery"
+    );
+    assert_eq!(
+        sync.scheduler.lock().window.pending_len(),
+        2,
+        "a fatal settlement must keep pending bodies instead of scheduling a retry"
+    );
+    assert_eq!(
+        sync.apply_buffered_blocks(None),
+        (0, 0),
+        "a halted sync must not re-enter commit_window"
+    );
+    Ok(())
+}
+
+#[test]
 fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget() -> TestResult {
     let fixture = deterministic_proxy_fixture()?;
     let max_received_blocks = 2;

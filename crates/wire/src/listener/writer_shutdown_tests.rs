@@ -177,7 +177,7 @@ fn send_block_unblocks_when_session_is_cancelled() -> Result<(), TestError> {
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(1);
     let mut shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
-    let session_cancel = crate::latch::LatchWriter::new();
+    let session_cancel = bitcoin_rs_consensus::latch::LatchWriter::new();
     shared.session_cancel = session_cancel.reader();
     let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 18_448));
     let (tx, _rx) = crossbeam_channel::unbounded();
@@ -1115,7 +1115,7 @@ fn queued_frames_release_on_writer_exit() {
 fn forward_block_cancels_promptly_on_latch() {
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::bounded(1);
-    let latch = crate::latch::LatchWriter::new();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
     let mut shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
     shared.session_cancel = latch.reader();
     let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
@@ -1148,7 +1148,7 @@ fn forward_block_cancels_promptly_on_latch() {
 fn enqueue_headers_cancels_promptly_on_latch() {
     let (headers_tx, _headers_rx) = crossbeam_channel::bounded(1);
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
-    let latch = crate::latch::LatchWriter::new();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
     let mut shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
     shared.session_cancel = latch.reader();
     let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();

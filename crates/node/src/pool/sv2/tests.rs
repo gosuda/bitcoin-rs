@@ -5,13 +5,14 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use crate::pool::ledger::Ledger;
 use binary_sv2::{Encodable, GetSize, Str0255, U256};
 use bitcoin::secp256k1::{Keypair, Secp256k1};
 use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
 use bitcoin_rs_execution::chain::compact_is_met_by;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_serving::context::PoolOperator as _;
-use bitcoin_rs_serving::mining::pool::ledger::{Ledger, MinerId, PayoutPolicy, PoolConfig};
+use bitcoin_rs_serving::mining::pool::ledger::{MinerId, PayoutPolicy, PoolConfig};
 use bitcoin_rs_serving::mining::pool::stratum::sv2::{
     AdmitError, AuthorityKeypair, Connection, FLAG_REQUIRES_STANDARD_JOBS, Limits, ServerConfig,
 };
@@ -47,10 +48,7 @@ type TestResult = Result<(), FixtureError>;
 #[derive(Debug, thiserror::Error)]
 enum FixtureError {
     #[error("SV2 {stage} failed: {detail}")]
-    Sv2 {
-        stage: &'static str,
-        detail: String,
-    },
+    Sv2 { stage: &'static str, detail: String },
     #[error("miner fixture is missing {0}")]
     Missing(&'static str),
     #[error("no received frame has type {0:#04x}")]
@@ -63,12 +61,15 @@ enum FixtureError {
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
     Ledger(#[from] bitcoin_rs_serving::mining::pool::ledger::LedgerError),
+    #[error(transparent)]
     Mining(#[from] bitcoin_rs_serving::mining::MiningError),
+    #[error(transparent)]
     Job(#[from] bitcoin_rs_serving::mining::pool::JobError),
     #[error(transparent)]
     Secp(#[from] bitcoin::secp256k1::Error),
     #[error(transparent)]
     Sv2Config(#[from] bitcoin_rs_serving::mining::pool::stratum::sv2::ConfigError),
+    #[error(transparent)]
     Transport(#[from] bitcoin_rs_serving::mining::pool::stratum::sv2::Error),
     #[error(transparent)]
     Run(#[from] crate::run::RunError),
@@ -219,14 +220,6 @@ impl Miner {
         self.inbuf.extend_from_slice(bytes);
         let mut frames = Vec::new();
         loop {
-            let want = self.decoder.writable_len();
-            if self.inbuf.len() < want {
-                break;
-            }
-            if want > 0 {
-                self.decoder.writable().copy_from_slice(&self.inbuf[..want]);
-                self.inbuf.drain(..want);
-            }
             let state = self
                 .dec
                 .take()
@@ -244,7 +237,17 @@ impl Miner {
                         payload: frame.payload().to_vec(),
                     });
                 }
-                Decrypted::Incomplete(_, state) => self.dec = Some(state),
+                Decrypted::Incomplete(state) => {
+                    self.dec = Some(state);
+                    let want = self.decoder.read_len();
+                    if self.inbuf.len() < want {
+                        break;
+                    }
+                    let window = self.decoder.read_buf();
+                    window.copy_from_slice(&self.inbuf[..want]);
+                    self.inbuf.drain(..want);
+                    self.decoder.advance(want).map_err(sv2("server frame"))?;
+                }
             }
         }
         Ok(frames)
@@ -312,20 +315,23 @@ fn handshake(
     let mut decoder = NoiseDecoder::new();
     let mut offset = 0;
     let act2 = loop {
-        let window = decoder.writable();
-        let end = offset + window.len();
-        window.copy_from_slice(
-            reply
-                .get(offset..end)
-                .ok_or(FixtureError::Missing("handshake reply bytes"))?,
-        );
-        offset = end;
         match decoder
             .next_handshake_frame::<InitiatorSent>()
             .map_err(sv2("handshake decode"))?
         {
             Decoded::Frame(frame) => break frame,
-            Decoded::Incomplete(_) => {}
+            Decoded::Incomplete => {
+                let window = decoder.read_buf();
+                let end = offset + window.len();
+                window.copy_from_slice(
+                    reply
+                        .get(offset..end)
+                        .ok_or(FixtureError::Missing("handshake reply bytes"))?,
+                );
+                let len = window.len();
+                offset = end;
+                decoder.advance(len).map_err(sv2("handshake decode"))?;
+            }
         }
     };
     let act2: [u8; INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE] = act2
@@ -632,7 +638,7 @@ fn reaped_worker_panic_propagates_through_stop_join() {
             .is_empty(),
         "reaped handle leaves no join for stop_join"
     );
-    let cancel = bitcoin_rs_execution::chain::LatchWriter::new();
+    let cancel = bitcoin_rs_consensus::latch::LatchWriter::new();
     let mut service = super::Sv2Service {
         cancel,
         listener: None,
@@ -667,7 +673,7 @@ fn stop_join_joins_remaining_workers_after_panic() {
             std::thread::sleep(Duration::from_millis(50));
         }));
     }
-    let cancel = bitcoin_rs_execution::chain::LatchWriter::new();
+    let cancel = bitcoin_rs_consensus::latch::LatchWriter::new();
     let mut service = super::Sv2Service {
         cancel,
         listener: None,
@@ -696,7 +702,7 @@ fn stop_join_joins_remaining_workers_after_panic() {
 
 #[test]
 fn sv2_listener_stops_promptly_on_cancellation() -> TestResult {
-    let cancel = bitcoin_rs_execution::chain::LatchWriter::new();
+    let cancel = bitcoin_rs_consensus::latch::LatchWriter::new();
     let cancel_reader = cancel.reader();
     let listener =
         std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| FixtureError::Sv2 {

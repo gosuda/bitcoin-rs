@@ -168,6 +168,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         )),
         Arc::new(crate::NoOpZmqPublisher),
         None,
+        None,
         Arc::new(crate::mining::MiningGenerationSignal::new()),
         Some(Arc::clone(&gateway)),
     );
@@ -282,6 +283,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             capture_rawtx: false,
             capture_block_bytes: true,
             retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
+            window_limits: bitcoin_rs_execution::default_window_limits_source(),
             history: bitcoin_rs_storage::pruning::HistoryAccess::new(
                 retention,
                 bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
@@ -401,6 +403,10 @@ fn admit_headers_reports_the_tip_a_heavier_fork_displaced()
         handles: Arc::clone(&handles),
         followers: crate::chain_effects::ChainFollowers::noop(),
         assumeutxo: None,
+        budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            bitcoin_rs_storage::split_chainstate_cache_budget(16),
+            1,
+        )),
     };
     let headers = |heights: std::ops::RangeInclusive<u32>| -> Vec<Header> {
         let mut prev = genesis.block_hash();

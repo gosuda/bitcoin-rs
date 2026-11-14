@@ -1,7 +1,7 @@
 mod listeners;
 
 use super::*;
-use bitcoin_rs_execution::chain::LatchWriter;
+use bitcoin_rs_consensus::latch::LatchWriter;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::context::Context;
@@ -312,7 +312,7 @@ fn prepare_http_socket_disables_nagle() {
 fn serve_with_shutdown_exits_on_signal() -> std::io::Result<()> {
     let server = accept_test_server()?;
     let handler = Arc::clone(&server.handler);
-    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let shutdown_reader = shutdown.reader();
     let (parked, ready) = crossbeam_channel::bounded(1);
     let handle = thread::spawn(move || {
@@ -347,7 +347,7 @@ fn serve_with_shutdown_exits_on_signal() -> std::io::Result<()> {
 #[test]
 fn serve_accept_loop_cancels_promptly_on_idle_socket() -> io::Result<()> {
     let server = accept_test_server()?;
-    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let reader = shutdown.reader();
     let (parked_tx, parked_rx) = crossbeam_channel::bounded(1);
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
@@ -392,7 +392,7 @@ fn shutdown_before_serving_does_not_admit_a_queued_connection() -> io::Result<()
     let server = accept_test_server()?;
     let handler = Arc::clone(&server.handler);
     let _queued = TcpStream::connect(server.local_addr()?)?;
-    let shutdown_writer = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown_writer = bitcoin_rs_consensus::latch::LatchWriter::new();
     shutdown_writer.trigger();
     let shutdown = shutdown_writer.reader();
     let mut attempts = 0;

@@ -1,6 +1,6 @@
 use crate::primitives::Hash256;
 use bitcoin::hex::FromHex;
-use secp256k1::{Keypair, Parity, Scalar, Secp256k1, SecretKey, XOnlyPublicKey};
+use secp256k1::{Keypair, Parity, Scalar, SecretKey, XOnlyPublicKey};
 use sha2::{Digest, Sha256};
 
 use super::{TAPROOT_LEAF_TAPSCRIPT, compute_taproot_merkle_root, verify_taproot_commitment};
@@ -22,12 +22,11 @@ struct TaprootFixture {
 
 impl TaprootFixture {
     fn build(script: &[u8]) -> Self {
-        let secp = Secp256k1::new();
-        let secret = match SecretKey::from_slice(&[3u8; 32]) {
+        let secret = match SecretKey::from_secret_bytes([3u8; 32]) {
             Ok(s) => s,
             Err(e) => panic!("fixed test key is valid: {e}"),
         };
-        let kp = Keypair::from_secret_key(&secp, &secret);
+        let kp = Keypair::from_secret_key(&secret);
         let (internal, _) = XOnlyPublicKey::from_keypair(&kp);
 
         let leaf_version = TAPROOT_LEAF_TAPSCRIPT;
@@ -37,25 +36,25 @@ impl TaprootFixture {
         let tapleaf_bytes = tagged_hash(b"TapLeaf", &tapleaf_msg);
         let tapleaf = Hash256::from_le_bytes(&tapleaf_bytes);
 
-        let mut tweak_msg = internal.serialize().to_vec();
+        let mut tweak_msg = internal.to_byte_array().to_vec();
         tweak_msg.extend_from_slice(&tapleaf_bytes);
         let tweak_bytes = tagged_hash(b"TapTweak", &tweak_msg);
         let tweak = match Scalar::from_be_bytes(tweak_bytes) {
             Ok(t) => t,
             Err(e) => panic!("tweak is valid scalar: {e}"),
         };
-        let (output, parity) = match internal.add_tweak(&secp, &tweak) {
+        let (output, parity) = match internal.add_tweak(&tweak) {
             Ok(v) => v,
             Err(e) => panic!("tweak add succeeds for valid key: {e}"),
         };
 
         let parity_byte = leaf_version | u8::from(parity != Parity::Even);
         let mut control = vec![parity_byte];
-        control.extend(internal.serialize());
+        control.extend(internal.to_byte_array());
 
         Self {
             control,
-            output: output.serialize(),
+            output: output.to_byte_array(),
             tapleaf,
         }
     }

@@ -39,7 +39,7 @@ A connect commits in this order:
 
 Coin replacements are carried inside the head batch. The compare-and-set makes exactly one head advance win, and cache installation runs strictly after durable success.
 
-Body and undo records are retained under the head's certified extents. When a batch reaches 64 blocks or 8 MiB, the group flushes as one head commit; the limits are `DURABLE_HEAD_GROUP_BLOCKS` and `DURABLE_HEAD_GROUP_MAX_BYTES` in `crates/execution/src/window.rs`.
+Body and undo records are retained under the head's certified extents. When a batch reaches 64 blocks or 8 MiB, the group flushes as one head commit; the limits are `DURABLE_HEAD_GROUP_BLOCKS` and `DURABLE_HEAD_GROUP_MAX_BYTES` in `crates/execution/src/window_limits.rs`.
 
 ## Undo and the atomic batch
 
@@ -65,10 +65,9 @@ A snapshot-loaded node runs two chainstates:
 
 Exactly one chainstate is active. Only the active one drives mempool admission, mining, RPC and ZMQ effects, indexing, and pruning. Historical events are detached.
 
-Two entry points share one activation owner:
+One entry point owns activation:
 
-- `loadtxoutset` reads Core's portable v2 file.
-- `Node::activate_assumeutxo_snapshot_file` reads bitcoin-rs native v4 input.
+- `loadtxoutset` reads Core's portable v2 file. Manifest bundles enter through the same Core v2 activation owner.
 
 Trust comes from the `hash_serialized_3` commitment over the imported coins matching the compiled `assume_utxo_for_height` anchor. Caller-supplied digests and file trailers do not establish trust. Mainnet anchors exist at heights 840,000, 880,000, 910,000, 935,000, and 965,000.
 
@@ -101,8 +100,7 @@ A regtest start and one mined block produce these storage and commit lines. `$DA
 ```text
 INFO bitcoin_rs_execution::recovery chainstate restore selected restore_source=cold reason=no_complete_checkpoint
 INFO bitcoin_rs_node::state::open opened storage backend with effective cache capacities backend="rocksdb" chainstate_dir=$DATA/chainstate chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
-DEBUG bitcoin_rs_execution::connect apply_block: tail begin height=1 outcome.hash=5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24
-DEBUG bitcoin_rs_execution::connect apply_block: publish profile height=1 durable_sync_us=4 durable_commit_us=67
+DEBUG bitcoin_rs_execution::connect apply_block: profile height=1 input.block_hash=5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24 total_us=67
 INFO bitcoin_rs_node::lifecycle published clean chainstate checkpoint generation=1
 ```
 

@@ -29,7 +29,7 @@ impl EventLoop {
 
     pub(crate) fn spin(
         self,
-        shutdown: &bitcoin_rs_execution::chain::LatchReader,
+        shutdown: &bitcoin_rs_consensus::latch::LatchReader,
         request_shutdown: impl Fn(),
     ) {
         let mut iterations: u64 = 0;

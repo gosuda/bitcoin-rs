@@ -9,7 +9,7 @@ use bitcoin_rs_consensus::script::{instructions, is_p2sh, is_p2wsh};
 use bitcoin_rs_consensus::{BlockRuleContext, check_block_body_binding};
 use bitcoin_rs_execution::chain::{TipSnapshot, softfork_state};
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
-use bitcoin_rs_projection::ScriptHash;
+use bitcoin_rs_projection::{ScriptHash, TransactionBlock};
 
 use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
 use crate::convert::{self};
@@ -26,6 +26,12 @@ pub(super) struct Confirmation {
     pub height: u32,
     pub hash: BlockHash,
     pub time: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TxSource {
+    Confirmed,
+    Joined,
 }
 
 #[derive(Clone, Copy)]
@@ -128,18 +134,28 @@ impl<'a> Projection<'a> {
     pub(super) fn required_transaction(
         &self,
         text_id: &str,
-    ) -> Result<(Tx, Option<Confirmation>), Response> {
-        let txid =
-            Txid::from_str(text_id).map_err(|_| bad_request("txid must be 64 hex characters"))?;
-        self.transaction(&txid)?.ok_or_else(not_found)
+    ) -> Result<(Tx, Option<Confirmation>, TxSource), (Response, TxSource)> {
+        let txid = Txid::from_str(text_id).map_err(|_| {
+            (
+                bad_request("txid must be 64 hex characters"),
+                TxSource::Confirmed,
+            )
+        })?;
+        match self
+            .transaction(&txid)
+            .map_err(|response| (response, TxSource::Confirmed))?
+        {
+            Some(found) => Ok(found),
+            None => Err((not_found(), TxSource::Joined)),
+        }
     }
 
     pub(super) fn transaction(
         &self,
         txid: &Txid,
-    ) -> Result<Option<(Tx, Option<Confirmation>)>, Response> {
+    ) -> Result<Option<(Tx, Option<Confirmation>, TxSource)>, Response> {
         if let Some(transaction) = self.ctx.mempool.gateway.read().transaction_by_txid(txid) {
-            return Ok(Some(((*transaction).clone(), None)));
+            return Ok(Some(((*transaction).clone(), None, TxSource::Joined)));
         }
         let index = self
             .ctx
@@ -147,15 +163,14 @@ impl<'a> Projection<'a> {
             .esplora_tx_index
             .as_ref()
             .ok_or_else(|| service_unavailable("transaction lookup index is disabled"))?;
-        let transaction = index.transaction(txid).map_err(query_error)?;
-        transaction.map_or(Ok(None), |transaction| {
-            self.confirmation(txid).and_then(|confirmation| {
-                confirmation.map_or_else(
-                    || Err(service_unavailable("transaction confirmation unavailable")),
-                    |confirmation| Ok(Some((transaction, Some(confirmation)))),
-                )
+        index
+            .transaction_block(txid)
+            .map_err(query_error)?
+            .map(|(transaction, block)| {
+                let confirmation = self.confirmation_in_block(block)?;
+                Ok((transaction, Some(confirmation), TxSource::Confirmed))
             })
-        })
+            .transpose()
     }
 
     pub(super) fn confirmed_transaction(&self, txid: &Txid) -> Result<Tx, Response> {
@@ -186,10 +201,25 @@ impl<'a> Projection<'a> {
             .esplora_tx_index
             .as_ref()
             .ok_or_else(|| service_unavailable("transaction lookup index is disabled"))?;
-        Ok(index
-            .transaction_height(txid)
+        index
+            .transaction_block(txid)
             .map_err(query_error)?
-            .and_then(|height| self.confirmation_at_height(height)))
+            .map(|(_, block)| self.confirmation_in_block(block))
+            .transpose()
+    }
+
+    fn confirmation_in_block(&self, block: TransactionBlock) -> Result<Confirmation, Response> {
+        let record = self
+            .ctx
+            .chain
+            .block_by_hash(block.hash)
+            .filter(|record| record.height == block.height)
+            .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+        Ok(Confirmation {
+            height: block.height,
+            hash: record.hash,
+            time: record.time,
+        })
     }
 
     pub(super) fn confirmation_at_height(&self, height: u32) -> Option<Confirmation> {
@@ -201,6 +231,29 @@ impl<'a> Projection<'a> {
         })
     }
 
+    pub(super) fn capture_chain_view(&self) -> Option<Arc<TipSnapshot>> {
+        self.ctx.chain.applied_tip.load_full()
+    }
+
+    pub(super) fn ensure_chain_view(
+        &self,
+        expected: Option<&Arc<TipSnapshot>>,
+    ) -> Result<(), Response> {
+        let current = self.ctx.chain.applied_tip.load_full();
+        let unchanged = match (expected, current.as_ref()) {
+            (Some(expected), Some(current)) => {
+                expected.hash == current.hash && expected.height == current.height
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            Ok(())
+        } else {
+            Err(query_error(TxQueryError::ExpiredView))
+        }
+    }
+
     pub(super) fn status_value(confirmation: Option<Confirmation>) -> TransactionStatus {
         confirmation.map_or_else(TransactionStatus::unconfirmed, TransactionStatus::from)
     }
@@ -209,7 +262,7 @@ impl<'a> Projection<'a> {
         &self,
         transactions: impl IntoIterator<Item = (&'t Tx, Option<Confirmation>)>,
         parents: Option<ParentSource<'t>>,
-    ) -> Result<Vec<TransactionValue>, Response> {
+    ) -> Result<(Vec<TransactionValue>, TxSource), Response> {
         let transactions = transactions
             .into_iter()
             .map(|(tx, status)| (tx, status, tx.txid()))
@@ -252,6 +305,7 @@ impl<'a> Projection<'a> {
             available.clear();
         }
         let mut prevouts = Vec::with_capacity(outpoints.len());
+        let mut mempool_used = false;
         for points in outpoints.chunk_by(|left, right| left.txid == right.txid) {
             let txid = points[0].txid;
             let mut collect = |tx: &Tx| -> Result<(), Response> {
@@ -274,6 +328,7 @@ impl<'a> Projection<'a> {
             }
             let mempool = self.ctx.mempool.gateway.read().transaction_by_txid(&txid);
             if let Some(tx) = mempool {
+                mempool_used = true;
                 collect(&tx)?;
             } else {
                 let index =
@@ -287,10 +342,18 @@ impl<'a> Projection<'a> {
                 collect(&tx)?;
             }
         }
-        transactions
+        let values = transactions
             .into_iter()
             .map(|(tx, status, txid)| self.transaction_value(tx, txid, status, &prevouts))
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            values,
+            if mempool_used {
+                TxSource::Joined
+            } else {
+                TxSource::Confirmed
+            },
+        ))
     }
 
     fn transaction_value(
@@ -593,27 +656,6 @@ impl<'a> Projection<'a> {
         Ok(outputs)
     }
 
-    pub(super) fn capture_chain_view(&self) -> Option<Arc<TipSnapshot>> {
-        self.ctx.chain.applied_tip.load_full()
-    }
-
-    pub(super) fn ensure_chain_view(
-        &self,
-        expected: Option<&Arc<TipSnapshot>>,
-    ) -> Result<(), Response> {
-        let current = self.ctx.chain.applied_tip.load_full();
-        let unchanged = match (expected, current.as_ref()) {
-            (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
-            (None, None) => true,
-            _ => false,
-        };
-        if unchanged {
-            Ok(())
-        } else {
-            Err(query_error(TxQueryError::Retry))
-        }
-    }
-
     fn mempool_activity(
         &self,
         script_hash: ScriptHash,
@@ -642,8 +684,14 @@ impl<'a> Projection<'a> {
         }
         let spenders = {
             let pool = self.ctx.mempool.gateway.read();
-            if pool.sequence_number() != sequence {
-                return Err(query_error(TxQueryError::Retry));
+            let current_sequence = pool.sequence_number();
+            if current_sequence != sequence {
+                return Err(query_error(TxQueryError::Retry(
+                    bitcoin_rs_projection::RetryReason::TipMoved {
+                        expected_commit: sequence,
+                        current_commit: current_sequence,
+                    },
+                )));
             }
             outputs
                 .iter()

@@ -58,7 +58,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
     let next_hash = Hash256::from(next.block_hash());
 
     let observer = handles.clone();
-    let stop = crate::chain::LatchWriter::new();
+    let stop = bitcoin_rs_consensus::latch::LatchWriter::new();
     let cancellation = stop.reader();
     let (answer_tx, answer_rx) = mpsc::channel();
     let waiter = std::thread::spawn(move || {
@@ -157,6 +157,7 @@ fn bip30_overwrite_undo_removes_the_overwritten_coin() -> TestResult {
     let txids = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
     let resolved = ResolvedUtxoView {
         external: HashMap::new(),
+        _hold: None,
     };
     let (_changes, undo, _totals) = build_block_changes(
         &BlockChangeInputs {
@@ -312,6 +313,12 @@ fn current_schema_version_mismatch_and_corruption_refuses_open() -> TestResult {
     assert!(ensure_current_schema(&dir).is_err());
 
     std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"4\n")?;
+    assert!(ensure_current_schema(&dir).is_err());
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"5\n")?;
+    assert!(ensure_current_schema(&dir).is_err());
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"6\n")?;
     assert!(ensure_current_schema(&dir).is_ok());
     Ok(())
 }

@@ -4,7 +4,6 @@ mod count;
 mod deployment;
 pub mod header_sync;
 mod ibd;
-mod latch;
 pub mod node;
 mod progress;
 #[cfg(feature = "test-seam")]
@@ -17,6 +16,7 @@ mod transition;
 mod tree;
 mod view;
 
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::Hash256;
 use thiserror::Error;
 
@@ -33,7 +33,7 @@ pub use header_sync::{
     permitted_difficulty_transition, validate_contextual_header, validate_pow,
 };
 pub use ibd::InitialBlockDownload;
-pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
+pub use node::{BlockTreeNode, NodeId, NodeStatus};
 pub use progress::{ChainProgress, ChainProgressReader};
 pub use reorg::{ReorgPlan, plan_reorg};
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,7 +45,19 @@ pub struct TipSnapshot {
     pub chain_tx_count: ChainTxCount,
 }
 
-pub use latch::{HookGuard, LatchReader, LatchWriter};
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedEpoch {
+    pub tip: TipSnapshot,
+    pub commit_id: u64,
+}
+
+impl AppliedEpoch {
+    #[must_use]
+    pub const fn new(tip: TipSnapshot, commit_id: u64) -> Self {
+        Self { tip, commit_id }
+    }
+}
+
 pub use tip_wait::{ActiveTipWait, TipWaitCondition};
 pub use transition::{
     StableRead, StableReadGuard, TransitionAuthority, TransitionAuthorityGuard, TransitionDomain,

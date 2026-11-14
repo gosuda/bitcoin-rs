@@ -1122,7 +1122,7 @@ fn zero_fee_ephemeral_parent_requires_its_child_to_spend_dust() -> TestResult {
     let before = {
         let pool = gateway.read();
         (
-            pool.mining_snapshot().entries,
+            pool.mining_snapshot().entries.clone(),
             pool.estimator_history(),
             pool.prioritised_transactions(),
             pool.sequence_number(),
@@ -1143,7 +1143,7 @@ fn zero_fee_ephemeral_parent_requires_its_child_to_spend_dust() -> TestResult {
         let pool = gateway.read();
         assert_eq!(
             (
-                pool.mining_snapshot().entries,
+                pool.mining_snapshot().entries.clone(),
                 pool.estimator_history(),
                 pool.prioritised_transactions(),
                 pool.sequence_number()

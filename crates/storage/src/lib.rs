@@ -19,16 +19,17 @@ pub use cache_budget::{
 
 pub use column_families::ColumnFamily;
 
-pub use bytes::Bytes;
+pub mod committed_facts;
 pub use coins::{COIN_KEY_LEN, CoinCache, CoinKey, CoinStatsFeed, CoinStore, WindowDelta};
 #[cfg(any(test, feature = "test-seam"))]
 pub use commit::CommitFault;
 pub use commit::{AcceptedPrefix, CommitAuthority, CommitError, DurableReceipt};
+pub use committed_facts::{CommittedBlock, CommittedFacts, CreatedOutput, SpentPrevout, TxFacts};
+
+pub use bytes::Bytes;
 pub use error::{BoundedReadError, StorageError};
 pub use memory_kv::MemoryKvStore;
-pub use snapshot_activation::{
-    SNAPSHOT_ACTIVATION_KEY, SnapshotActivationMarker, SnapshotActivationRecovery,
-};
+pub use snapshot_activation::{SNAPSHOT_ACTIVATION_KEY, SnapshotActivationMarker};
 
 #[cfg(any(test, feature = "test-seam"))]
 pub use trait_::PersistFault;
@@ -118,6 +119,7 @@ pub mod assumeutxo;
 mod batch;
 pub mod block_body;
 mod block_file;
+pub mod budget;
 pub mod cache_budget;
 pub mod coins;
 mod column_families;
@@ -143,3 +145,5 @@ pub mod schema_model;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod utxo;
+#[cfg(any(test, feature = "test-seam"))]
+pub mod write_fault;

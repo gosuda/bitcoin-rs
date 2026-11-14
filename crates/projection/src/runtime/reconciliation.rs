@@ -5,7 +5,7 @@ use super::PendingForward;
 use super::ReconcileAction;
 use super::Worker;
 use super::catch_up::BatchWait;
-use super::rollback::SeedFlow;
+use super::rollback::SeedPass;
 use crate::IndexCapabilities;
 use crate::IndexCapability;
 use crate::IndexError;
@@ -109,6 +109,7 @@ impl Worker {
         &self,
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
+        self.retry_undo_gap();
         let action = self.reconcile_pass(pending)?;
         if !matches!(action, ReconcileAction::CaughtUp) {
             return Ok(action);
@@ -124,7 +125,24 @@ impl Worker {
             return Ok(ReconcileAction::Progressed);
         }
         self.runtime.publish_phase(ReconcilePhase::FORWARD);
+        if self.has_facts_gap() {
+            if let Some(gap) = &self.facts_gap {
+                gap.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
         Ok(ReconcileAction::CaughtUp)
+    }
+
+    fn retry_undo_gap(&self) {
+        let Some((height, hash)) = self.runtime.undo_gap() else {
+            return;
+        };
+        let Some(store) = self.body_store.as_ref() else {
+            return;
+        };
+        if matches!(store.undo_record(height, hash), Ok(Some(_))) {
+            self.runtime.clear_undo_group();
+        }
     }
 
     pub(super) fn reconcile_pass(
@@ -132,6 +150,9 @@ impl Worker {
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         let (target, fence, watermarks) = self.capture_target_watermarks()?;
+        if self.has_facts_gap() {
+            self.clear_buffered_facts();
+        }
         let leftover = self.enabled.leftover(watermarks);
         if !leftover.is_empty() {
             self.writer
@@ -164,23 +185,14 @@ impl Worker {
         let Some(target) = target else {
             return Ok(ReconcileAction::CaughtUp);
         };
-        let want_on_stall = match self.dispatch_script_live_seed_pass(
-            &mut fence,
-            &mut watermarks,
-            pending.as_ref(),
-        )? {
-            ControlFlow::Break(action) => return Ok(action),
-            ControlFlow::Continue(w) => w,
-        };
+        let seed_pass = self.dispatch_script_live_seed_pass(&mut fence, &mut watermarks)?;
+        match seed_pass {
+            SeedPass::Published | SeedPass::Discarded => return Ok(ReconcileAction::Progressed),
+            SeedPass::Stall => return Ok(ReconcileAction::Stalled),
+            SeedPass::Idle => {}
+        }
         let seed_lease = self.take_seed_lease();
-        self.execute_forward_pass(
-            &target,
-            fence,
-            watermarks,
-            pending,
-            seed_lease,
-            want_on_stall,
-        )
+        self.execute_forward_pass(&target, fence, watermarks, pending, seed_lease)
     }
 
     pub(super) fn reconcile_pending(
@@ -264,6 +276,9 @@ impl Worker {
 
     pub(super) fn effective_enabled(&self) -> IndexCapabilities {
         let mut enabled = self.enabled;
+        if self.runtime.tx_lookup_failure.read().is_some() {
+            enabled = enabled.without(IndexCapability::TxLookup);
+        }
         if self.runtime.compact_filter_failure.read().is_some() {
             enabled = enabled.without(IndexCapability::CompactFilters);
         }
@@ -509,9 +524,6 @@ impl Worker {
                     );
                     self.runtime
                         .fail_script_live(&DerivedIndexWorkerError::ScriptLiveHistoryPruned);
-                    if let Some(slot) = self.seed_slot.as_ref() {
-                        slot.want();
-                    }
                     return Ok(ControlFlow::Continue((fence, watermarks)));
                 }
                 tracing::warn!(
@@ -531,47 +543,6 @@ impl Worker {
         }
     }
 
-    fn dispatch_script_live_seed_pass(
-        &self,
-        fence: &mut IndexWriteFence,
-        watermarks: &mut IndexWatermarks,
-        pending: Option<&PendingForward>,
-    ) -> Result<ControlFlow<ReconcileAction, bool>, DerivedIndexWorkerError> {
-        if !self.enabled.contains(IndexCapability::ScriptLive) {
-            return Ok(ControlFlow::Continue(false));
-        }
-        let mut want_on_stall = false;
-        if watermarks.script_live.is_some() {
-            if self.runtime.script_live_failure.read().is_none() {
-                self.rest_seed_cell();
-            } else {
-                self.writer
-                    .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
-                    .map_err(DerivedIndexWorkerError::Index)?;
-                let (next_fence, next_watermarks) = self
-                    .writer
-                    .fenced_watermarks()
-                    .map_err(DerivedIndexWorkerError::Index)?;
-                *fence = next_fence;
-                *watermarks = next_watermarks;
-                self.runtime.clear_script_live();
-                match self.seed_dispatch(pending)? {
-                    SeedFlow::Return(action) => return Ok(ControlFlow::Break(action)),
-                    SeedFlow::Seeded => return Ok(ControlFlow::Break(ReconcileAction::Progressed)),
-                    SeedFlow::FallThrough { want_on_stall: w } => want_on_stall = w,
-                }
-            }
-            self.release_seed_lease_if_superseded(watermarks.script_live);
-        } else {
-            match self.seed_dispatch(pending)? {
-                SeedFlow::Return(action) => return Ok(ControlFlow::Break(action)),
-                SeedFlow::Seeded => return Ok(ControlFlow::Break(ReconcileAction::Progressed)),
-                SeedFlow::FallThrough { want_on_stall: w } => want_on_stall = w,
-            }
-        }
-        Ok(ControlFlow::Continue(want_on_stall))
-    }
-
     fn execute_forward_pass(
         &self,
         target: &TipSnapshot,
@@ -579,7 +550,6 @@ impl Worker {
         watermarks: IndexWatermarks,
         pending: &mut Option<PendingForward>,
         mut seed_lease: Option<HistoryLease>,
-        want_on_stall: bool,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         let mut after_start = None;
         loop {
@@ -592,16 +562,6 @@ impl Worker {
                     ReconcileAction::CaughtUp
                 };
                 self.park_seed_lease(seed_lease.take());
-                if want_on_stall
-                    && matches!(action, ReconcileAction::Stalled)
-                    && watermarks.script_live.is_none()
-                    && self.seed_bundle.lock().is_none()
-                    && !self.runtime.should_stop()
-                {
-                    if let Some(slot) = self.seed_slot.as_ref() {
-                        slot.want();
-                    }
-                }
                 return Ok(action);
             };
             let leg = self.catch_up_to(

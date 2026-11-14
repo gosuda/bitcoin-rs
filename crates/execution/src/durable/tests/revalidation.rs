@@ -191,7 +191,8 @@ fn prepare_cold_with_optional_marker(
         .ok_or(TestError::Missing("missing durable head"))?;
     let dir = if let Some(dir) = checkpoint_dir {
         if let Some(marker) = marker {
-            let baseline = prepare_initial_chainstate(dir.path(), Network::Regtest, Some(&head))?;
+            let baseline =
+                prepare_initial_chainstate(dir.path(), Network::Regtest, Some(&head), None)?;
             assert_eq!(baseline.resume_source, ResumeSource::Checkpoint);
             assert_eq!(baseline.applied_tip.as_ref().map(|t| t.height), Some(100));
             write_full_revalidation_marker(dir.path(), marker)?;
@@ -205,7 +206,8 @@ fn prepare_cold_with_optional_marker(
         }
         dir
     };
-    let restored = prepare_initial_state_with_engine(dir.path(), Network::Regtest, Some(&head))?;
+    let restored =
+        prepare_initial_state_with_engine(dir.path(), Network::Regtest, Some(&head), None)?;
     assert_eq!(restored.initial.resume_source, ResumeSource::Cold);
     assert!(restored.initial.applied_tip.is_none());
     install_restored_state(chain, restored, mode)?;
@@ -221,8 +223,12 @@ fn prepare_warm(
         .durable_head
         .load()?
         .ok_or(TestError::Missing("missing durable head"))?;
-    let restored =
-        prepare_initial_state_with_engine(checkpoint_dir.path(), Network::Regtest, Some(&head))?;
+    let restored = prepare_initial_state_with_engine(
+        checkpoint_dir.path(),
+        Network::Regtest,
+        Some(&head),
+        None,
+    )?;
     assert_eq!(restored.initial.resume_source, ResumeSource::Checkpoint);
     let tip = restored
         .initial
@@ -450,7 +456,8 @@ fn full_start_over_an_assume_valid_commit_rebuilds_cold_and_rejects_the_invalid_
         false,
     )?;
     assert!(!requires_full_revalidation(checkpoint_dir.path()));
-    let warm = prepare_initial_chainstate(checkpoint_dir.path(), Network::Regtest, Some(&head))?;
+    let warm =
+        prepare_initial_chainstate(checkpoint_dir.path(), Network::Regtest, Some(&head), None)?;
     assert_eq!(
         warm.resume_source,
         ResumeSource::Checkpoint,

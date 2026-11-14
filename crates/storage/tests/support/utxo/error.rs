@@ -6,8 +6,7 @@ pub(crate) enum TestError {
     TryFromInt(#[from] std::num::TryFromIntError),
     #[error(transparent)]
     Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
-    #[error(transparent)]
-    RawSeed(#[from] bitcoin_rs_storage::utxo::RawSeedError<std::convert::Infallible>),
+
     #[error(transparent)]
     CoinStatsDecode(#[from] bitcoin_rs_storage::utxo::stats::CoinStatsDecodeError),
     #[error("missing: {0}")]

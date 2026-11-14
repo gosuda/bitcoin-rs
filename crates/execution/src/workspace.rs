@@ -15,6 +15,15 @@ use bitcoin_rs_storage::utxo::set::UtxoError;
 use bitcoin_rs_storage::{CoinKey, CoinStore, StorageError, WindowDelta};
 use bytes::Bytes;
 use hashbrown::{HashMap, HashSet};
+#[cfg(test)]
+thread_local! {
+    static FOLD_EVENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_fold_event() {
+    FOLD_EVENTS.with(|events| events.set(events.get() + 1));
+}
 
 #[cfg(test)]
 thread_local! {
@@ -28,6 +37,8 @@ fn count_fold_visit() {
 
 #[cfg(not(test))]
 const fn count_fold_visit() {}
+#[cfg(not(test))]
+const fn count_fold_event() {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CreatedOwned {
@@ -39,19 +50,12 @@ pub(crate) struct CreatedOwned {
     pub script_pubkey: Bytes,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum UndoKind {
-    ExternalSpend,
-    Bip30Overwrite,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UndoCoin {
     pub outpoint: OutPoint,
     pub txout: TxOut,
     pub height: u32,
     pub coinbase: bool,
-    pub kind: UndoKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,7 +64,6 @@ pub(crate) struct BlockTransition {
     pub hash: Hash256,
     pub prev_hash: Hash256,
     pub created: Vec<CreatedOwned>,
-    pub spent_external: Vec<UndoCoin>,
     pub spent_outpoints: Vec<OutPoint>,
     pub bip30_overwrites: Vec<UndoCoin>,
 }
@@ -99,6 +102,10 @@ pub(crate) struct WindowWorkspace {
     flushed_transitions: usize,
     touched: HashMap<Txid, Vec<usize>>,
     engine_presence: HashMap<Txid, bool>,
+    coin_cursor: usize,
+    coin_entries: HashMap<Txid, usize>,
+    coin_bytes: usize,
+    coin_states: HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>>,
 }
 
 impl WindowWorkspace {
@@ -114,6 +121,10 @@ impl WindowWorkspace {
             flushed_transitions: 0,
             touched: HashMap::new(),
             engine_presence: HashMap::new(),
+            coin_cursor: 0,
+            coin_entries: HashMap::new(),
+            coin_bytes: 0,
+            coin_states: HashMap::new(),
         }
     }
     #[must_use]
@@ -153,7 +164,46 @@ impl WindowWorkspace {
         let delta = Self::build_window_delta(prefix, &self.initial_records)?;
         merge_delta_records(&mut self.initial_records, delta.records.iter())?;
         self.flushed_transitions = end;
+        self.coin_cursor = end;
+        self.coin_entries.clear();
+        self.coin_bytes = 0;
+        self.coin_states.clear();
         Ok(delta)
+    }
+
+    pub(crate) fn staged_coin_bytes(&mut self, pending_count: usize) -> Result<usize, UtxoError> {
+        let target = (self.flushed_transitions + pending_count).min(self.transitions.len());
+        while self.coin_cursor < target {
+            let index = self.coin_cursor;
+            Self::apply_transition(
+                &mut self.coin_states,
+                &self.initial_records,
+                &self.transitions[index],
+            );
+            let mut seen = HashSet::new();
+            for txid in transition_txids(&self.transitions[index]) {
+                if !seen.insert(txid) {
+                    continue;
+                }
+                let bytes = {
+                    let current: Vec<_> = self
+                        .coin_states
+                        .get(&txid)
+                        .into_iter()
+                        .flat_map(|outputs| outputs.values().cloned())
+                        .collect();
+                    let entry = txid_entry(&self.initial_records, txid, &current)?;
+                    entry.as_ref().map_or(0, entry_encoded_len)
+                };
+                let previous = self.coin_entries.insert(txid, bytes).unwrap_or(0);
+                self.coin_bytes = self
+                    .coin_bytes
+                    .saturating_sub(previous)
+                    .saturating_add(bytes);
+            }
+            self.coin_cursor += 1;
+        }
+        Ok(self.coin_bytes)
     }
 
     pub(crate) fn resolve_external_batch(
@@ -195,7 +245,6 @@ impl WindowWorkspace {
             Hash256::from(block.block_hash()),
         );
         let mut created_owned = Vec::new();
-        let mut spent_external = Vec::new();
         let mut spent_outpoints = Vec::new();
         let mut bip30_overwrites = Vec::new();
 
@@ -234,11 +283,7 @@ impl WindowWorkspace {
                     }
                     self.spent.insert(prev);
                     spent_outpoints.push(prev);
-                    if let Some(undo) =
-                        spend_input_in_workspace(&mut self.live, &self.resolved_external, prev)
-                    {
-                        spent_external.push(undo);
-                    }
+                    spend_input_in_workspace(&mut self.live, prev);
                 }
             }
         }
@@ -248,7 +293,6 @@ impl WindowWorkspace {
             hash: Hash256::from(block.block_hash()),
             prev_hash: block.header.prev_blockhash.into(),
             created: created_owned,
-            spent_external,
             spent_outpoints,
             bip30_overwrites,
         };
@@ -336,34 +380,53 @@ impl WindowWorkspace {
     ) -> Result<WindowDelta, UtxoError> {
         let mut states: HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>> = HashMap::new();
         for transition in prefix {
-            fold_transition(&mut states, initial_records, transition);
+            Self::apply_transition(&mut states, initial_records, transition);
         }
-        let mut folded: Vec<_> = states.into_iter().collect();
-        folded.sort_unstable_by_key(|(txid, _)| *txid);
         let mut delta = WindowDelta::default();
-        for (txid, current_outputs) in folded {
-            let existed_before = initial_records
-                .get(&txid)
-                .and_then(Option::as_ref)
-                .is_some();
-            match (existed_before, current_outputs.is_empty()) {
-                (false, true) => {}
-                (true, true) => delta.push_final(CoinKey(txid.0.to_le_bytes()), None),
-                (_, false) => {
-                    let current_outputs: Vec<_> = current_outputs.into_values().collect();
-                    let record = UtxoRecord::from_owned_outputs(
-                        Hash256::from_le_bytes(&txid.0.to_le_bytes()),
-                        &current_outputs,
-                    )?;
-                    delta.push_final(
-                        CoinKey(txid.0.to_le_bytes()),
-                        Some(Bytes::copy_from_slice(record.bytes())),
-                    );
-                }
+        for (txid, current_outputs) in states {
+            let current_outputs: Vec<_> = current_outputs.into_values().collect();
+            if let Some((key, record)) = txid_entry(initial_records, txid, &current_outputs)? {
+                delta.push_final(key, record);
             }
         }
         delta.records.sort_by_key(|(key, _)| *key);
         Ok(delta)
+    }
+
+    fn apply_transition(
+        states: &mut HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>>,
+        initial_records: &HashMap<Txid, Option<UtxoRecord>>,
+        transition: &BlockTransition,
+    ) {
+        let mut seen = HashSet::new();
+        for txid in transition_txids(transition) {
+            if seen.insert(txid) {
+                count_fold_event();
+            }
+        }
+        for overwrite in &transition.bip30_overwrites {
+            count_fold_visit();
+            outputs_for(states, initial_records, overwrite.outpoint.txid).clear();
+        }
+        for created in &transition.created {
+            count_fold_visit();
+            let outputs = outputs_for(states, initial_records, created.txid);
+            outputs.insert(
+                created.vout,
+                OwnedUtxoOut {
+                    vout: created.vout,
+                    value: created.value,
+                    script_pubkey: created.script_pubkey.to_vec(),
+                    coinbase: created.coinbase,
+                    height: created.height,
+                },
+            );
+        }
+        for spent in &transition.spent_outpoints {
+            count_fold_visit();
+            let vout = spent.vout;
+            outputs_for(states, initial_records, spent.txid).remove(&vout);
+        }
     }
 }
 
@@ -449,31 +512,17 @@ fn record_bip30_overwrites(
             },
             height: prior.height,
             coinbase: prior.coinbase,
-            kind: UndoKind::Bip30Overwrite,
         });
     }
 }
 
-fn spend_input_in_workspace(
-    live: &mut HashMap<Txid, Vec<LiveOut>>,
-    resolved_external: &HashMap<OutPoint, UtxoCoin>,
-    prev: OutPoint,
-) -> Option<UndoCoin> {
+fn spend_input_in_workspace(live: &mut HashMap<Txid, Vec<LiveOut>>, prev: OutPoint) {
     if let Some(outs) = live.get_mut(&prev.txid) {
         if let Some(out) = outs.iter_mut().find(|o| o.vout == prev.vout && !o.spent) {
             out.spent = true;
-            return None;
         }
     }
-    resolved_external.get(&prev).map(|coin| UndoCoin {
-        outpoint: prev,
-        txout: coin.txout.clone(),
-        height: coin.height,
-        coinbase: coin.coinbase,
-        kind: UndoKind::ExternalSpend,
-    })
 }
-
 fn unresolved_txids(workspace: &WindowWorkspace, outpoints: &[OutPoint]) -> Vec<Txid> {
     let mut needed: Vec<Txid> = outpoints
         .iter()
@@ -526,12 +575,8 @@ fn install_resolved_records(
     Ok(())
 }
 
-fn index_transition(
-    touched: &mut HashMap<Txid, Vec<usize>>,
-    index: usize,
-    transition: &BlockTransition,
-) {
-    let txids = transition
+fn transition_txids(transition: &BlockTransition) -> impl Iterator<Item = Txid> + '_ {
+    transition
         .created
         .iter()
         .map(|created| created.txid)
@@ -541,13 +586,59 @@ fn index_transition(
                 .bip30_overwrites
                 .iter()
                 .map(|overwrite| overwrite.outpoint.txid),
-        );
-    for txid in txids {
+        )
+}
+
+fn outputs_for<'s>(
+    states: &'s mut HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>>,
+    initial_records: &HashMap<Txid, Option<UtxoRecord>>,
+    txid: Txid,
+) -> &'s mut BTreeMap<u32, OwnedUtxoOut> {
+    states
+        .entry(txid)
+        .or_insert_with(|| initial_outputs_for_txid(initial_records, txid))
+}
+
+fn index_transition(
+    touched: &mut HashMap<Txid, Vec<usize>>,
+    index: usize,
+    transition: &BlockTransition,
+) {
+    for txid in transition_txids(transition) {
         let entries = touched.entry(txid).or_default();
         if entries.last() != Some(&index) {
             entries.push(index);
         }
     }
+}
+
+type CoinEntry = (CoinKey, Option<Bytes>);
+
+fn txid_entry(
+    initial_records: &HashMap<Txid, Option<UtxoRecord>>,
+    txid: Txid,
+    current_outputs: &[OwnedUtxoOut],
+) -> Result<Option<CoinEntry>, UtxoError> {
+    let existed_before = initial_records
+        .get(&txid)
+        .and_then(Option::as_ref)
+        .is_some();
+    let key = CoinKey(txid.0.to_le_bytes());
+    match (existed_before, current_outputs.is_empty()) {
+        (false, true) => Ok(None),
+        (true, true) => Ok(Some((key, None))),
+        (_, false) => {
+            let record = UtxoRecord::from_owned_outputs(
+                Hash256::from_le_bytes(&txid.0.to_le_bytes()),
+                current_outputs,
+            )?;
+            Ok(Some((key, Some(Bytes::copy_from_slice(record.bytes())))))
+        }
+    }
+}
+
+fn entry_encoded_len(entry: &CoinEntry) -> usize {
+    entry.0.as_bytes().len() + entry.1.as_ref().map_or(0, Bytes::len)
 }
 
 fn merge_delta_records<'r>(
@@ -589,46 +680,6 @@ fn initial_outputs_for_txid(
     }
 }
 
-fn fold_transition(
-    states: &mut HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>>,
-    initial_records: &HashMap<Txid, Option<UtxoRecord>>,
-    transition: &BlockTransition,
-) {
-    for overwrite in &transition.bip30_overwrites {
-        count_fold_visit();
-        outputs_for(states, initial_records, overwrite.outpoint.txid).clear();
-    }
-    for created in &transition.created {
-        count_fold_visit();
-        let outputs = outputs_for(states, initial_records, created.txid);
-        outputs.insert(
-            created.vout,
-            OwnedUtxoOut {
-                vout: created.vout,
-                value: created.value,
-                script_pubkey: created.script_pubkey.to_vec(),
-                coinbase: created.coinbase,
-                height: created.height,
-            },
-        );
-    }
-    for spent in &transition.spent_outpoints {
-        count_fold_visit();
-        let vout = spent.vout;
-        outputs_for(states, initial_records, spent.txid).remove(&vout);
-    }
-}
-
-fn outputs_for<'s>(
-    states: &'s mut HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>>,
-    initial_records: &HashMap<Txid, Option<UtxoRecord>>,
-    txid: Txid,
-) -> &'s mut BTreeMap<u32, OwnedUtxoOut> {
-    states
-        .entry(txid)
-        .or_insert_with(|| initial_outputs_for_txid(initial_records, txid))
-}
-
 impl OutputSource for WindowWorkspace {
     fn get_entry(&self, outpoint: &OutPoint) -> Option<UtxoCoin> {
         if self.spent.contains(outpoint) {
@@ -662,344 +713,9 @@ mod tests {
 
     use super::{
         Amount, BlockTransition, CoinKey, CreatedOwned, FOLD_VISITS, Hash256, HashMap, OutPoint,
-        OwnedUtxoOut, TxOut, Txid, UndoCoin, UndoKind, UtxoError, UtxoRecord, WindowWorkspace,
+        OwnedUtxoOut, TxOut, Txid, UndoCoin, UtxoError, UtxoRecord, WindowWorkspace,
         merge_delta_records,
     };
-
-    // WIN-05
-    #[test]
-    fn corrupt_delta_record_is_a_typed_error() {
-        let mut initial_records = HashMap::new();
-        let records = [(CoinKey([0x11; 32]), Some(Bytes::from_static(&[0xff; 5])))];
-        assert!(matches!(
-            merge_delta_records(&mut initial_records, records.iter()),
-            Err(UtxoError::CorruptRecord)
-        ));
-        assert!(
-            initial_records.is_empty(),
-            "a corrupt record must not be stored as an absent coin"
-        );
-    }
-
-    #[test]
-    fn recreated_outpoint_is_readable_and_its_next_spend_undo_names_the_new_incarnation() {
-        use crate::chain::regtest_fixture::{coinbase, mined_block_with_prev_hash};
-        use bitcoin_rs_consensus::primitives::Network;
-        use bitcoin_rs_storage::KvStore as _;
-        use bitcoin_rs_storage::utxo::contract::OutputSource;
-        use hashbrown::HashSet;
-        use std::sync::Arc;
-
-        let original = coinbase(1);
-        let txid = original.txid();
-        let outpoint = OutPoint::new(txid, 0);
-        let mut spend = coinbase(2);
-        spend.inputs[0].previous_output = outpoint;
-        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
-        let mut prev = Network::Regtest.genesis_block().block_hash();
-        for (height, tx) in [(1, original.clone()), (101, spend.clone()), (102, original)] {
-            let txids = [tx.txid()];
-            let block = mined_block_with_prev_hash(prev, height, vec![tx]).expect("fixture block");
-            workspace
-                .advance(&block, &txids, height, &HashSet::new())
-                .expect("advance");
-            prev = block.block_hash();
-            if height == 101 {
-                assert_eq!(workspace.get_entry(&outpoint), None);
-            }
-        }
-
-        let replacement = workspace
-            .get_entry(&outpoint)
-            .expect("recreated output is live");
-        assert_eq!(replacement.height, 102);
-        assert!(replacement.coinbase);
-        assert_eq!(replacement.txout, coinbase(1).outputs[0]);
-        let delta = workspace.build_flush_delta(3).expect("flush recreation");
-        let bytes = delta
-            .records
-            .iter()
-            .find(|(key, _)| *key == CoinKey(txid.0.to_le_bytes()))
-            .and_then(|(_, bytes)| bytes.as_ref())
-            .expect("replacement record");
-        let record = UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice()).expect("record");
-        let outputs: Vec<_> = record.outputs().collect();
-        assert_eq!(outputs.len(), 1);
-        assert_eq!((outputs[0].vout, outputs[0].height), (0, 102));
-
-        let spend_id = spend.txid();
-        let block = mined_block_with_prev_hash(prev, 202, vec![spend]).expect("spend block");
-        workspace
-            .advance(&block, &[spend_id], 202, &HashSet::new())
-            .expect("spend replacement");
-        assert_eq!(workspace.get_entry(&outpoint), None);
-        let transition = workspace.transitions.last().expect("spend transition");
-        assert_eq!(transition.spent_outpoints, vec![outpoint]);
-        assert!(transition.spent_external.is_empty());
-        let spent_delta = workspace
-            .build_flush_delta(1)
-            .expect("flush replacement spend");
-        assert!(
-            spent_delta
-                .records
-                .iter()
-                .any(|(key, value)| { *key == CoinKey(txid.0.to_le_bytes()) && value.is_none() }),
-            "spending the replacement removes its published record"
-        );
-
-        let store = Arc::new(bitcoin_rs_storage::MemoryKvStore::new());
-        store
-            .put(
-                bitcoin_rs_storage::ColumnFamily::Coins,
-                CoinKey(txid.0.to_le_bytes()).as_bytes(),
-                bytes.as_ref(),
-            )
-            .expect("publish replacement record");
-        let coins = super::CoinStore::open(store, 1 << 20);
-        let mut next_workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
-        next_workspace
-            .resolve_external_batch(&coins, &[outpoint])
-            .expect("resolve published replacement");
-        assert_eq!(
-            next_workspace.get_entry(&outpoint),
-            Some(replacement.clone())
-        );
-        next_workspace
-            .advance(&block, &[spend_id], 202, &HashSet::new())
-            .expect("spend published replacement");
-        assert_eq!(next_workspace.get_entry(&outpoint), None);
-        let undo = &next_workspace
-            .transitions
-            .last()
-            .expect("external spend transition")
-            .spent_external;
-        assert_eq!(undo.len(), 1);
-        assert_eq!(undo[0].outpoint, outpoint);
-        assert_eq!(undo[0].height, 102);
-        assert_eq!(undo[0].txout, replacement.txout);
-        assert_eq!(undo[0].kind, UndoKind::ExternalSpend);
-    }
-
-    #[test]
-    fn many_outputs_preserve_last_creation_then_spend_and_overwrite_order() {
-        let mut first = empty_transition(10);
-        first.created = (0..512)
-            .rev()
-            .map(|vout| created_output(1, vout, 1000 + u64::from(vout), 10))
-            .collect();
-        let mut second = empty_transition(11);
-        second.created.push(created_output(1, 7, 7777, 11));
-        first.created.push(created_output(2, 4, 4444, 10));
-        second.created.push(created_output(1, 7, 8888, 11));
-        second.spent_outpoints = (0..512)
-            .filter(|vout| vout % 3 == 0)
-            .map(|vout| OutPoint::new(indexed_txid(1), vout))
-            .collect();
-        let mut third = empty_transition(12);
-        third.bip30_overwrites.push(overwrite_of(2));
-        third.created.push(created_output(2, 9, 9999, 12));
-        let initial = HashMap::new();
-        let delta =
-            WindowWorkspace::build_window_delta(&[first, second, third], &initial).expect("delta");
-        let mut expected = Outputs::new();
-        for vout in 0..512 {
-            if vout % 3 != 0 {
-                let (value, height) = if vout == 7 {
-                    (8888, 11)
-                } else {
-                    (1000 + u64::from(vout), 10)
-                };
-                expected.insert(
-                    vout,
-                    (
-                        value,
-                        vec![0x51, u8::try_from(value % 200).expect("byte")],
-                        value.is_multiple_of(2),
-                        height,
-                    ),
-                );
-            }
-        }
-        assert_eq!(delta.records.len(), 2);
-        for (key, bytes) in &delta.records {
-            let record = UtxoRecord::from_encoded(
-                bytes
-                    .as_ref()
-                    .expect("live record")
-                    .to_vec()
-                    .into_boxed_slice(),
-            )
-            .expect("record");
-            if *key == CoinKey(indexed_txid(1).0.to_le_bytes()) {
-                assert_eq!(outputs_of(&record), expected);
-            } else {
-                assert_eq!(*key, CoinKey(indexed_txid(2).0.to_le_bytes()));
-                let expected_other = [(9, (9999, vec![0x51, 199], false, 12))]
-                    .into_iter()
-                    .collect();
-                assert_eq!(outputs_of(&record), expected_other);
-            }
-        }
-    }
-
-    #[test]
-    fn staged_presence_reads_flushed_and_unflushed_transitions() {
-        use crate::chain::regtest_fixture::{coinbase, mined_block_with_prev_hash};
-        use bitcoin_rs_consensus::primitives::{Block, Network};
-        use hashbrown::HashSet;
-
-        let mut blocks: Vec<Block> = Vec::new();
-        let mut prev = Network::Regtest.genesis_block().block_hash();
-        for height in 1..=3_u32 {
-            let block = mined_block_with_prev_hash(prev, height, vec![coinbase(height)])
-                .expect("fixture block");
-            prev = block.block_hash();
-            blocks.push(block);
-        }
-        let txid_of = |block: &Block| block.txs[0].txid();
-        let (x1, x2, x3) = (
-            txid_of(&blocks[0]),
-            txid_of(&blocks[1]),
-            txid_of(&blocks[2]),
-        );
-        let untracked = Txid(Hash256::from_le_bytes(&[0x42; 32]));
-
-        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
-        for (index, block) in blocks.iter().enumerate() {
-            let txids = [txid_of(block)];
-            let height = u32::try_from(index + 1).expect("height");
-            workspace
-                .advance(block, &txids, height, &HashSet::new())
-                .expect("advance");
-        }
-
-        assert_eq!(workspace.staged_coin_presence_before(x1, 1), None);
-        assert_eq!(workspace.staged_coin_presence_before(x1, 2), Some(true));
-        assert_eq!(workspace.staged_coin_presence_before(x3, 3), None);
-        assert_eq!(workspace.staged_coin_presence_before(untracked, 4), None);
-
-        workspace
-            .build_flush_delta(2)
-            .expect("flush first two blocks");
-
-        assert_eq!(workspace.staged_coin_presence_before(x1, 3), Some(true));
-        assert_eq!(workspace.staged_coin_presence_before(x2, 3), Some(true));
-        assert_eq!(workspace.staged_coin_presence_before(x3, 4), Some(true));
-        assert_eq!(workspace.staged_coin_presence_before(x3, 3), None);
-        assert_eq!(workspace.staged_coin_presence_before(untracked, 4), None);
-    }
-
-    fn reference_presence(workspace: &WindowWorkspace, txid: Txid, height: u32) -> Option<bool> {
-        let mut tracked = workspace.initial_records.contains_key(&txid);
-        let mut unspent: hashbrown::HashSet<u32> = match workspace.initial_records.get(&txid) {
-            Some(Some(record)) => record.outputs().map(|output| output.vout).collect(),
-            _ => hashbrown::HashSet::new(),
-        };
-        for transition in workspace.transitions[workspace.flushed_transitions..]
-            .iter()
-            .filter(|transition| transition.height < height)
-        {
-            if transition
-                .bip30_overwrites
-                .iter()
-                .any(|overwrite| overwrite.outpoint.txid == txid)
-            {
-                unspent.clear();
-                tracked = true;
-            }
-            for created in &transition.created {
-                if created.txid == txid {
-                    unspent.insert(created.vout);
-                    tracked = true;
-                }
-            }
-            for spent in &transition.spent_outpoints {
-                if spent.txid == txid {
-                    let vout = spent.vout;
-                    unspent.remove(&vout);
-                    tracked = true;
-                }
-            }
-        }
-        tracked.then_some(!unspent.is_empty())
-    }
-
-    #[test]
-    fn staged_presence_index_matches_the_linear_scan() {
-        use crate::chain::regtest_fixture::{coinbase, mined_block_with_prev_hash};
-        use bitcoin_rs_consensus::primitives::{
-            Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
-        };
-        use hashbrown::HashSet;
-
-        let spend = |previous: OutPoint| Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: previous,
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1),
-                script_pubkey: vec![0x51].into(),
-            }],
-        };
-        let genesis_hash = Network::Regtest.genesis_block().block_hash();
-        let block_1 =
-            mined_block_with_prev_hash(genesis_hash, 1, vec![coinbase(1)]).expect("fixture block");
-        let x1 = block_1.txs[0].txid();
-        let block_2 = mined_block_with_prev_hash(
-            block_1.block_hash(),
-            2,
-            vec![coinbase(2), spend(OutPoint::new(x1, 0))],
-        )
-        .expect("fixture block");
-        let x2 = block_2.txs[0].txid();
-        let s2 = block_2.txs[1].txid();
-        let block_3 = mined_block_with_prev_hash(
-            block_2.block_hash(),
-            3,
-            vec![
-                coinbase(3),
-                spend(OutPoint::new(x2, 0)),
-                spend(OutPoint::new(s2, 0)),
-            ],
-        )
-        .expect("fixture block");
-        let blocks = [block_1, block_2, block_3];
-
-        let mut candidates: Vec<Txid> = blocks
-            .iter()
-            .flat_map(|block| block.txs.iter().map(Tx::txid))
-            .collect();
-        candidates.push(Txid(Hash256::from_le_bytes(&[0x42; 32])));
-
-        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
-        for (index, block) in blocks.iter().enumerate() {
-            let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
-            let height = u32::try_from(index + 1).expect("height");
-            workspace
-                .advance(block, &txids, height, &HashSet::new())
-                .expect("advance");
-        }
-
-        for flushed in 0..=blocks.len() {
-            for height in 0..=4_u32 {
-                for txid in &candidates {
-                    assert_eq!(
-                        workspace.staged_coin_presence_before(*txid, height),
-                        reference_presence(&workspace, *txid, height),
-                        "indexed presence diverged at height {height} after {flushed} flushed blocks"
-                    );
-                }
-            }
-            if flushed < blocks.len() {
-                workspace.build_flush_delta(1).expect("flush one block");
-            }
-        }
-    }
 
     type Outputs = std::collections::BTreeMap<u32, (u64, Vec<u8>, bool, u32)>;
     type Model = std::collections::BTreeMap<(u32, u32), (u64, Vec<u8>, bool, u32)>;
@@ -1019,79 +735,6 @@ mod tests {
         }
     }
 
-    // WIN-07
-    #[test]
-    fn bip30_exception_block_stays_an_explicit_overwrite_of_the_engine_coin() {
-        use super::{CoinStore, UndoKind};
-        use bitcoin_rs_consensus::bip30::BIP30_DUPLICATE_TXID_EXCEPTIONS;
-        use bitcoin_rs_consensus::primitives::{Block, OutPoint, Tx, deserialize};
-        use bitcoin_rs_storage::KvStore as _;
-        use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
-        use hashbrown::HashSet;
-        use std::sync::Arc;
-
-        let (exception_height, exception_hash) = BIP30_DUPLICATE_TXID_EXCEPTIONS[0];
-        let block: Block = deserialize(include_bytes!("../../consensus/tests/testdata/91842.bin"))
-            .expect("block 91842 decodes");
-        assert_eq!(Hash256::from(block.block_hash()), exception_hash);
-        let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
-        let duplicated = txids[0];
-        let earlier = OwnedUtxoOut {
-            vout: 0,
-            value: 5_000_000_000,
-            script_pubkey: vec![0x51],
-            coinbase: true,
-            height: 91_812,
-        };
-        let earlier_record =
-            UtxoRecord::from_owned_outputs(duplicated.0, &[earlier]).expect("earlier coin record");
-        let store = Arc::new(bitcoin_rs_storage::MemoryKvStore::new());
-        store
-            .put(
-                bitcoin_rs_storage::ColumnFamily::Coins,
-                CoinKey(duplicated.0.to_le_bytes()).as_bytes(),
-                earlier_record.bytes(),
-            )
-            .expect("seed the engine coin");
-        let coins = CoinStore::open(store, 1 << 20);
-
-        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
-        workspace
-            .resolve_external_batch(&coins, &[OutPoint::new(duplicated, 0)])
-            .expect("resolve the engine coin");
-        workspace
-            .advance(&block, &txids, exception_height, &HashSet::new())
-            .expect("advance over the exception block");
-
-        let overwritten = &workspace.transitions[0].bip30_overwrites;
-        assert_eq!(overwritten.len(), 1);
-        assert_eq!(overwritten[0].outpoint, OutPoint::new(duplicated, 0));
-        assert_eq!(overwritten[0].height, 91_812);
-        assert!(matches!(overwritten[0].kind, UndoKind::Bip30Overwrite));
-        assert_eq!(
-            workspace.staged_coin_presence_before(duplicated, exception_height + 1),
-            Some(true),
-            "the exception block's own coin is unspent after it"
-        );
-
-        let delta = workspace.build_flush_delta(1).expect("flush the block");
-        let (_, row) = delta
-            .records
-            .iter()
-            .find(|(key, _)| *key == CoinKey(duplicated.0.to_le_bytes()))
-            .expect("the delta rewrites the duplicated txid");
-        let row = row
-            .as_ref()
-            .expect("the exception block leaves its own coin");
-        let record = UtxoRecord::from_encoded(row.to_vec().into_boxed_slice())
-            .expect("the delta row decodes");
-        let outputs: Vec<_> = record.outputs().collect();
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(outputs[0].height, exception_height);
-        assert_eq!(outputs[0].value, block.txs[0].outputs[0].value.to_sat());
-        assert!(outputs[0].coinbase);
-    }
-
     fn indexed_txid(index: u32) -> Txid {
         let mut bytes = [0_u8; 32];
         bytes[..4].copy_from_slice(&index.to_le_bytes());
@@ -1109,7 +752,6 @@ mod tests {
             hash: Hash256::from_le_bytes(&[0xb0; 32]),
             prev_hash: Hash256::from_le_bytes(&[0xb1; 32]),
             created: Vec::new(),
-            spent_external: Vec::new(),
             spent_outpoints: Vec::new(),
             bip30_overwrites: Vec::new(),
         }
@@ -1135,7 +777,6 @@ mod tests {
             },
             height: 1,
             coinbase: true,
-            kind: UndoKind::Bip30Overwrite,
         }
     }
 
@@ -1434,5 +1075,752 @@ mod tests {
             entries,
             "every created, spent and overwrite entry is visited once, not once per touched txid"
         );
+    }
+    // WIN-05
+    #[test]
+    fn corrupt_delta_record_is_a_typed_error() {
+        let mut initial_records = HashMap::new();
+        let records = [(CoinKey([0x11; 32]), Some(Bytes::from_static(&[0xff; 5])))];
+        assert!(matches!(
+            merge_delta_records(&mut initial_records, records.iter()),
+            Err(UtxoError::CorruptRecord)
+        ));
+        assert!(
+            initial_records.is_empty(),
+            "a corrupt record must not be stored as an absent coin"
+        );
+    }
+
+    #[test]
+    fn recreated_outpoint_is_readable_and_its_next_spend_undo_names_the_new_incarnation() {
+        use crate::chain::regtest_fixture::{coinbase, mined_block_with_prev_hash};
+        use bitcoin_rs_consensus::primitives::Network;
+        use bitcoin_rs_storage::KvStore as _;
+        use bitcoin_rs_storage::utxo::contract::OutputSource;
+        use hashbrown::HashSet;
+        use std::sync::Arc;
+
+        let original = coinbase(1);
+        let txid = original.txid();
+        let outpoint = OutPoint::new(txid, 0);
+        let mut spend = coinbase(2);
+        spend.inputs[0].previous_output = outpoint;
+        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+        let mut prev = Network::Regtest.genesis_block().block_hash();
+        for (height, tx) in [(1, original.clone()), (101, spend.clone()), (102, original)] {
+            let txids = [tx.txid()];
+            let block = mined_block_with_prev_hash(prev, height, vec![tx]).expect("fixture block");
+            workspace
+                .advance(&block, &txids, height, &HashSet::new())
+                .expect("advance");
+            prev = block.block_hash();
+            if height == 101 {
+                assert_eq!(workspace.get_entry(&outpoint), None);
+            }
+        }
+
+        let replacement = workspace
+            .get_entry(&outpoint)
+            .expect("recreated output is live");
+        assert_eq!(replacement.height, 102);
+        assert!(replacement.coinbase);
+        assert_eq!(replacement.txout, coinbase(1).outputs[0]);
+        let delta = workspace.build_flush_delta(3).expect("flush recreation");
+        let bytes = delta
+            .records
+            .iter()
+            .find(|(key, _)| *key == CoinKey(txid.0.to_le_bytes()))
+            .and_then(|(_, bytes)| bytes.as_ref())
+            .expect("replacement record");
+        let record = UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice()).expect("record");
+        let outputs: Vec<_> = record.outputs().collect();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!((outputs[0].vout, outputs[0].height), (0, 102));
+
+        let spend_id = spend.txid();
+        let block = mined_block_with_prev_hash(prev, 202, vec![spend]).expect("spend block");
+        let undo_for = |source: &WindowWorkspace| {
+            use bitcoin_rs_storage::utxo::contract::{
+                BlockChangeInputs, SpentOutputLookup, build_block_changes,
+            };
+            struct SpentCoin(bitcoin_rs_storage::utxo::UtxoCoin);
+            impl SpentOutputLookup for SpentCoin {
+                fn entry(
+                    &self,
+                    outpoint: &OutPoint,
+                ) -> Option<&bitcoin_rs_storage::utxo::UtxoCoin> {
+                    (self.0.outpoint == *outpoint).then_some(&self.0)
+                }
+            }
+            let resolved = SpentCoin(source.get_entry(&outpoint).expect("replacement prevout"));
+            let image = bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone());
+            let (_, undo, _) = build_block_changes(
+                &BlockChangeInputs {
+                    block: &image,
+                    height: 202,
+                    txids: &[spend_id],
+                    same_block_spent: None,
+                    add_capacity: 1,
+                    remove_capacity: 1,
+                    max_script_size: bitcoin_rs_consensus::MAX_SCRIPT_SIZE,
+                },
+                &resolved,
+            )
+            .expect("replacement spend changes");
+            assert_eq!(undo.restores().len(), 1);
+            assert_eq!(undo.restores()[0].outpoint, outpoint);
+            assert_eq!(undo.restores()[0].height, 102);
+            assert_eq!(undo.restores()[0].txout, replacement.txout);
+            assert!(undo.restores()[0].coinbase);
+            undo
+        };
+        let staged_undo = undo_for(&workspace);
+        workspace
+            .advance(&block, &[spend_id], 202, &HashSet::new())
+            .expect("spend replacement");
+        assert_eq!(workspace.get_entry(&outpoint), None);
+        let transition = workspace.transitions.last().expect("spend transition");
+        assert_eq!(transition.spent_outpoints, vec![outpoint]);
+        let spent_delta = workspace
+            .build_flush_delta(1)
+            .expect("flush replacement spend");
+        assert!(
+            spent_delta
+                .records
+                .iter()
+                .any(|(key, value)| { *key == CoinKey(txid.0.to_le_bytes()) && value.is_none() }),
+            "spending the replacement removes its published record"
+        );
+
+        let store = Arc::new(bitcoin_rs_storage::MemoryKvStore::new());
+        store
+            .put(
+                bitcoin_rs_storage::ColumnFamily::Coins,
+                CoinKey(txid.0.to_le_bytes()).as_bytes(),
+                bytes.as_ref(),
+            )
+            .expect("publish replacement record");
+        let coins = super::CoinStore::open(store, 1 << 20);
+        let mut next_workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+        next_workspace
+            .resolve_external_batch(&coins, &[outpoint])
+            .expect("resolve published replacement");
+        assert_eq!(
+            next_workspace.get_entry(&outpoint),
+            Some(replacement.clone())
+        );
+        let published_undo = undo_for(&next_workspace);
+        assert_eq!(published_undo, staged_undo);
+        next_workspace
+            .advance(&block, &[spend_id], 202, &HashSet::new())
+            .expect("spend published replacement");
+        assert_eq!(next_workspace.get_entry(&outpoint), None);
+    }
+
+    #[test]
+    fn many_outputs_preserve_last_creation_then_spend_and_overwrite_order() {
+        let mut first = empty_transition(10);
+        first.created = (0..512)
+            .rev()
+            .map(|vout| created_output(1, vout, 1000 + u64::from(vout), 10))
+            .collect();
+        let mut second = empty_transition(11);
+        second.created.push(created_output(1, 7, 7777, 11));
+        first.created.push(created_output(2, 4, 4444, 10));
+        second.created.push(created_output(1, 7, 8888, 11));
+        second.spent_outpoints = (0..512)
+            .filter(|vout| vout % 3 == 0)
+            .map(|vout| OutPoint::new(indexed_txid(1), vout))
+            .collect();
+        let mut third = empty_transition(12);
+        third.bip30_overwrites.push(overwrite_of(2));
+        third.created.push(created_output(2, 9, 9999, 12));
+        let initial = HashMap::new();
+        let delta =
+            WindowWorkspace::build_window_delta(&[first, second, third], &initial).expect("delta");
+        let mut expected = Outputs::new();
+        for vout in 0..512 {
+            if vout % 3 != 0 {
+                let (value, height) = if vout == 7 {
+                    (8888, 11)
+                } else {
+                    (1000 + u64::from(vout), 10)
+                };
+                expected.insert(
+                    vout,
+                    (
+                        value,
+                        vec![0x51, u8::try_from(value % 200).expect("byte")],
+                        value.is_multiple_of(2),
+                        height,
+                    ),
+                );
+            }
+        }
+        assert_eq!(delta.records.len(), 2);
+        for (key, bytes) in &delta.records {
+            let record = UtxoRecord::from_encoded(
+                bytes
+                    .as_ref()
+                    .expect("live record")
+                    .to_vec()
+                    .into_boxed_slice(),
+            )
+            .expect("record");
+            if *key == CoinKey(indexed_txid(1).0.to_le_bytes()) {
+                assert_eq!(outputs_of(&record), expected);
+            } else {
+                assert_eq!(*key, CoinKey(indexed_txid(2).0.to_le_bytes()));
+                let expected_other = [(9, (9999, vec![0x51, 199], false, 12))]
+                    .into_iter()
+                    .collect();
+                assert_eq!(outputs_of(&record), expected_other);
+            }
+        }
+    }
+
+    #[test]
+    fn staged_presence_reads_flushed_and_unflushed_transitions() {
+        use crate::chain::regtest_fixture::{coinbase, mined_block_with_prev_hash};
+        use bitcoin_rs_consensus::primitives::{Block, Network};
+        use hashbrown::HashSet;
+
+        let mut blocks: Vec<Block> = Vec::new();
+        let mut prev = Network::Regtest.genesis_block().block_hash();
+        for height in 1..=3_u32 {
+            let block = mined_block_with_prev_hash(prev, height, vec![coinbase(height)])
+                .expect("fixture block");
+            prev = block.block_hash();
+            blocks.push(block);
+        }
+        let txid_of = |block: &Block| block.txs[0].txid();
+        let (x1, x2, x3) = (
+            txid_of(&blocks[0]),
+            txid_of(&blocks[1]),
+            txid_of(&blocks[2]),
+        );
+        let untracked = Txid(Hash256::from_le_bytes(&[0x42; 32]));
+
+        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+        for (index, block) in blocks.iter().enumerate() {
+            let txids = [txid_of(block)];
+            let height = u32::try_from(index + 1).expect("height");
+            workspace
+                .advance(block, &txids, height, &HashSet::new())
+                .expect("advance");
+        }
+
+        assert_eq!(workspace.staged_coin_presence_before(x1, 1), None);
+        assert_eq!(workspace.staged_coin_presence_before(x1, 2), Some(true));
+        assert_eq!(workspace.staged_coin_presence_before(x3, 3), None);
+        assert_eq!(workspace.staged_coin_presence_before(untracked, 4), None);
+
+        workspace
+            .build_flush_delta(2)
+            .expect("flush first two blocks");
+
+        assert_eq!(workspace.staged_coin_presence_before(x1, 3), Some(true));
+        assert_eq!(workspace.staged_coin_presence_before(x2, 3), Some(true));
+        assert_eq!(workspace.staged_coin_presence_before(x3, 4), Some(true));
+        assert_eq!(workspace.staged_coin_presence_before(x3, 3), None);
+        assert_eq!(workspace.staged_coin_presence_before(untracked, 4), None);
+    }
+
+    fn reference_presence(workspace: &WindowWorkspace, txid: Txid, height: u32) -> Option<bool> {
+        let mut tracked = workspace.initial_records.contains_key(&txid);
+        let mut unspent: hashbrown::HashSet<u32> = match workspace.initial_records.get(&txid) {
+            Some(Some(record)) => record.outputs().map(|output| output.vout).collect(),
+            _ => hashbrown::HashSet::new(),
+        };
+        for transition in workspace.transitions[workspace.flushed_transitions..]
+            .iter()
+            .filter(|transition| transition.height < height)
+        {
+            if transition
+                .bip30_overwrites
+                .iter()
+                .any(|overwrite| overwrite.outpoint.txid == txid)
+            {
+                unspent.clear();
+                tracked = true;
+            }
+            for created in &transition.created {
+                if created.txid == txid {
+                    unspent.insert(created.vout);
+                    tracked = true;
+                }
+            }
+            for spent in &transition.spent_outpoints {
+                if spent.txid == txid {
+                    let vout = spent.vout;
+                    unspent.remove(&vout);
+                    tracked = true;
+                }
+            }
+        }
+        tracked.then_some(!unspent.is_empty())
+    }
+
+    #[test]
+    fn staged_presence_index_matches_the_linear_scan() {
+        use crate::chain::regtest_fixture::{coinbase, mined_block_with_prev_hash};
+        use bitcoin_rs_consensus::primitives::{
+            Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+        };
+        use hashbrown::HashSet;
+
+        let spend = |previous: OutPoint| Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: previous,
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: vec![0x51].into(),
+            }],
+        };
+        let genesis_hash = Network::Regtest.genesis_block().block_hash();
+        let block_1 =
+            mined_block_with_prev_hash(genesis_hash, 1, vec![coinbase(1)]).expect("fixture block");
+        let x1 = block_1.txs[0].txid();
+        let block_2 = mined_block_with_prev_hash(
+            block_1.block_hash(),
+            2,
+            vec![coinbase(2), spend(OutPoint::new(x1, 0))],
+        )
+        .expect("fixture block");
+        let x2 = block_2.txs[0].txid();
+        let s2 = block_2.txs[1].txid();
+        let block_3 = mined_block_with_prev_hash(
+            block_2.block_hash(),
+            3,
+            vec![
+                coinbase(3),
+                spend(OutPoint::new(x2, 0)),
+                spend(OutPoint::new(s2, 0)),
+            ],
+        )
+        .expect("fixture block");
+        let blocks = [block_1, block_2, block_3];
+
+        let mut candidates: Vec<Txid> = blocks
+            .iter()
+            .flat_map(|block| block.txs.iter().map(Tx::txid))
+            .collect();
+        candidates.push(Txid(Hash256::from_le_bytes(&[0x42; 32])));
+
+        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+        for (index, block) in blocks.iter().enumerate() {
+            let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+            let height = u32::try_from(index + 1).expect("height");
+            workspace
+                .advance(block, &txids, height, &HashSet::new())
+                .expect("advance");
+        }
+
+        for flushed in 0..=blocks.len() {
+            for height in 0..=4_u32 {
+                for txid in &candidates {
+                    assert_eq!(
+                        workspace.staged_coin_presence_before(*txid, height),
+                        reference_presence(&workspace, *txid, height),
+                        "indexed presence diverged at height {height} after {flushed} flushed blocks"
+                    );
+                }
+            }
+            if flushed < blocks.len() {
+                workspace.build_flush_delta(1).expect("flush one block");
+            }
+        }
+    }
+
+    // WIN-07
+    #[test]
+    fn bip30_exception_block_stays_an_explicit_overwrite_of_the_engine_coin()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::CoinStore;
+        use bitcoin_rs_consensus::bip30::BIP30_DUPLICATE_TXID_EXCEPTIONS;
+        use bitcoin_rs_consensus::primitives::{Block, OutPoint, Tx, deserialize};
+        use bitcoin_rs_storage::KvStore as _;
+        use bitcoin_rs_storage::memory_kv::MemoryKvStore;
+        use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
+        use hashbrown::HashSet;
+        use std::sync::Arc;
+
+        let (exception_height, exception_hash) = BIP30_DUPLICATE_TXID_EXCEPTIONS[0];
+        let block: Block = deserialize(include_bytes!("../../consensus/tests/testdata/91842.bin"))?;
+        assert_eq!(Hash256::from(block.block_hash()), exception_hash);
+        let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+        let duplicated = txids[0];
+        let earlier = OwnedUtxoOut {
+            vout: 0,
+            value: 5_000_000_000,
+            script_pubkey: vec![0x51],
+            coinbase: true,
+            height: 91_812,
+        };
+        let earlier_record = UtxoRecord::from_owned_outputs(duplicated.0, &[earlier])?;
+        let store = Arc::new(MemoryKvStore::new());
+        store.put(
+            bitcoin_rs_storage::ColumnFamily::Coins,
+            CoinKey(duplicated.0.to_le_bytes()).as_bytes(),
+            earlier_record.bytes(),
+        )?;
+        let coins = CoinStore::open(store, 1 << 20);
+
+        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+        workspace.resolve_external_batch(&coins, &[OutPoint::new(duplicated, 0)])?;
+        workspace.advance(&block, &txids, exception_height, &HashSet::new())?;
+
+        let overwritten = &workspace.transitions[0].bip30_overwrites;
+        assert_eq!(overwritten.len(), 1);
+        assert_eq!(overwritten[0].outpoint, OutPoint::new(duplicated, 0));
+        assert_eq!(overwritten[0].height, 91_812);
+        assert!(overwritten[0].coinbase);
+        assert_eq!(overwritten[0].txout.value.to_sat(), 5_000_000_000);
+        assert_eq!(
+            workspace.staged_coin_presence_before(duplicated, exception_height + 1),
+            Some(true),
+            "the exception block's own coin is unspent after it"
+        );
+
+        let delta = workspace.build_flush_delta(1)?;
+        let (_, row) = delta
+            .records
+            .iter()
+            .find(|(key, _)| *key == CoinKey(duplicated.0.to_le_bytes()))
+            .ok_or("the delta must rewrite the duplicated txid")?;
+        let row = row
+            .as_ref()
+            .ok_or("the exception block must leave its own coin")?;
+        let record = UtxoRecord::from_encoded(row.to_vec().into_boxed_slice())?;
+        let outputs: Vec<_> = record.outputs().collect();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].height, exception_height);
+        assert_eq!(outputs[0].value, block.txs[0].outputs[0].value.to_sat());
+        assert!(outputs[0].coinbase);
+        Ok(())
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum CoinBytesError {
+        #[error(transparent)]
+        Fixture(Box<crate::test_fixtures::TestError>),
+        #[error(transparent)]
+        Read(#[from] super::WindowReadError),
+        #[error(transparent)]
+        Workspace(#[from] super::WindowWorkspaceError),
+        #[error(transparent)]
+        Utxo(#[from] UtxoError),
+        #[error(transparent)]
+        Height(#[from] std::num::TryFromIntError),
+    }
+
+    impl From<crate::test_fixtures::TestError> for CoinBytesError {
+        fn from(error: crate::test_fixtures::TestError) -> Self {
+            Self::Fixture(Box::new(error))
+        }
+    }
+
+    // BUD-06, WIN-05
+    #[test]
+    fn staged_coin_bytes_equal_the_flush_encoder_after_each_block() -> Result<(), CoinBytesError> {
+        let corpus = crate::test_fixtures::churn_corpus()?;
+        let limits = crate::window_limits::WindowLimits::durable_head_defaults();
+        let chain = crate::test_fixtures::funded_chain(&corpus, limits)?;
+        let outpoints: Vec<super::OutPoint> = corpus
+            .blocks
+            .iter()
+            .flat_map(|block| block.txs.iter().filter(|tx| !tx.is_coinbase()))
+            .flat_map(|tx| tx.inputs.iter().map(|input| input.previous_output))
+            .collect();
+        let mut workspace = WindowWorkspace::new(bitcoin_rs_consensus::MAX_SCRIPT_SIZE);
+        workspace.resolve_external_batch(chain.coins.as_ref(), &outpoints)?;
+        for (index, block) in corpus.blocks.iter().enumerate() {
+            let txids: Vec<Txid> = block.txs.iter().map(|tx| tx.txid()).collect();
+            let height = u32::try_from(corpus.prefix.len() + index + 1)?;
+            workspace.advance(block, &txids, height, &super::HashSet::new())?;
+            let running = workspace.staged_coin_bytes(index + 1)?;
+            let flushed = WindowWorkspace::build_window_delta(
+                &workspace.transitions[..=index],
+                &workspace.initial_records,
+            )?;
+            let encoder_bytes: usize = flushed.records.iter().map(super::entry_encoded_len).sum();
+            assert_eq!(
+                running, encoder_bytes,
+                "running coin bytes diverged from the flush encoder after block {index}"
+            );
+        }
+        assert!(
+            workspace.coin_bytes > 0,
+            "the churn blocks must stage coin bytes"
+        );
+        Ok(())
+    }
+    // WIN-03
+    #[test]
+    fn window_delta_matches_the_outpoint_model_and_folds_each_event_once()
+    -> Result<(), CoinBytesError> {
+        use super::{
+            BlockTransition, CreatedOwned, FOLD_EVENTS, HashSet, OutPoint, OwnedUtxoOut, TxOut,
+            UndoCoin, UtxoRecord,
+        };
+
+        let txid_a = Txid(Hash256::from_le_bytes(&[0xa0; 32]));
+        let txid_b = Txid(Hash256::from_le_bytes(&[0xb0; 32]));
+        let txid_c = Txid(Hash256::from_le_bytes(&[0xc0; 32]));
+        let txid_d = Txid(Hash256::from_le_bytes(&[0xd0; 32]));
+        let txid_e = Txid(Hash256::from_le_bytes(&[0xe0; 32]));
+        let script = Bytes::from_static(&[0x51]);
+        let create = |txid: Txid, vout: u32, value: u64, height: u32| CreatedOwned {
+            txid,
+            vout,
+            coinbase: false,
+            height,
+            value,
+            script_pubkey: script.clone(),
+        };
+        let overwrite = |txid: Txid, height: u32| UndoCoin {
+            outpoint: OutPoint::new(txid, 0),
+            txout: TxOut::default(),
+            height,
+            coinbase: false,
+        };
+        let block = |height: u32,
+                     created: Vec<CreatedOwned>,
+                     spent: Vec<OutPoint>,
+                     overwrites: Vec<UndoCoin>| BlockTransition {
+            height,
+            hash: Hash256::default(),
+            prev_hash: Hash256::default(),
+            created,
+            spent_outpoints: spent,
+            bip30_overwrites: overwrites,
+        };
+        let prefix = vec![
+            block(
+                1,
+                vec![create(txid_c, 0, 100, 1), create(txid_c, 1, 101, 1)],
+                vec![OutPoint::new(txid_a, 0)],
+                Vec::new(),
+            ),
+            block(
+                2,
+                vec![create(txid_d, 0, 200, 2), create(txid_c, 2, 102, 2)],
+                vec![OutPoint::new(txid_c, 0), OutPoint::new(txid_b, 0)],
+                Vec::new(),
+            ),
+            block(
+                3,
+                vec![create(txid_e, 0, 300, 3), create(txid_a, 5, 305, 3)],
+                vec![OutPoint::new(txid_d, 0), OutPoint::new(txid_c, 1)],
+                vec![overwrite(txid_a, 3)],
+            ),
+        ];
+
+        let initial_outputs = vec![
+            (
+                txid_a,
+                vec![
+                    OwnedUtxoOut::new(0, 1_000, vec![0x51], false, 1),
+                    OwnedUtxoOut::new(1, 1_001, vec![0x51], false, 1),
+                ],
+            ),
+            (
+                txid_b,
+                vec![OwnedUtxoOut::new(0, 2_000, vec![0x51], false, 1)],
+            ),
+        ];
+        let mut initial_records = HashMap::new();
+        for (txid, outputs) in &initial_outputs {
+            let record = UtxoRecord::from_owned_outputs(txid.0, outputs)?;
+            initial_records.insert(*txid, Some(record));
+        }
+
+        let mut existed: HashSet<Txid> = HashSet::new();
+        for (txid, _) in &initial_outputs {
+            existed.insert(*txid);
+        }
+        let mut referenced: HashSet<Txid> = HashSet::new();
+        for transition in &prefix {
+            for created in &transition.created {
+                referenced.insert(created.txid);
+            }
+            for spent in &transition.spent_outpoints {
+                referenced.insert(spent.txid);
+            }
+            for overwrite in &transition.bip30_overwrites {
+                referenced.insert(overwrite.outpoint.txid);
+            }
+        }
+        let mut expected: Vec<(CoinKey, Option<Bytes>)> = Vec::new();
+        for txid in referenced {
+            let mut current: Vec<OwnedUtxoOut> = initial_outputs
+                .iter()
+                .find(|(id, _)| *id == txid)
+                .map(|(_, outputs)| outputs.clone())
+                .unwrap_or_default();
+            for transition in &prefix {
+                if transition
+                    .bip30_overwrites
+                    .iter()
+                    .any(|overwrite| overwrite.outpoint.txid == txid)
+                {
+                    current.clear();
+                }
+                for created in &transition.created {
+                    if created.txid == txid {
+                        current.retain(|out| out.vout != created.vout);
+                        current.push(OwnedUtxoOut {
+                            vout: created.vout,
+                            value: created.value,
+                            script_pubkey: created.script_pubkey.to_vec(),
+                            coinbase: created.coinbase,
+                            height: created.height,
+                        });
+                    }
+                }
+                for spent in &transition.spent_outpoints {
+                    if spent.txid == txid {
+                        current.retain(|out| out.vout != spent.vout);
+                    }
+                }
+            }
+            let key = CoinKey(txid.0.to_le_bytes());
+            match (existed.contains(&txid), current.is_empty()) {
+                (false, true) => {}
+                (true, true) => expected.push((key, None)),
+                (_, false) => {
+                    let record = UtxoRecord::from_owned_outputs(txid.0, &current)?;
+                    expected.push((key, Some(Bytes::copy_from_slice(record.bytes()))));
+                }
+            }
+        }
+        expected.sort_by_key(|(key, _)| *key);
+
+        let events_expected: usize = prefix
+            .iter()
+            .map(|transition| {
+                let mut seen = HashSet::new();
+                for created in &transition.created {
+                    seen.insert(created.txid);
+                }
+                for spent in &transition.spent_outpoints {
+                    seen.insert(spent.txid);
+                }
+                for overwrite in &transition.bip30_overwrites {
+                    seen.insert(overwrite.outpoint.txid);
+                }
+                seen.len()
+            })
+            .sum();
+        FOLD_EVENTS.with(|events| events.set(0));
+        let delta = WindowWorkspace::build_window_delta(&prefix, &initial_records)?;
+        assert_eq!(delta.records, expected);
+        assert_eq!(FOLD_EVENTS.with(std::cell::Cell::get), events_expected,);
+        Ok(())
+    }
+
+    // WIN-03
+    #[test]
+    fn window_fold_counts_one_event_per_transition_txid_pair_under_spend_churn()
+    -> Result<(), CoinBytesError> {
+        use super::{
+            BlockTransition, CreatedOwned, FOLD_EVENTS, OutPoint, OwnedUtxoOut, UtxoRecord,
+            index_transition,
+        };
+        let victim = Txid(Hash256::from_le_bytes(&[0xf0; 32]));
+        let script = Bytes::from_static(&[0x51]);
+        let create = |txid: Txid, vout: u32, value: u64, height: u32| CreatedOwned {
+            txid,
+            vout,
+            coinbase: false,
+            height,
+            value,
+            script_pubkey: script.clone(),
+        };
+        let block =
+            |height: u32, created: Vec<CreatedOwned>, spent: Vec<OutPoint>| BlockTransition {
+                height,
+                hash: Hash256::default(),
+                prev_hash: Hash256::default(),
+                created,
+                spent_outpoints: spent,
+                bip30_overwrites: Vec::new(),
+            };
+        let mut prefix = Vec::new();
+        for (index, byte) in (0..16_u8).enumerate() {
+            let height = u32::try_from(index + 1)?;
+            let fresh = Txid(Hash256::from_le_bytes(&[byte; 32]));
+            prefix.push(block(
+                height,
+                vec![create(fresh, 0, 2_000, height)],
+                Vec::new(),
+            ));
+        }
+        let spends: Vec<OutPoint> = (0..200_u32)
+            .map(|vout| OutPoint::new(victim, vout))
+            .collect();
+        prefix.push(block(17, Vec::new(), spends));
+
+        let mut victim_outputs = Vec::new();
+        for vout in 0..200_u32 {
+            victim_outputs.push(OwnedUtxoOut::new(
+                vout,
+                1_000 + u64::from(vout),
+                vec![0x51],
+                false,
+                1,
+            ));
+        }
+        let mut initial_records = HashMap::new();
+        let victim_record = UtxoRecord::from_owned_outputs(victim.0, &victim_outputs)?;
+        initial_records.insert(victim, Some(victim_record));
+
+        let mut expected: Vec<(CoinKey, Option<Bytes>)> = Vec::new();
+        expected.push((CoinKey(victim.0.to_le_bytes()), None));
+        for (index, byte) in (0..16_u8).enumerate() {
+            let height = u32::try_from(index + 1)?;
+            let fresh = Txid(Hash256::from_le_bytes(&[byte; 32]));
+            let outputs = vec![OwnedUtxoOut::new(0, 2_000, vec![0x51], false, height)];
+            let record = UtxoRecord::from_owned_outputs(fresh.0, &outputs)?;
+            expected.push((
+                CoinKey(fresh.0.to_le_bytes()),
+                Some(Bytes::copy_from_slice(record.bytes())),
+            ));
+        }
+        expected.sort_by_key(|(key, _)| *key);
+        let reference_bytes: usize = expected
+            .iter()
+            .map(|(key, record)| key.as_bytes().len() + record.as_ref().map_or(0, Bytes::len))
+            .sum();
+
+        FOLD_EVENTS.with(|events| events.set(0));
+        let delta = WindowWorkspace::build_window_delta(&prefix, &initial_records)?;
+        assert_eq!(delta.records, expected);
+        assert_eq!(FOLD_EVENTS.with(std::cell::Cell::get), 16 + 1);
+        let mut workspace = WindowWorkspace::new(10_000);
+        workspace.transitions = prefix;
+        workspace.initial_records = initial_records;
+        for (index, transition) in workspace.transitions.iter().enumerate() {
+            index_transition(&mut workspace.touched, index, transition);
+        }
+        FOLD_EVENTS.with(|events| events.set(0));
+        workspace.staged_coin_bytes(16)?;
+        let staged = workspace.staged_coin_bytes(17)?;
+        assert_eq!(
+            FOLD_EVENTS.with(std::cell::Cell::get),
+            16 + 1,
+            "staging the churn block must not refold the prefix"
+        );
+        assert_eq!(
+            staged, reference_bytes,
+            "staged coin bytes must equal the modelled records"
+        );
+        Ok(())
     }
 }

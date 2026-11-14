@@ -572,8 +572,7 @@ impl ModelDriver {
         let block_id_list: Vec<Txid> = block_txs.iter().map(Tx::txid).collect();
         let expected_removals = self.naive.plan_block_removals(&block_txs, &block_id_list);
         let outcome = self.pool.remove_for_block(
-            &block_refs,
-            &block_id_list,
+            &crate::settlement::TransitionFacts::from_txs(&block_refs),
             self.height.saturating_add(1),
             self.current_time,
         );

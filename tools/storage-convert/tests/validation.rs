@@ -1,39 +1,10 @@
-use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
-use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore};
 use std::fs;
 use tempfile::tempdir;
 
-use super::epoch3_to_4::create_checkpoint_fixture;
+use super::epoch3_to_4::stage_canonical_epoch3_source;
 use super::support::error::{TestError, TestResult};
 use super::support::harness::{recursive_dir_digest, run_converter};
 use super::support::oracle::{write_rocksdb_namespace, write_schema_marker};
-
-/// Builds an epoch-3 source whose chainstate checkpoint, durable head, and
-/// namespace rows satisfy the converter's fail-closed preconditions.
-fn write_complete_epoch3_source(from_path: &std::path::Path) -> TestResult<()> {
-    write_schema_marker(from_path, 3)?;
-    let txid1 = Hash256::from_le_bytes(&[5u8; 32]);
-    let checkpoint_tip = Hash256::from_le_bytes(&[100u8; 32]);
-    create_checkpoint_fixture(from_path, checkpoint_tip, 100, &[txid1])?;
-    let cs_store = RocksDbStore::open(from_path.join("chainstate"))?;
-    let durable_head = DurableHead {
-        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
-        commit_id: 1,
-        height: 100,
-        tip: checkpoint_tip,
-        chain_tx_count: 100,
-        body_extent: None,
-        undo_extent: None,
-    };
-    cs_store.put(
-        ColumnFamily::UtxoMeta,
-        DURABLE_HEAD_KEY,
-        &durable_head.encode(),
-    )?;
-    drop(cs_store);
-    Ok(())
-}
 
 #[test]
 fn nonempty_destination_is_rejected_without_modifying_source_or_destination() -> TestResult<()> {
@@ -565,7 +536,7 @@ fn overlaid_recognized_engines_in_epoch_3_namespace_is_rejected() -> TestResult<
     let from_path = source_temp.path();
     let to_path = dest_temp.path().join("converted");
 
-    write_complete_epoch3_source(from_path)?;
+    stage_canonical_epoch3_source(from_path)?;
 
     let chainstate_dir = from_path.join("chainstate");
     let rocks_data = vec![(
@@ -577,6 +548,7 @@ fn overlaid_recognized_engines_in_epoch_3_namespace_is_rejected() -> TestResult<
     let standalone_mdbx_dir = tempdir()?;
     #[cfg(feature = "mdbx")]
     {
+        use bitcoin_rs_storage::KvStore as _;
         let store = bitcoin_rs_storage::MdbxStore::open(standalone_mdbx_dir.path())?;
         store.put(bitcoin_rs_storage::ColumnFamily::UtxoMeta, b"k", b"v")?;
         fs::copy(
@@ -639,7 +611,7 @@ fn bare_relative_destination_path_succeeds() -> TestResult<()> {
     let run_temp = tempdir()?;
     let from_path = source_temp.path();
 
-    write_complete_epoch3_source(from_path)?;
+    stage_canonical_epoch3_source(from_path)?;
 
     let from_str = from_path
         .to_str()

@@ -268,6 +268,7 @@ fn unsatisfiable_budget_fails_typed_and_leaves_the_slot_free() -> TestResult {
 fn long_poll_accepts_a_budget_qualified_id_and_rejects_malformed_qualifiers() {
     let key = GenerationKey {
         tip_hash: Hash256::from_le_bytes(&[0x33; 32]),
+        commit_id: 0,
         mempool_sequence: 9,
         fee_delta_sequence: 4,
     };
@@ -435,7 +436,7 @@ impl MempoolSnapshotSource for BudgetGate {
 
     fn select_template_after(
         &self,
-        block: &Block,
+        block: &BlockImage,
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError> {
@@ -446,7 +447,7 @@ impl MempoolSnapshotSource for BudgetGate {
         &self,
         selection: &GenerateSelection,
         context: &CandidateContext,
-    ) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    ) -> Result<Arc<MempoolMiningSnapshot>, MiningControlError> {
         self.inner.selection_snapshot(selection, context)
     }
 
@@ -472,11 +473,11 @@ fn gated_service() -> (
     Arc<MiningService>,
     Arc<BudgetGate>,
     GenerationKey,
-    bitcoin_rs_execution::chain::LatchWriter,
+    bitcoin_rs_consensus::latch::LatchWriter,
 ) {
     let tip = Hash256::from_le_bytes(&[0x71; 32]);
     let pool = Arc::new(BudgetGate::new(5, 2));
-    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let service = Arc::new(service_with_source(
         Some(tip_snapshot(tip)),
         pool.clone(),
@@ -485,6 +486,7 @@ fn gated_service() -> (
     ));
     let generation = GenerationKey {
         tip_hash: tip,
+        commit_id: 0,
         mempool_sequence: 5,
         fee_delta_sequence: 2,
     };

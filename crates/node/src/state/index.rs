@@ -71,6 +71,7 @@ impl DerivedIndexHost {
         &mut self,
         chainstate: &bitcoin_rs_execution::Chainstate,
         history: bitcoin_rs_storage::pruning::HistoryAccess,
+        historical_verified: bitcoin_rs_projection::runtime::HistoricalVerifiedReader,
     ) -> Result<(), IndexWorkerError> {
         let Some(enabled) = self.enabled.as_mut() else {
             return Ok(());
@@ -89,6 +90,7 @@ impl DerivedIndexHost {
             Arc::clone(&enabled.lifecycle),
             spawn.generation,
             chainstate.applied_tip_reader(),
+            Some(historical_verified),
             chainstate.block_tree_reader(),
             chainstate.block_body_store_handle(),
             history,

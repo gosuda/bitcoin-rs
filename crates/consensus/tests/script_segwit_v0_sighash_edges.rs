@@ -5,7 +5,7 @@ use bitcoin_rs_consensus::primitives::{
     Amount, Script, Sighash, SighashCache, SighashError, Tx, TxOut, Witness, deserialize,
 };
 use bitcoin_rs_consensus::script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
-use secp256k1::{Message, PublicKey, SECP256K1, SecretKey};
+use secp256k1::{Message, PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 
 const TX_HEX: &str = concat!(
@@ -91,7 +91,8 @@ fn reference_bip143(
 }
 
 fn test_key() -> SecretKey {
-    SecretKey::from_slice(&hex(TEST_KEY)).expect("public BIP143 test key")
+    SecretKey::from_secret_bytes(hex(TEST_KEY).try_into().expect("32-byte test key"))
+        .expect("public BIP143 test key")
 }
 
 fn p2wpkh_prevout() -> TxOut {
@@ -199,9 +200,7 @@ fn published_bip143_digest_and_signature_anchor_reference() {
 #[test]
 fn every_segwit_hashtype_byte_matches_reference_and_verifies() {
     let key = test_key();
-    let pubkey = PublicKey::from_secret_key(SECP256K1, &key)
-        .serialize()
-        .to_vec();
+    let pubkey = PublicKey::from_secret_key(&key).serialize().to_vec();
     let script = hex(SCRIPT_CODE);
     let prevout = p2wpkh_prevout();
     for output_count in [1, 2] {
@@ -219,8 +218,7 @@ fn every_segwit_hashtype_byte_matches_reference_and_verifies() {
                 "outputs={output_count}, raw={raw:#x}",
             );
             let message = Message::from_digest(expected);
-            let mut signature = SECP256K1
-                .sign_ecdsa(&message, &key)
+            let mut signature = secp256k1::ecdsa::sign(message, &key)
                 .serialize_der()
                 .to_vec();
             signature.push(byte);
@@ -352,7 +350,7 @@ fn separator_witness_script(pubkey: &[u8], multisig: bool, verify: bool) -> Vec<
 #[test]
 fn every_hashtype_verifies_all_witness_ecdsa_opcodes_with_separators() {
     let key = test_key();
-    let pubkey = PublicKey::from_secret_key(SECP256K1, &key).serialize();
+    let pubkey = PublicKey::from_secret_key(&key).serialize();
     for (multisig, verify) in [(false, false), (false, true), (true, false), (true, true)] {
         let script = separator_witness_script(&pubkey, multisig, verify);
         let mut program = vec![0x00, 0x20];
@@ -370,8 +368,7 @@ fn every_hashtype_verifies_all_witness_ecdsa_opcodes_with_separators() {
             let (tx, oracle) = fixture(output_count);
             for byte in 0_u8..=u8::MAX {
                 let digest = reference_bip143(&oracle, INPUT, &script[1..], VALUE, u32::from(byte));
-                let mut signature = SECP256K1
-                    .sign_ecdsa(&Message::from_digest(digest), &key)
+                let mut signature = secp256k1::ecdsa::sign(Message::from_digest(digest), &key)
                     .serialize_der()
                     .to_vec();
                 signature.push(byte);

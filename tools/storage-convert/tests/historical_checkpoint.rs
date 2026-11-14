@@ -5,8 +5,8 @@ use bitcoin_rs_consensus::primitives::{Hash256, Network, OutPoint, Txid};
 use bitcoin_rs_execution::{AssumeUtxoManager, HistoricalCheckpointRef};
 use bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus;
 use bitcoin_rs_storage::checkpoint::{
-    COINSTATS_FILE, CheckpointManifestV1, CheckpointReference, HEADERS_FILE,
-    HISTORICAL_CHECKPOINT_ROOT, MANIFEST_FILE,
+    COINSTATS_FILE, CURRENT_FILE, CheckpointManifestV1, CheckpointReference, CurrentV1,
+    HEADERS_FILE, HISTORICAL_CHECKPOINT_ROOT, MANIFEST_FILE,
 };
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::utxo::record::UtxoRecord;
@@ -17,6 +17,7 @@ use tempfile::tempdir;
 
 use super::support::error::{TestError, TestResult};
 use super::support::harness::{parse_report, recursive_dir_digest, run_converter};
+use super::support::oracle::write_schema_marker;
 
 const GENERATION: &str = "gen-00000000000000000001";
 const UTXO_FILE: &str = "utxo-v4.dat";
@@ -44,6 +45,62 @@ fn stage_historical_source(from: &Path) -> TestResult<()> {
     let checkpoint = from.join("chainstate-checkpoints").join(GENERATION);
     let historical = from.join(HISTORICAL_CHECKPOINT_ROOT).join(GENERATION);
     copy_tree(&checkpoint, &historical)
+}
+
+fn stage_trusted_historical_source(from: &Path) -> TestResult<()> {
+    use bitcoin_rs_consensus::primitives::hex::hex_encode;
+    let archive = tempdir()?;
+    super::epoch4_to_5::write_valid_epoch4_snapshot_source(archive.path())?;
+    let output = run_converter(&["--from", str_path(archive.path())?, "--to", str_path(from)?])?;
+    parse_report(&output)?;
+    let pinned = super::epoch4_to_5::regtest_pin()?;
+    let generation = from.join("chainstate-checkpoints").join(GENERATION);
+    let (_, mut manifest) = read_manifest(&generation)?;
+    let (_, legacy) = read_manifest(
+        &fixture_dir()
+            .join("chainstate-checkpoints")
+            .join(GENERATION),
+    )?;
+    let mut utxo = legacy
+        .utxo
+        .ok_or_else(|| TestError::Assertion("legacy fixture has no coin artifact".into()))?;
+    let coins = fs::read(
+        archive
+            .path()
+            .join("assumeutxo")
+            .join(pinned.block_hash.to_string())
+            .join("coins.dat"),
+    )?;
+    let snapshot = read_snapshot_strict_v4(&mut coins.as_slice())
+        .map_err(|error| TestError::Assertion(error.to_string()))?;
+    assert_eq!(snapshot.tip_hash, pinned.block_hash);
+    assert_eq!(snapshot.height, pinned.height);
+    let records = snapshot.set.all_records();
+    utxo.bytes = u64::try_from(coins.len())?;
+    utxo.sha256 = hex_encode(&Sha256::digest(&coins));
+    utxo.record_count = u64::try_from(records.len())?;
+    utxo.output_count = u64::try_from(
+        records
+            .iter()
+            .map(|record| record.outputs().count())
+            .sum::<usize>(),
+    )?;
+    utxo.muhash_trailer_sha256 = hex_encode(&Sha256::digest(snapshot.muhash_trailer));
+    fs::write(generation.join(UTXO_FILE), coins)?;
+    manifest.utxo = Some(utxo);
+    let engine = manifest
+        .engine
+        .take()
+        .ok_or_else(|| TestError::Assertion("published checkpoint has no engine".into()))?;
+    fs::remove_dir_all(generation.join(engine.dir))?;
+    let manifest_bytes = sonic_rs::to_vec(&manifest)?;
+    fs::write(generation.join(MANIFEST_FILE), &manifest_bytes)?;
+    let current_path = from.join("chainstate-checkpoints").join(CURRENT_FILE);
+    let mut current: CurrentV1 = sonic_rs::from_slice(&fs::read(&current_path)?)?;
+    current.manifest_sha256 = hex_encode(&Sha256::digest(&manifest_bytes));
+    fs::write(current_path, sonic_rs::to_vec(&current)?)?;
+    copy_tree(&generation, &converted_generation(from))?;
+    write_schema_marker(from, 3)
 }
 
 fn str_path(path: &Path) -> TestResult<&str> {
@@ -83,7 +140,7 @@ fn converted_historical_generation_loads_epoch3_coins_through_assumeutxo() -> Te
     let dest = tempdir()?;
     let from = source.path();
     let to = dest.path().join("converted");
-    stage_historical_source(from)?;
+    stage_trusted_historical_source(from)?;
     let old_reference = historical_reference(&converted_generation(from))?;
     fs::copy(
         from.join("chainstate-checkpoints").join("CURRENT"),
@@ -99,7 +156,7 @@ fn converted_historical_generation_loads_epoch3_coins_through_assumeutxo() -> Te
         head.assumeutxo = AssumeUtxoDiskStatus::Validating {
             base_height: head.height,
             base_hash: head.tip,
-            expected_hash_serialized: Hash256::default(),
+            expected_hash_serialized: super::epoch4_to_5::regtest_pin()?.hash_serialized,
             chain_tx_count: head.chain_tx_count,
             historical_height: old_reference.height,
             historical_hash: old_reference.hash,
@@ -519,8 +576,9 @@ fn equal_head_epoch3_conversion_preserves_canonical_headers_over_64_mib() -> Tes
         );
         panic!("valid canonical artifact exceeds only the whole-file publication limit: {stderr}");
     }
-    parse_report(&output)?;
-    assert_eq!(fs::read(to.join("CURRENT_SCHEMA"))?, b"4\n");
+    let report = parse_report(&output)?;
+    assert_eq!((report.source_epoch, report.target_epoch), (3, 6));
+    assert_eq!(fs::read(to.join("CURRENT_SCHEMA"))?, b"6\n");
     let target_generation = to.join(CHECKPOINT_ROOT).join(GENERATION);
     for artifact in [HEADERS_FILE, COINSTATS_FILE] {
         let mut source_file = fs::File::open(generation.join(artifact))?;
@@ -539,6 +597,13 @@ fn equal_head_epoch3_conversion_preserves_canonical_headers_over_64_mib() -> Tes
     }
     let (_, target_manifest) = read_manifest(&target_generation)?;
     manifest.utxo = None;
+    let image_dir =
+        bitcoin_rs_storage::checkpoint::open_data_dir(&target_generation.join("chainstate"))?;
+    manifest.engine = Some(
+        bitcoin_rs_storage::checkpoint::digest_engine_dir(&image_dir)
+            .map_err(|error| TestError::Assertion(format!("target engine image: {error}")))?,
+    );
+    drop(image_dir);
     assert_eq!(
         sonic_rs::to_vec(&target_manifest)
             .map_err(|error| TestError::Assertion(error.to_string()))?,

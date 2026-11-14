@@ -5,7 +5,9 @@ use crate::chain::{ChainTxCount, TipSnapshot};
 use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256, OutPoint};
 use bitcoin_rs_storage::DurableHead;
 use bitcoin_rs_storage::utxo::UtxoCoin;
-use bitcoin_rs_storage::utxo::contract::{OutputSource, UndoLoadError, load_block_undo};
+use bitcoin_rs_storage::utxo::contract::{
+    BlockUndoCheck, OutputSource, UndoLoadError, load_block_undo, load_block_undo_for_block,
+};
 
 /// Proof that a connect replays the committed gap below the durable head.
 ///
@@ -382,9 +384,17 @@ fn rewind_one_step(
             "a rewound block body does not match its header's merkle root",
         ));
     }
-    let undo = load_block_undo(handles.undo_store.as_ref(), height, hash).map_err(|_| {
-        rewind_refused(handles, head, "a rewound block's undo record does not load")
-    })?;
+    let undo = load_block_undo_for_block(
+        handles.undo_store.as_ref(),
+        height,
+        hash,
+        &BlockUndoCheck {
+            block: &block,
+            txids: &txids,
+            max_script_size: bitcoin_rs_consensus::MAX_SCRIPT_SIZE,
+        },
+    )
+    .map_err(|_| rewind_refused(handles, head, "a rewound block's undo record does not load"))?;
     let tx_count_delta = tx_count_delta_for(&block);
     let parent_tip = rewound_parent(handles, head, applied, &block, tx_count_delta)?;
     let coin_delta = super::disconnect::build_disconnect_delta(&handles.coins, &undo)
@@ -527,6 +537,7 @@ fn apply_replayed_gap_block(
                 payload,
                 &UndoRowSpends(&undo),
                 handles.validation_engine,
+                handles.prevout_charge.clone(),
             )?,
         )),
         Ok(_) | Err(UndoLoadError::Missing { .. }) => None,

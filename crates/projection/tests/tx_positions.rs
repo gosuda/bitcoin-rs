@@ -2,6 +2,7 @@
 
 use crate::support::common;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bitcoin_rs_consensus::primitives::{
@@ -10,10 +11,10 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_projection::types::{TX_POSITION_SIZE, TxPosition, TxPositionValue, U24_MAX};
 use bitcoin_rs_projection::{
-    IndexCapabilities, IndexWriter, PreparedBatch, PreparedBatchLimits, ScriptHash,
-    SpentCoinScripts,
+    IndexCapabilities, IndexReader, IndexWriter, Indexer, PreparedBatch, PreparedBatchLimits,
+    ScriptHash, SpentCoin, SpentCoins,
 };
-use bitcoin_rs_storage::{ColumnFamily, KvStore};
+use bitcoin_rs_storage::PrefixScanLimit;
 use proptest::prelude::*;
 
 use common::MemoryStore;
@@ -22,9 +23,14 @@ struct FixtureScripts;
 
 static FIXTURE_SPENT_SCRIPT: [u8; 2] = [0x51, 0x01];
 
-impl SpentCoinScripts for FixtureScripts {
-    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
-        Some(FIXTURE_SPENT_SCRIPT.as_slice())
+impl SpentCoins for FixtureScripts {
+    fn spent_coin(&self, _txid: &[u8; 32], _vout: u32) -> Option<SpentCoin<'_>> {
+        Some(SpentCoin {
+            script: FIXTURE_SPENT_SCRIPT.as_slice(),
+            value: 0,
+            height: 0,
+            coinbase: false,
+        })
     }
 }
 
@@ -110,16 +116,12 @@ fn mixed_block() -> Block {
     }
 }
 
-fn rows_with_values(store: &MemoryStore, cf: ColumnFamily) -> Vec<(Vec<u8>, Vec<u8>)> {
-    store
-        .iter_prefix(cf, &[])
-        .expect("iterate")
-        .map(|entry| entry.expect("row"))
-        .collect()
-}
+const SCAN_ALL: PrefixScanLimit = PrefixScanLimit {
+    max_rows: 100_000,
+    max_bytes: 64 << 20,
+};
 
 #[test]
-
 fn funding_positions_address_the_transactions_that_funded_the_script() {
     let block = mixed_block();
     let bytes = consensus_bytes(&block);
@@ -129,14 +131,20 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
 
     let target = ScriptHash::from_script_bytes(&script(0x11));
 
-    let rows = rows_with_values(&store, ColumnFamily::Funding);
-    let (_key, value) = rows
+    let indexer = Indexer::new(Arc::clone(&store));
+    let snapshot = indexer.snapshot().expect("snapshot");
+    let scan = snapshot
+        .funding_rows(target, SCAN_ALL)
+        .expect("funding rows");
+    assert!(scan.complete, "funding scan must not truncate");
+    let occurrences: Vec<_> = scan
+        .rows
         .iter()
-        .find(|(key, _)| key.starts_with(&target.prefix()))
-        .expect("funding row for the target script");
-
-    let occurrences = bitcoin_rs_projection::types::ScriptHistoryOccurrence::decode_all(value)
-        .expect("row value decodes");
+        .flat_map(|row| {
+            bitcoin_rs_projection::types::ScriptHistoryOccurrence::decode_all(&row.value)
+                .expect("row value decodes")
+        })
+        .collect();
     let funded: Vec<_> = occurrences
         .iter()
         .filter(|occurrence| {
@@ -145,6 +153,7 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
         .collect();
     assert_eq!(funded.len(), 2, "two transactions funded this script");
 
+    let mut seen = BTreeSet::new();
     for occurrence in funded {
         let position = occurrence.position;
         let start = usize::try_from(position.offset()).expect("offset fits usize");
@@ -152,6 +161,7 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
         let decoded: Tx =
             deserialize(&bytes[start..end]).expect("position slices a whole transaction");
         assert_eq!(decoded.txid().as_bytes(), &occurrence.txid);
+        seen.insert(decoded.txid());
         assert!(
             decoded
                 .outputs
@@ -160,6 +170,11 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
             "position must address a transaction that funded the script"
         );
     }
+    assert_eq!(
+        seen,
+        BTreeSet::from([block.txs[0].txid(), block.txs[1].txid()]),
+        "funding positions must name exactly the two transactions that funded the script"
+    );
 }
 
 #[test]
@@ -170,23 +185,32 @@ fn txid_positions_address_their_own_transaction() {
     let store = Arc::new(MemoryStore::default());
     commit_block(&store, 0, &bytes);
 
-    let rows = rows_with_values(&store, ColumnFamily::TxConfirmed);
-    assert_eq!(rows.len(), block.txs.len());
-
-    for (_key, value) in &rows {
-        let positions = TxPositionValue::decode(value).expect("row value decodes");
-        for position in positions {
-            let start = usize::try_from(position.offset()).expect("offset fits usize");
-            let end =
-                usize::try_from(position.end().expect("end fits u32")).expect("end fits usize");
-            let decoded: Tx =
-                deserialize(&bytes[start..end]).expect("position slices a whole transaction");
-            assert!(
-                block.txs.contains(&decoded),
-                "position must address a transaction of this block"
-            );
+    let indexer = Indexer::new(Arc::clone(&store));
+    let snapshot = indexer.snapshot().expect("snapshot");
+    let mut row_count = 0;
+    for tx in &block.txs {
+        let scan = snapshot
+            .transaction_rows(&tx.txid(), SCAN_ALL)
+            .expect("transaction rows");
+        assert!(scan.complete, "transaction scan must not truncate");
+        for row in &scan.rows {
+            row_count += 1;
+            let positions = TxPositionValue::decode(&row.value).expect("row value decodes");
+            for position in positions {
+                let start = usize::try_from(position.offset()).expect("offset fits usize");
+                let end =
+                    usize::try_from(position.end().expect("end fits u32")).expect("end fits usize");
+                let decoded: Tx =
+                    deserialize(&bytes[start..end]).expect("position slices a whole transaction");
+                assert_eq!(
+                    decoded.txid().as_bytes(),
+                    tx.txid().as_bytes(),
+                    "position must address the transaction whose txid the row is keyed by"
+                );
+            }
         }
     }
+    assert_eq!(row_count, block.txs.len());
 }
 
 fn arb_u24() -> impl Strategy<Value = u32> {

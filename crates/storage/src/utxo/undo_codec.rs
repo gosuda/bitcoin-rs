@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::utxo::contract::{UndoBatch, UtxoAdd};
 
-pub(crate) const UNDO_FORMAT_VERSION: u8 = 1;
+pub(crate) const UNDO_FORMAT_VERSION: u8 = 2;
 
 #[cfg(test)]
 const VERSION_BYTES: usize = 1;
@@ -18,7 +18,7 @@ const COUNT_BYTES: usize = core::mem::size_of::<u32>();
 #[cfg(test)]
 const RESTORE_COUNT_OFFSET: usize = VERSION_BYTES + BLOCK_HASH_BYTES;
 #[cfg(test)]
-const RESTORE_TRAILER_BYTES: usize = 1 + core::mem::size_of::<u32>() + COUNT_BYTES;
+const RESTORE_TRAILER_BYTES: usize = 1 + core::mem::size_of::<u32>();
 
 pub fn record_size_limit(
     block: &bitcoin_rs_consensus::primitives::Block,
@@ -30,10 +30,8 @@ pub fn record_size_limit(
         .filter(|tx| !tx.is_coinbase())
         .map(|tx| tx.inputs.len())
         .sum::<usize>();
-    let outputs = block.txs.iter().map(|tx| tx.outputs.len()).sum::<usize>();
-    41_usize
+    37_usize
         .saturating_add(inputs.saturating_mul(52_usize.saturating_add(max_spent_script)))
-        .saturating_add(outputs.saturating_mul(52 + 36))
         .saturating_add(block.total_size())
 }
 
@@ -75,30 +73,20 @@ pub fn encode(batch: &UndoBatch, block_hash: Hash256) -> Vec<u8> {
         out.push(u8::from(add.coinbase));
         out.extend_from_slice(&add.height.to_le_bytes());
     }
-
-    let removes = batch.removes();
-    out.extend_from_slice(&u32_len(removes.len()).to_le_bytes());
-    for outpoint in removes {
-        put_outpoint(&mut out, *outpoint);
-    }
     out
 }
 
 pub fn decode(bytes: &[u8], expected_hash: Hash256) -> Result<UndoBatch, UndoCodecError> {
-    decode_bounded(bytes, expected_hash, usize::MAX, usize::MAX)
+    decode_bounded(bytes, expected_hash, usize::MAX)
 }
 
 pub(crate) fn decode_bounded(
     bytes: &[u8],
     expected_hash: Hash256,
     max_restores: usize,
-    max_removes: usize,
 ) -> Result<UndoBatch, UndoCodecError> {
     const MIN_RESTORE_BYTES: usize = 36 + 9 + 1 + 4;
-    const MIN_REMOVE_BYTES: usize = 36;
-
     let mut cursor = Cursor::new(bytes);
-
     let version = cursor.take_array::<1>()?[0];
     if version != UNDO_FORMAT_VERSION {
         return Err(UndoCodecError::UnsupportedVersion {
@@ -137,25 +125,11 @@ pub(crate) fn decode_bounded(
         restores.push(UtxoAdd::new(outpoint, txout, coinbase, height));
     }
 
-    let remove_count = cursor.take_count(MIN_REMOVE_BYTES)?;
-    if usize::try_from(remove_count).unwrap_or(usize::MAX) > max_removes {
-        return Err(UndoCodecError::BlockCountLimit {
-            count: remove_count,
-            limit: max_removes,
-        });
-    }
-    let mut removes = Vec::with_capacity(bounded_capacity(remove_count));
-    for _ in 0..remove_count {
-        let outpoint = cursor.take_outpoint()?;
-        reject_duplicate(&mut seen, outpoint)?;
-        removes.push(outpoint);
-    }
-
     let trailing = cursor.remaining();
     if trailing != 0 {
         return Err(UndoCodecError::TrailingBytes { trailing });
     }
-    Ok(UndoBatch::from_parts(restores, removes))
+    Ok(UndoBatch::from_parts(restores, Vec::new()))
 }
 
 fn bounded_capacity(count: u32) -> usize {
@@ -288,8 +262,6 @@ mod tests {
         let mut batch = UndoBatch::empty();
         restore(&mut batch, outpoint(1, 0), 50_000, true, 11);
         restore(&mut batch, outpoint(2, 7), 1, false, 12);
-        batch.remove(outpoint(3, 0));
-        batch.remove(outpoint(3, 1));
         batch
     }
 
@@ -316,7 +288,6 @@ mod tests {
             true,
             1,
         ));
-        batch.remove(OutPoint::new(spend.txid(), 0));
         block.txs.push(spend);
         let actual = encode(&batch, block.block_hash().into()).len();
         assert!(
@@ -341,7 +312,7 @@ mod tests {
             assert_eq!(out.coinbase, expected.coinbase);
             assert_eq!(out.height, expected.height);
         }
-        assert_eq!(decoded.removes(), batch.removes());
+        assert!(decoded.removes().is_empty());
         Ok(())
     }
 
@@ -367,19 +338,15 @@ mod tests {
             bytes[flag] = byte;
             bytes
         }
-        fn twice(outpoint: OutPoint, in_both_halves: bool) -> Vec<u8> {
+        fn twice(outpoint: OutPoint) -> Vec<u8> {
             let mut batch = UndoBatch::empty();
-            if in_both_halves {
-                restore(&mut batch, outpoint, 10, false, 4);
-            } else {
-                batch.remove(outpoint);
-            }
-            batch.remove(outpoint);
+            restore(&mut batch, outpoint, 10, false, 4);
+            restore(&mut batch, outpoint, 11, false, 5);
             encode(&batch, hash(1))
         }
 
         type Expected = fn(&UndoCodecError) -> bool;
-        let cases: [(&str, Vec<u8>, Hash256, Expected); 7] = [
+        let cases: [(&str, Vec<u8>, Hash256, Expected); 6] = [
             (
                 "another block",
                 encode(&sample(), hash(1)),
@@ -415,18 +382,11 @@ mod tests {
             ),
             (
                 "repeated outpoint",
-                twice(OutPoint::new(hash(5).into(), 0), false),
-                hash(1),
-                |error| matches!(error, UndoCodecError::DuplicateOutpoint { .. }),
-            ),
-            (
-                "outpoint in both halves",
-                twice(OutPoint::new(hash(6).into(), 3), true),
+                twice(OutPoint::new(hash(5).into(), 0)),
                 hash(1),
                 |error| matches!(error, UndoCodecError::DuplicateOutpoint { .. }),
             ),
         ];
-
         for (name, bytes, block, expected) in cases {
             let Err(error) = decode(&bytes, block) else {
                 panic!("{name}: a corrupt record decoded");

@@ -69,7 +69,7 @@ pub enum TestError {
     #[error(transparent)]
     PruneService(#[from] bitcoin_rs_serving::context::PruneServiceError),
     #[error(transparent)]
-    HistoricalQuery(#[from] bitcoin_rs_projection::query_api::HistoricalQueryError),
+    TxQuery(#[from] bitcoin_rs_projection::query_api::TxQueryError),
     #[error(transparent)]
     AddrParse(#[from] std::net::AddrParseError),
     #[error(transparent)]

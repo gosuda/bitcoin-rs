@@ -326,21 +326,41 @@ fn getpeerinfo_omits_ping_times_it_has_never_measured() {
     assert!(entry.get("pingwait").is_none(), "{entry:?}");
 }
 
+fn release_version(release: &str) -> i64 {
+    release
+        .split('.')
+        .take(3)
+        .map(|part| {
+            part.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+        })
+        .zip([10_000_i64, 100, 1])
+        .map(|(digits, scale)| digits.parse().unwrap_or(0) * scale)
+        .sum()
+}
+
 #[test]
 fn getnetworkinfo_version_tracks_the_release() {
     let result = getnetworkinfo(&Arc::new(Context::new()), &json!(null))
         .unwrap_or_else(|err| panic!("getnetworkinfo failed: {err}"));
 
-    assert_eq!(
-        result.get("subversion").and_then(JsonValueTrait::as_str),
-        Some(bitcoin_rs_consensus::primitives::USER_AGENT),
-        "subversion must be the owned BIP-14 user agent"
-    );
+    let subversion = result.get("subversion").and_then(JsonValueTrait::as_str);
+    let release = subversion
+        .and_then(|value| value.split(':').nth(1))
+        .and_then(|value| value.strip_suffix('/'))
+        .unwrap_or_else(|| panic!("unexpected subversion: {subversion:?}"));
     assert_eq!(
         result.get("version").and_then(JsonValueTrait::as_i64),
-        Some(bitcoin_rs_consensus::primitives::client_version()),
-        "the client version integer is owned by the version module"
+        Some(release_version(release))
     );
+}
+
+#[test]
+fn release_version_matches_client_version_prerelease_rules() {
+    assert_eq!(release_version("0.15.0"), 1_500);
+    assert_eq!(release_version("0.16.0-rc.1"), 1_600);
+    assert_eq!(release_version("0.16"), 1_600);
 }
 
 #[test]

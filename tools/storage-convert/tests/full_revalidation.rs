@@ -95,7 +95,7 @@ fn converted_full_revalidation_marker_selects_cold_startup() -> TestResult {
         .ok_or_else(|| TestError::Assertion("converted durable head undecodable".into()))?;
     drop(store);
 
-    let state = prepare_initial_state_with_engine(&to, Network::Regtest, Some(&head))
+    let state = prepare_initial_state_with_engine(&to, Network::Regtest, Some(&head), None)
         .map_err(|error| TestError::Assertion(error.to_string()))?;
     if state.initial.resume_source != ResumeSource::Cold || state.engine.is_some() {
         return Err(TestError::Assertion(
@@ -189,7 +189,7 @@ fn epoch4_backend_copy_preserves_root_marker() -> TestResult {
     drop(store);
 
     let schema = fs::read_to_string(to.join("CURRENT_SCHEMA"))?;
-    assert_eq!(schema, "4\n");
+    assert_eq!(schema, "6\n");
     Ok(())
 }
 

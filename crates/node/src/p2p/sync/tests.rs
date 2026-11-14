@@ -13,14 +13,16 @@ use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash;
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, BlockImage, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
     consensus_bytes,
 };
 use bitcoin_rs_execution::chain::{
-    BlockTree, ChainWork, HeaderRefusal, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
+    BlockTree, HeaderRefusal, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
     regtest_fixture,
 };
+use bitcoin_rs_storage::split_chainstate_cache_budget;
 use crossbeam_channel::unbounded;
 use hashbrown::HashMap;
 use metrics::Counter;
@@ -559,6 +561,85 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> TestResult {
             "a same-drain admission may only fire a benign getheaders, never a body retry"
         );
     }
+    Ok(())
+}
+
+// BUD-06
+#[test]
+fn staged_images_charge_follows_retained_images() -> TestResult {
+    let genesis = Network::Regtest.genesis_block();
+    let block1 = regtest_fixture::mined_block_with_prev_hash(
+        genesis.block_hash(),
+        1,
+        vec![regtest_fixture::coinbase(1)],
+    )
+    .or_fail("regtest fixture block");
+    let block2 = regtest_fixture::mined_block_with_prev_hash(
+        block1.block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2)],
+    )
+    .or_fail("regtest fixture block");
+    let mut tree = BlockTree::new();
+    tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+    let SyncHarness {
+        sync,
+        peers,
+        block_tree,
+        applied_tip,
+        inbound_blocks_tx,
+        inbound_headers_tx: _inbound_headers_tx,
+    } = SyncHarness::new(tree);
+    install_budget(&sync, super::default_sync_budget(Network::Regtest));
+    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8_334,
+    ));
+    let _rx = connect_peer(&peers, synthetic_peer(addr, 0));
+    let source = current_source(&peers, addr);
+    sync.tick();
+    assert_applied_genesis(&applied_tip, &block_tree)?;
+
+    let budget = Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+        split_chainstate_cache_budget(64 * 1024 * 1024),
+        4,
+    ));
+    let ledger = Arc::new(crate::budget::BudgetedIngressLedger::new(Arc::clone(
+        &budget,
+    )));
+    let block_memory = Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
+        ledger,
+    ));
+
+    let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block2);
+    inbound.source = Some(source);
+    let retained = inbound
+        .payload()
+        .bytes()
+        .len()
+        .saturating_add(inbound.payload().retained_heap_bytes());
+    let hash = Hash256::from(inbound.payload().block_hash());
+    let mut credit = block_memory
+        .reserve(retained, || false)
+        .map_err(|error| TestError::message(error.to_string()))?;
+    credit
+        .retain(retained)
+        .map_err(|error| TestError::message(error.to_string()))?;
+    inbound.memory_credit = Some(credit);
+    inbound_blocks_tx.send(inbound)?;
+    sync.tick();
+
+    assert!(
+        sync.scheduler.lock().stager.contains(&hash),
+        "the future body must stay staged without its predecessor"
+    );
+    let charged =
+        budget.available_of_charges(bitcoin_rs_storage::budget::BudgetOwner::StagedImages);
+    assert_eq!(
+        charged,
+        u64::try_from(retained).map_err(|_| TestError::message("size overflow"))?,
+        "the retained image must own its staged-image charge"
+    );
     Ok(())
 }
 

@@ -69,13 +69,3 @@ impl SnapshotActivationMarker {
         })
     }
 }
-
-/// Outcome of the boot-time activation reconciliation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SnapshotActivationRecovery {
-    /// No interrupted activation is recorded.
-    Clean,
-    /// The staged coins were wiped and the marker cleared; the durable head
-    /// never moved to the snapshot tip.
-    RolledBack { marker: SnapshotActivationMarker },
-}

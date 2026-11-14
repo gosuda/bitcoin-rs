@@ -27,7 +27,7 @@ pub(crate) struct PoolService {
     #[cfg(feature = "pool-sv2")]
     control: Arc<dyn MiningControl>,
     chain: Arc<ledger::NodeChainView>,
-    cancel: bitcoin_rs_execution::chain::LatchWriter,
+    cancel: bitcoin_rs_consensus::latch::LatchWriter,
     worker: Option<JoinHandle<()>>,
     v1: Option<Server>,
     #[cfg(feature = "pool-sv2")]
@@ -137,7 +137,7 @@ impl PoolService {
             #[cfg(feature = "pool-sv2")]
             control: Arc::clone(control),
             chain,
-            cancel: bitcoin_rs_execution::chain::LatchWriter::new(),
+            cancel: bitcoin_rs_consensus::latch::LatchWriter::new(),
             worker: None,
             v1: None,
             #[cfg(feature = "pool-sv2")]

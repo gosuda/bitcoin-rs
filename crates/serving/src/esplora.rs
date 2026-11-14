@@ -17,8 +17,6 @@ use crate::handlers::Handler;
 use crate::rest::Response;
 
 use self::projection::Projection;
-
-/// Aggregate allowance shared by all listeners of a node.
 pub const DEFAULT_MAX_QUERIES: std::num::NonZeroUsize =
     std::num::NonZeroUsize::MIN.saturating_add(1);
 
@@ -31,8 +29,6 @@ pub enum Surface {
 #[must_use]
 pub fn route(handler: &Handler, surface: Surface, path: &str, query: &str) -> Response {
     let ctx = handler.context();
-    // Admission precedes even chain-view capture. Keep the permit until all
-    // projection and generation checks finish, including error returns.
     let _permit = if admission::is_expensive(path) {
         match ctx.esplora_admission.try_acquire() {
             Some(permit) => Some(permit),
@@ -43,12 +39,21 @@ pub fn route(handler: &Handler, surface: Surface, path: &str, query: &str) -> Re
     } else {
         None
     };
-    let projection = Projection::new(&ctx);
-    let chain_view = projection.capture_chain_view();
-    let response = dispatch_get(handler, &ctx, surface, path, query);
-    match projection.ensure_chain_view(chain_view.as_ref()) {
-        Ok(()) => response,
-        Err(response) => response,
+    if needs_tip_fence(path) {
+        let projection = Projection::new(&ctx);
+        let chain_view = projection.capture_chain_view();
+        #[cfg(test)]
+        crate::esplora::tests::gate_route_for_tests();
+        let response = dispatch_get(handler, &ctx, surface, path, query);
+        if response.status == 400 || response.status == 404 {
+            return response;
+        }
+        match projection.ensure_chain_view(chain_view.as_ref()) {
+            Ok(()) => response,
+            Err(response) => response,
+        }
+    } else {
+        dispatch_get(handler, &ctx, surface, path, query)
     }
 }
 
@@ -66,21 +71,32 @@ fn dispatch_get(
     }
     public::get(ctx, path)
 }
-
 #[must_use]
 pub(crate) fn route_post(handler: &Handler, surface: Surface, path: &str, body: &[u8]) -> Response {
     if surface == Surface::Backend {
-        let ctx = handler.context();
-        let projection = Projection::new(&ctx);
-        let chain_view = projection.capture_chain_view();
-        if let Some(response) = backend::post(handler, path, body) {
-            return match projection.ensure_chain_view(chain_view.as_ref()) {
-                Ok(()) => response,
-                Err(response) => response,
-            };
+        if let Some(response) = backend_post(handler, path, body) {
+            return response;
         }
     }
     public::post(handler, path, body)
+}
+fn backend_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
+    if !needs_tip_fence(path) {
+        return backend::post(handler, path, body);
+    }
+    let ctx = handler.context();
+    let projection = Projection::new(&ctx);
+    let chain_view = projection.capture_chain_view();
+    #[cfg(test)]
+    crate::esplora::tests::gate_route_for_tests();
+    let response = backend::post(handler, path, body)?;
+    if response.status == 400 || response.status == 404 {
+        return Some(response);
+    }
+    match projection.ensure_chain_view(chain_view.as_ref()) {
+        Ok(()) => Some(response),
+        Err(unavailable) => Some(unavailable),
+    }
 }
 
 #[must_use]
@@ -88,6 +104,28 @@ pub fn namespace(path: &str) -> Option<(Surface, &str)> {
     strip_dir(path, "/api")
         .map(|rest| (Surface::Public, rest))
         .or_else(|| strip_dir(path, "/esplora").map(|rest| (Surface::Backend, rest)))
+}
+
+fn needs_tip_fence(path: &str) -> bool {
+    let parts: Vec<_> = path.trim_matches('/').split('/').collect();
+    !matches!(
+        parts.as_slice(),
+        ["blocks", ..]
+            | ["block", ..]
+            | ["block-height", ..]
+            | ["tx", _, "merkleblock-proof" | "merkle-proof"]
+            | ["tx", _]
+            | ["tx", _, "hex" | "raw" | "status" | "outspends"]
+            | ["tx", _, "outspend", _]
+            | ["address" | "scripthash", _, "txs", "summary"]
+            | ["address" | "scripthash", _, "txs", "chain", ..]
+            | ["address-prefix", ..]
+            | ["internal", "block", _, "txs"]
+            | ["mempool", ..]
+            | ["fee-estimates"]
+            | ["address" | "scripthash", _, "txs", "mempool"]
+            | ["internal", "mempool", "txs", ..]
+    )
 }
 
 fn strip_dir<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {

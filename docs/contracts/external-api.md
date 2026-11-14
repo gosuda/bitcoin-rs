@@ -654,13 +654,13 @@ wallet interoperability remain unverified.
 - `loadtxoutset(path)` synchronously reads an unmodified Core v2 `dumptxoutset` file.
 - Positional `[path]` and named `{ "path": path }` are accepted.
 - Relative paths resolve below the datadir.
-- Input MUST be a regular file outside the node's `assumeutxo` recovery namespace.
+- Input MUST be a regular file.
 - The shared UTXO codec applies finite resource limits.
 - It resolves height, commitment, and cumulative transaction count only from the compiled network anchor matching the header base hash.
 - The decoded state MUST reproduce `hash_serialized_3` (a parsed header is not authentication).
 - One file import per node may materialize at a time.
-- Portable RPC and native-v4 embedding share that permit and reject an existing activation before opening/decoding.
-- Archive publication and abandoned-reservation cleanup follow `ARCH-07b`.
+- Portable RPC import holds the one-file permit and rejects an existing activation before opening/decoding.
+- Activation publishes the snapshot-base checkpoint and removes no operator file.
 - Activation requires an empty mempool and retains operator fee prioritisation.
 - Orphan reconsideration policy, bounds, and settlement are owned by `MPL-04` in `mempool-mutations.md`.
 - Activation runs through `AssumeUtxoManager` with consumer reconciliation and a lifecycle-protected admission recheck.
@@ -671,7 +671,7 @@ wallet interoperability remain unverified.
 - The installation boundary also rejects repeated activation, missing headers, and an existing full-revalidation requirement.
 - It also rejects a base without strictly greater cumulative work than the settled tip.
 - Height alone does not rank branches; equal work is refused (no Core block-availability tie-breaker parity).
-- Native v4 checkpoints stay internal recovery artifacts and are not accepted.
+- Checkpoints stay internal recovery artifacts and are not accepted as import input.
 - Result: `coins_loaded` (unspent outputs, not txid records), `tip_hash`, `base_height`, and UTF-8 display of the absolute input `path`.
 - The path is rendered before activation; non-UTF-8 bytes are replaced only in this display.
 - Path and open failures return `-8`.
@@ -703,7 +703,7 @@ wallet interoperability remain unverified.
 - Missing, null, empty, or any other string returns `-8`.
 - An unknown named parameter (e.g. `rollback`) also returns `-8`.
 - Relative `path` resolves below the datadir and its final component MUST be UTF-8.
-- Nothing is ever replaced: any existing destination (including named pipes) or one under the recovery namespace is refused with `-8`.
+- Nothing is ever replaced: any existing destination (including named pipes) is refused with `-8`.
 - The export is one coherent view.
 - It takes chain-transition exclusion then the stable UTXO view.
 - It reads tip plus chain transaction count holding both, and holds both until the last coin is encoded.

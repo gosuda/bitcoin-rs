@@ -19,9 +19,10 @@ use super::namespace::NamespaceRegistry;
 use crate::PreparedBatchLimits;
 use crate::portable::{BundleHost, BundleOutcome, IndexBundleError, Withheld};
 use crate::writer::TxIndexWriter;
-use crate::{IndexCapability, IndexError, IndexWriter};
+use crate::{IndexError, IndexWriter};
 use arc_swap::ArcSwap;
-use bitcoin_rs_execution::chain::{BlockTreeReader, LatchReader, LatchWriter, TipReader};
+use bitcoin_rs_consensus::latch::{LatchReader, LatchWriter};
+use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::HistoryAccess;
@@ -59,15 +60,16 @@ pub(super) fn run_worker_with_open(
     lifecycle: &Arc<ArcSwap<DerivedIndexLifecycle>>,
     generation: &Generation,
     applied_tip: TipReader,
+    historical_verified: Option<super::HistoricalVerifiedReader>,
     block_tree: BlockTreeReader,
     body_store: Option<Arc<dyn BlockBodyStore>>,
     history: HistoryAccess,
     body_source: Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<dyn crate::reconcile::ChainCursorSource>,
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
-    shutdown: &bitcoin_rs_execution::chain::LatchReader,
+    shutdown: &bitcoin_rs_consensus::latch::LatchReader,
     wake_rx: &Receiver<()>,
-    open_abandoned: &bitcoin_rs_execution::chain::LatchWriter,
+    open_abandoned: &bitcoin_rs_consensus::latch::LatchWriter,
 ) {
     let namespace_key =
         match NamespaceRegistry::validate_child(&spec.canonical_data_root, spec.namespace) {
@@ -98,6 +100,7 @@ pub(super) fn run_worker_with_open(
         lifecycle,
         generation,
         applied_tip: &applied_tip,
+        historical_verified: &historical_verified,
         block_tree: &block_tree,
         body_source,
         shutdown,
@@ -122,7 +125,7 @@ fn finish_worker(
     generation: &Generation,
     namespace_key: &Path,
     result: Result<(), DerivedIndexWorkerError>,
-    open_abandoned: &bitcoin_rs_execution::chain::LatchWriter,
+    open_abandoned: &bitcoin_rs_consensus::latch::LatchWriter,
 ) {
     let registry = &*NAMESPACE_REGISTRY;
     if let Err(error) = result {
@@ -174,6 +177,7 @@ pub(super) struct WorkerSetup<'a> {
     lifecycle: &'a Arc<ArcSwap<DerivedIndexLifecycle>>,
     generation: &'a Generation,
     applied_tip: &'a TipReader,
+    historical_verified: &'a Option<super::HistoricalVerifiedReader>,
     block_tree: &'a BlockTreeReader,
     body_source: Option<Arc<dyn BlockBodySource>>,
     shutdown: &'a LatchReader,
@@ -242,12 +246,15 @@ fn publish_serving_query_engine(open: &OpenDerivedIndex, setup: &WorkerSetup<'_>
             setup.applied_tip.clone(),
             setup.body_source.clone(),
             QueryEngineLive {
-                utxo: setup.spec.utxo.clone(),
-                chain_transition: setup.spec.chain_transition.clone(),
                 enabled: setup.spec.enabled,
+                generation: std::sync::Arc::new(setup.generation.clone()),
+                historical_verified: setup.historical_verified.clone(),
+                #[cfg(any(test, feature = "test-seam"))]
+                chain_transition: None,
             },
         )
-        .with_scripthash_limit(setup.spec.scripthash_limit),
+        .with_scripthash_limit(setup.spec.scripthash_limit)
+        .with_query_charge(setup.spec.query_charge.clone()),
     );
     publish_lifecycle(
         setup.lifecycle,
@@ -260,11 +267,13 @@ fn execute_portable_bundle(
     open: &OpenDerivedIndex,
     setup: &WorkerSetup<'_>,
 ) -> Result<(), DerivedIndexWorkerError> {
-    if setup.spec.enabled.contains(IndexCapability::TxLookup)
-        && crate::portable::reset_interrupted_import(open.writer.as_ref(), open.reader.as_ref())
-            .map_err(DerivedIndexWorkerError::Index)?
+    if setup
+        .spec
+        .enabled
+        .contains(crate::IndexCapability::TxLookup)
     {
-        tracing::warn!("cleared rows left by an interrupted portable index import");
+        crate::portable::reset_interrupted_import(open.writer.as_ref())
+            .map_err(DerivedIndexWorkerError::Index)?;
     }
     let cancelled = || setup.is_interrupted();
     let host = BundleHost {
@@ -332,8 +341,12 @@ fn build_worker(
         chain_events: Arc::clone(chain_events),
         reporter,
         batch_delay: FORWARD_BATCH_DELAY,
-        seed_slot: setup.spec.seed_slot.clone(),
-        seed_bundle: parking_lot::Mutex::new(None),
+        seed_history_lease: parking_lot::Mutex::new(None),
+        facts_rx: setup.spec.facts_rx.clone(),
+        facts_charge: setup.spec.facts_charge.clone(),
+        facts_gap: setup.spec.facts_gap.clone(),
+        cpu: setup.spec.cpu.clone(),
+        buffered_facts: parking_lot::Mutex::new(hashbrown::HashMap::new()),
     }
 }
 
@@ -389,7 +402,7 @@ pub(super) fn open_derived_index_with_timeout(
     spec: &DerivedIndexOpenSpec,
     txindex_dir: &Path,
     open_timeout: Duration,
-    shutdown: &bitcoin_rs_execution::chain::LatchReader,
+    shutdown: &bitcoin_rs_consensus::latch::LatchReader,
     should_stop: impl Fn() -> bool,
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
     if shutdown.is_triggered() || should_stop() {
@@ -458,7 +471,37 @@ pub fn open_derived_index_store_on_worker<S>(
 where
     S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
 {
-    let writer = open_writer(&store, epoch)?;
+    open_derived_index_store_in(store, batch_limits, epoch, None)
+}
+
+pub fn open_derived_index_store_with_scratch<S>(
+    store: Arc<S>,
+    batch_limits: PreparedBatchLimits,
+    epoch: u64,
+    seal_scratch: std::path::PathBuf,
+) -> Result<OpenDerivedIndex, DerivedIndexWorkerError>
+where
+    S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
+{
+    open_derived_index_store_in(store, batch_limits, epoch, Some(seal_scratch))
+}
+
+fn open_derived_index_store_in<S>(
+    store: Arc<S>,
+    batch_limits: PreparedBatchLimits,
+    epoch: u64,
+    seal_scratch: Option<std::path::PathBuf>,
+) -> Result<OpenDerivedIndex, DerivedIndexWorkerError>
+where
+    S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
+{
+    let mut writer = open_writer(&store, epoch)?;
+    if let Some(scratch) = seal_scratch {
+        writer = writer.with_seal_scratch(scratch);
+    }
+    writer
+        .restore_tail_bounds()
+        .map_err(DerivedIndexWorkerError::Index)?;
     let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(writer));
     let reader: Arc<dyn crate::IndexReader> = Arc::new(crate::Indexer::new(store));
     Ok(OpenDerivedIndex {
@@ -526,7 +569,7 @@ impl Drop for Heartbeat {
 pub(super) fn wait_for_open_result(
     receiver: &crossbeam_channel::Receiver<Result<OpenDerivedIndex, DerivedIndexWorkerError>>,
     timeout: Duration,
-    shutdown: &bitcoin_rs_execution::chain::LatchReader,
+    shutdown: &bitcoin_rs_consensus::latch::LatchReader,
     should_stop: impl Fn() -> bool,
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
     if shutdown.is_triggered() || should_stop() {

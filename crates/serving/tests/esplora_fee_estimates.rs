@@ -58,10 +58,14 @@ fn admit_batch(ctx: &Context, fee_sats: u64, entry_height: u32) -> Vec<Tx> {
     txs
 }
 
-fn connect_block(ctx: &Context, confirmed: &[&Tx], confirmed_txids: &[Txid], height: u32) {
+fn connect_block(ctx: &Context, confirmed: &[&Tx], height: u32) {
     let pool = ctx.mempool.gateway.pool();
     let mut guard = pool.write();
-    let _ = guard.remove_for_block(confirmed, confirmed_txids, height, u64::from(height) * 600);
+    let _ = guard.remove_for_block(
+        &bitcoin_rs_mempool::TransitionFacts::from_txs(confirmed),
+        height,
+        u64::from(height) * 600,
+    );
 }
 
 fn fee_estimates(ctx: &Arc<Context>) -> BTreeMap<String, f64> {
@@ -93,11 +97,10 @@ fn rpc_estimates(ctx: &Arc<Context>) -> BTreeMap<String, f64> {
 fn confirmed_history(fee: u64, delay: u32) -> Arc<Context> {
     let ctx = Arc::new(Context::new());
     admit_batch(&ctx, fee / 2, ENTRY_HEIGHT);
-    connect_block(&ctx, &[], &[], ENTRY_HEIGHT + delay);
+    connect_block(&ctx, &[], ENTRY_HEIGHT + delay);
     let txs = admit_batch(&ctx, fee, ENTRY_HEIGHT + delay);
-    let txids: Vec<_> = txs.iter().map(Tx::txid).collect();
     let refs: Vec<_> = txs.iter().collect();
-    connect_block(&ctx, &refs, &txids, ENTRY_HEIGHT + 2 * delay);
+    connect_block(&ctx, &refs, ENTRY_HEIGHT + 2 * delay);
     ctx
 }
 

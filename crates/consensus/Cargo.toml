@@ -29,6 +29,7 @@ usdt = ["dep:usdt", "dep:tracing"]
 [dependencies]
 bytemuck.workspace = true
 bytes.workspace = true
+crossbeam-channel.workspace = true
 ruint.workspace = true
 serde.workspace = true
 sha3.workspace = true

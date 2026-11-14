@@ -68,7 +68,7 @@ fn chain_ctx_with_counter(times: &[u32], chain_tx_count: Option<u64>) -> Arc<Con
         .store(Some(Arc::new(bitcoin_rs_execution::chain::TipSnapshot {
             tip_id,
             height,
-            chainwork: bitcoin_rs_execution::chain::ChainWork::ZERO,
+            chainwork: bitcoin_rs_consensus::header_rules::ChainWork::ZERO,
             hash: hash.into(),
             chain_tx_count: chain_tx_count.map_or(
                 bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,

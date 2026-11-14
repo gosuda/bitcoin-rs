@@ -2,7 +2,7 @@
 
 use crate::support::error::TestError;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
-use bitcoin_hashes::{Hash as _, hash160};
+use bitcoin_hashes::hash160;
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, OutPoint, Script, Tx, TxIn, TxOut, Txid, Witness,
 };

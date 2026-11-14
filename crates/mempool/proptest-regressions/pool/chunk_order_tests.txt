@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e7fbc587ef9f5fb346c77edf7975a570082bbba9647775dbad1405356589582e # shrinks to actions = [(0, None, 0, 1, 0)], overlay_picks = [], block_picks = [(2, 0), (0, 0)]

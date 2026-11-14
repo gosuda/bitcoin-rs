@@ -14,15 +14,17 @@ pub enum IndexError {
     InvalidHeaderLength { len: usize },
     #[error("transaction byte range is not addressable at block offset {offset}")]
     UnaddressablePosition { offset: u64 },
-    #[error("compact filter or parent filter commitment is unavailable or corrupt")]
-    InvalidCompactFilter,
     #[error("invalid TxIndex watermark encoding")]
     InvalidWatermark,
     #[error("invalid TxIndex prefix row length {len}")]
     InvalidPrefixRowLength { len: usize },
     #[error("invalid ScriptLive row value length {len}")]
     InvalidLiveRowValue { len: usize },
-    #[error("unsupported TxIndex format version {version}")]
+    #[error(transparent)]
+    LiveValue(#[from] crate::types::ScriptLiveValueError),
+    #[error(
+        "unsupported TxIndex format version {version}; run bitcoin-rs-storage-convert rebuild-index to rebuild"
+    )]
     UnsupportedTxIndexFormatVersion { version: u32 },
     #[error(
         "block body identity mismatch at height {height}: expected {expected:?}, found {actual:?}"
@@ -53,7 +55,21 @@ pub enum IndexError {
     },
     #[error("ScriptLive is already seeded; reset the capability first")]
     LiveAlreadySeeded,
-    #[error("TxIndex tables are present without a versioned watermark")]
+    #[error("ScriptHistory already holds rows; attach needs an empty family")]
+    ScriptHistoryPopulated,
+    #[error("CompactFilters already holds rows; attach needs an empty family")]
+    CompactFiltersPopulated,
+    #[error("CompactFilters attach wrote {actual} rows, the artifact has {expected}")]
+    CompactFiltersIncomplete { expected: u64, actual: u64 },
+    #[error("a ScriptLive snapshot seed session is already active")]
+    SeedAlreadyActive,
+    #[error("ScriptLive snapshot seed staging stalled; the store writer is not draining")]
+    SeedBacklogStalled,
+    #[error("ScriptLive snapshot seed channel closed before publication")]
+    SeedChannelClosed,
+    #[error(
+        "TxIndex tables are present without a versioned watermark; run bitcoin-rs-storage-convert rebuild-index to rebuild"
+    )]
     LegacyCursorlessIndex,
     #[error("invalid TxIndex capability reset marker")]
     InvalidResetMarker,
@@ -69,6 +85,19 @@ pub enum IndexError {
     StateRevisionOverflow,
     #[error("TxIndex state changed; discard derived state and re-derive")]
     StaleIndexState,
+    #[error("segment fault injected at {stage} stage")]
+    InjectedFault { stage: &'static str },
+    #[error("segment seal marker is corrupt")]
+    InvalidSealMarker,
+    #[error("tail undo log at height {height} is corrupt")]
+    CorruptTailLog { height: u32 },
+    #[error("sealing a tail segment needs a scratch directory under the node datadir")]
+    SealScratchUnset,
+    #[error(
+        "consumer cursor of {len} bytes exceeds the reserved width of {} bytes",
+        crate::reconcile::CURSOR_BYTE_LEN
+    )]
+    CursorLength { len: usize },
     #[error("operation cancelled")]
     Cancelled,
 }

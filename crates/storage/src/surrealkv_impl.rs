@@ -1156,6 +1156,13 @@ const fn cf_to_u8(cf: ColumnFamily) -> u8 {
         ColumnFamily::ScriptLive => 10,
         ColumnFamily::Coins => 11,
         ColumnFamily::PoolLedger => 12,
+        ColumnFamily::IdxMeta => 13,
+        ColumnFamily::TxDir => 14,
+        ColumnFamily::ScriptDict => 15,
+        ColumnFamily::ScriptPost => 16,
+        ColumnFamily::SpendDir => 17,
+        ColumnFamily::ScriptStats => 18,
+        ColumnFamily::Filters => 19,
     }
 }
 

@@ -297,15 +297,6 @@ impl Client {
         self.inbuf.extend_from_slice(bytes);
         let mut out = Vec::new();
         loop {
-            let want = self.decoder.writable_len();
-            if self.inbuf.len() < want {
-                break;
-            }
-            if want > 0 {
-                let window = self.decoder.writable();
-                window.copy_from_slice(&self.inbuf[..want]);
-                self.inbuf.drain(..want);
-            }
             let state = self
                 .dec
                 .take()
@@ -324,7 +315,19 @@ impl Client {
                         payload: frame.payload().to_vec(),
                     });
                 }
-                Decrypted::Incomplete(_, state) => self.dec = Some(state),
+                Decrypted::Incomplete(state) => {
+                    self.dec = Some(state);
+                    let want = self.decoder.read_len();
+                    if self.inbuf.len() < want {
+                        break;
+                    }
+                    let window = self.decoder.read_buf();
+                    window.copy_from_slice(&self.inbuf[..want]);
+                    self.inbuf.drain(..want);
+                    self.decoder
+                        .advance(want)
+                        .unwrap_or_else(|error| panic!("feed window respected: {error:?}"));
+                }
             }
         }
         out
@@ -352,13 +355,18 @@ fn handshake(
     let mut decoder = NoiseDecoder::new();
     let mut offset = 0;
     let act2 = loop {
-        let window = decoder.writable();
-        let len = window.len();
-        window.copy_from_slice(&reply[offset..offset + len]);
-        offset += len;
         match decoder.next_handshake_frame::<InitiatorSent>()? {
             Decoded::Frame(frame) => break frame,
-            Decoded::Incomplete(_) => {}
+            Decoded::Incomplete => {
+                let window = decoder.read_buf();
+                let end = offset + window.len();
+                window.copy_from_slice(&reply[offset..end]);
+                let len = window.len();
+                offset = end;
+                decoder
+                    .advance(len)
+                    .unwrap_or_else(|error| panic!("feed window respected: {error:?}"));
+            }
         }
     };
     let act2: [u8; INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE] = act2
@@ -597,7 +605,7 @@ fn read_open_extended(frames: &mut Vec<Received>) -> Opened {
 struct StdJob {
     channel_id: u32,
     job_id: u32,
-    min_ntime: Option<u32>,
+    ntime_start: Option<u32>,
     version: u32,
     merkle_root: [u8; 32],
 }
@@ -611,14 +619,14 @@ fn read_std_job(frames: &mut Vec<Received>) -> StdJob {
         job_id: msg.job_id,
         version: msg.version,
         merkle_root: *msg.merkle_root.as_array(),
-        min_ntime: msg.min_ntime.into_inner(),
+        ntime_start: msg.ntime_start.into_inner(),
     }
 }
 
 struct ExtJob {
     channel_id: u32,
     job_id: u32,
-    min_ntime: Option<u32>,
+    ntime_start: Option<u32>,
     version: u32,
     rolling_allowed: bool,
     path: Vec<[u8; 32]>,
@@ -643,7 +651,7 @@ fn read_ext_job(frames: &mut Vec<Received>) -> ExtJob {
             .collect(),
         prefix: msg.coinbase_tx_prefix.as_bytes().to_vec(),
         suffix: msg.coinbase_tx_suffix.as_bytes().to_vec(),
-        min_ntime: msg.min_ntime.into_inner(),
+        ntime_start: msg.ntime_start.into_inner(),
     }
 }
 
@@ -651,7 +659,7 @@ struct PrevHash {
     channel_id: u32,
     job_id: u32,
     prev: [u8; 32],
-    min_ntime: u32,
+    ntime_start: u32,
     nbits: u32,
 }
 
@@ -663,7 +671,7 @@ fn read_prev_hash(frames: &mut Vec<Received>) -> PrevHash {
         channel_id: msg.channel_id,
         job_id: msg.job_id,
         prev: *msg.prev_hash.as_array(),
-        min_ntime: msg.min_ntime,
+        ntime_start: msg.ntime_start,
         nbits: msg.nbits,
     }
 }
@@ -1119,7 +1127,7 @@ fn standard_channel_gets_a_future_job_then_the_prev_hash_that_activates_it() {
     );
     assert_eq!(job.channel_id, opened.channel_id);
     assert_eq!(job.job_id, owned.id().get());
-    assert_eq!(job.min_ntime, None, "future job: ntime_start unset");
+    assert_eq!(job.ntime_start, None, "future job: ntime_start unset");
     assert_eq!(job.version, owned.version());
     let (session, rolled) = opened.prefix.split_at(4);
     let root = owned
@@ -1131,7 +1139,7 @@ fn standard_channel_gets_a_future_job_then_the_prev_hash_that_activates_it() {
     assert_eq!(prev.job_id, owned.id().get());
     assert_eq!(prev.prev, *owned.previous_block_hash().as_bytes());
     assert_eq!(prev.nbits, 0x207f_ffff);
-    assert_eq!(prev.min_ntime, owned.ntime());
+    assert_eq!(prev.ntime_start, owned.ntime());
 
     let events = wire.events();
     assert!(events.iter().any(|event| matches!(
@@ -1156,7 +1164,7 @@ fn extended_channel_job_rebuilds_the_owners_merkle_root_from_the_wire_fields() {
     let job = read_ext_job(&mut frames);
     let prev = read_prev_hash(&mut frames);
     assert_eq!(job.channel_id, opened.channel_id);
-    assert_eq!(job.min_ntime, None);
+    assert_eq!(job.ntime_start, None);
     assert_eq!(job.version, installed.job.version());
     assert!(job.rolling_allowed, "the owner has a version mask");
     assert_eq!(job.path.len(), 2, "coinbase plus two transactions");
@@ -1606,7 +1614,7 @@ fn clean_jobs_send_a_future_job_and_a_prev_hash_but_a_refresh_does_not() {
     let job = read_std_job(&mut frames);
     assert_eq!(job.job_id, refreshed.job.id().get());
     assert_eq!(
-        job.min_ntime,
+        job.ntime_start,
         Some(refreshed.job.ntime()),
         "active: ntime_start set"
     );
@@ -1971,7 +1979,7 @@ fn update_channel_reflects_a_smaller_max_target_in_a_set_target() {
         UpdateChannel {
             channel_id: s.opened.channel_id,
             nominal_hash_rate: 2.0e12,
-            maximum_target: U256::from(&smaller),
+            max_target: U256::from(&smaller),
         },
     );
     let mut frames = frames;
@@ -1980,7 +1988,7 @@ fn update_channel_reflects_a_smaller_max_target_in_a_set_target() {
     assert!(frame.channel_msg);
     let target: SetTarget = parse(&mut frame);
     assert_eq!(target.channel_id, s.opened.channel_id);
-    assert_eq!(*target.maximum_target.as_array(), smaller);
+    assert_eq!(*target.target.as_array(), smaller);
 
     let frames = s.wire.exchange(
         MESSAGE_TYPE_UPDATE_CHANNEL,
@@ -1988,7 +1996,7 @@ fn update_channel_reflects_a_smaller_max_target_in_a_set_target() {
         UpdateChannel {
             channel_id: s.opened.channel_id,
             nominal_hash_rate: 2.0e12,
-            maximum_target: U256::from(&ALL_ONES),
+            max_target: U256::from(&ALL_ONES),
         },
     );
     assert!(frames.is_empty());
@@ -1999,7 +2007,7 @@ fn update_channel_reflects_a_smaller_max_target_in_a_set_target() {
         UpdateChannel {
             channel_id: 31_337,
             nominal_hash_rate: 1.0,
-            maximum_target: U256::from(&ALL_ONES),
+            max_target: U256::from(&ALL_ONES),
         },
     );
     let mut frame = take_type(&mut frames, MESSAGE_TYPE_UPDATE_CHANNEL_ERROR);
@@ -2037,7 +2045,7 @@ fn a_host_retarget_is_sent_and_never_exceeds_the_miners_max_target() {
     assert!(frame.channel_msg);
     let msg: SetTarget = parse(&mut frame);
     assert_eq!(msg.channel_id, opened.channel_id);
-    assert_eq!(*msg.maximum_target.as_array(), harder);
+    assert_eq!(*msg.target.as_array(), harder);
     let info = wire
         .conn
         .session()
@@ -2105,7 +2113,7 @@ fn a_connection_without_standard_jobs_gets_one_group_addressed_job() {
     assert_eq!(job.channel_id, group);
     assert_eq!(prev.channel_id, group);
     assert_eq!(job.job_id, prev.job_id);
-    assert_eq!(job.min_ntime, None);
+    assert_eq!(job.ntime_start, None);
 
     let owned = wire.job(job.job_id);
     let nonce = share_nonce(&owned, &standard.prefix, owned.version());
@@ -2147,7 +2155,7 @@ fn a_connection_without_standard_jobs_gets_one_group_addressed_job() {
     assert_eq!(types(&frames), vec![MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB]);
     let job = read_ext_job(&mut frames);
     assert_eq!(job.channel_id, group);
-    assert_eq!(job.min_ntime, Some(refreshed.job.ntime()));
+    assert_eq!(job.ntime_start, Some(refreshed.job.ntime()));
 }
 
 #[test]
@@ -2203,7 +2211,7 @@ fn custom_jobs_are_answered_with_the_official_code_not_pretended() {
             token: B0255::new(&[1, 2, 3]).unwrap_or_else(|error| panic!("short: {error:?}")),
             version: 0x2000_0000,
             prev_hash: U256::from(&ALL_ONES),
-            min_ntime: 1,
+            ntime_start: 1,
             nbits: 0x207f_ffff,
             coinbase_tx_version: 2,
             coinbase_prefix: B0255::new(&[0x03, 0x64, 0x00, 0x00])
@@ -2659,11 +2667,11 @@ fn active_refresh_upgrades_a_channel_that_missed_its_parent_to_future() {
     assert!(received.is_empty());
     let active = jobs
         .iter()
-        .find(|job| job.min_ntime.is_some())
+        .find(|job| job.ntime_start.is_some())
         .unwrap_or_else(|| panic!("one channel gets Active"));
     let future = jobs
         .iter()
-        .find(|job| job.min_ntime.is_none())
+        .find(|job| job.ntime_start.is_none())
         .unwrap_or_else(|| panic!("stale channel gets Future"));
     assert_eq!(active.job_id, second.job.id().get());
     assert_eq!(future.job_id, second.job.id().get());

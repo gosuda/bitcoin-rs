@@ -18,8 +18,8 @@ use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Header, Txid};
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, UtxoView};
 use bitcoin_rs_storage::ScriptAttestation;
 use bitcoin_rs_storage::utxo::contract::{
-    BlockChangeError, BlockChangeInputs, BlockChanges, BlockValueTotals, UndoBatch, UndoRecord,
-    build_block_changes,
+    BlockChangeError, BlockChangeInputs, BlockChanges, BlockValueTotals, CoinEntryError, UndoBatch,
+    UndoRecord, build_block_changes, resolve_coin_entries,
 };
 use hashbrown::HashMap;
 use std::sync::Arc;
@@ -228,33 +228,26 @@ impl bitcoin_rs_storage::utxo::contract::OutputSource for ChainstateUtxoSource<'
         &self,
         outpoint: &bitcoin_rs_consensus::primitives::OutPoint,
     ) -> Option<bitcoin_rs_storage::utxo::UtxoCoin> {
-        let key = bitcoin_rs_storage::CoinKey(outpoint.txid.0.to_le_bytes());
-        let bytes = match self.handles.coins.get(&key) {
-            Ok(bytes) => bytes?,
-            Err(source) => {
+        self.get_entries(std::slice::from_ref(outpoint))
+            .pop()
+            .flatten()
+    }
+
+    fn get_entries(
+        &self,
+        outpoints: &[bitcoin_rs_consensus::primitives::OutPoint],
+    ) -> Vec<Option<bitcoin_rs_storage::utxo::UtxoCoin>> {
+        match resolve_coin_entries(&self.handles.coins, outpoints) {
+            Ok(entries) => entries,
+            Err(CoinEntryError::Read(source)) => {
                 self.note_failure(ApplyError::CoinStoreRead(source));
-                return None;
+                vec![None; outpoints.len()]
             }
-        };
-        let record = match bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(
-            bytes.to_vec().into_boxed_slice(),
-        ) {
-            Ok(record) => record,
-            Err(error) => {
+            Err(CoinEntryError::Record(error)) => {
                 self.note_failure(ApplyError::UtxoCommit(error));
-                return None;
+                vec![None; outpoints.len()]
             }
-        };
-        let out = record.find_output(outpoint.vout)?;
-        Some(bitcoin_rs_storage::utxo::UtxoCoin {
-            outpoint: *outpoint,
-            txout: bitcoin_rs_consensus::primitives::TxOut {
-                value: bitcoin_rs_consensus::primitives::Amount::from_sat(out.value),
-                script_pubkey: out.script_pubkey.to_vec().into(),
-            },
-            coinbase: out.coinbase,
-            height: out.height,
-        })
+        }
     }
 }
 
@@ -271,7 +264,12 @@ fn prepare_block<'b>(
         Some(ProvenApply::Proven(proof)) => Ok((proof.prepared, false)),
         None => {
             let source = ChainstateUtxoSource::new(handles);
-            let prepared = prepare_apply(payload, &source, handles.validation_engine)?;
+            let prepared = prepare_apply(
+                payload,
+                &source,
+                handles.validation_engine,
+                handles.prevout_charge.clone(),
+            )?;
             source.into_result()?;
             Ok((prepared, false))
         }
@@ -367,7 +365,10 @@ struct ScriptVerification<'a, 'b> {
 }
 
 impl ScriptVerification<'_, '_> {
-    fn run(&mut self, timings: &mut ApplyTimings) -> core::result::Result<ScriptsRan, ApplyError> {
+    fn run(
+        &mut self,
+        timings: &mut ApplyTimings,
+    ) -> core::result::Result<(ScriptsRan, Option<super::PrevoutHold>), ApplyError> {
         let script_verify_started = quanta::Instant::now();
         let script_cache = if self.intent == ApplyIntent::Commit {
             self.handles.script_cache.as_deref()
@@ -375,7 +376,7 @@ impl ScriptVerification<'_, '_> {
             None
         };
         let script_verify_result = if self.transactions_proven {
-            Ok(ScriptsRan::Executed)
+            Ok((ScriptsRan::Executed, None))
         } else {
             verify_block_transactions(
                 self.handles,
@@ -681,6 +682,7 @@ fn finish_block_outcome(
         txids: input.txids,
         block_bytes: persisted.block_bytes,
         raw_txs,
+        committed_facts: None,
     };
     (
         outcome,
@@ -691,12 +693,10 @@ fn finish_block_outcome(
 
 struct Publication<'a, 'p, 'b> {
     handles: &'a Chainstate,
-    #[expect(dead_code)]
     image: &'b BlockImage,
 
     outcome: ConnectOutcome,
     publication: PublishMode<'p>,
-    #[expect(dead_code)]
     undo: UndoBatch,
     changes: BlockChanges<bitcoin_rs_consensus::primitives::TxOut>,
     undo_record: UndoRecord,
@@ -710,17 +710,17 @@ impl Publication<'_, '_, '_> {
     fn run(self) -> core::result::Result<ApplyFinish, ApplyError> {
         let Publication {
             handles,
-            image: _,
+            image,
             mut outcome,
             publication,
-            undo: _,
+            undo,
             changes,
             undo_record,
             attestation,
             prev_hash,
             coin_stats_height_delta: _,
         } = self;
-        let commit_id = match publication {
+        match publication {
             PublishMode::Now => {
                 return Err(ApplyError::DurableHeadCommit(
                     bitcoin_rs_storage::StorageError::InvalidOperation(
@@ -777,9 +777,13 @@ impl Publication<'_, '_, '_> {
                 if certify_head {
                     outcome.tip = receipt.certify(outcome.tip);
                 }
-                commit_id
+                outcome.commit_id = commit_id;
+                outcome.committed_facts =
+                    committed_facts_for_publish(handles, &outcome, image, &undo);
             }
             PublishMode::Grouped(group) => {
+                outcome.committed_facts =
+                    committed_facts_for_publish(handles, &outcome, image, &undo);
                 group.stage(PendingBlockCommit {
                     outcome: outcome.clone(),
                     undo_record,
@@ -791,7 +795,7 @@ impl Publication<'_, '_, '_> {
         };
 
         handles.publish_applied(&outcome.tip, crate::events::HintKind::Connected);
-        outcome.commit_id = commit_id;
+
         Ok(ApplyFinish::Committed(Box::new(outcome)))
     }
 }
@@ -872,6 +876,120 @@ fn replay_coin_delta(
     Ok(delta)
 }
 
+fn committed_facts_for_publish(
+    handles: &Chainstate,
+    outcome: &ConnectOutcome,
+    image: &BlockImage,
+    undo: &UndoBatch,
+) -> Option<Arc<bitcoin_rs_storage::CommittedFacts>> {
+    if !handles.wants_committed_facts() {
+        return None;
+    }
+    #[cfg(any(test, feature = "test-seam"))]
+    handles
+        .facts
+        .builds
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    build_committed_facts(outcome, image, undo)
+}
+
+pub(crate) fn build_committed_facts(
+    outcome: &ConnectOutcome,
+    image: &BlockImage,
+    undo: &UndoBatch,
+) -> Option<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>> {
+    use bitcoin_rs_storage::{
+        CommittedBlock, CommittedFacts, CreatedOutput, SpentPrevout, TxFacts,
+    };
+    use bytes::Bytes;
+    use hashbrown::HashMap;
+
+    let header: [u8; 80] = image.header_bytes();
+    let block_hash = outcome.hash.to_le_bytes();
+    let parent_hash = image.header().prev_blockhash.0.to_le_bytes();
+
+    let mut prevout_map =
+        HashMap::<([u8; 32], u32), (u64, Bytes, u32, bool)>::with_capacity(undo.restores().len());
+    for add in undo.restores() {
+        let txid = *add.outpoint.txid.as_bytes();
+        let vout = add.outpoint.vout;
+        prevout_map.insert(
+            (txid, vout),
+            (
+                add.txout.value.to_sat(),
+                Bytes::copy_from_slice(&add.txout.script_pubkey),
+                add.height,
+                add.coinbase,
+            ),
+        );
+    }
+
+    let tx_count = image.tx_count();
+    let mut txs = Vec::with_capacity(tx_count);
+    for i in 0..tx_count {
+        let tx = image.tx(i);
+        let txid = *tx.txid().as_bytes();
+        let offset = tx.layout().span().start();
+        let len = tx.layout().span().len();
+
+        let mut inputs = Vec::new();
+        if !tx.is_coinbase() {
+            for j in 0..tx.input_count() {
+                let outpoint = tx.input_outpoint(j);
+                let prev_txid = *outpoint.txid.as_bytes();
+                let prev_vout = outpoint.vout;
+                let (value, script, height, coinbase) =
+                    prevout_map.get(&(prev_txid, prev_vout))?.clone();
+                inputs.push(SpentPrevout {
+                    txid: prev_txid,
+                    vout: prev_vout,
+                    value,
+                    script,
+                    height,
+                    coinbase,
+                });
+            }
+        }
+
+        let output_count = tx.output_count();
+        let mut outputs = Vec::with_capacity(output_count);
+        for vout in 0..output_count {
+            let vout_u32 = u32::try_from(vout).ok()?;
+            let script = Bytes::copy_from_slice(tx.output_script(vout));
+            let value = tx.output_value(vout).to_sat();
+            outputs.push(CreatedOutput {
+                vout: vout_u32,
+                value,
+                script: script.clone(),
+            });
+            prevout_map.insert(
+                (txid, vout_u32),
+                (value, script, outcome.height, tx.is_coinbase()),
+            );
+        }
+        txs.push(TxFacts {
+            txid,
+            offset,
+            len,
+            inputs,
+            outputs,
+        });
+    }
+
+    let committed_block = CommittedBlock {
+        height: outcome.height,
+        hash: block_hash,
+        parent_hash,
+        header,
+        txs,
+    };
+
+    Some(std::sync::Arc::new(CommittedFacts {
+        commit_id: outcome.commit_id,
+        blocks: vec![committed_block],
+    }))
+}
+
 struct BlockValidation<'a, 'b, 'c> {
     handles: &'a Chainstate,
     image: &'b BlockImage,
@@ -918,7 +1036,7 @@ impl BlockValidation<'_, '_, '_> {
         }
         .check(&mut view, tx_plan.has_witness, timings)?;
 
-        let scripts_ran = ScriptVerification {
+        let (scripts_ran, _view_hold) = ScriptVerification {
             handles: self.handles,
             view: &mut view,
             tx_plan: &tx_plan,

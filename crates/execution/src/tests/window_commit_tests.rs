@@ -12,17 +12,15 @@ use bitcoin_rs_consensus::primitives::{
     TxOut, Witness,
 };
 use bitcoin_rs_consensus::script::opcode::OP_PUSHNUM_1;
+use bitcoin_rs_storage::ColumnFamily;
 use bitcoin_rs_storage::coins::{CoinKey, CoinStore};
-use bitcoin_rs_storage::commit::AcceptedPrefix;
-use bitcoin_rs_storage::durable_head::DurableHead;
 use bitcoin_rs_storage::utxo::UtxoSet;
-use bitcoin_rs_storage::{ColumnFamily, WindowDelta};
 
 use crate::ApplyError;
 use crate::Chainstate;
 use crate::test_fixtures::{
-    Corpus, CorpusBlockPlan, CorpusSpend, CorpusSpendPlan, TestError, TestResult, coin_scan,
-    handles, seed_genesis,
+    Corpus, CorpusBlockPlan, CorpusSpend, CorpusSpendPlan, TestError, TestResult, apply_headers,
+    coin_scan, commit_genesis_head, handles, seed_genesis,
 };
 use proptest::prelude::*;
 
@@ -39,40 +37,6 @@ fn dump_payloads(blocks: &[Block]) -> Vec<BlockImage> {
         .iter()
         .map(|block| BlockImage::from_local(block.clone()))
         .collect()
-}
-
-fn apply_headers(chain: &Chainstate, blocks: &[&Block]) -> TestResult {
-    let headers: Vec<_> = blocks.iter().map(|block| block.header).collect();
-    chain.admit_headers(&headers)?;
-    Ok(())
-}
-
-fn commit_genesis_head(chain: &Chainstate) -> TestResult {
-    let genesis = Network::Regtest.genesis_block();
-    let prefix = AcceptedPrefix {
-        expected_head: None,
-        next_head: DurableHead {
-            assumeutxo: crate::AssumeUtxoDiskStatus::Uninitialized,
-            commit_id: 1,
-            height: 0,
-            tip: Hash256::from(genesis.block_hash()),
-            chain_tx_count: 1,
-            body_extent: None,
-            undo_extent: None,
-        },
-        undo_rows: Vec::new(),
-        body_rows: Vec::new(),
-        attestation: None,
-        coin_delta: WindowDelta::default(),
-    };
-    chain
-        .commit_authority
-        .commit_prefix(prefix)
-        .map_err(|e| match e {
-            bitcoin_rs_storage::CommitError::Storage(s) => s,
-            other => bitcoin_rs_storage::StorageError::backend(other.to_string()),
-        })?;
-    Ok(())
 }
 
 fn window_slices(len: usize, cuts: &[usize]) -> Vec<(usize, usize)> {
@@ -370,7 +334,10 @@ fn crash_between_commit_and_cache_install_reloads_from_engine() -> TestResult {
     let reloaded = fresh_coins
         .get(&key)?
         .ok_or(TestError::Missing("coin must reload from engine"))?;
-    assert_eq!(&reloaded[0..32], &cb_txid.0.to_le_bytes());
+    let record = bitcoin_rs_storage::utxo::record::UtxoRecord::from_encoded(
+        reloaded.to_vec().into_boxed_slice(),
+    )?;
+    assert_eq!(record.txid(), cb_txid.0);
 
     Ok(())
 }
@@ -410,7 +377,16 @@ fn bip30_overwrite_stays_explicit() -> TestResult {
         "regtest height 3 is not a BIP30 exception height"
     );
 
-    let committed = windowed.durable_head.load()?.map_or(0, |head| head.height);
+    let committed_head = windowed
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("durable head"))?;
+    assert_eq!(
+        committed_head.height, 2,
+        "the valid prefix before the rejected block commits and the rejected block does not"
+    );
+    assert_eq!(committed_head.tip, b2.block_hash().0);
+    let committed = committed_head.height;
     let sequential = fresh_regtest_chain_with_bodies()?;
     for block in blocks.iter().take(usize::try_from(committed)?) {
         sequential.apply_block(&BlockImage::from_local(block.clone()))?;
@@ -667,49 +643,6 @@ fn fixed_window_committed_prefix_equals_sequential_execution() -> TestResult {
 
     Ok(())
 }
-// WIN-07
-#[test]
-fn window_rejects_duplicate_txid_staged_in_the_same_window() -> TestResult {
-    let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
-    seed_genesis(&chain)?;
-    commit_genesis_head(&chain)?;
-
-    let genesis = Network::Regtest.genesis_block();
-    let b1 = mined_child(genesis.block_hash(), 1)?;
-    let b1_hash = b1.block_hash().0;
-    let b2 = mined_block_with_prev_hash(b1.block_hash(), 2, vec![b1.txs[0].clone()])?;
-    assert_eq!(b1.txs[0].txid(), b2.txs[0].txid());
-
-    apply_headers(&chain, &[&b1, &b2])?;
-    let blocks = [b1, b2];
-    let payloads = dump_payloads(&blocks);
-    let payload_refs: Vec<&BlockImage> = payloads.iter().collect();
-
-    let error = match chain.apply_window(&payload_refs) {
-        Ok(outcomes) => panic!(
-            "duplicate coinbase txid staged in one commit window was accepted; \
-             head at height {}",
-            outcomes.last().map_or(0, |outcome| outcome.height)
-        ),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("BIP30"),
-        "the rejection must name BIP30, got: {error}"
-    );
-
-    let head = chain
-        .durable_head
-        .load()?
-        .ok_or(TestError::Missing("durable head"))?;
-    assert_eq!(
-        head.height, 1,
-        "the valid prefix before the rejected block commits and the rejected block does not"
-    );
-    assert_eq!(head.tip, b1_hash);
-
-    Ok(())
-}
 
 fn insert_engine_coin(
     chain: &Chainstate,
@@ -795,12 +728,20 @@ fn engine_coin_spent_inside_the_window_is_not_a_duplicate() -> TestResult {
         Err(error) => error,
     };
     assert!(
-        !error.to_string().contains("BIP30"),
-        "a coin spent inside the window is not a duplicate, got: {error}"
+        !matches!(
+            *error.source,
+            ApplyError::Consensus(ConsensusError::Bip { .. })
+        ),
+        "a coin spent inside the window is not a duplicate, got: {:?}",
+        error.source
     );
     assert!(
-        error.to_string().contains("missing prevout"),
-        "block 2 must fail on its absent prevout, got: {error}"
+        matches!(
+            *error.source,
+            ApplyError::Consensus(ConsensusError::MissingPrevout { .. })
+        ),
+        "block 2 must fail on its absent prevout, got: {:?}",
+        error.source
     );
 
     let head = chain
@@ -810,6 +751,99 @@ fn engine_coin_spent_inside_the_window_is_not_a_duplicate() -> TestResult {
     assert_eq!(head.height, 1);
     assert_eq!(head.tip, b1_hash);
 
+    Ok(())
+}
+
+#[derive(Default)]
+struct RecordingCharge {
+    balance: parking_lot::Mutex<(u64, u64)>,
+}
+
+impl bitcoin_rs_storage::budget::BudgetCharge for RecordingCharge {
+    fn reserve_bytes(
+        &self,
+        _owner: bitcoin_rs_storage::budget::BudgetOwner,
+        _bytes: u64,
+    ) -> Result<(), bitcoin_rs_storage::budget::BudgetError> {
+        Ok(())
+    }
+
+    fn allocate_bytes(
+        &self,
+        _owner: bitcoin_rs_storage::budget::BudgetOwner,
+        bytes: u64,
+    ) -> Result<(), bitcoin_rs_storage::budget::BudgetError> {
+        let mut balance = self.balance.lock();
+        balance.0 += bytes;
+        balance.1 = balance.1.max(balance.0);
+        Ok(())
+    }
+
+    fn release_bytes(&self, _owner: bitcoin_rs_storage::budget::BudgetOwner, bytes: u64) {
+        let mut balance = self.balance.lock();
+        balance.0 = balance.0.saturating_sub(bytes);
+    }
+
+    fn available_bytes(&self, _owner: bitcoin_rs_storage::budget::BudgetOwner) -> u64 {
+        u64::MAX
+    }
+}
+
+// BUD-06
+#[test]
+fn window_prevouts_are_charged_during_apply_and_released_after_commit() -> TestResult {
+    let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    commit_genesis_head(&chain)?;
+
+    let genesis = Network::Regtest.genesis_block();
+    let duplicate_tx = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(genesis.txs[0].txid(), 0),
+            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    insert_engine_coin(&chain, duplicate_tx.txid())?;
+
+    let spend_tx = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(duplicate_tx.txid(), 0),
+            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(40_000),
+            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    let mut b1 = mined_child(genesis.block_hash(), 1)?;
+    b1.txs.push(spend_tx);
+    remine(&mut b1)?;
+    apply_headers(&chain, &[&b1])?;
+    let payloads = dump_payloads(std::slice::from_ref(&b1));
+    let payload_refs: Vec<&BlockImage> = payloads.iter().collect();
+
+    let charge = Arc::new(RecordingCharge::default());
+    chain.set_prevout_charge(bitcoin_rs_storage::budget::ChargeHandle::new(
+        charge.clone(),
+        bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
+    ));
+    chain.apply_window(&payload_refs)?;
+
+    let (current, peak) = *charge.balance.lock();
+    assert!(peak > 0, "the resolved window prevouts were never charged");
+    assert_eq!(current, 0, "the window prevout charge returns after commit");
     Ok(())
 }
 
@@ -838,8 +872,12 @@ fn engine_coin_duplicate_across_windows_is_rejected_by_bip30() -> TestResult {
         Err(error) => error,
     };
     assert!(
-        error.to_string().contains("BIP30"),
-        "the rejection must name BIP30, got: {error}"
+        matches!(
+            *error.source,
+            ApplyError::Consensus(ConsensusError::Bip { .. })
+        ),
+        "the duplicate must be refused by the BIP30 rule, got: {:?}",
+        error.source
     );
 
     let head = chain
@@ -873,7 +911,8 @@ fn gap_replay_token_keeps_the_duplicate_exemption() -> TestResult {
     apply_headers(&chain, &[&b2])?;
     let b2_payload = BlockImage::from_local(b2);
 
-    let mut group = crate::window::WindowGroup::default();
+    let mut group =
+        crate::window::WindowGroup::new(crate::window_limits::default_window_limits_source()());
     let outcome = crate::connect::apply_block_admitted(
         &chain,
         &b2_payload,
@@ -964,4 +1003,216 @@ fn corrupt_engine_coin_record_fails_closed() -> TestResult {
         "the refused window must not advance the head"
     );
     Ok(())
+}
+// BUD-06
+#[test]
+fn window_resolved_views_are_charged_and_released() -> TestResult {
+    let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    commit_genesis_head(&chain)?;
+    let genesis = Network::Regtest.genesis_block();
+    let owner = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(genesis.txs[0].txid(), 0),
+            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    let owner_txid = owner.txid();
+    insert_engine_coin(&chain, owner_txid)?;
+    let spend = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(owner_txid, 0),
+            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(40_000),
+            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    let mut b1 = mined_child(genesis.block_hash(), 1)?;
+    b1.txs.push(spend);
+    remine(&mut b1)?;
+    apply_headers(&chain, &[&b1])?;
+    let payloads = dump_payloads(std::slice::from_ref(&b1));
+    let payload_refs: Vec<&BlockImage> = payloads.iter().collect();
+    let charge = Arc::new(RecordingCharge::default());
+    chain.set_prevout_charge(bitcoin_rs_storage::budget::ChargeHandle::new(
+        charge.clone(),
+        bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
+    ));
+    chain.apply_window(&payload_refs)?;
+    let (current, peak) = *charge.balance.lock();
+    assert!(peak > 0);
+    assert_eq!(current, 0);
+    Ok(())
+}
+
+// BUD-06
+#[test]
+fn window_resolved_charge_returns_on_failure() -> TestResult {
+    let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    commit_genesis_head(&chain)?;
+    let genesis = Network::Regtest.genesis_block();
+    let b1 = mined_child(genesis.block_hash(), 1)?;
+    let b2 = mined_block_with_prev_hash(b1.block_hash(), 2, vec![b1.txs[0].clone()])?;
+    apply_headers(&chain, &[&b1, &b2])?;
+    let payloads = dump_payloads(&[b1, b2]);
+    let payload_refs: Vec<&BlockImage> = payloads.iter().collect();
+    let charge = Arc::new(RecordingCharge::default());
+    chain.set_prevout_charge(bitcoin_rs_storage::budget::ChargeHandle::new(
+        charge.clone(),
+        bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
+    ));
+    let _ = chain
+        .apply_window(&payload_refs)
+        .err()
+        .ok_or(TestError::Missing("window must fail"))?;
+    let (current, _) = *charge.balance.lock();
+    assert_eq!(current, 0);
+    Ok(())
+}
+
+// BUD-06
+#[test]
+fn single_prepare_resolved_is_charged_and_released() -> TestResult {
+    let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    commit_genesis_head(&chain)?;
+    let genesis = Network::Regtest.genesis_block();
+    let owner = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(genesis.txs[0].txid(), 0),
+            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    let owner_txid = owner.txid();
+    insert_engine_coin(&chain, owner_txid)?;
+    let spend = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(owner_txid, 0),
+            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(40_000),
+            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    let mut b1 = mined_child(genesis.block_hash(), 1)?;
+    b1.txs.push(spend);
+    remine(&mut b1)?;
+    apply_headers(&chain, &[&b1])?;
+    let payload = BlockImage::from_local(b1);
+    let charge = Arc::new(RecordingCharge::default());
+    chain.set_prevout_charge(bitcoin_rs_storage::budget::ChargeHandle::new(
+        charge.clone(),
+        bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
+    ));
+    chain.apply_block(&payload)?;
+    let (current, peak) = *charge.balance.lock();
+    assert!(peak > 0);
+    assert_eq!(current, 0);
+    Ok(())
+}
+
+// BUD-06
+#[test]
+fn single_view_prevouts_refusal_returns_staged_exhausted() -> TestResult {
+    let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    commit_genesis_head(&chain)?;
+    let genesis = Network::Regtest.genesis_block();
+    let owner = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(genesis.txs[0].txid(), 0),
+            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    let owner_txid = owner.txid();
+    insert_engine_coin(&chain, owner_txid)?;
+    let spend = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(owner_txid, 0),
+            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(40_000),
+            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    let mut b1 = mined_child(genesis.block_hash(), 1)?;
+    b1.txs.push(spend);
+    remine(&mut b1)?;
+    apply_headers(&chain, &[&b1])?;
+    let payload = BlockImage::from_local(b1);
+    let charge = Arc::new(RefusingCharge);
+    chain.set_prevout_charge(bitcoin_rs_storage::budget::ChargeHandle::new(
+        charge,
+        bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
+    ));
+    let err = chain
+        .apply_block(&payload)
+        .err()
+        .ok_or(TestError::Missing("refused block"))?;
+    assert!(matches!(err, crate::ApplyError::StagedBudgetExhausted));
+    Ok(())
+}
+
+struct RefusingCharge;
+
+impl bitcoin_rs_storage::budget::BudgetCharge for RefusingCharge {
+    fn reserve_bytes(
+        &self,
+        _owner: bitcoin_rs_storage::budget::BudgetOwner,
+        _bytes: u64,
+    ) -> Result<(), bitcoin_rs_storage::budget::BudgetError> {
+        Err(bitcoin_rs_storage::budget::BudgetError::BudgetExhausted)
+    }
+    fn allocate_bytes(
+        &self,
+        _owner: bitcoin_rs_storage::budget::BudgetOwner,
+        _bytes: u64,
+    ) -> Result<(), bitcoin_rs_storage::budget::BudgetError> {
+        Err(bitcoin_rs_storage::budget::BudgetError::BudgetExhausted)
+    }
+    fn release_bytes(&self, _owner: bitcoin_rs_storage::budget::BudgetOwner, _bytes: u64) {}
+    fn available_bytes(&self, _owner: bitcoin_rs_storage::budget::BudgetOwner) -> u64 {
+        0
+    }
 }

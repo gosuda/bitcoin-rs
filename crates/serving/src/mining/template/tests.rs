@@ -148,7 +148,9 @@ fn projected_staged_parent_locks_evaluate_at_the_staged_height() -> TestResult {
         header: Header::default(),
         txs: vec![parent],
     };
-    let plan = pool.plan_block_removals(&block);
+    let plan = pool.plan_block_removals(&bitcoin_rs_mempool::TransitionFacts::from_block(
+        &bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone()),
+    ));
     assert_eq!(plan.removals.len(), 1, "only the parent stages");
 
     let base = context(true, GENEROUS);

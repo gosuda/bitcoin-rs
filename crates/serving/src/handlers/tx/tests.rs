@@ -1,9 +1,10 @@
 use alloc::sync::Arc;
 
+use bitcoin_rs_consensus::latch::LatchReader;
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
 };
-use bitcoin_rs_execution::chain::{LatchReader, NodeId, NodeStatus, TipSnapshot};
+use bitcoin_rs_execution::chain::{NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, arm_admission_park, reset_admission_park};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
@@ -12,7 +13,7 @@ use std::thread;
 
 use super::{getrawtransaction, gettxout};
 use crate::Handler;
-use crate::context::{Context, DerivedIndexQuery, TxQueryError};
+use crate::context::{Context, DerivedIndexQuery, TransactionBlock, TxQueryError};
 use crate::error::RpcError;
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_projection::block_log::BlockRecord;
@@ -185,7 +186,7 @@ fn sendrawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
 #[test]
 fn decoderawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
     let ctx = Arc::new(Context::new());
-    let latch = bitcoin_rs_execution::chain::LatchWriter::new().reader();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new().reader();
     let odd = super::decoderawtransaction(&ctx, &json!(["abc"]), &latch)
         .expect_err("odd length hex must fail");
     assert_eq!(odd.code(), RpcError::CORE_DESERIALIZATION_ERROR);
@@ -312,7 +313,7 @@ fn testmempoolaccept_survives_one_oversize_row_with_package_too_large() {
 #[test]
 fn decoderawtransaction_decodes_oversize_hex_like_core() {
     let ctx = Arc::new(Context::new());
-    let latch = bitcoin_rs_execution::chain::LatchWriter::new().reader();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new().reader();
     let raw = consensus_bytes(&many_output_tx(117_700)).to_lower_hex_string();
     let value = super::decoderawtransaction(&ctx, &json!([raw]), &latch)
         .unwrap_or_else(|err| panic!("Core decodes any hex that fits the request: {err}"));
@@ -357,6 +358,10 @@ fn getrawtransaction_checks_mempool_before_failing_txindex()
             Ok(crate::context::DerivedIndexInfo {
                 synced: false,
                 best_block_height: 0,
+                applied_height: 0,
+                historical_height: 0,
+                verified_height: 0,
+                coverage_height: 0,
             })
         }
     }
@@ -660,6 +665,7 @@ fn getrawtransaction_uses_applied_ancestry_for_explicit_block_metadata() {
 fn getrawtransaction_resolves_confirmed_transaction_from_txindex_without_cache() {
     struct StaticQuery {
         tx: Tx,
+        block: TransactionBlock,
     }
 
     impl DerivedIndexQuery for StaticQuery {
@@ -671,14 +677,21 @@ fn getrawtransaction_resolves_confirmed_transaction_from_txindex_without_cache()
             Ok(None)
         }
 
-        fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
-            Ok((self.tx.txid() == *txid).then_some(0))
+        fn transaction_block(
+            &self,
+            txid: &Txid,
+        ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
+            Ok((self.tx.txid() == *txid).then(|| (self.tx.clone(), self.block)))
         }
 
         fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
             Ok(crate::context::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 1,
+                applied_height: 1,
+                historical_height: 1,
+                verified_height: 1,
+                coverage_height: 1,
             })
         }
     }
@@ -693,6 +706,10 @@ fn getrawtransaction_resolves_confirmed_transaction_from_txindex_without_cache()
     let mut ctx = Context::new();
     ctx.indexes.derived_index = Some(Arc::new(StaticQuery {
         tx: coinbase.clone(),
+        block: TransactionBlock {
+            height: 0,
+            hash: genesis.block_hash().into(),
+        },
     }));
     ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
     let tip = {
@@ -803,7 +820,7 @@ fn gettxoutproof_finds_genesis_coinbase_through_the_index() {
     };
     let txid = coinbase.txid();
     let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(&genesis, 0))));
     install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
     let ctx = Arc::new(ctx);
     let handler = Handler::new(Arc::clone(&ctx));
@@ -1070,7 +1087,7 @@ struct HeightQuery<F>(F);
 
 impl<F> DerivedIndexQuery for HeightQuery<F>
 where
-    F: Fn(&Txid) -> Result<Option<u32>, TxQueryError> + Send + Sync,
+    F: Fn(&Txid) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> + Send + Sync,
 {
     fn transaction(&self, _txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
         Ok(None)
@@ -1084,20 +1101,35 @@ where
         Ok(crate::context::DerivedIndexInfo {
             synced: true,
             best_block_height: 0,
+            applied_height: 0,
+            historical_height: 0,
+            verified_height: 0,
+            coverage_height: 0,
         })
     }
 
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
         (self.0)(txid)
     }
 }
 
-fn resolving(resolvable: Vec<(Txid, u32)>) -> impl Fn(&Txid) -> Result<Option<u32>, TxQueryError> {
+fn resolving(
+    block: &Block,
+    height: u32,
+) -> impl Fn(&Txid) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> + use<> {
+    let transactions = block.txs.clone();
+    let identity = TransactionBlock {
+        height,
+        hash: block.block_hash().into(),
+    };
     move |txid| {
-        Ok(resolvable
+        Ok(transactions
             .iter()
-            .find(|(known, _)| known == txid)
-            .map(|(_, height)| *height))
+            .find(|tx| tx.txid() == *txid)
+            .map(|tx| (tx.clone(), identity)))
     }
 }
 
@@ -1202,7 +1234,7 @@ fn gettxoutproof_index_path_does_not_read_unrelated_block_bodies() {
     };
     let indexed = BlockRecord::from_block(2, &block);
     let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(2)))));
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(&block, 2))));
     ctx.chain.block_body_source = Some(Arc::new(PanicUnlessBodySource {
         height: indexed.height,
         hash: indexed.hash,
@@ -1237,7 +1269,23 @@ fn gettxoutproof_keeps_its_error_when_no_block_holds_every_txid() {
         .collect::<Vec<_>>();
 
     let mut index_ctx = Context::new();
-    index_ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+    let indexed_blocks = blocks.clone();
+    index_ctx.indexes.derived_index = Some(Arc::new(HeightQuery(move |txid: &Txid| {
+        Ok(indexed_blocks
+            .iter()
+            .zip(0_u32..)
+            .find_map(|(block, height)| {
+                block.txs.iter().find(|tx| tx.txid() == *txid).map(|tx| {
+                    (
+                        tx.clone(),
+                        TransactionBlock {
+                            height,
+                            hash: block.block_hash().into(),
+                        },
+                    )
+                })
+            }))
+    })));
     install_blocks(&mut index_ctx, &blocks);
     let index_ctx = Arc::new(index_ctx);
 
@@ -1259,10 +1307,9 @@ fn gettxoutproof_index_path_answers_for_several_txids_in_one_block() {
     let mut block = block_with_two_txs(11);
     block.header.prev_blockhash = genesis.block_hash();
     let wanted = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
-    let resolvable = wanted.iter().map(|txid| (*txid, 1)).collect::<Vec<_>>();
 
     let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(resolvable))));
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(&block, 1))));
     install_chain_blocks(&mut ctx, &[genesis, block]);
     let ctx = Arc::new(ctx);
 
@@ -1292,10 +1339,11 @@ fn gettxoutproof_asks_the_index_about_the_first_txid_only() {
         panic!("block has no transactions");
     };
 
+    let resolve = resolving(&block, 1);
     let mut ctx = Context::new();
     ctx.indexes.derived_index = Some(Arc::new(HeightQuery(move |txid: &Txid| {
         if *txid == first {
-            Ok(Some(1))
+            resolve(txid)
         } else {
             panic!("the index must not be asked about later txids: {txid}")
         }
@@ -1329,7 +1377,14 @@ fn gettxoutproof_maps_a_transient_index_error_instead_of_reporting_absence() {
     };
     let mut ctx = Context::new();
     ctx.indexes.derived_index = Some(Arc::new(HeightQuery(
-        |_: &Txid| -> Result<Option<u32>, TxQueryError> { Err(TxQueryError::Retry) },
+        |_: &Txid| -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
+            Err(TxQueryError::Retry(
+                bitcoin_rs_projection::RetryReason::TipMoved {
+                    expected_commit: 0,
+                    current_commit: 1,
+                },
+            ))
+        },
     )));
     install_blocks(&mut ctx, std::slice::from_ref(&block));
     let ctx = Arc::new(ctx);
@@ -1356,7 +1411,7 @@ fn gettxoutproof_index_path_reports_the_missing_body() {
         panic!("block has no transactions");
     };
     let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(1)))));
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(&block, 1))));
     ctx.chain.add_block(BlockRecord::synthetic(
         0,
         BlockHash::from(Hash256::from_le_bytes(&[9_u8; 32])),
@@ -1384,7 +1439,7 @@ fn gettxoutproof_answers_core_pruned_message_when_the_node_has_pruned() {
         panic!("block has no transactions");
     };
     let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(1)))));
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(&block, 1))));
     ctx.chain.add_block(BlockRecord::synthetic(
         0,
         BlockHash::from(Hash256::from_le_bytes(&[9_u8; 32])),
@@ -1535,7 +1590,7 @@ fn gettxoutproof_answers_index_corrupt_when_the_index_names_an_absent_block() {
         panic!("block has no transactions");
     };
     let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(3)))));
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(&block, 3))));
     ctx.chain.add_block(BlockRecord::from_block(0, &block));
     let ctx = Arc::new(ctx);
 
@@ -1604,7 +1659,7 @@ fn gettxoutproof_answers_core_read_error_for_an_undecodable_body() {
         panic!("block has no transactions");
     };
     let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(1)))));
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(&block, 1))));
     ctx.chain.add_block(BlockRecord::synthetic(
         0,
         BlockHash::from(Hash256::from_le_bytes(&[9_u8; 32])),
@@ -1643,7 +1698,7 @@ fn gettxoutproof_utxo_path_answers_interrupted_when_cancelled() {
     ));
     ctx.chain.add_block(BlockRecord::from_block(1, &block));
     let ctx = Arc::new(ctx);
-    let latch = bitcoin_rs_execution::chain::LatchWriter::new();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
     latch.trigger();
 
     let cancelled = super::gettxoutproof(&ctx, &json!([[txid.to_string()]]), &latch.reader());
@@ -1669,7 +1724,7 @@ fn gettxoutproof_utxo_path_interrupts_for_a_mixed_txid_list() {
     attach_body_for_block(&mut ctx, &block, 1);
     ctx.chain.add_block(BlockRecord::from_block(1, &block));
     let ctx = Arc::new(ctx);
-    let latch = bitcoin_rs_execution::chain::LatchWriter::new();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
     latch.trigger();
 
     let cancelled = super::gettxoutproof(
@@ -1696,7 +1751,7 @@ fn gettxoutproof_with_blockhash_never_consults_the_index() {
     let block_hash = record.hash;
     let mut ctx = Context::new();
     ctx.indexes.derived_index = Some(Arc::new(HeightQuery(
-        |_: &Txid| -> Result<Option<u32>, TxQueryError> {
+        |_: &Txid| -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
             panic!("the explicit-blockhash path must not consult the index");
         },
     )));
@@ -1863,7 +1918,7 @@ fn verifytxoutproof_refuses_a_header_outside_the_active_chain()
         panic!("genesis has no transactions");
     };
     let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(&genesis, 0))));
     install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
     let ctx = Arc::new(ctx);
 
@@ -1899,7 +1954,7 @@ fn verifytxoutproof_answers_an_empty_list_when_the_transaction_count_differs()
     };
     let proof_hex = {
         let mut ctx = Context::new();
-        ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+        ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(&genesis, 0))));
         install_chain_blocks(&mut ctx, std::slice::from_ref(&genesis));
         let proof = proof_for(&Arc::new(ctx), &[txid])?;
         proof.as_str().expect("proof hex string").to_owned()

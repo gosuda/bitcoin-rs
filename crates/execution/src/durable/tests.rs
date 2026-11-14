@@ -1,7 +1,7 @@
 use crate::chain::current_unix_seconds;
 use crate::chain::regtest_fixture::mined_regtest_child_at as mined_child;
 use bitcoin_rs_consensus::primitives::{
-    Block, BlockHash, BlockImage, Hash256, Network, consensus_bytes,
+    Block, BlockHash, BlockImage, Hash256, Network, OutPoint, consensus_bytes,
 };
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::utxo::UtxoSet;
@@ -412,7 +412,7 @@ fn durable_head_at_or_below_restored_tip_is_not_a_replay_gap() -> TestResult {
 #[test]
 fn wide_authenticated_gap_replays_to_durable_head() -> TestResult {
     let (mut handles, first) = restored_chainstate()?;
-    let width = crate::window::DURABLE_HEAD_GROUP_BLOCKS + 1;
+    let width = crate::window_limits::DURABLE_HEAD_GROUP_BLOCKS + 1;
     let bodies = Arc::new(MemoryBodies::default());
     let mut tip_hash = Hash256::from(first.block_hash());
     bodies.persist_block_body(1, tip_hash, &consensus_bytes(&first))?;
@@ -811,4 +811,67 @@ proptest! {
             );
         }
     }
+}
+// CMT-06
+#[test]
+fn rewind_one_step_removes_creations_from_block_bytes() -> TestResult {
+    let bodies: Arc<MemoryBodies> = Arc::new(MemoryBodies::default());
+    let genesis = Network::Regtest.genesis_block();
+    let genesis_hash = Hash256::from(genesis.block_hash());
+    bodies.persist_block_body(0, genesis_hash, &consensus_bytes(&genesis))?;
+    let genesis_head = DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
+        commit_id: 1,
+        height: 0,
+        tip: genesis_hash,
+        chain_tx_count: 1,
+        body_extent: None,
+        undo_extent: None,
+    };
+    let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    chain
+        .commit_authority
+        .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+            expected_head: None,
+            next_head: genesis_head,
+            undo_rows: Vec::new(),
+            body_rows: Vec::new(),
+            attestation: None,
+            coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+        })
+        .map_err(|_| TestError::Missing("commit prefix"))?;
+    let _ = seed_genesis(&chain)?;
+    let shared_bodies = Arc::clone(&bodies);
+    let body_store: Arc<dyn BlockBodyStore> = shared_bodies;
+    chain.block_body_store = Some(body_store);
+    let child = mined_child(BlockHash(genesis_hash), 1)?;
+    let child_hash = Hash256::from(child.block_hash());
+    let created = OutPoint::new(child.txs[0].txid(), 0);
+    if chain.utxo_reader().get(&created)?.is_some() {
+        return Err(TestError::Missing("creation must be absent before connect"));
+    }
+    bodies.persist_block_body(1, child_hash, &consensus_bytes(&child))?;
+    chain.apply_block(&BlockImage::from_local(child.clone()))?;
+    if chain.utxo_reader().get(&created)?.is_none() {
+        return Err(TestError::Missing("creation must be present after connect"));
+    }
+    let applied = chain
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("applied tip"))?;
+    if applied.height != 1 || applied.hash != child_hash {
+        return Err(TestError::Missing("child must be the applied tip"));
+    }
+    super::rewind_one_step(&chain, &genesis_head, &applied)?;
+    let rewound = chain
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("rewound tip"))?;
+    if rewound.height != 0 || rewound.hash != genesis_hash {
+        return Err(TestError::Missing("rewind must publish the parent tip"));
+    }
+    if chain.utxo_reader().get(&created)?.is_some() {
+        return Err(TestError::Missing(
+            "coin set after rewind must equal the set before connect",
+        ));
+    }
+    Ok(())
 }

@@ -1,6 +1,7 @@
 use super::*;
-use bitcoin_rs_consensus::primitives::{Block, Sequence, TxIn, Txid, Witness};
-use bitcoin_rs_execution::chain::{BlockTree, ChainError, ChainTxCount, LatchReader, NodeStatus};
+use bitcoin_rs_consensus::latch::LatchReader;
+use bitcoin_rs_consensus::primitives::{BlockImage, Sequence, TxIn, Txid, Witness};
+use bitcoin_rs_execution::chain::{BlockTree, ChainError, ChainTxCount, NodeStatus};
 use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
 use bitcoin_rs_serving::mining::{
     MiningChainContext, SelectedBody, select_template_body, select_template_body_after,
@@ -81,13 +82,14 @@ impl MempoolSnapshotSource for Sources {
     }
     fn select_template_after(
         &self,
-        block: &Block,
+        block: &BlockImage,
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError> {
         let pool = self.pool.lock();
         let source_sequences = (pool.sequence_number(), pool.fee_delta_sequence_number());
-        let plan = pool.plan_block_removals(block);
+        let plan =
+            pool.plan_block_removals(&bitcoin_rs_mempool::TransitionFacts::from_block(block));
         let body = select_template_body_after(&pool, &plan, context, payout)
             .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
         let removals = plan
@@ -105,7 +107,7 @@ impl MempoolSnapshotSource for Sources {
         &self,
         selection: &GenerateSelection,
         context: &CandidateContext,
-    ) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    ) -> Result<Arc<MempoolMiningSnapshot>, MiningControlError> {
         snapshot_for_selection(
             self.pool.lock().mining_snapshot(),
             selection,

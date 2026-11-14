@@ -206,9 +206,7 @@ fn fee_estimate_access_reuses_pool_owned_estimator() -> Result<(), TestError> {
     assert_eq!(pool.estimate_fee_rate(2), None);
 
     let first = chained_tx(81, outpoint(80, 0));
-    let first_txid = first.txid();
     let second = chained_tx(82, outpoint(81, 0));
-    let second_txid = second.txid();
     pool.insert_entry(MempoolEntry::new(
         Arc::new(first.clone()),
         100,
@@ -227,7 +225,11 @@ fn fee_estimate_access_reuses_pool_owned_estimator() -> Result<(), TestError> {
     ))?;
     assert_eq!(pool.estimate_fee_rate(2), None);
 
-    pool.remove_for_block(&[&first, &second], &[first_txid, second_txid], 8, 1);
+    pool.remove_for_block(
+        &bitcoin_rs_mempool::TransitionFacts::from_txs(&[&first, &second]),
+        8,
+        1,
+    );
     assert!(pool.estimate_fee_rate(2).is_some());
     Ok(())
 }

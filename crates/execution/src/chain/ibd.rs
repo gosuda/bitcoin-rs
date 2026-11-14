@@ -72,9 +72,10 @@ mod initial_block_download_tests {
     use parking_lot::RwLock;
 
     use super::InitialBlockDownload;
+    use crate::chain::NodeStatus;
     use crate::chain::tree::BlockTree;
     use crate::chain::view::{BlockTreeReader, TipReader};
-    use crate::chain::{BlockHeader, NodeStatus};
+    use bitcoin_rs_consensus::header_rules::BlockHeader;
 
     const DAY: u64 = 24 * 60 * 60;
 

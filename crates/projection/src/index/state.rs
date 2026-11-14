@@ -11,16 +11,23 @@ use tracing::debug;
 
 /// Reserved `UtxoMeta` metadata keys: the `0x00` prefix is reserved for `TxIndex` metadata;
 /// data row keys begin with ASCII letters and can never collide.
-pub(super) const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
+pub(super) const FORMAT_VERSION_KEY: &[u8] = crate::types::INDEX_FORMAT_VERSION_KEY;
 
-/// On-disk format 6: newest-first exact `ScriptHistory` occurrences, 43-byte
-/// `ScriptLive` keys with u24 `vout`, and 6-byte `TxPosition` locators. Any
-/// older marker refuses start (`UnsupportedTxIndexFormatVersion`), so
-/// `open_writer` resets the derived store and rebuilds it from chainstate; no
-/// in-place upgrade or dual-read path exists.
-pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = [0x06, 0x00, 0x00, 0x00];
+/// On-disk format 8: newest-first exact `ScriptHistory` occurrences, 43-byte
+/// `ScriptLive` keys with u24 `vout`, 6-byte `TxPosition` locators, and
+/// self-contained `ScriptLive` rows whose column value carries the full
+/// script hash followed by the compact varint payload
+/// `varint(compress_amount(value)) || varint((height << 1) | coinbase)`
+/// (`PRJ-11`). Version 7 is reserved for the index-generation layout
+/// (PRJ-05..09). Any older marker refuses start
+/// (`UnsupportedTxIndexFormatVersion`), so `open_writer` resets the derived
+/// store and rebuilds it from chainstate; no in-place upgrade or dual-read
+/// path exists. `bitcoin-rs-storage-convert rebuild-index` performs the same
+/// reset offline. On-disk format 9 carries the block hash anchor in every per-block tail log record.
+pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = crate::types::INDEX_FORMAT_VERSION_VALUE;
+pub(super) const LEGACY_FILTER_ROW_PREFIX: &[u8] = &[1, b'F'];
 
-const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
+pub(super) const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 
 /// `[mask, process_epoch(u64 LE), base_version(u64 LE)]` (17 bytes).
 /// `Idle(base_version + 1)`, which makes stale fences un-reusable (no ABA)
@@ -500,8 +507,10 @@ pub(super) fn resume_capability_reset<S: KvStore>(
             work.claim.condition(),
             revision_condition(work.revision, &revision_bytes),
         ];
-        let scan_slices: Vec<(ColumnFamily, &[u8])> =
-            scans.iter().map(|&(cf, p)| (cf, p)).collect();
+        let scan_slices: Vec<(ColumnFamily, &[u8])> = scans
+            .iter()
+            .map(|(cf, prefix)| (*cf, prefix.as_slice()))
+            .collect();
         let claim_changed = purge_family_scans(store, &scan_slices, &conditions)?;
         if claim_changed {
             continue;
@@ -523,6 +532,34 @@ pub(super) fn resume_capability_reset<S: KvStore>(
         }
     }
 }
+const TAIL_BOUND_CAPABILITIES: [IndexCapability; 3] = [
+    IndexCapability::TxLookup,
+    IndexCapability::ScriptHistory,
+    IndexCapability::CompactFilters,
+];
+
+fn clears_shared_tail_logs<S: KvStore>(
+    store: &S,
+    capabilities: IndexCapabilities,
+) -> Result<bool, IndexError> {
+    if !TAIL_BOUND_CAPABILITIES
+        .iter()
+        .any(|capability| capabilities.contains(*capability))
+    {
+        return Ok(false);
+    }
+    for capability in TAIL_BOUND_CAPABILITIES {
+        if !capabilities.contains(capability)
+            && store
+                .get(ColumnFamily::UtxoMeta, capability.watermark_key())?
+                .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn build_reset_batch<S: KvStore>(
     store: &S,
     work: &ResetWork,
@@ -542,6 +579,19 @@ fn build_reset_batch<S: KvStore>(
     let capabilities = IndexCapabilities::from_mask(mask)?;
     for capability in capabilities.iter() {
         batch.delete(ColumnFamily::UtxoMeta, capability.watermark_key());
+        batch.delete(
+            ColumnFamily::IdxMeta,
+            &crate::segment::meta_gen_key(capability),
+        );
+        let (sealed_start, sealed_end) = crate::segment::sealed_gen_range(capability);
+        batch.delete_range(ColumnFamily::IdxMeta, &sealed_start, &sealed_end);
+    }
+    if clears_shared_tail_logs(store, capabilities)? {
+        batch.delete_range(
+            ColumnFamily::IdxMeta,
+            crate::segment::tail::LOG_PREFIX,
+            crate::segment::tail::LOG_END,
+        );
     }
     crate::index::capability::delete_selected_floors(&mut batch, capabilities);
     batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
@@ -551,28 +601,46 @@ fn build_reset_batch<S: KvStore>(
 fn reset_scan_families<S: KvStore>(
     store: &S,
     capabilities: IndexCapabilities,
-) -> Result<Vec<(ColumnFamily, &'static [u8])>, IndexError> {
-    let mut scans: Vec<(ColumnFamily, &'static [u8])> = capabilities
+) -> Result<Vec<(ColumnFamily, Vec<u8>)>, IndexError> {
+    let mut scans: Vec<(ColumnFamily, Vec<u8>)> = capabilities
         .iter()
         .flat_map(IndexCapability::column_families)
-        .map(|&cf| (cf, &[][..]))
+        .map(|&cf| (cf, Vec::new()))
         .collect();
     let unselected_cursor_remains = IndexCapability::ALL.into_iter().try_fold(
         false,
         |remains, capability| -> Result<bool, IndexError> {
-            if remains || capabilities.contains(capability) {
+            if capabilities.contains(capability) {
                 return Ok(remains);
             }
-            Ok(store
+            let published = store
                 .get(ColumnFamily::UtxoMeta, capability.watermark_key())?
-                .is_some())
+                .is_some();
+            if published {
+                scans.retain(|(family, _)| !capability.column_families().contains(family));
+            }
+            Ok(remains || published)
         },
     )?;
     if !unselected_cursor_remains {
-        scans.push((ColumnFamily::BlockHeaders, &[]));
+        scans.push((ColumnFamily::BlockHeaders, Vec::new()));
     }
     if capabilities.contains(IndexCapability::CompactFilters) {
-        scans.push((ColumnFamily::UtxoMeta, super::filters::PREFIX));
+        scans.push((ColumnFamily::UtxoMeta, LEGACY_FILTER_ROW_PREFIX.to_vec()));
+    }
+    for capability in capabilities.iter() {
+        if capability != IndexCapability::ScriptLive {
+            scans.push((
+                ColumnFamily::IdxMeta,
+                crate::segment::meta_gen_key(capability),
+            ));
+        }
+    }
+    if clears_shared_tail_logs(store, capabilities)? {
+        scans.push((
+            ColumnFamily::IdxMeta,
+            crate::segment::tail::LOG_PREFIX.to_vec(),
+        ));
     }
     Ok(scans)
 }

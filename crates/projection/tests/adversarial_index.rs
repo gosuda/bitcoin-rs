@@ -5,7 +5,7 @@ use bitcoin_rs_consensus::primitives::{Hash256, encode};
 use bitcoin_rs_projection::types::{ScriptHash, ScriptHashRow, TxPosition};
 use bitcoin_rs_projection::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter,
-    Indexer, PreparedBatch, PreparedBatchLimits, SpentCoinScripts,
+    Indexer, PreparedBatch, PreparedBatchLimits, SpentCoin, SpentCoins,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit};
 
@@ -33,9 +33,14 @@ struct TestScripts {
     by_txid: HashMap<[u8; 32], Vec<u8>>,
 }
 
-impl SpentCoinScripts for TestScripts {
-    fn script_bytes(&self, txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
-        self.by_txid.get(txid).map(Vec::as_slice)
+impl SpentCoins for TestScripts {
+    fn spent_coin(&self, txid: &[u8; 32], _vout: u32) -> Option<SpentCoin<'_>> {
+        self.by_txid.get(txid).map(|script| SpentCoin {
+            script,
+            value: 0,
+            height: 0,
+            coinbase: false,
+        })
     }
 }
 
@@ -161,7 +166,7 @@ fn commit_test_chain<S: KvStore + 'static>(
 
 #[test]
 fn wrong_format_version_refuses_open() -> Result<(), TestError> {
-    for wrong_version in [0_u32, 1, 5, 7, u32::MAX] {
+    for wrong_version in [0_u32, 1, 5, 6, 7, u32::MAX] {
         let store = Arc::new(MemoryStore::default());
         store.put(
             ColumnFamily::UtxoMeta,
@@ -169,12 +174,22 @@ fn wrong_format_version_refuses_open() -> Result<(), TestError> {
             &wrong_version.to_le_bytes(),
         )?;
         let result = IndexWriter::open(Arc::clone(&store), 1);
+        let Err(err) = result else {
+            return Err(TestError::Message(format!(
+                "version {wrong_version} must refuse open"
+            )));
+        };
         assert!(
             matches!(
-                result,
-                Err(IndexError::UnsupportedTxIndexFormatVersion { version }) if version == wrong_version
+                err,
+                IndexError::UnsupportedTxIndexFormatVersion { version } if version == wrong_version
             ),
             "version {wrong_version} must refuse open with UnsupportedTxIndexFormatVersion"
+        );
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("bitcoin-rs-storage-convert rebuild-index"),
+            "version {wrong_version} error must contain rebuild-index guidance: {err_msg}"
         );
     }
     Ok(())
@@ -185,9 +200,41 @@ fn legacy_cursorless_index_without_version_marker_refuses_open() -> Result<(), T
     let store = Arc::new(MemoryStore::default());
     store.put(ColumnFamily::Funding, &[0xAA; 12], &[0xBB; 71])?;
     let result = IndexWriter::open(Arc::clone(&store), 1);
+    let Err(err) = result else {
+        return Err(TestError::Message(
+            "unversioned store must refuse open".into(),
+        ));
+    };
     assert!(
-        matches!(result, Err(IndexError::LegacyCursorlessIndex)),
+        matches!(err, IndexError::LegacyCursorlessIndex),
         "unversioned store with existing rows must refuse open with LegacyCursorlessIndex"
+    );
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("bitcoin-rs-storage-convert rebuild-index"),
+        "legacy unversioned store error must contain rebuild-index guidance: {err_msg}"
+    );
+    Ok(())
+}
+
+#[test]
+fn marker_in_idx_meta_is_not_accepted_as_format_marker() -> Result<(), TestError> {
+    let store = Arc::new(MemoryStore::default());
+    store.put(ColumnFamily::IdxMeta, &[0x00, b'V'], &7_u32.to_le_bytes())?;
+    let result = IndexWriter::open(Arc::clone(&store), 1);
+    let Err(err) = result else {
+        return Err(TestError::Message(
+            "marker in IdxMeta must refuse open".into(),
+        ));
+    };
+    assert!(
+        matches!(err, IndexError::LegacyCursorlessIndex),
+        "marker in IdxMeta must not be accepted; format marker must reside in UtxoMeta"
+    );
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("bitcoin-rs-storage-convert rebuild-index"),
+        "error must contain rebuild-index guidance: {err_msg}"
     );
     Ok(())
 }

@@ -203,13 +203,21 @@ const _: () = assert!(
     BLOCK_PRODUCTION_RESERVE_BYTES >= crate::wire::HEADER_LEN + crate::wire::MAX_MESSAGE_PAYLOAD
 );
 
-#[derive(Debug)]
+/// `BUD-02`: node-wide owner for peer outbound bytes. The wire crate owns
+/// this trait so the node ledger can back every shared reservation without
+/// the wire crate depending on the node crate.
+pub trait OutboundLedger: Send + Sync {
+    fn try_take(&self, bytes: usize) -> bool;
+    fn give_back(&self, bytes: usize);
+}
+
 pub struct SharedOutboundBudget {
     max_bytes: usize,
     bulk_limit: usize,
     pending_bytes: AtomicUsize,
     drained: Condvar,
     drained_lock: Mutex<()>,
+    ledger: parking_lot::RwLock<Option<Arc<dyn OutboundLedger>>>,
 }
 
 impl SharedOutboundBudget {
@@ -227,15 +235,41 @@ impl SharedOutboundBudget {
             pending_bytes: AtomicUsize::new(0),
             drained: Condvar::new(),
             drained_lock: Mutex::new(()),
+            ledger: parking_lot::RwLock::new(None),
+        }
+    }
+
+    pub fn set_ledger(&self, ledger: Arc<dyn OutboundLedger>) {
+        *self.ledger.write() = Some(ledger);
+    }
+
+    fn ledger_take(&self, bytes: usize) -> bool {
+        self.ledger
+            .read()
+            .as_ref()
+            .is_none_or(|ledger| ledger.try_take(bytes))
+    }
+
+    fn ledger_give_back(&self, bytes: usize) {
+        if let Some(ledger) = self.ledger.read().as_ref() {
+            ledger.give_back(bytes);
         }
     }
 
     fn try_charge(&self, bytes: usize, limit: usize) -> bool {
-        self.pending_bytes
+        if !self.ledger_take(bytes) {
+            return false;
+        }
+        let admitted = self
+            .pending_bytes
             .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
                 pending.checked_add(bytes).filter(|total| *total <= limit)
             })
-            .is_ok()
+            .is_ok();
+        if !admitted {
+            self.ledger_give_back(bytes);
+        }
+        admitted
     }
 
     fn release_counter(&self, bytes: usize) {
@@ -245,8 +279,10 @@ impl SharedOutboundBudget {
                     pending.checked_sub(bytes)
                 });
         debug_assert!(released.is_ok(), "released more shared bytes than charged");
+        if released.is_ok() {
+            self.ledger_give_back(bytes);
+        }
     }
-
     fn wake_waiters(&self) {
         drop(self.drained_lock.lock());
         self.drained.notify_all();
@@ -279,8 +315,28 @@ impl SharedOutboundBudget {
     pub const fn max_bytes(&self) -> usize {
         self.max_bytes
     }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn test_try_charge(&self, bytes: usize) -> bool {
+        self.try_charge(bytes, self.max_bytes)
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn test_release(&self, bytes: usize) {
+        self.release_counter(bytes);
+    }
 }
 
+impl std::fmt::Debug for SharedOutboundBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedOutboundBudget")
+            .field("max_bytes", &self.max_bytes)
+            .field("bulk_limit", &self.bulk_limit)
+            .field("pending_bytes", &self.pending_bytes.load(Ordering::Acquire))
+            .field("ledgered", &self.ledger.read().is_some())
+            .finish_non_exhaustive()
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     Local,

@@ -146,7 +146,7 @@ fn addnode_returns_error_when_outbound_queue_is_full() {
             outbound_queue_limit: 1,
             ..bitcoin_rs_wire::P2pServiceConfig::default()
         },
-        bitcoin_rs_wire::LatchReader::fixture_never(),
+        bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
     ));
     p2p.add_node_onetry(SocketAddr::from(([127, 0, 0, 1], 8333)).into())
         .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
@@ -166,7 +166,7 @@ fn addnode_add_persists_when_outbound_queue_is_full() {
             outbound_queue_limit: 1,
             ..bitcoin_rs_wire::P2pServiceConfig::default()
         },
-        bitcoin_rs_wire::LatchReader::fixture_never(),
+        bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
     ));
     p2p.add_node_onetry(SocketAddr::from(([127, 0, 0, 1], 8333)).into())
         .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));

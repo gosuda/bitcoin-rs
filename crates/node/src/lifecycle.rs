@@ -2,7 +2,7 @@ use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin_rs_execution::chain::LatchReader;
+use bitcoin_rs_consensus::latch::LatchReader;
 use bitcoin_rs_execution::verify::{
     CheckLevel, VerifyError, VerifyOutcome, VerifyRequest, verify_recent_blocks,
 };
@@ -360,7 +360,7 @@ pub(crate) struct NodeServices {
     event_loop: Option<std::thread::JoinHandle<()>>,
     shutdown_forwarder: Option<(
         std::thread::JoinHandle<()>,
-        Arc<bitcoin_rs_execution::chain::LatchWriter>,
+        Arc<bitcoin_rs_consensus::latch::LatchWriter>,
     )>,
     metrics: Option<crate::metrics::MetricsServer>,
     rpc_threads: Vec<std::thread::JoinHandle<std::io::Result<()>>>,
@@ -812,6 +812,7 @@ pub(crate) fn start_node(
         ibd: Some((node_ibd, state.config().network)),
         block_sync: Some(block_sync_obs),
         block_announcer: Some(block_announcer_obs),
+        block_memory: Some(state.block_memory()),
     };
     let (relay_queue, relay_rx) =
         crate::p2p::TxRelayQueue::new(crate::p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY);
@@ -947,11 +948,15 @@ fn final_payout_script(config: &NodeConfig) -> Vec<u8> {
 }
 const GLOBAL_RAYON_THREADS: usize = 4;
 
-fn cap_global_thread_pool() {
+pub(crate) fn worker_shares() -> u32 {
     let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    let threads = available.min(GLOBAL_RAYON_THREADS);
+    u32::try_from(available.min(GLOBAL_RAYON_THREADS)).unwrap_or(1)
+}
+
+fn cap_global_thread_pool() {
+    let threads = worker_shares().max(1);
     if let Err(error) = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
+        .num_threads(usize::try_from(threads).unwrap_or(GLOBAL_RAYON_THREADS))
         .build_global()
     {
         tracing::debug!(%error, "global rayon pool already configured, keeping it");

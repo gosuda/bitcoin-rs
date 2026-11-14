@@ -19,10 +19,12 @@ fn test_open_spec(dir: &std::path::Path, epoch: u64) -> DerivedIndexOpenSpec {
         enabled: IndexCapabilities::default(),
         rollback_rebuild_cutover: 0,
         canonical_data_root: dir.to_path_buf(),
-        utxo: None,
-        chain_transition: None,
         bundle: crate::portable::IndexBundleDirective::None,
-        seed_slot: None,
+        facts_rx: None,
+        facts_charge: None,
+        query_charge: None,
+        facts_gap: None,
+        cpu: None,
         open_store: Arc::new(move |dir| {
             let store = Arc::new(
                 bitcoin_rs_storage::RocksDbStore::open_with_cache(dir, 8 * 1024 * 1024)
@@ -38,22 +40,22 @@ struct WorkerInputs {
     spec: DerivedIndexOpenSpec,
     lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>>,
     generation: Generation,
-    applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
+    applied_tip: Arc<arc_swap::ArcSwapOption<bitcoin_rs_execution::chain::TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-    shutdown: bitcoin_rs_execution::chain::LatchWriter,
+    shutdown: bitcoin_rs_consensus::latch::LatchWriter,
     wake_rx: Receiver<()>,
     chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
 }
 
 fn build_worker_inputs(dir: &std::path::Path, epoch: u64) -> WorkerInputs {
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+    let runtime = DerivedIndexRuntime::new(wake_tx);
     let spec = test_open_spec(dir, epoch);
     let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
     let generation = Generation::new(epoch);
     let applied_tip = Arc::new(arc_swap::ArcSwapOption::empty());
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
-    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let chain_events = Arc::new(TestChainCursor);
 
     WorkerInputs {
@@ -101,6 +103,7 @@ fn blocked_open_abandonment_detaches_and_poisons() {
         Arc::clone(&inputs.lifecycle),
         inputs.generation.clone(),
         bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+        None,
         bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
         None,
         bitcoin_rs_storage::pruning::HistoryAccess::new(
@@ -200,6 +203,7 @@ fn shutdown_during_open_joins_helper_releases_lock_and_leaves_namespace_reusable
         Arc::clone(&inputs.lifecycle),
         inputs.generation.clone(),
         bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+        None,
         bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
         None,
         bitcoin_rs_storage::pruning::HistoryAccess::new(
@@ -298,6 +302,7 @@ fn stalled_open_at_shutdown_deadline_yields_poison_and_safely_cleans_up() {
         Arc::clone(&inputs.lifecycle),
         inputs.generation.clone(),
         bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+        None,
         bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
         None,
         bitcoin_rs_storage::pruning::HistoryAccess::new(
@@ -365,7 +370,7 @@ fn stalled_open_at_shutdown_deadline_yields_poison_and_safely_cleans_up() {
 #[test]
 fn open_timeout_publishes_error_not_infinite_spin() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let mut spec = test_open_spec(dir.path(), 1);
     spec.open_store = Arc::new(move |_dir| {
         std::thread::sleep(Duration::from_secs(10));
@@ -389,13 +394,14 @@ fn open_timeout_publishes_error_not_infinite_spin() {
 fn caught_up_idle_worker_wakes_on_shutdown_latch_and_joins_promptly() {
     let dir = tempfile::tempdir().expect("tempdir");
     let inputs = build_worker_inputs(dir.path(), 45);
-    let shutdown_writer = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown_writer = bitcoin_rs_consensus::latch::LatchWriter::new();
     let mut worker = DerivedIndexWorker::spawn_with_open(
         Arc::clone(&inputs.runtime),
         inputs.spec,
         Arc::clone(&inputs.lifecycle),
         inputs.generation.clone(),
         bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+        None,
         bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
         None,
         bitcoin_rs_storage::pruning::HistoryAccess::new(
@@ -441,7 +447,7 @@ fn caught_up_idle_worker_wakes_on_shutdown_latch_and_joins_promptly() {
 fn revision_quiet_cancellation_wakes_and_joins_promptly() {
     let dir = tempfile::tempdir().expect("tempdir");
     let inputs = build_worker_inputs(dir.path(), 46);
-    let shutdown_writer = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown_writer = bitcoin_rs_consensus::latch::LatchWriter::new();
     let store = Arc::new(
         bitcoin_rs_storage::RocksDbStore::open_with_cache(dir.path(), 8 * 1024 * 1024)
             .expect("store"),
@@ -469,8 +475,12 @@ fn revision_quiet_cancellation_wakes_and_joins_promptly() {
         quiet_period: Duration::from_secs(30),
         batch_delay: Duration::ZERO,
         rollback_rebuild_cutover: 0,
-        seed_slot: None,
-        seed_bundle: parking_lot::Mutex::new(None),
+        seed_history_lease: parking_lot::Mutex::new(None),
+        facts_rx: None,
+        facts_charge: None,
+        facts_gap: None,
+        cpu: None,
+        buffered_facts: parking_lot::Mutex::new(hashbrown::HashMap::new()),
     };
 
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
@@ -493,7 +503,7 @@ fn revision_quiet_cancellation_wakes_and_joins_promptly() {
 fn batch_deadline_cancellation_wakes_and_joins_promptly() {
     let dir = tempfile::tempdir().expect("tempdir");
     let inputs = build_worker_inputs(dir.path(), 47);
-    let shutdown_writer = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown_writer = bitcoin_rs_consensus::latch::LatchWriter::new();
     let store = Arc::new(
         bitcoin_rs_storage::RocksDbStore::open_with_cache(dir.path(), 8 * 1024 * 1024)
             .expect("store"),
@@ -521,8 +531,12 @@ fn batch_deadline_cancellation_wakes_and_joins_promptly() {
         quiet_period: Duration::from_secs(30),
         batch_delay: Duration::ZERO,
         rollback_rebuild_cutover: 0,
-        seed_slot: None,
-        seed_bundle: parking_lot::Mutex::new(None),
+        seed_history_lease: parking_lot::Mutex::new(None),
+        facts_rx: None,
+        facts_charge: None,
+        facts_gap: None,
+        cpu: None,
+        buffered_facts: parking_lot::Mutex::new(hashbrown::HashMap::new()),
     };
 
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);

@@ -20,11 +20,15 @@ use bitcoin::{
     pow::CompactTarget,
     script::Builder,
 };
+use bitcoin_rs_consensus::latch::LatchWriter;
 use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Network, Txid};
 use bitcoin_rs_execution::chain::{
-    BlockTree, BlockTreeReader, ChainTxCount, LatchWriter, NodeStatus, TipReader, TipSnapshot,
+    BlockTree, BlockTreeReader, ChainTxCount, NodeStatus, TipReader, TipSnapshot,
 };
-use bitcoin_rs_projection::portable::{IndexBundleDirective, IndexBundleRequest};
+use bitcoin_rs_projection::portable::{
+    IndexBundleDirective, IndexBundleRequest, ManifestArtifactTarget, SpillBudget,
+    attach_tx_lookup_artifact,
+};
 use bitcoin_rs_projection::reconcile::{ChainCursorSource, ConsumerCursor};
 use bitcoin_rs_projection::runtime::{
     DEFAULT_BATCH_LIMITS, DerivedIndexLifecycle, DerivedIndexOpenSpec, DerivedIndexQueryAdapter,
@@ -33,6 +37,7 @@ use bitcoin_rs_projection::runtime::{
 };
 use bitcoin_rs_projection::{
     DerivedIndexQuery, IndexCapabilities, IndexCapability, IndexReader, IndexWatermark, Indexer,
+    index_format_version,
 };
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
@@ -58,6 +63,7 @@ struct ChainFixture {
     bodies: Arc<BodyMap>,
     tip: Arc<TipSnapshot>,
     txids: Vec<(Txid, u32)>,
+    block_hashes: Vec<Hash256>,
 }
 
 impl ChainFixture {
@@ -65,6 +71,7 @@ impl ChainFixture {
         let mut tree = BlockTree::new();
         let mut bodies = BodyMap::new();
         let mut txids = Vec::new();
+        let mut block_hashes = Vec::new();
         let mut prev = [0_u8; 32];
         let mut tip_id = None;
         for height in 0..=blocks {
@@ -86,6 +93,7 @@ impl ChainFixture {
             .expect("fixture node exists");
             txids.extend(parsed.txids().into_iter().map(|txid| (txid, height)));
             let hash = block.block_hash().to_byte_array();
+            block_hashes.push(Hash256::from_le_bytes(&hash));
             bodies.insert((height, hash), bytes);
             prev = hash;
             tip_id = Some(id);
@@ -106,6 +114,7 @@ impl ChainFixture {
             bodies: Arc::new(bodies),
             tip,
             txids,
+            block_hashes,
         }
     }
 
@@ -133,6 +142,16 @@ impl ChainFixture {
             })
             .collect::<HashSet<_>>()
             .len()
+    }
+
+    fn txs_through(&self, height: u32) -> u64 {
+        u64::try_from(
+            self.txids
+                .iter()
+                .filter(|(_, tx_height)| *tx_height <= height)
+                .count(),
+        )
+        .expect("tx count fits u64")
     }
 
     fn tip_watermark(&self) -> IndexWatermark {
@@ -475,7 +494,12 @@ impl KvStore for CrashAfterBulkImport {
         rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
         scratch: &std::path::Path,
     ) -> Result<u64, StorageError> {
-        self.inner.ingest_sorted(cf, rows, scratch)
+        if self.crashed.load(Ordering::Acquire) {
+            return Err(StorageError::backend("injected post-bulk crash"));
+        }
+        let count = self.inner.ingest_sorted(cf, rows, scratch)?;
+        self.crashed.store(true, Ordering::Release);
+        Ok(count)
     }
 
     fn delete_range(&self, cf: ColumnFamily, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
@@ -537,7 +561,7 @@ impl Node {
     fn start(fixture: &ChainFixture, data_dir: &Path, start: Start) -> Self {
         let epoch = NEXT_EPOCH.fetch_add(1, Ordering::Relaxed);
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+        let runtime = DerivedIndexRuntime::new(wake_tx);
         let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
         let adapter = DerivedIndexQueryAdapter::new(Arc::clone(&lifecycle));
         let probe = Arc::new(Probe::default());
@@ -565,10 +589,12 @@ impl Node {
                     open_derived_index_store_on_worker(Arc::new(inner), DEFAULT_BATCH_LIMITS, epoch)
                 }
             }),
-            utxo: None,
-            chain_transition: None,
             bundle: start.bundle,
-            seed_slot: None,
+            facts_rx: None,
+            facts_charge: None,
+            query_charge: None,
+            facts_gap: None,
+            cpu: None,
         };
         let body_store: Arc<dyn BlockBodyStore> = Arc::new(StoreBodies {
             bodies: Arc::clone(&fixture.bodies),
@@ -597,6 +623,7 @@ impl Node {
             Arc::clone(&lifecycle),
             Generation::new(epoch),
             TipReader::new(Arc::new(ArcSwapOption::new(Some(Arc::clone(&fixture.tip))))),
+            None,
             BlockTreeReader::new(Arc::clone(&fixture.tree)),
             Some(body_store),
             HistoryAccess::new(
@@ -682,12 +709,34 @@ fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     }
 }
 
+type LogicalTxRow = ([u8; 32], u32, [u8; 32], u32, u32);
+
 #[derive(Debug, PartialEq, Eq)]
 struct Durable {
-    tx_confirmed: Vec<KvPair>,
+    tx_confirmed: Vec<LogicalTxRow>,
     headers: Vec<KvPair>,
     watermark: Option<IndexWatermark>,
     floor: Option<u32>,
+}
+
+fn tx_lookup_rows(store: &RocksDbStore) -> Vec<LogicalTxRow> {
+    use bitcoin_rs_projection::segment::format::{decode_tx_dir_key, decode_tx_dir_value};
+    let mut rows: Vec<LogicalTxRow> = store
+        .iter_prefix(ColumnFamily::TxDir, &[])
+        .expect("iterate tx directory")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read tx directory")
+        .into_iter()
+        .filter(|(key, _)| decode_tx_dir_key(key).is_some())
+        .map(|(key, value)| {
+            let (_gen, txid, height) = decode_tx_dir_key(&key).expect("tx directory key");
+            let (block_hash, _ordinal, offset, len) =
+                decode_tx_dir_value(&value).expect("tx directory value");
+            (txid, height, block_hash, offset, len)
+        })
+        .collect();
+    rows.sort_unstable();
+    rows
 }
 
 fn durable(data_dir: &Path) -> Durable {
@@ -702,7 +751,7 @@ fn durable(data_dir: &Path) -> Durable {
             .collect::<Result<Vec<_>, _>>()
             .expect("read column family")
     };
-    let tx_confirmed = rows(ColumnFamily::TxConfirmed);
+    let tx_confirmed = tx_lookup_rows(&store);
     let headers = rows(ColumnFamily::BlockHeaders);
     let indexer = Indexer::new(Arc::clone(&store));
     let snapshot = indexer.snapshot().expect("index snapshot");
@@ -826,9 +875,20 @@ fn export_then_restore_serves_the_same_queries_as_backfill() {
     source_node.wait_synced(fixture.tip.height);
     restored.wait_synced(fixture.tip.height);
     for (txid, height) in &fixture.txids {
-        let expected = source_node.adapter.transaction_height(txid);
-        assert_eq!(expected, Ok(Some(*height)));
-        assert_eq!(restored.adapter.transaction_height(txid), expected);
+        let expected = source_node.adapter.transaction_block(txid);
+        let expected_identity = bitcoin_rs_projection::TransactionBlock {
+            height: *height,
+            hash: fixture.block_hashes
+                [usize::try_from(*height).expect("fixture height fits usize")],
+        };
+        let (source_tx, source_identity) = expected
+            .as_ref()
+            .expect("source lookup")
+            .as_ref()
+            .expect("source transaction");
+        assert_eq!(source_tx.txid(), *txid);
+        assert_eq!(*source_identity, expected_identity);
+        assert_eq!(restored.adapter.transaction_block(txid), expected);
         let served = restored.adapter.transaction(txid);
         assert!(matches!(&served, Ok(Some(tx)) if tx.txid() == *txid));
         assert_eq!(served, source_node.adapter.transaction(txid));
@@ -924,7 +984,20 @@ fn restore_below_a_restarted_receivers_tip_then_reconciles_forward() {
     );
     node.wait_synced(receiver_chain.tip.height);
     for (txid, height) in &receiver_chain.txids {
-        assert_eq!(node.adapter.transaction_height(txid), Ok(Some(*height)));
+        let (tx, identity) = node
+            .adapter
+            .transaction_block(txid)
+            .expect("receiver lookup")
+            .expect("receiver transaction");
+        assert_eq!(tx.txid(), *txid);
+        assert_eq!(
+            identity,
+            bitcoin_rs_projection::TransactionBlock {
+                height: *height,
+                hash: receiver_chain.block_hashes
+                    [usize::try_from(*height).expect("fixture height fits usize")],
+            }
+        );
     }
     node.stop();
     assert_eq!(durable(&receiver), truth_state);
@@ -1024,6 +1097,222 @@ fn flip_byte(path: &Path, offset: u64) {
     let index = usize::try_from(offset).expect("offset fits usize");
     bytes[index] ^= 0x01;
     fs::write(path, bytes).expect("rewrite artifact");
+}
+
+fn digest_of(path: &Path) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(fs::read(path).expect("read artifact")).into()
+}
+
+fn chain_headers(fixture: &ChainFixture, base_height: u32, base_hash: [u8; 32]) -> Vec<[u8; 80]> {
+    let tree = fixture.tree.read();
+    let tip = tree
+        .lookup(Hash256::from_le_bytes(&base_hash))
+        .expect("base header");
+    (0..=base_height)
+        .map(|height| {
+            let id = tree
+                .node_at_height_from(tip, height)
+                .expect("header on the active chain");
+            let node = tree.node(id).expect("header node");
+            let mut bytes = [0_u8; 80];
+            bytes.copy_from_slice(
+                &bitcoin_rs_consensus::primitives::consensus_bytes(&node.header)[..80],
+            );
+            bytes
+        })
+        .collect()
+}
+
+fn manifest_target(
+    artifact: &Path,
+    base: IndexWatermark,
+    sha256: [u8; 32],
+    size_bytes: u64,
+    chain_tx_count: u64,
+) -> ManifestArtifactTarget {
+    ManifestArtifactTarget {
+        artifact_path: artifact.to_path_buf(),
+        base_height: base.height,
+        base_hash: base.hash,
+        floor: 0,
+        network: Network::Regtest,
+        index_format: index_format_version(),
+        sha256,
+        size_bytes,
+        chain_tx_count,
+    }
+}
+
+fn open_receiver(root: &Path, name: &str) -> bitcoin_rs_projection::runtime::OpenDerivedIndex {
+    let store = Arc::new(
+        RocksDbStore::open_with_cache(root.join(name).join("txindex"), STORE_CACHE_BYTES)
+            .expect("receiver store"),
+    );
+    open_derived_index_store_on_worker(
+        store,
+        DEFAULT_BATCH_LIMITS,
+        NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
+    )
+    .expect("open receiver index")
+}
+
+// SNP-03, SNP-04, SNP-05
+#[test]
+fn manifest_artifact_attach_verifies_digest_header_and_base_before_ingest() {
+    let fixture = ChainFixture::new(5, 30);
+    let root = tempfile::tempdir().expect("tempdir");
+    let (source, bundle) = (root.path().join("source"), root.path().join("bundle"));
+    backfilled_source(&fixture, &source);
+    exported_bundle(&fixture, &source, &bundle);
+    let base = fixture.tip_watermark();
+    let exported = bundle.join(ARTIFACT);
+    let size = fs::metadata(&exported)
+        .expect("exported artifact metadata")
+        .len();
+    let headers = chain_headers(&fixture, base.height, base.hash);
+    let header_refs: Vec<&[u8; 80]> = headers.iter().collect();
+
+    let attach = root.path().join("attach");
+    fs::create_dir_all(&attach).expect("attach dir");
+    fs::copy(&exported, attach.join(ARTIFACT)).expect("stage manifest artifact");
+    let good = open_receiver(root.path(), "receiver-good");
+    let records = attach_tx_lookup_artifact(
+        good.writer(),
+        &manifest_target(
+            &attach.join(ARTIFACT),
+            base,
+            digest_of(&attach.join(ARTIFACT)),
+            size,
+            fixture.txs_through(base.height),
+        ),
+        &header_refs,
+        &attach,
+        &SpillBudget::new(u64::MAX),
+    )
+    .expect("a verified manifest artifact attaches");
+    assert!(records > 0, "the attached artifact produced no rows");
+    let (_, watermarks) = good
+        .writer()
+        .fenced_watermarks()
+        .expect("receiver watermarks");
+    assert_eq!(watermarks.tx_lookup, Some(base));
+
+    let poisoned = root.path().join("attach-poisoned");
+    fs::create_dir_all(&poisoned).expect("attach dir");
+    fs::copy(&exported, poisoned.join(ARTIFACT)).expect("stage manifest artifact");
+    let mut forged = digest_of(&poisoned.join(ARTIFACT));
+    forged[0] ^= 0x01;
+    let receiver = open_receiver(root.path(), "receiver-bad");
+    let error = attach_tx_lookup_artifact(
+        receiver.writer(),
+        &manifest_target(
+            &poisoned.join(ARTIFACT),
+            base,
+            forged,
+            size,
+            fixture.txs_through(base.height),
+        ),
+        &header_refs,
+        &poisoned,
+        &SpillBudget::new(u64::MAX),
+    )
+    .expect_err("a manifest artifact with a forged digest must be refused");
+    assert!(
+        matches!(
+            error,
+            bitcoin_rs_projection::portable::IndexBundleError::ArtifactHash { .. }
+        ),
+        "got {error:?}"
+    );
+
+    let wrong_base = IndexWatermark {
+        height: base.height - 1,
+        hash: base.hash,
+    };
+    let error = attach_tx_lookup_artifact(
+        receiver.writer(),
+        &manifest_target(
+            &poisoned.join(ARTIFACT),
+            wrong_base,
+            digest_of(&poisoned.join(ARTIFACT)),
+            size,
+            fixture.txs_through(wrong_base.height),
+        ),
+        &header_refs,
+        &poisoned,
+        &SpillBudget::new(u64::MAX),
+    )
+    .expect_err("a manifest artifact from another base must be refused");
+    assert!(
+        matches!(
+            error,
+            bitcoin_rs_projection::portable::IndexBundleError::ArtifactHeader { .. }
+        ),
+        "got {error:?}"
+    );
+
+    drop(good);
+    drop(receiver);
+    assert_untouched_fresh(&root.path().join("receiver-bad"));
+}
+// SNP-05
+#[test]
+fn small_budget_tx_lookup_restore_matches_backfill() {
+    let fixture = ChainFixture::new(6, 40);
+    let root = tempfile::tempdir().expect("tempdir");
+    let (source, bundle) = (root.path().join("source"), root.path().join("bundle"));
+    backfilled_source(&fixture, &source);
+    exported_bundle(&fixture, &source, &bundle);
+    let base = fixture.tip_watermark();
+    let exported = bundle.join(ARTIFACT);
+    let size = fs::metadata(&exported)
+        .expect("exported artifact metadata")
+        .len();
+    let decoded = size.saturating_sub(73);
+    let headers = chain_headers(&fixture, base.height, base.hash);
+    let header_refs: Vec<&[u8; 80]> = headers.iter().collect();
+
+    let attach = root.path().join("attach");
+    fs::create_dir_all(&attach).expect("attach dir");
+    fs::copy(&exported, attach.join(ARTIFACT)).expect("stage manifest artifact");
+    let budget = SpillBudget::new(1024);
+    let receiver = open_receiver(root.path(), "receiver-bounded");
+    let records = attach_tx_lookup_artifact(
+        receiver.writer(),
+        &manifest_target(
+            &attach.join(ARTIFACT),
+            base,
+            digest_of(&attach.join(ARTIFACT)),
+            size,
+            fixture.txs_through(base.height),
+        ),
+        &header_refs,
+        &attach,
+        &budget,
+    )
+    .expect("a bounded re-encode attaches");
+    assert!(records > 0, "the attached artifact produced no rows");
+    assert!(
+        budget.peak_bytes() > 0,
+        "the re-encode must charge the spill budget or the bound is vacuous"
+    );
+    assert!(
+        decoded > budget.peak_bytes(),
+        "the artifact must exceed the budget to prove streaming: {decoded} <= {}",
+        budget.peak_bytes()
+    );
+    assert!(
+        budget.peak_bytes() <= 1024,
+        "the re-encode buffered {} bytes above the 1024-byte budget",
+        budget.peak_bytes()
+    );
+    drop(receiver);
+    assert_eq!(
+        durable(&root.path().join("receiver-bounded")),
+        durable(&source),
+        "the bounded restore serves the backfilled rows"
+    );
 }
 
 #[test]
@@ -1178,7 +1467,7 @@ fn missing_bodies_withhold_readiness_until_ordinary_backfill() {
             "{name}: withheld bundle made the index ready"
         );
         assert!(
-            !matches!(node.adapter.transaction_height(&probe_txid), Ok(Some(_))),
+            !matches!(node.adapter.transaction_block(&probe_txid), Ok(Some(_))),
             "{name}: withheld bundle served a lookup"
         );
         node.stop();
@@ -1229,11 +1518,10 @@ fn interrupted_import_is_cleared_on_restart_and_restore_retries() {
     );
     node.stop();
     let interrupted = durable(&receiver);
-    let headers = usize::try_from(blocks + 1).expect("header count fits usize");
     assert_eq!(
         interrupted.tx_confirmed.len(),
-        IMPORT_BATCH_ROWS - headers,
-        "the injected crash must leave exactly the first import batch on disk"
+        source_state.tx_confirmed.len(),
+        "the injected crash must leave the full unwatermarked bulk import on disk"
     );
     let source_rows: HashSet<_> = source_state.tx_confirmed.iter().collect();
     assert!(

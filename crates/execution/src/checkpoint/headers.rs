@@ -17,7 +17,8 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use crate::chain::{BlockTree, ChainWork, NodeId, accept_headers};
+use crate::chain::{BlockTree, NodeId, accept_headers};
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{ConsensusEncode, Hash256, Header, Network, deserialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;

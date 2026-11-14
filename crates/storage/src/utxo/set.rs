@@ -41,6 +41,8 @@ pub enum UtxoError {
     SnapshotDuplicateVout { vout: u32 },
     #[error("snapshot shard {shard} does not match key shard {key_shard}")]
     SnapshotShardMismatch { shard: u8, key_shard: u8 },
+    #[error("snapshot shard {shard} follows shard {previous} out of order")]
+    SnapshotShardOutOfOrder { shard: u8, previous: u8 },
     #[error("snapshot txid prefix does not match record key prefix")]
     SnapshotTxidPrefixMismatch,
     #[error("output value {value} exceeds the maximum money supply")]

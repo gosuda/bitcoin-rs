@@ -13,7 +13,7 @@ use bitcoin_rs_node::ScriptIndexMode;
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, Node, NodeConfig, NodeError};
 use bitcoin_rs_projection::ScriptHash;
-use bitcoin_rs_projection::query_api::HistoricalQueryError;
+use bitcoin_rs_projection::query_api::{Answer, TxQueryError};
 
 const SEED_BLOCKS: u32 = 100;
 const SEED_BASE_TIME: u32 = 1_296_688_603;
@@ -54,7 +54,7 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
     let invalid_snapshot = dir.path().join("invalid-snapshot.dat");
     std::fs::write(&invalid_snapshot, b"not a UTXO snapshot")?;
     assert!(matches!(
-        block_on(node.activate_assumeutxo_snapshot_file(&invalid_snapshot)),
+        block_on(node.import_manifest(&invalid_snapshot)),
         Err(NodeError::Snapshot(_))
     ));
     assert_eq!(node.snapshot(), before_import);
@@ -240,16 +240,15 @@ fn historical_config(data_dir: &std::path::Path) -> Result<NodeConfig> {
     Ok(config)
 }
 
-fn wait_historical_transaction(
-    node: &Node,
-    txid: &Txid,
-) -> Result<bitcoin_rs_projection::query_api::AtPrefix<Option<(u32, Tx)>>> {
+fn wait_historical_transaction(node: &Node, txid: &Txid) -> Result<Answer<Option<(u32, Tx)>>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         match node.transaction_at_prefix(txid) {
             Ok(answer) => return Ok(answer),
-            Err(HistoricalQueryError::Retry | HistoricalQueryError::Unavailable(_)) => {}
-            Err(HistoricalQueryError::Storage(message)) => {
+            Err(
+                TxQueryError::Retry(_) | TxQueryError::Unavailable(_) | TxQueryError::ExpiredView,
+            ) => {}
+            Err(TxQueryError::Storage(message)) => {
                 return Err(TestError::message(format!(
                     "historical index storage error while waiting: {message}"
                 )));
@@ -290,36 +289,36 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
     let script = ScriptHash::from_script_bytes(known_tx.outputs[0].script_pubkey.as_bytes());
 
     let ready = wait_historical_transaction(&node, &known_txid)?;
-    assert_eq!(ready.prefix.floor, 0, "seeded chain covers from genesis");
-    assert_eq!(ready.prefix.height, SEED_BLOCKS);
-    assert_eq!(ready.prefix.hash, node.snapshot().tip_hash);
+    assert_eq!(ready.coverage.floor, 0, "seeded chain covers from genesis");
+    assert_eq!(ready.coverage.height, SEED_BLOCKS);
+    assert_eq!(ready.coverage.hash, node.snapshot().tip_hash);
 
     let at = node.transaction_at_prefix(&known_txid)?;
-    assert_eq!(at.prefix.floor, 0);
-    assert_eq!(at.prefix.height, SEED_BLOCKS);
-    assert_eq!(at.prefix.hash, node.snapshot().tip_hash);
-    let Some((height, tx)) = at.answer else {
+    assert_eq!(at.coverage.floor, 0);
+    assert_eq!(at.coverage.height, SEED_BLOCKS);
+    assert_eq!(at.coverage.hash, node.snapshot().tip_hash);
+    let Some((height, tx)) = at.value else {
         return Err(TestError::message(
             "known seed coinbase must resolve historically",
         ));
     };
     assert_eq!(height, 1);
-    assert!(at.prefix.floor <= height && height <= at.prefix.height);
+    assert!(at.coverage.floor <= height && height <= at.coverage.height);
     assert_eq!(consensus_bytes(&tx), consensus_bytes(&known_tx));
 
     let unknown_txid = Txid(Hash256::from_le_bytes(&[0xAA; 32]));
     let absent = node.transaction_at_prefix(&unknown_txid)?;
-    assert!(absent.answer.is_none(), "unknown txid is a scoped None");
-    assert_eq!(absent.prefix.height, SEED_BLOCKS);
-    assert_eq!(absent.prefix.hash, node.snapshot().tip_hash);
+    assert!(absent.value.is_none(), "unknown txid is a scoped None");
+    assert_eq!(absent.coverage.height, SEED_BLOCKS);
+    assert_eq!(absent.coverage.hash, node.snapshot().tip_hash);
 
     let history = node.script_history_at_prefix(script)?;
-    assert_eq!(history.prefix.floor, 0);
-    assert_eq!(history.prefix.height, SEED_BLOCKS);
-    assert_eq!(history.prefix.hash, node.snapshot().tip_hash);
+    assert_eq!(history.coverage.floor, 0);
+    assert_eq!(history.coverage.height, SEED_BLOCKS);
+    assert_eq!(history.coverage.hash, node.snapshot().tip_hash);
     assert!(
         history
-            .answer
+            .value
             .history
             .iter()
             .any(|record| record.height == 1),
@@ -327,22 +326,21 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
     );
     assert!(
         history
-            .answer
+            .value
             .history
             .iter()
-            .all(|record| history.prefix.floor <= record.height
-                && record.height <= history.prefix.height),
+            .all(|record| history.coverage.floor <= record.height
+                && record.height <= history.coverage.height),
         "history rows stay inside the covered prefix"
     );
 
     let spend = node.spender_at_prefix(known_outpoint)?;
-    assert_eq!(spend.prefix.height, SEED_BLOCKS);
-    assert_eq!(spend.prefix.hash, node.snapshot().tip_hash);
+    assert_eq!(spend.coverage.height, SEED_BLOCKS);
+    assert_eq!(spend.coverage.hash, node.snapshot().tip_hash);
     assert!(
-        spend.answer.is_none(),
+        spend.value.is_none(),
         "unspent seed outpoint has no spend in range"
     );
-
     let via_index = block_on(node.tx_by_id(known_txid))?;
     assert_eq!(consensus_bytes(&via_index), consensus_bytes(&known_tx));
 

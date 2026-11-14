@@ -143,13 +143,14 @@ fn pending_broadcast_batches_resume_by_key_after_completion_and_removal() {
         .read()
         .transaction_by_txid(&removed_id)
         .expect("live cursor entry");
-    gateway.remove_for_block(
-        AdmissionOrigin::Block,
-        &[removed.as_ref()],
-        &[removed_id],
-        2,
-        2,
-    );
+    gateway
+        .remove_for_block(
+            AdmissionOrigin::Block,
+            &bitcoin_rs_mempool::TransitionFacts::from_txs(&[removed.as_ref()]),
+            2,
+            2,
+        )
+        .expect("block settlement commits");
     for (_, wtxid, _) in first {
         gateway.mark_broadcast(wtxid);
         gateway.commit_broadcast(wtxid);
@@ -182,7 +183,9 @@ fn pending_broadcast_batches_resume_by_key_after_completion_and_removal() {
         1027,
         "idle retry keeps ordinary membership"
     );
-    gateway.clear(AdmissionOrigin::Block);
+    gateway
+        .clear(AdmissionOrigin::Block)
+        .expect("clear commits");
     assert_eq!(gateway.read().unbroadcast_transactions().count(), 0);
 }
 
@@ -319,7 +322,9 @@ fn a_re_admitted_request_is_not_announced() {
     let (tx, sequence) = admit_live_tx(20, &gateway);
     queue.announce(tx.txid(), tx.wtxid(), None, sequence);
 
-    gateway.clear(AdmissionOrigin::Block);
+    gateway
+        .clear(AdmissionOrigin::Block)
+        .expect("clear commits");
     let re_admitted = admit_entry(&tx, &gateway);
     assert_ne!(re_admitted, sequence);
 
@@ -342,7 +347,9 @@ fn stale_queued_transaction_is_not_announced() {
     let (tx, sequence) = admit_live_tx(10, &gateway);
     queue.announce(tx.txid(), tx.wtxid(), None, sequence);
 
-    gateway.clear(AdmissionOrigin::Block);
+    gateway
+        .clear(AdmissionOrigin::Block)
+        .expect("clear commits");
 
     let processed = drain_relay_queue(&rx, &sink, &gateway);
 
@@ -366,15 +373,16 @@ fn relay_worker_announces_only_live_transactions() {
     queue.announce(live.txid(), live.wtxid(), None, live_seq);
     queue.announce(confirmed.txid(), confirmed.wtxid(), None, confirmed_seq);
 
-    gateway.remove_for_block(
-        AdmissionOrigin::Block,
-        &[&*confirmed],
-        &[confirmed.txid()],
-        1,
-        1,
-    );
+    gateway
+        .remove_for_block(
+            AdmissionOrigin::Block,
+            &bitcoin_rs_mempool::TransitionFacts::from_txs(&[&*confirmed]),
+            1,
+            1,
+        )
+        .expect("block settlement commits");
 
-    let shutdown = bitcoin_rs_execution::chain::LatchReader::fixture_never();
+    let shutdown = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), shutdown)
         .expect("relay worker spawns");
     drop(queue);
@@ -400,7 +408,7 @@ fn relay_worker_exits_when_queue_closes_with_observer_attached() {
         )
         .expect("observer slot");
     let sink = FakeSink::new(Vec::new());
-    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), shutdown.reader())
         .expect("relay worker spawns");
 
@@ -549,7 +557,7 @@ fn local_tx_relay_uses_committed_wtxid_and_ignores_peer_and_removed_entries() {
         );
         last_txid = txid;
     }
-    gateway.clear(AdmissionOrigin::Rpc);
+    gateway.clear(AdmissionOrigin::Rpc).expect("clear commits");
     observer.on_mutation(&mutation_envelope(
         AdmissionOrigin::Rpc,
         Hash256::from(last_txid),
@@ -659,7 +667,9 @@ impl MempoolObserver for MutateBeforeLocalRelay {
         };
         let gateway = self.gateway.upgrade().expect("fixture gateway lives");
         if self.clear_first {
-            gateway.clear(AdmissionOrigin::Block);
+            gateway
+                .clear(AdmissionOrigin::Block)
+                .expect("clear commits");
         }
         gateway
             .insert_entry(relay_identity_peer(), entry)
@@ -813,7 +823,7 @@ fn tx_relay_worker_promptly_exits_on_latch_trigger_while_idle() {
     let gateway = relay_identity_gateway();
     let (_queue, rx) = TxRelayQueue::new(8);
     let sink = FakeSink::new(Vec::new());
-    let latch = bitcoin_rs_execution::chain::LatchWriter::new();
+    let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
     let worker = spawn_tx_relay_worker_polling(
         sink,
         rx,

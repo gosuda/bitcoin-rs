@@ -80,6 +80,7 @@ fn matured_chain_with_body_store() -> Result<MaturedBodyStore, crate::test_suppo
             capture_rawtx: false,
             capture_block_bytes: true,
             retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
+            window_limits: bitcoin_rs_execution::default_window_limits_source(),
             history: bitcoin_rs_storage::pruning::HistoryAccess::new(
                 retention,
                 bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
@@ -114,6 +115,10 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
         handles: Arc::clone(&handles),
         followers,
         assumeutxo: None,
+        budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            bitcoin_rs_storage::split_chainstate_cache_budget(16),
+            1,
+        )),
     };
     let applied_tip = handles.applied_tip_reader();
     let main_tip_hash = Hash256::from_le_bytes(main[100].block_hash().as_bytes());
@@ -210,6 +215,10 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), crate::test_s
         handles: Arc::clone(&handles),
         followers,
         assumeutxo: None,
+        budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            bitcoin_rs_storage::split_chainstate_cache_budget(16),
+            1,
+        )),
     };
     let applied_tip = handles.applied_tip_reader();
 
@@ -300,6 +309,10 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
         handles: Arc::clone(&handles),
         followers: crate::chain_effects::ChainFollowers::noop(),
         assumeutxo: None,
+        budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            bitcoin_rs_storage::split_chainstate_cache_budget(16),
+            1,
+        )),
     };
     let old_tip_hash = Hash256::from_le_bytes(main[100].block_hash().as_bytes());
     let fork_root_hash = main[99].block_hash();

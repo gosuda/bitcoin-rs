@@ -51,6 +51,9 @@ pub(crate) enum ConvertError {
     #[error("invalid operation: {0}")]
     InvalidOperation(String),
 
+    #[error("snapshot archive for base {base} failed verification: {reason}")]
+    SnapshotArchiveInvalid { base: String, reason: String },
+
     #[error("missing complete chainstate checkpoint; resync into a new datadir is required")]
     MissingCheckpoint,
 
@@ -78,4 +81,81 @@ pub(crate) enum ConvertError {
 
     #[error("checkpoint publication at the durable head failed: {0}")]
     CheckpointPublish(#[source] bitcoin_rs_execution::recovery::ConvertedCheckpointError),
+
+    #[error("block file '{file}' record {index} has bad magic")]
+    BadBlockMagic { file: String, index: u64 },
+
+    #[error("block file '{file}' is truncated inside record {index}")]
+    TruncatedBlockRecord { file: String, index: u64 },
+
+    #[error(
+        "block file '{file}' record {index} declares a {len}-byte body over the {max}-byte record limit"
+    )]
+    OversizeBlockRecord {
+        file: String,
+        index: u64,
+        len: u32,
+        max: u64,
+    },
+
+    #[error("block {hash} at height {height} is not a readable block: {reason}")]
+    UnparseableBlock {
+        height: u32,
+        hash: String,
+        reason: String,
+    },
+
+    #[error(
+        "block record at height {height} stores hash {recorded} but its header hashes to {computed}"
+    )]
+    BlockHashMismatch {
+        height: u32,
+        recorded: String,
+        computed: String,
+    },
+
+    #[error(
+        "block record {hash} at height {height} conflicts with an earlier record of the same hash"
+    )]
+    ConflictingBlockRecord { height: u32, hash: String },
+
+    #[error("chainstate holds no durable head, but the block archive holds records")]
+    MissingDurableHead,
+
+    #[error("the durable head block {hash} at height {height} is not in the block archive")]
+    MissingTipRecord { height: u32, hash: String },
+
+    #[error("block {hash} at height {height} is not connected to the canonical chain: {reason}")]
+    CanonicalChainBroken {
+        height: u32,
+        hash: String,
+        reason: &'static str,
+    },
+
+    #[error(
+        "block {hash} is recorded at height {recorded} but the canonical chain places it at height {expected}"
+    )]
+    BlockHeightMismatch {
+        recorded: u32,
+        expected: u32,
+        hash: String,
+    },
+
+    #[error("no undo row restores prevout {txid}:{vout} spent in block {hash} at height {height}")]
+    MissingUndoRow {
+        height: u32,
+        hash: String,
+        txid: String,
+        vout: u32,
+    },
+
+    #[error("undo row for block {hash} at height {height} is unreadable: {source}")]
+    UnreadableUndoRow {
+        height: u32,
+        hash: String,
+        source: bitcoin_rs_storage::utxo::contract::UndoCodecError,
+    },
+
+    #[error("bulk index build failed: {0}")]
+    BulkBuild(#[from] bitcoin_rs_projection::segment::bulk_builder::BulkBuilderError),
 }

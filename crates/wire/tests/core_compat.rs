@@ -880,7 +880,7 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Te
         Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
             true,
         )))),
-        bitcoin_rs_wire::LatchReader::fixture_never(),
+        bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
         None,
         magic,
         headers_tx,
@@ -1195,7 +1195,7 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Te
     )?;
     let addr = listener.local_addr()?;
 
-    let shutdown = bitcoin_rs_wire::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let listener_shutdown = shutdown.reader();
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded::<InboundHeaders>();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded::<InboundBlock>();
@@ -1206,7 +1206,7 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Te
         Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
             true,
         )))),
-        bitcoin_rs_wire::LatchWriter::new().reader(),
+        bitcoin_rs_consensus::latch::LatchWriter::new().reader(),
         None,
         magic,
         headers_tx,
@@ -1420,7 +1420,7 @@ fn outbound_shared(peer_table: Arc<PeerTable>, magic: Magic) -> ConnectionShared
         Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
             true,
         )))),
-        bitcoin_rs_wire::LatchReader::fixture_never(),
+        bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
         None,
         magic,
         headers_tx,

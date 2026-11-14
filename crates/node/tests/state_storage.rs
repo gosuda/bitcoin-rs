@@ -6,9 +6,8 @@ use parking_lot::Mutex;
 use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
-
 use bitcoin_rs_node::{Network, NodeConfig, ScriptIndexMode, state::NodeState};
-use bitcoin_rs_storage::{Bytes, COIN_KEY_LEN, CoinKey};
+use bitcoin_rs_storage::{Bytes, COIN_KEY_LEN, CoinKey, budget::BudgetOwner};
 use metrics::{
     Counter, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder,
     SharedString, Unit,
@@ -149,6 +148,17 @@ fn assert_opened_cache_pressure(
         "latest row must stay readable and intact"
     );
 
+    let caps = state.budget().caps();
+    assert_eq!(
+        caps.owner_cap(BudgetOwner::EngineCache),
+        expected.engine_capacity_bytes,
+        "the opened node ledger must cap EngineCache at its post-index share"
+    );
+    assert_eq!(
+        caps.owner_cap(BudgetOwner::CoinCache),
+        expected.coin_allowance_bytes,
+        "the opened node ledger must cap CoinCache at its post-index share"
+    );
     assert_capacity_eq(
         &gauges,
         "storage.cache_capacity_bytes{backend=\"rocksdb\"}",

@@ -23,6 +23,7 @@ pub(super) struct NodeStorage {
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     prune_height: Option<u32>,
+    engine_cache_probe: Arc<dyn Fn() -> u64 + Send + Sync>,
     pub(super) deferred: Arc<dyn DeferredChainstateServices>,
     pub(super) coins: Arc<bitcoin_rs_storage::CoinStore>,
     pub(super) commit_authority: Arc<bitcoin_rs_storage::CommitAuthority>,
@@ -33,6 +34,7 @@ struct ChainstateComposer<'a> {
     data_dir: &'a std::path::Path,
     guard: &'a StoreGuard,
     cache_allocation: bitcoin_rs_storage::ChainstateCacheBudget,
+    budget: Arc<crate::budget::NodeBudget>,
 }
 
 impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
@@ -50,9 +52,14 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
             &store,
         )));
         let dyn_store: Arc<dyn bitcoin_rs_storage::KvStore> = store.clone();
-        let coins = Arc::new(bitcoin_rs_storage::CoinStore::open(
+        let coin_charge = bitcoin_rs_storage::budget::ChargeHandle::new(
+            self.budget.clone(),
+            bitcoin_rs_storage::budget::BudgetOwner::CoinCache,
+        );
+        let coins = Arc::new(bitcoin_rs_storage::CoinStore::open_with_charge(
             Arc::clone(&dyn_store),
             self.cache_allocation.coin_bytes,
+            Some(coin_charge),
         ));
         let commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(
             dyn_store,
@@ -72,6 +79,14 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
             }
             .guarded_by(Arc::clone(self.guard)),
         );
+        let engine_store: Arc<dyn KvStore> = store.clone();
+        let engine_weak = Arc::downgrade(&engine_store);
+        drop(engine_store);
+        let engine_cache_probe: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(move || {
+            engine_weak
+                .upgrade()
+                .map_or(0, |store| store.engine_cache_bytes())
+        });
         let deferred: Arc<dyn DeferredChainstateServices> = Arc::new(ChainstateStoreServices {
             store: Arc::clone(&store),
         });
@@ -85,6 +100,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
             )),
             retention,
             prune_height,
+            engine_cache_probe,
             deferred,
             coins,
             commit_authority,
@@ -98,6 +114,7 @@ impl NodeStorage {
         config: &NodeConfig,
         cache_allocation: bitcoin_rs_storage::ChainstateCacheBudget,
         guard: &StoreGuard,
+        budget: Arc<crate::budget::NodeBudget>,
     ) -> Result<(Self, Arc<FlatFileBlockStore>), NodeOpenError> {
         let chainstate_dir = config.data_dir.join("chainstate");
         std::fs::create_dir_all(&chainstate_dir).map_err(|source| {
@@ -119,6 +136,7 @@ impl NodeStorage {
                 data_dir: &config.data_dir,
                 guard,
                 cache_allocation,
+                budget,
             },
         )?;
         Ok(opened)
@@ -130,6 +148,10 @@ impl NodeStorage {
 
     pub(super) const fn stored_prune_height(&self) -> Option<u32> {
         self.prune_height
+    }
+
+    pub(super) fn engine_cache_probe(&self) -> Arc<dyn Fn() -> u64 + Send + Sync> {
+        Arc::clone(&self.engine_cache_probe)
     }
 
     pub(super) fn block_body_store(

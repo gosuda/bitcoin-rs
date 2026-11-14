@@ -2,7 +2,7 @@ use super::*;
 
 struct RunningServer {
     address: SocketAddr,
-    shutdown: bitcoin_rs_execution::chain::LatchWriter,
+    shutdown: bitcoin_rs_consensus::latch::LatchWriter,
     worker: Option<thread::JoinHandle<io::Result<()>>>,
     handler: Arc<Handler>,
 }
@@ -19,7 +19,7 @@ impl RunningServer {
         )?;
         let address = server.local_addr()?;
         let handler = Arc::clone(&server.handler);
-        let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+        let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
         let stop = shutdown.reader();
         let worker = Some(thread::spawn(move || {
             server.serve_surface_with_shutdown(stop, surface)

@@ -9,6 +9,9 @@ pub(crate) enum TestError {
     #[error("storage error: {0}")]
     Storage(#[from] bitcoin_rs_storage::StorageError),
 
+    #[error("index error: {0}")]
+    Index(#[from] bitcoin_rs_projection::IndexError),
+
     #[error("fjall error: {0}")]
     Fjall(#[from] fjall::Error),
 
@@ -35,6 +38,9 @@ pub(crate) enum TestError {
 
     #[error("assertion failed: {0}")]
     Assertion(String),
+
+    #[error(transparent)]
+    TryFromInt(#[from] std::num::TryFromIntError),
 }
 
 pub(crate) type TestResult<T = ()> = Result<T, TestError>;

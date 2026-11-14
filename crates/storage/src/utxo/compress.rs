@@ -24,7 +24,7 @@ pub(crate) fn write_varint_at(value: u64, out: &mut [u8], at: usize) -> Option<u
 }
 
 #[inline]
-pub(crate) const fn varint_len(value: u64) -> usize {
+pub const fn varint_len(value: u64) -> usize {
     let mut remaining = value >> 7;
     let mut len = 1;
     while remaining != 0 {
@@ -35,7 +35,7 @@ pub(crate) const fn varint_len(value: u64) -> usize {
 }
 
 #[inline]
-pub(crate) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), UtxoError> {
+pub fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), UtxoError> {
     let first = *bytes.get(offset).ok_or(UtxoError::CorruptRecord)?;
     if first & 0x80 == 0 {
         return Ok((u64::from(first), offset + 1));
@@ -66,7 +66,7 @@ pub(crate) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), U
 pub(crate) const MAX_COMPRESSIBLE_AMOUNT: u64 = Amount::MAX_MONEY.to_sat();
 
 #[inline]
-pub(crate) const fn compress_amount(amount: u64) -> Result<u64, UtxoError> {
+pub const fn compress_amount(amount: u64) -> Result<u64, UtxoError> {
     if amount > MAX_COMPRESSIBLE_AMOUNT {
         return Err(UtxoError::AmountOutOfRange { value: amount });
     }
@@ -102,7 +102,7 @@ const POW10: [u64; 10] = [
 ];
 
 #[inline]
-pub(crate) fn decompress_amount(compressed: u64) -> Option<u64> {
+pub fn decompress_amount(compressed: u64) -> Option<u64> {
     if compressed == 0 {
         return Some(0);
     }
@@ -119,6 +119,18 @@ pub(crate) fn decompress_amount(compressed: u64) -> Option<u64> {
     let scale = POW10.get(usize::try_from(exponent).ok()?)?;
     let value = n.checked_mul(*scale)?;
     (value <= MAX_COMPRESSIBLE_AMOUNT).then_some(value)
+}
+
+#[inline]
+pub fn write_varint_into(out: &mut Vec<u8>, value: u64) {
+    let start = out.len();
+    let len = varint_len(value);
+    out.resize(start + len, 0);
+    let written = write_varint_at(value, out, start);
+    debug_assert_eq!(written, Some(start + len));
+    if written.is_none() {
+        out.truncate(start);
+    }
 }
 
 pub(crate) fn write_core_varint(mut value: u64, out: &mut Vec<u8>) {

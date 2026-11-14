@@ -8,10 +8,10 @@ use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT;
 use bitcoin_rs_storage::utxo::UtxoSet;
 
-use crate::chain::LatchWriter;
 use crate::chain::regtest_fixture::mined_regtest_child_at;
 use crate::checkpoint::publisher::CheckpointPublisher;
 use crate::test_fixtures::{TestError, TestResult};
+use bitcoin_rs_consensus::latch::LatchWriter;
 
 use super::{CHECKPOINT_PUBLICATION_CADENCE, maintenance_loop, should_publish_checkpoint};
 

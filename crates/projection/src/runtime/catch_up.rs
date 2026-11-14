@@ -29,6 +29,23 @@ use std::time::Instant;
 
 type AnchoredPreparation = Result<Result<PreparedBlock, IndexError>, DerivedIndexWorkerError>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrefixStop {
+    Complete,
+    MissingBody,
+    AwaitingFacts,
+}
+
+impl PrefixStop {
+    fn action(self) -> Option<ChunkAction> {
+        match self {
+            Self::Complete => None,
+            Self::MissingBody => Some(ChunkAction::MissingBody),
+            Self::AwaitingFacts => Some(ChunkAction::AwaitingFacts),
+        }
+    }
+}
+
 impl Worker {
     pub(super) fn collect_target_chain(
         &self,
@@ -195,14 +212,42 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        let (bodies, missing_body) = self
+        if !self.has_facts_gap() {
+            if let Some(prepared) = self.try_prepare_from_facts(identities, capabilities)? {
+                let loaded = prepared.len();
+                let sub_chunk = &identities[..loaded];
+                if self.runtime.should_stop() {
+                    return Ok(ChunkAction::Stalled);
+                }
+                let (admitted, action) =
+                    self.admit_prepared(prepared, sub_chunk, state, history)?;
+                let mut guard = self.buffered_facts.lock();
+                for identity in &sub_chunk[..admitted] {
+                    if let Some(block) = guard.remove(&(identity.hash, identity.height)) {
+                        if let Some(charge) = &self.facts_charge {
+                            charge.release(block.size_bytes());
+                        }
+                    }
+                }
+                drop(guard);
+                if let Some(action) = action {
+                    return Ok(action);
+                }
+                *identities = &identities[loaded..];
+                return Ok(ChunkAction::Continue);
+            }
+        }
+
+        let (bodies, stop) = self
             .load_body_prefix(body_reader.as_mut(), identities)
             .map_err(DerivedIndexWorkerError::Storage)?;
         if self.runtime.should_stop() {
             return Ok(ChunkAction::Stalled);
         }
-        if bodies.is_empty() && missing_body {
-            return Ok(ChunkAction::MissingBody);
+        if bodies.is_empty()
+            && let Some(action) = stop.action()
+        {
+            return Ok(action);
         }
         let loaded = bodies.len();
         let sub_chunk = &identities[..loaded];
@@ -217,12 +262,13 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        if let Some(action) = self.admit_prepared(prepared, sub_chunk, state, history)? {
+        let (admitted, action) = self.admit_prepared(prepared, sub_chunk, state, history)?;
+        *identities = &identities[admitted..];
+        if let Some(action) = action {
             return Ok(action);
         }
-        *identities = &identities[loaded..];
-        if missing_body {
-            return Ok(ChunkAction::MissingBody);
+        if let Some(action) = stop.action() {
+            return Ok(action);
         }
         Ok(ChunkAction::Continue)
     }
@@ -320,20 +366,126 @@ impl Worker {
         Ok(ReconcileAction::Progressed)
     }
 
+    pub(super) fn has_facts_gap(&self) -> bool {
+        self.facts_gap
+            .as_ref()
+            .is_some_and(|gap| gap.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    pub(super) fn clear_buffered_facts(&self) {
+        if let Some(rx) = &self.facts_rx {
+            while let Ok(facts) = rx.try_recv() {
+                if let Some(charge) = &self.facts_charge {
+                    charge.release(facts.size_bytes());
+                }
+            }
+        }
+        let mut guard = self.buffered_facts.lock();
+        if let Some(charge) = &self.facts_charge {
+            let retained: u64 = guard.values().map(|block| block.size_bytes()).sum();
+            charge.release(retained);
+        }
+        guard.clear();
+    }
+
+    fn charge_and_retain_facts_block(
+        &self,
+        guard: &mut hashbrown::HashMap<([u8; 32], u32), bitcoin_rs_storage::CommittedBlock>,
+        block: bitcoin_rs_storage::CommittedBlock,
+    ) {
+        if let Some(charge) = &self.facts_charge {
+            if charge.charge(block.size_bytes()).is_err() {
+                return;
+            }
+        }
+        if let Some(previous) = guard.insert((block.hash, block.height), block) {
+            if let Some(charge) = &self.facts_charge {
+                charge.release(previous.size_bytes());
+            }
+        }
+    }
+
+    fn drain_facts_into_buffer(&self) {
+        if let Some(rx) = &self.facts_rx {
+            while let Ok(facts) = rx.try_recv() {
+                if let Some(charge) = &self.facts_charge {
+                    charge.release(facts.size_bytes());
+                }
+                let mut guard = self.buffered_facts.lock();
+                for block in &facts.blocks {
+                    self.charge_and_retain_facts_block(&mut guard, block.clone());
+                }
+            }
+        }
+    }
+
+    pub(super) fn try_prepare_from_facts(
+        &self,
+        identities: &[BlockIdentity],
+        capabilities: IndexCapabilities,
+    ) -> Result<Option<Vec<Result<PreparedBlock, IndexError>>>, DerivedIndexWorkerError> {
+        if self.facts_rx.is_none() {
+            return Ok(None);
+        }
+        self.drain_facts_into_buffer();
+        if let Some(floor) = identities.first().map(|identity| identity.height) {
+            let mut guard = self.buffered_facts.lock();
+            let mut evicted = 0_u64;
+            guard.retain(|_, block| {
+                if block.height >= floor {
+                    true
+                } else {
+                    evicted += block.size_bytes();
+                    false
+                }
+            });
+            if let Some(charge) = &self.facts_charge {
+                charge.release(evicted);
+            }
+        }
+        let guard = self.buffered_facts.lock();
+        if guard.is_empty() {
+            return Ok(None);
+        }
+        let mut count = 0;
+        for identity in identities {
+            if guard.contains_key(&(identity.hash, identity.height)) {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        if count == 0 {
+            return Ok(None);
+        }
+        drop(guard);
+        let guard = self.buffered_facts.lock();
+        let mut prepared = Vec::with_capacity(count);
+        for identity in &identities[..count] {
+            if let Some(block) = guard.get(&(identity.hash, identity.height)).cloned() {
+                prepared.push(self.writer.prepare_block_from_facts(capabilities, block));
+            }
+        }
+        Ok(Some(prepared))
+    }
+
     fn load_body_prefix(
         &self,
         reader: &mut dyn BlockBodyReader,
         identities: &[BlockIdentity],
-    ) -> Result<(Vec<Vec<u8>>, bool), StorageError> {
+    ) -> Result<(Vec<Vec<u8>>, PrefixStop), StorageError> {
         let mut bodies = Vec::new();
         let mut loaded_bytes = 0_usize;
         for identity in identities.iter().take(PREPARE_CHUNK_BLOCKS) {
             if self.runtime.should_stop() {
                 break;
             }
+            if self.runtime.awaits_historical_facts(identity.height) {
+                return Ok((bodies, PrefixStop::AwaitingFacts));
+            }
             let hash = Hash256::from_le_bytes(&identity.hash);
             let Some(body) = reader.load_block_body(identity.height, hash)? else {
-                return Ok((bodies, true));
+                return Ok((bodies, PrefixStop::MissingBody));
             };
             loaded_bytes = loaded_bytes.saturating_add(body.len());
             bodies.push(body);
@@ -341,7 +493,7 @@ impl Worker {
                 break;
             }
         }
-        Ok((bodies, false))
+        Ok((bodies, PrefixStop::Complete))
     }
 
     pub(super) fn wait_for_revision_quiet(&self, mut seen_revision: u64) -> Option<u64> {
@@ -495,6 +647,19 @@ impl Worker {
                             ReconcileAction::Buffered,
                         )));
                     }
+                    ChunkAction::AwaitingFacts => {
+                        Self::park_unused_seed_lease(
+                            scope.seed_lease,
+                            scope.from_seed,
+                            scope.pass_history,
+                        );
+                        if !state.batch.is_empty() {
+                            *pending = Some(state);
+                        }
+                        return Ok(PrefetchOutcome::Leg(ForwardLeg::Settled(
+                            ReconcileAction::Stalled,
+                        )));
+                    }
                 }
             }
         }
@@ -582,9 +747,6 @@ impl Worker {
                 } else if capabilities.contains(IndexCapability::ScriptLive) {
                     self.runtime
                         .fail_script_live(&DerivedIndexWorkerError::ScriptLiveHistoryPruned);
-                    if let Some(slot) = self.seed_slot.as_ref() {
-                        slot.want();
-                    }
                     ReconcileAction::Stalled
                 } else {
                     self.rebuild_from_pruned(capabilities, below, target)?
@@ -617,50 +779,48 @@ impl Worker {
             || capabilities.contains(IndexCapability::ScriptLive)
             || capabilities.contains(IndexCapability::CompactFilters);
 
-        let outcomes: Vec<AnchoredPreparation> = sub_chunk
-            .par_iter()
-            .zip(bodies.par_iter())
-            .map(|(identity, body)| -> AnchoredPreparation {
-                let prepare = |spent: &dyn crate::SpentCoinScripts| {
-                    self.writer.prepare_block_with_spent_scripts(
-                        capabilities,
-                        identity.height,
-                        identity.hash,
-                        body.as_slice(),
-                        spent,
-                    )
-                };
-                if !needs_anchor {
-                    return Ok(prepare(&NoSpentScripts));
-                }
-                let anchor = self.live_anchor(identity.height, identity.hash)?;
-                Ok(prepare(&anchor))
-            })
-            .collect();
+        let permit = self
+            .cpu
+            .as_ref()
+            .and_then(|cpu| cpu.try_acquire_background());
+        let parallel = self.cpu.is_none() || permit.is_some();
+        let prepare = |identity: &BlockIdentity, body: &[u8]| -> AnchoredPreparation {
+            let prepare = |spent: &dyn crate::SpentCoins| {
+                self.writer.prepare_block_with_spent_scripts(
+                    capabilities,
+                    identity.height,
+                    identity.hash,
+                    body,
+                    spent,
+                )
+            };
+            if !needs_anchor {
+                return Ok(prepare(&NoSpentScripts));
+            }
+            let anchor = self.live_anchor(identity.height, identity.hash)?;
+            Ok(prepare(&anchor))
+        };
+        let outcomes: Vec<AnchoredPreparation> = if parallel {
+            sub_chunk
+                .par_iter()
+                .zip(bodies.par_iter())
+                .map(|(identity, body)| prepare(identity, body))
+                .collect()
+        } else {
+            sub_chunk
+                .iter()
+                .zip(bodies.iter())
+                .map(|(identity, body)| prepare(identity, body))
+                .collect()
+        };
 
         match outcomes.into_iter().collect::<Result<Vec<_>, _>>() {
             Ok(prepared) => Ok(ControlFlow::Continue(prepared)),
             Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
                 *pending = None;
                 state.batch = PreparedBatch::new(self.batch_limits);
-                if capabilities.contains(IndexCapability::CompactFilters) {
-                    self.runtime.fail_compact_filters(&error);
-                }
-                if capabilities.contains(IndexCapability::ScriptHistory) {
-                    self.runtime.fail_script_history(&error);
-                }
-                if !capabilities.contains(IndexCapability::ScriptLive) {
-                    return Ok(ControlFlow::Break(ChunkAction::Progressed));
-                }
-                self.writer
-                    .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
-                    .map_err(DerivedIndexWorkerError::Index)?;
-                self.runtime.fail_script_live(&error);
-                if let Some(slot) = self.seed_slot.as_ref() {
-                    slot.want();
-                }
-                tracing::warn!(error = %error, "ScriptLive unavailable after missing undo; awaiting verified seed");
-                Ok(ControlFlow::Break(ChunkAction::MissingBody))
+                self.runtime.stop_undo_group(capabilities, &error);
+                Ok(ControlFlow::Break(ChunkAction::Progressed))
             }
             Err(error) => Err(error),
         }
@@ -672,27 +832,39 @@ impl Worker {
         sub_chunk: &[BlockIdentity],
         state: &mut PendingForward,
         history: &HistoryLease,
-    ) -> Result<Option<ChunkAction>, DerivedIndexWorkerError> {
-        for (result, identity) in prepared.into_iter().zip(sub_chunk.iter()) {
+    ) -> Result<(usize, Option<ChunkAction>), DerivedIndexWorkerError> {
+        let mut admitted = 0;
+        for (identity, result) in sub_chunk.iter().zip(prepared) {
             let prepared = result.map_err(DerivedIndexWorkerError::Index)?;
             if identity.height > 0 && prepared.parent_hash != identity.parent_hash {
                 return Err(DerivedIndexWorkerError::MissingTargetChain {
                     height: identity.height,
                 });
             }
-            if state.batch.try_push(prepared).is_err() || state.batch.is_full() {
-                let action = if self
-                    .commit_forward(state.take(self.batch_limits), history)?
-                    .is_some()
-                {
-                    ChunkAction::Progressed
-                } else {
-                    ChunkAction::Stalled
-                };
-                return Ok(Some(action));
+            if state.batch.try_push(prepared).is_err() {
+                return Ok((admitted, Some(self.admit_filled_batch(state, history)?)));
+            }
+            admitted += 1;
+            if state.batch.is_full() {
+                return Ok((admitted, Some(self.admit_filled_batch(state, history)?)));
             }
         }
-        Ok(None)
+        Ok((admitted, None))
+    }
+
+    fn admit_filled_batch(
+        &self,
+        state: &mut PendingForward,
+        history: &HistoryLease,
+    ) -> Result<ChunkAction, DerivedIndexWorkerError> {
+        if self
+            .commit_forward(state.take(self.batch_limits), history)?
+            .is_some()
+        {
+            Ok(ChunkAction::Progressed)
+        } else {
+            Ok(ChunkAction::Stalled)
+        }
     }
 }
 impl Worker {

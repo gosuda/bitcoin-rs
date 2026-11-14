@@ -758,6 +758,7 @@ fn decoded_heap_limits_staging_and_expected_frontier_can_evict_a_fat_tail() {
     assert!(stager.retained_attributed_bytes() <= budget.max_retained_bytes);
 }
 
+#[expect(clippy::expect_used)]
 #[test]
 fn decoded_attribution_follows_insert_drain_and_restore_apart_from_serialized_bytes() {
     let (lean, fat, serialized) = lean_and_fat_blocks();
@@ -789,11 +790,10 @@ fn decoded_attribution_follows_insert_drain_and_restore_apart_from_serialized_by
     assert_eq!(stager.retained_attributed_bytes(), 0);
     assert_eq!(stager.retained_attributed_bytes_high_water(), peak);
 
-    let fat_tail = drained.split_off(1);
-    let clone = fat_tail[0].clone();
-    let clone_bytes = clone.payload().retained_heap_bytes();
-    assert_eq!(fat_tail[0].payload().retained_heap_bytes(), fat_bytes);
-    stager.restore_many([clone]);
+    let fat_tail = drained.pop().expect("fat tail");
+    let clone_bytes = fat_tail.payload().retained_heap_bytes();
+    assert_eq!(fat_tail.payload().retained_heap_bytes(), fat_bytes);
+    stager.restore_many([fat_tail]);
     assert_eq!(stager.received_len(), 1);
     assert_eq!(stager.received_bytes(), wire);
     assert_eq!(stager.decoded_bytes(), clone_bytes);

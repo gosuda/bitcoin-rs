@@ -49,15 +49,12 @@ VARIABLES
   queryIsScriptLive,
   \* @type: Str;
   queryResult,
-  \* @type: [transitionLock: Bool, chainLock: Bool, mempoolLock: Bool];
-  queryLocksHeld,
-  \* @type: Bool;
-  transitionLockHeld
+  \* @type: [chainLock: Bool, mempoolLock: Bool];
+  queryLocksHeld
 
 vars == << tipHeight, tipCommit, currentGen, retiredGens, coverageHeight,
            views, queryPhase, queryViewId, queryTargetHeight,
-           queryIsTipPromised, queryIsScriptLive, queryResult, queryLocksHeld,
-           transitionLockHeld >>
+           queryIsTipPromised, queryIsScriptLive, queryResult, queryLocksHeld >>
 
 ViewIds == 1..MaxViews
 GenIds == 1..MaxGenerations
@@ -73,7 +70,6 @@ ViewRecord == [
 ]
 
 LockState == [
-  transitionLock: BOOLEAN,
   chainLock: BOOLEAN,
   mempoolLock: BOOLEAN
 ]
@@ -92,7 +88,6 @@ TypeOK ==
   /\ queryIsScriptLive \in BOOLEAN
   /\ queryResult \in {"None", "AnswerOk", "Unavailable", "ExpiredView", "Retry"}
   /\ queryLocksHeld \in LockState
-  /\ transitionLockHeld \in BOOLEAN
 
 InitView(i) == [
   captured |-> FALSE,
@@ -104,7 +99,6 @@ InitView(i) == [
 ]
 
 InitLocks == [
-  transitionLock |-> FALSE,
   chainLock |-> FALSE,
   mempoolLock |-> FALSE
 ]
@@ -123,7 +117,6 @@ Init ==
   /\ queryIsScriptLive = FALSE
   /\ queryResult = "None"
   /\ queryLocksHeld = InitLocks
-  /\ transitionLockHeld = FALSE
 \* Actions
 
 \* Ordinary tip extension (QRY-03): commit and tip height advance.
@@ -133,8 +126,7 @@ ExtendChain ==
   /\ tipCommit' = tipCommit + 1
   /\ UNCHANGED << currentGen, retiredGens, coverageHeight, views,
                   queryPhase, queryViewId, queryTargetHeight,
-                  queryIsTipPromised, queryIsScriptLive, queryResult, queryLocksHeld,
-                  transitionLockHeld >>
+                  queryIsTipPromised, queryIsScriptLive, queryResult, queryLocksHeld >>
 
 \* Projection coverage catches up to chain tip.
 AdvanceCoverage ==
@@ -142,8 +134,7 @@ AdvanceCoverage ==
   /\ coverageHeight' = coverageHeight + 1
   /\ UNCHANGED << tipHeight, tipCommit, currentGen, retiredGens, views,
                   queryPhase, queryViewId, queryTargetHeight,
-                  queryIsTipPromised, queryIsScriptLive, queryResult, queryLocksHeld,
-                  transitionLockHeld >>
+                  queryIsTipPromised, queryIsScriptLive, queryResult, queryLocksHeld >>
 
 \* Deep reorg (QRY-06): current generation is retired and replaced.
 \* Views pinned to retired generations become Expired.
@@ -157,22 +148,6 @@ DeepReorg ==
        ELSE views[i]]
   /\ UNCHANGED << tipHeight, tipCommit, coverageHeight,
                   queryPhase, queryViewId, queryTargetHeight,
-                  queryIsTipPromised, queryIsScriptLive, queryResult, queryLocksHeld,
-                  transitionLockHeld >>
-
-\* Concurrent ChainTransition actor acquires and releases the transition lock.
-ChainTransitionAcquire ==
-  /\ ~transitionLockHeld
-  /\ transitionLockHeld' = TRUE
-  /\ UNCHANGED << tipHeight, tipCommit, currentGen, retiredGens, coverageHeight,
-                  views, queryPhase, queryViewId, queryTargetHeight,
-                  queryIsTipPromised, queryIsScriptLive, queryResult, queryLocksHeld >>
-
-ChainTransitionRelease ==
-  /\ transitionLockHeld
-  /\ transitionLockHeld' = FALSE
-  /\ UNCHANGED << tipHeight, tipCommit, currentGen, retiredGens, coverageHeight,
-                  views, queryPhase, queryViewId, queryTargetHeight,
                   queryIsTipPromised, queryIsScriptLive, queryResult, queryLocksHeld >>
 
 \* Capture view (QRY-01, QRY-07): long reader pins one view and generation.
@@ -193,20 +168,18 @@ CaptureView(v, isScriptLive, isTip, targetH) ==
   /\ queryIsScriptLive' = isScriptLive
   /\ queryResult' = "None"
   /\ queryLocksHeld' = [
-       transitionLock |-> FALSE,
        chainLock |-> ~isScriptLive,
        mempoolLock |-> FALSE
      ]
-  /\ UNCHANGED << tipHeight, tipCommit, currentGen, retiredGens, coverageHeight, transitionLockHeld >>
+  /\ UNCHANGED << tipHeight, tipCommit, currentGen, retiredGens, coverageHeight >>
 
 \* State access within view (QRY-02, QRY-03, QRY-05, QRY-06, PRJ-11):
-\* ScriptLive queries are enabled regardless of transitionLockHeld (PRJ-11).
-\* Non-ScriptLive queries require the transition lock not to be held.
+\* QRY-02: a query reads its immutable captured view only; concurrent chain
+\* extension changes tipHeight and tipCommit but never the captured view fields.
 \* Serialization begins only after state access releases query-held locks.
-AccessState ==
-  /\ queryPhase = "Captured"
-  /\ (~queryIsScriptLive => ~transitionLockHeld)
-  /\ LET v == views[queryViewId] IN
+ AccessState ==
+   /\ queryPhase = "Captured"
+   /\ LET v == views[queryViewId] IN
      IF v.status = "Expired" \/ v.viewGen \in retiredGens
      THEN \* Retired view returns ExpiredView (QRY-06)
           /\ queryResult' = "ExpiredView"
@@ -214,7 +187,7 @@ AccessState ==
           /\ queryPhase' = "ResponseReady"
           /\ UNCHANGED << tipHeight, tipCommit, currentGen, retiredGens,
                           coverageHeight, views, queryViewId, queryTargetHeight,
-                          queryIsTipPromised, queryIsScriptLive, transitionLockHeld >>
+                          queryIsTipPromised, queryIsScriptLive >>
      ELSE IF queryIsTipPromised /\ v.viewEpochCommit # tipCommit
      THEN \* Tip-promising query explicitly requires latest applied tip (QRY-03)
           /\ queryResult' = "Retry"
@@ -222,7 +195,7 @@ AccessState ==
           /\ queryPhase' = "ResponseReady"
           /\ UNCHANGED << tipHeight, tipCommit, currentGen, retiredGens,
                           coverageHeight, views, queryViewId, queryTargetHeight,
-                          queryIsTipPromised, queryIsScriptLive, transitionLockHeld >>
+                          queryIsTipPromised, queryIsScriptLive >>
      ELSE IF queryTargetHeight > v.viewCoverage
      THEN \* Outside declared coverage returns Unavailable (QRY-05)
           /\ queryResult' = "Unavailable"
@@ -230,28 +203,26 @@ AccessState ==
           /\ queryPhase' = "ResponseReady"
           /\ UNCHANGED << tipHeight, tipCommit, currentGen, retiredGens,
                           coverageHeight, views, queryViewId, queryTargetHeight,
-                          queryIsTipPromised, queryIsScriptLive, transitionLockHeld >>
+                          queryIsTipPromised, queryIsScriptLive >>
      ELSE \* Valid answer inside coverage (QRY-04, PRJ-11)
-          \* ScriptLive does NOT acquire transition lock (PRJ-11)
+          \* ScriptLive answers from its self-contained live rows (PRJ-11)
           /\ queryResult' = "AnswerOk"
           /\ queryLocksHeld' = InitLocks
           /\ queryPhase' = "ResponseReady"
           /\ UNCHANGED << tipHeight, tipCommit, currentGen, retiredGens,
                           coverageHeight, views, queryViewId, queryTargetHeight,
-                          queryIsTipPromised, queryIsScriptLive, transitionLockHeld >>
+                          queryIsTipPromised, queryIsScriptLive >>
 
 \* Serialization after state access (QRY-08): buffer held under backpressure,
 \* zero chain or mempool locks held.
 StartSerialization ==
   /\ queryPhase = "ResponseReady"
-  /\ queryLocksHeld.transitionLock = FALSE
   /\ queryLocksHeld.chainLock = FALSE
   /\ queryLocksHeld.mempoolLock = FALSE
   /\ queryPhase' = "Serializing"
   /\ UNCHANGED << tipHeight, tipCommit, currentGen, retiredGens,
                   coverageHeight, views, queryViewId, queryTargetHeight,
-                  queryIsTipPromised, queryIsScriptLive, queryResult, queryLocksHeld,
-                  transitionLockHeld >>
+                  queryIsTipPromised, queryIsScriptLive, queryResult, queryLocksHeld >>
 
 \* Complete query, release response buffer
 FinishQuery ==
@@ -261,7 +232,7 @@ FinishQuery ==
   /\ queryLocksHeld' = InitLocks
   /\ UNCHANGED << tipHeight, tipCommit, currentGen, retiredGens,
                   coverageHeight, views, queryViewId, queryTargetHeight,
-                  queryIsTipPromised, queryIsScriptLive, transitionLockHeld >>
+                  queryIsTipPromised, queryIsScriptLive >>
 
 Stutter ==
   /\ UNCHANGED vars
@@ -269,8 +240,6 @@ Next ==
   \/ ExtendChain
   \/ AdvanceCoverage
   \/ DeepReorg
-  \/ ChainTransitionAcquire
-  \/ ChainTransitionRelease
   \/ \E v \in ViewIds, isScript \in BOOLEAN, isTip \in BOOLEAN, h \in HeightDom :
         CaptureView(v, isScript, isTip, h)
   \/ AccessState
@@ -300,14 +269,14 @@ SafetyAccessFromRetiredNeverAnswersOk ==
   /\ (queryPhase = "Captured" /\ (views[queryViewId].viewGen \in retiredGens \/ views[queryViewId].status = "Expired")) =>
        queryResult # "AnswerOk"
 
-\* PRJ-11: ScriptLive never acquires the chain transition lock
+\* PRJ-11: ScriptLive never acquires the chain lock
 SafetyScriptLiveLockFree ==
-  /\ queryIsScriptLive => ~queryLocksHeld.transitionLock
+  /\ queryIsScriptLive => ~queryLocksHeld.chainLock
 
 \* QRY-08: Serialization runs with no locks held
 SafetySerializationNoLocks ==
   /\ (queryPhase = "Serializing") =>
-       (~queryLocksHeld.transitionLock /\ ~queryLocksHeld.chainLock /\ ~queryLocksHeld.mempoolLock)
+       (~queryLocksHeld.chainLock /\ ~queryLocksHeld.mempoolLock)
 
 Safety ==
   /\ SafetyHistoryQueryNeverRetries

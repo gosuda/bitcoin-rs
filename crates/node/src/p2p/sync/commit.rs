@@ -60,8 +60,7 @@ impl BlockSync {
             applied = stopped,
             error = %source,
             "block sync: chain transition could not be settled; \
-             mempool admission is closed and the node will not \
-             retry until recovery or restart"
+             chainstate is closed for recovery and node shutdown was requested"
         );
     }
 
@@ -90,7 +89,7 @@ impl BlockSync {
         let (mut drained, expected_len) = self.drain_blocks_for_apply(staged_count);
         let mut applied_hashes = ExpectedBlockHashes::with_capacity(expected_len);
         let mut failed_hash = None;
-        let mut failed_permanent = false;
+        let mut failed_disposition: Option<WindowApplyDisposition> = None;
         let mut chunk_start = 0_usize;
         while chunk_start < drained.len() {
             let chunk_end = chunk_start.saturating_add(
@@ -139,12 +138,17 @@ impl BlockSync {
                     }
                     applied = applied.saturating_add(outcome.stopped);
                     failed_hash = outcome.failed_hash;
-                    failed_permanent = outcome.failed_permanent;
+                    failed_disposition = Some(error.disposition);
                     break;
                 }
             }
         }
-        self.finish_apply_buffered_blocks(&applied_hashes, failed_hash, failed_permanent, started);
+        self.finish_apply_buffered_blocks(
+            &applied_hashes,
+            failed_hash,
+            failed_disposition,
+            started,
+        );
         (applied, failed)
     }
 
@@ -206,11 +210,15 @@ impl BlockSync {
         &self,
         applied_hashes: &[Hash256],
         failed_hash: Option<Hash256>,
-        failed_permanent: bool,
+        failed_disposition: Option<WindowApplyDisposition>,
         started: Instant,
     ) {
         if !applied_hashes.is_empty() || failed_hash.is_some() {
-            if let Some(hash) = failed_hash.filter(|_| !failed_permanent) {
+            let retryable = failed_disposition.is_some_and(|disposition| {
+                disposition != WindowApplyDisposition::Permanent
+                    && disposition != WindowApplyDisposition::Fatal
+            });
+            if let Some(hash) = failed_hash.filter(|_| retryable) {
                 let failed_height = {
                     let tree = self.chain.block_tree();
                     tree.height_of_hash(hash)

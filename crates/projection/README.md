@@ -3,18 +3,17 @@
 Owns the confirmed-transaction index: compact rows over the workspace key-value
 store and versioned `TxLookup`/`ScriptHistory`/`ScriptLive` watermarks that pin
 rows to an exact active-chain prefix. `ScriptLive` is the compact reverse view
-of the authoritative UTXO set: each row stores an empty value and a complete
-outpoint after an eight-byte script-hash prefix.
+of the authoritative UTXO set: each row stores a complete outpoint after an
+eight-byte script-hash prefix, with a value carrying the full script hash and
+the coin's value, height, and coinbase flag in compact varint form.
 
-`IndexWriter` is the sole mutation owner. It walks a serialized block once
-(`prepare_block` / `prepare_block_with_spent_scripts`) and commits bounded
-`PreparedBatch` writes of txid, script-funding, previous-outpoint spending,
-and live-outpoint rows (counted by `IndexRowCounts`). `Indexer<S: KvStore>`
-is the read side over the same store. `iter_funding_rows`, `iter_spending_rows`, and
-`iter_live_outpoints` scan a lossy 8-byte prefix. Funding and spending rows come back in
-chronological (big-endian height) order; live outpoints come back in key byte order.
-Exact resolution of those rows against full block identity lives in the runtime query
-engine, which reads row-scoped block ranges by height.
+`IndexWriter` is the sole mutation owner. It prepares each block from its committed
+facts (`prepare_block_from_facts`), or from the serialized body on the gap fallback
+(`prepare_block_with_spent_scripts`), which parses the body once. Each `PreparedBatch`
+commit writes block headers and live-outpoint rows; transaction, script-history, and
+compact-filter rows go to the segment tail. `Indexer<S: KvStore>` is the read side over
+the same store, and `iter_live_outpoints` scans a lossy 8-byte prefix. Live outpoints
+come back in key byte order.
 `PreparedBlock`/`PreparedBatch` under `PreparedBatchLimits` bound one atomic
 forward write by row count and encoded bytes, and `IndexWriter` is the mutation-only
 handle for durable prepared writes. `IndexWatermark` is the durable

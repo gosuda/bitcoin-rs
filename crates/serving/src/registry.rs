@@ -16,7 +16,7 @@ pub(crate) enum Dispatch {
         fn(
             &Arc<Context>,
             &Value,
-            &bitcoin_rs_execution::chain::LatchReader,
+            &bitcoin_rs_consensus::latch::LatchReader,
         ) -> Result<Value, RpcError>,
     ),
 }
@@ -253,7 +253,7 @@ declare_rows! {
 
     "getcapabilities", SurfaceKind::Rpc, Status::Extension, "", CORE_VERSION, "bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/serving/src/handlers/chain.rs, crates/projection/src/capabilities.rs).", "0.4.0", Some(chain::getcapabilities);
 
-    "dumptxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Writes an unmodified Core v2 snapshot of the applied tip's UTXO set. Only type latest is served: type is required to be \"latest\" as in Core 31.1, and rollback snapshots and the options object (rollback, in_memory) are not accepted. The encode holds chain-transition and stable-view exclusion for its whole duration, blocking block commits, and logs that time; it is cancellable through the request latch and node shutdown, answering -1 and publishing nothing. The output goes to a fsynced exclusive sibling temporary file and is renamed into place without replacement, then the directory is fsynced; an existing destination (including a named pipe), a destination under the assumeutxo recovery namespace, or a platform without atomic no-replace rename is refused. See API-33 in docs/contracts/external-api.md.", "0.14.0", Some(chain::dumptxoutset), Blocking, ["path", "type"];
+    "dumptxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Writes an unmodified Core v2 snapshot of the applied tip's UTXO set. Only type latest is served: type is required to be \"latest\" as in Core 31.1, and rollback snapshots and the options object (rollback, in_memory) are not accepted. The encode holds chain-transition and stable-view exclusion for its whole duration, blocking block commits, and logs that time; it is cancellable through the request latch and node shutdown, answering -1 and publishing nothing. The output goes to a fsynced exclusive sibling temporary file and is renamed into place without replacement, then the directory is fsynced; an existing destination (including a named pipe) or a platform without atomic no-replace rename is refused. See API-33 in docs/contracts/external-api.md.", "0.14.0", Some(chain::dumptxoutset), Blocking, ["path", "type"];
     "getblockfilter", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Optional basic BIP158 filters. Active-chain only; stale/pruned or missing history is unavailable. Disabled by default; enable --blockfilterindex on an unpruned node. See docs/contracts/indexing.md.", "0.14.0", Some(chain::getblockfilter), ["blockhash", "filtertype"];
     "getblockfrompeer", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No on-demand block fetch from peers.", "n/a", None;
     "getchainstates", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Reports coherent active/historical lifecycle with transaction-based progress; omits Core cache/difficulty fields and unavailable progress. Returns -32603 instead of waiting when lifecycle work is busy; ordinary chain-transition reads may still wait. Historical role precedes active. See API-33, crates/node/src/snapshot.rs and crates/serving/src/handlers/chain.rs.", "0.12.0", Some(chain::getchainstates);

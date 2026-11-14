@@ -18,6 +18,7 @@ struct NodeReorgObserver<'a> {
     disconnected_bytes: usize,
     disconnected_full: bool,
     disconnected_blocks: usize,
+    connect_failed: bool,
 }
 
 impl<'a> NodeReorgObserver<'a> {
@@ -30,6 +31,7 @@ impl<'a> NodeReorgObserver<'a> {
             disconnected_bytes: 0,
             disconnected_full: false,
             disconnected_blocks: 0,
+            connect_failed: false,
         }
     }
 }
@@ -43,7 +45,9 @@ impl ReorgObserver for NodeReorgObserver<'_> {
     fn connected(&mut self, block: &BlockImage, outcome: &ConnectOutcome) {
         self.reconnected
             .extend((0..block.tx_count()).map(|tx| block.identity(tx).txid()));
-        self.followers.on_connect(block, outcome);
+        if self.followers.on_connect(block, outcome).is_err() {
+            self.connect_failed = true;
+        }
         (self.connected_body)(outcome.hash);
     }
 
@@ -71,10 +75,10 @@ impl ReorgObserver for NodeReorgObserver<'_> {
 fn trim_after_reorg(
     gateway: &bitcoin_rs_mempool::MempoolGateway,
 ) -> Result<(), bitcoin_rs_mempool::MempoolError> {
-    let _ = gateway.expire(
+    gateway.expire(
         bitcoin_rs_mempool::AdmissionOrigin::Reorg,
         bitcoin_rs_consensus::primitives::unix_time_secs(),
-    );
+    )?;
     let max_bytes = gateway.max_total_bytes();
     if max_bytes == 0 || gateway.read().dynamic_memory_usage() <= max_bytes {
         return Ok(());
@@ -97,11 +101,12 @@ fn settle_node_reorg(
 
     let settlement_failed = (|| {
         if observer.disconnected_blocks == 0 {
-            return mempool_change
-                .take()
-                .is_some_and(|change| change.finish().is_err());
+            return observer.connect_failed
+                || mempool_change
+                    .take()
+                    .is_some_and(|change| change.finish().is_err());
         }
-        let mut settle_failed = false;
+        let mut settle_failed = observer.connect_failed;
         if let (Some(change), Some(gateway)) = (
             mempool_change.as_ref(),
             observer.followers.mempool_gateway(),
@@ -123,10 +128,18 @@ fn settle_node_reorg(
                     observer.disconnected.drain(..),
                 );
             }
-            if gateway.remove_for_reorg(change, &chain).is_err()
-                || (reconsidered && trim_after_reorg(gateway).is_err())
+            let commit_id = handles.durable_commit_id();
+            if observer.connect_failed
+                || gateway.remove_for_reorg(change, &chain, commit_id).is_err()
+                || (reconsidered && trim_after_reorg(gateway.as_ref()).is_err())
             {
                 settle_failed = true;
+            } else if let Some(tip) = handles.applied_tip_snapshot() {
+                observer
+                    .followers
+                    .epoch()
+                    .advance((*tip).clone(), commit_id);
+                observer.followers.mining().publish_generation();
             }
         }
         settle_failed

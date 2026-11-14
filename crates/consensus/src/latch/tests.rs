@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crossbeam_channel::Receiver;
 
-use crate::chain::latch::{HookGuard, LatchReader, LatchWriter};
+use super::{HookGuard, LatchReader, LatchWriter};
 
 fn spawn_with_timeout<T: Send + 'static, F: FnOnce() -> T + Send + 'static>(
     f: F,

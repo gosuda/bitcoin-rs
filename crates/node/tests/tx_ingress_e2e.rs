@@ -525,7 +525,7 @@ struct Harness {
     magic: Magic,
     gateway: Arc<MempoolGateway>,
     mining: Arc<FakeMiningControl>,
-    shutdown: bitcoin_rs_execution::chain::LatchWriter,
+    shutdown: bitcoin_rs_consensus::latch::LatchWriter,
     stop: Arc<AtomicBool>,
     source: LoopbackPeer,
     bystander: LoopbackPeer,
@@ -548,7 +548,7 @@ impl Harness {
         let (relay, relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
         let mining = FakeMiningControl::unavailable("not implemented");
         let mining_control: Arc<dyn MiningControl> = mining.clone();
-        let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+        let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
 
         let wiring = PeerWiring {
             magic,
@@ -660,7 +660,7 @@ fn full_relay_queue_does_not_block_peer_admission_or_mining_wake() -> Result<()>
     assert!(relay.announce(pending.txid(), pending.wtxid(), None, u64::MAX));
     let mining = Arc::new(RecordingMining::default());
     let mining_control: Arc<dyn MiningControl> = Arc::<RecordingMining>::clone(&mining);
-    let shutdown = bitcoin_rs_execution::chain::LatchWriter::new();
+    let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
     let (ingress_tx, ingress_rx) = crossbeam_channel::bounded(1);
     let tx = spending_tx(parent_txid(0xDD), 40_000);
     let txid = tx.txid();

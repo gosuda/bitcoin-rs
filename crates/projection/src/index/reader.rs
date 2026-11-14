@@ -2,7 +2,7 @@ use super::{
     capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
     capability::SCRIPT_LIVE_WATERMARK_KEY, error::IndexError,
 };
-use crate::{types::ScriptHashRow, types::SpendingPrefixRow};
+use crate::types::ScriptHashRow;
 use bitcoin_rs_consensus::primitives::OutPoint;
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
@@ -40,20 +40,6 @@ impl<S: KvStore> Indexer<S> {
         })
     }
 
-    /// Returns prefix rows in store order, newest first, with decoded ascending heights.
-    pub fn iter_funding_rows(
-        &self,
-        scripthash: crate::ScriptHash,
-    ) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
-        let prefix = ScriptHashRow::scan_prefix(scripthash);
-        let iter = self.store.iter_prefix(ColumnFamily::Funding, &prefix)?;
-        let mut rows = collect_prefix_rows(iter)?;
-        for row in &mut rows {
-            row.height = crate::types::ascending_history_height(row.height);
-        }
-        Ok(rows)
-    }
-
     pub fn iter_live_outpoints(
         &self,
         scripthash: crate::ScriptHash,
@@ -70,39 +56,12 @@ impl<S: KvStore> Indexer<S> {
         let mut outpoints = Vec::new();
         for row in iter {
             let (key, value) = row?;
-            if !value.is_empty() {
-                return Err(IndexError::InvalidLiveRowValue { len: value.len() });
-            }
             let row = crate::types::ScriptLiveRow::from_db_row(&key)
                 .ok_or(IndexError::InvalidPrefixRowLength { len: key.len() })?;
+            crate::types::ScriptLiveCoin::decode_value(&value)
+                .map_err(|_| IndexError::InvalidLiveRowValue { len: value.len() })?;
             outpoints.push(row.outpoint());
         }
         Ok(outpoints)
     }
-
-    pub fn iter_spending_rows(
-        &self,
-        outpoint: &OutPoint,
-    ) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
-        let prefix = SpendingPrefixRow::scan_prefix(outpoint);
-        let iter = self.store.iter_prefix(ColumnFamily::Spending, &prefix)?;
-        collect_prefix_rows(iter)
-    }
-}
-
-fn collect_prefix_rows(
-    iter: bitcoin_rs_storage::KvIter<'_>,
-) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
-    let mut rows = Vec::new();
-    for entry in iter {
-        let (key, _value) = entry?;
-        if key.len() != crate::HASH_PREFIX_ROW_SIZE {
-            return Err(IndexError::InvalidPrefixRowLength { len: key.len() });
-        }
-        rows.push(
-            zerocopy::FromBytes::read_from_bytes(&key[..])
-                .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })?,
-        );
-    }
-    Ok(rows)
 }

@@ -94,8 +94,10 @@ pub trait SyncChain: Send + Sync {
 
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission;
 
-    fn minimum_chain_work(&self) -> bitcoin_rs_execution::chain::ChainWork {
-        bitcoin_rs_execution::chain::ChainWork::from_be_bytes(self.network().minimum_chain_work())
+    fn minimum_chain_work(&self) -> bitcoin_rs_consensus::header_rules::ChainWork {
+        bitcoin_rs_consensus::header_rules::ChainWork::from_be_bytes(
+            self.network().minimum_chain_work(),
+        )
     }
 
     fn check_body_binding(&self, block: &BlockImage) -> Result<(), SyncChainError>;

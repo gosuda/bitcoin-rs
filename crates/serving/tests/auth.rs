@@ -469,7 +469,7 @@ fn spawn_on_surface(auth: Auth, surface: RpcSurface) -> TestResult<std::net::Soc
         idle_timeout: Duration::from_secs(2),
         rest_enabled: false,
     };
-    let shutdown = bitcoin_rs_execution::chain::LatchReader::fixture_never();
+    let shutdown = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     thread::spawn(move || {
         let _ignored = server.serve_surface_with_shutdown(shutdown, surface);
     });
@@ -493,7 +493,7 @@ fn spawn_with_rest(auth: Auth, rest_enabled: bool) -> TestResult<std::net::Socke
         idle_timeout: Duration::from_secs(2),
         rest_enabled,
     };
-    let shutdown = bitcoin_rs_execution::chain::LatchReader::fixture_never();
+    let shutdown = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     thread::spawn(move || {
         let _ignored = server.serve_with_shutdown(shutdown);
     });

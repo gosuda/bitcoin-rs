@@ -451,7 +451,7 @@ impl BlockSync {
                 let hash = Hash256::from(inbound.payload().block_hash());
                 let source = inbound.source;
                 let _ = inbound.forward_credit;
-                let _memory_credit = inbound.memory_credit.take();
+                let memory_credit = inbound.memory_credit.take();
                 let payload = inbound.into_payload();
                 if matches!(admission, BodyAdmission::Staged) {
                     staged_blocks.push((hash, source, StagedBlock::AlreadyStaged));
@@ -497,7 +497,14 @@ impl BlockSync {
                     refused_at_quota = refused_at_quota.saturating_add(1);
                     continue;
                 }
-                let staged = stager.insert(hash, next_expected_hash, payload, source, now);
+                let staged = stager.insert_with_credit(
+                    hash,
+                    next_expected_hash,
+                    payload,
+                    source,
+                    now,
+                    memory_credit,
+                );
                 if matches!(admission, BodyAdmission::Unrequested { gate_pending: true })
                     && matches!(staged, StagedBlock::Memory { .. })
                 {

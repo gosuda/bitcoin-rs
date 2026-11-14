@@ -3,14 +3,14 @@ use crate::support::{common, error::TestError};
 use bitcoin::{Block, consensus::serialize, hashes::Hash as _};
 use bitcoin_rs_projection::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter,
-    PreparedBatch, PreparedBatchLimits, SpentCoinScripts,
+    PreparedBatch, PreparedBatchLimits, SpentCoin, SpentCoins,
 };
 use bitcoin_rs_storage::KvStore;
 use std::sync::{Arc, atomic::Ordering};
 
 struct NoSpends;
-impl SpentCoinScripts for NoSpends {
-    fn script_bytes(&self, _: &[u8; 32], _: u32) -> Option<&[u8]> {
+impl SpentCoins for NoSpends {
+    fn spent_coin(&self, _: &[u8; 32], _: u32) -> Option<SpentCoin<'_>> {
         None
     }
 }
@@ -61,11 +61,11 @@ fn filter_rows_and_cursor_publish_atomically_and_reset_preserves_txindex() -> Re
         Err(IndexError::Storage(_))
     ));
     assert!(writer.watermarks()?.compact_filters.is_none());
-    assert!(writer.snapshot()?.compact_filter(&hash)?.is_none());
+    assert!(writer.snapshot()?.compact_filter(0, &hash)?.is_none());
     writer.commit_forward(prepare(&writer, &genesis, 0, caps)?)?;
     let original = writer
         .snapshot()?
-        .compact_filter(&hash)?
+        .compact_filter(0, &hash)?
         .ok_or("missing filter")?;
     assert_eq!(original.filter, [1, 0x9d, 0xfc, 0xa8]);
     let mark = Some(IndexWatermark { height: 0, hash });
@@ -78,7 +78,7 @@ fn filter_rows_and_cursor_publish_atomically_and_reset_preserves_txindex() -> Re
     let stale_fence = writer.fenced_watermarks()?.0;
     writer.reset_capabilities(IndexCapabilities::COMPACT_FILTERS)?;
     assert_eq!(writer.watermarks()?.tx_lookup, mark);
-    assert!(writer.snapshot()?.compact_filter(&hash)?.is_none());
+    assert!(writer.snapshot()?.compact_filter(0, &hash)?.is_none());
     assert!(matches!(
         writer.commit_forward_with_cursor(stale_fence, stale_batch, ConsumerCursorUpdate::Keep),
         Err(IndexError::ResetInProgress)
@@ -118,17 +118,20 @@ fn filter_rows_and_cursor_publish_atomically_and_reset_preserves_txindex() -> Re
     assert!(
         writer
             .snapshot()?
-            .compact_filter(&child.block_hash().to_byte_array())?
+            .compact_filter(1, &child.block_hash().to_byte_array())?
             .is_none()
     );
     assert_eq!(
-        writer.snapshot()?.compact_filter(&hash)?,
+        writer.snapshot()?.compact_filter(0, &hash)?,
         Some(original.clone())
     );
     drop(writer);
     let reopened = IndexWriter::open(store, 2)?;
     assert_eq!(reopened.watermarks()?.compact_filters, mark);
-    assert_eq!(reopened.snapshot()?.compact_filter(&hash)?, Some(original));
+    assert_eq!(
+        reopened.snapshot()?.compact_filter(0, &hash)?,
+        Some(original)
+    );
     Ok(())
 }
 
@@ -153,7 +156,7 @@ fn compact_filters_survive_rocksdb_index_reopen() -> Result<(), TestError> {
     assert_eq!(
         writer
             .snapshot()?
-            .compact_filter(&hash)?
+            .compact_filter(0, &hash)?
             .ok_or("missing filter")?
             .filter,
         [1, 0x9d, 0xfc, 0xa8]

@@ -120,7 +120,7 @@ impl ChainControl for StubControl {
     fn dump_txoutset(
         &self,
         _path: &std::path::Path,
-        _cancellation: &bitcoin_rs_execution::chain::LatchReader,
+        _cancellation: &bitcoin_rs_consensus::latch::LatchReader,
     ) -> Result<crate::context::SnapshotExport, crate::context::SnapshotControlError> {
         Err(crate::context::SnapshotControlError::Unavailable(
             "snapshot export is not attached to this stub".to_owned(),
@@ -131,7 +131,7 @@ impl ChainControl for StubControl {
         &self,
         check_level: u8,
         nblocks: u32,
-        _cancellation: &bitcoin_rs_execution::chain::LatchReader,
+        _cancellation: &bitcoin_rs_consensus::latch::LatchReader,
     ) -> Result<bool, ChainControlError> {
         self.calls.store(true, Ordering::SeqCst);
         self.level.store(check_level, Ordering::SeqCst);

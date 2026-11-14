@@ -143,7 +143,8 @@ fn sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool() -> Resul
     let removed = ctx
         .mempool
         .gateway
-        .evict_below_fee_rate(AdmissionOrigin::Rpc, u64::MAX);
+        .evict_below_fee_rate(AdmissionOrigin::Rpc, u64::MAX)
+        .expect("eviction commits");
     assert!(
         !removed.changes.is_empty(),
         "the eviction must have removed the entry"
@@ -232,7 +233,7 @@ fn sendrawtransaction_fee_argument_keeps_core_amount_semantics() -> Result<(), T
         (json!({"maxfeerate": false}), Some(core_type_error)),
         (json!(-0.1), Some(RpcError::INVALID_PARAMS)),
         (json!(1.0), Some(RpcError::INVALID_PARAMS)),
-        (json!("false"), None),
+        (json!("false"), Some(RpcError::INVALID_PARAMS)),
     ]
     .into_iter()
     .enumerate()

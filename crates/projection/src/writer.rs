@@ -1,19 +1,41 @@
-use bitcoin_rs_consensus::primitives::OutPoint;
 use parking_lot::RwLock;
+
+use std::path::Path;
 
 use crate::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexWatermark, IndexWatermarks,
-    IndexWriteFence, IndexWriter, PreparedBatch, PreparedBlock, ScriptHash, SpentCoinScripts,
-    index::PortableImportRow,
+    IndexWriteFence, IndexWriter, PreparedBatch, PreparedBlock, SpentCoins,
 };
+use bitcoin_rs_storage::ColumnFamily;
 
-pub(crate) type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHash) -> Result<(), IndexError>) -> Result<(), IndexError>
-    + 'a;
+pub struct TxLookupAttachment<'a> {
+    pub headers: &'a [&'a [u8; crate::types::HEADER_ROW_SIZE]],
+    pub base: IndexWatermark,
+    pub floor: u32,
+    pub scratch: &'a Path,
+}
 
-pub(crate) type PortableImportProduce<'a> = dyn FnMut(&mut dyn FnMut(PortableImportRow<'_>) -> Result<(), IndexError>) -> Result<(), IndexError>
-    + 'a;
+pub struct ScriptHistoryAttachment<'a> {
+    pub base: IndexWatermark,
+    pub floor: u32,
+    pub scratch: &'a Path,
+}
 
-pub(crate) trait TxIndexWriter: Send + Sync {
+pub struct CompactFilterRow {
+    pub height: u32,
+    pub block_hash: [u8; 32],
+    pub filter_hash: [u8; 32],
+    pub header: [u8; 32],
+    pub filter: Vec<u8>,
+}
+
+pub struct CompactFilterAttachment<'a> {
+    pub base: IndexWatermark,
+    pub records: u64,
+    pub scratch: &'a Path,
+}
+
+pub trait TxIndexWriter: Send + Sync {
     fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
     fn prepare_block_with_spent_scripts(
         &self,
@@ -21,20 +43,46 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         height: u32,
         hash: [u8; 32],
         body: &[u8],
-        spent_scripts: &dyn SpentCoinScripts,
+        spent_scripts: &dyn SpentCoins,
     ) -> Result<PreparedBlock, IndexError>;
-    fn seed_script_live_stream(
+    fn prepare_block_from_facts(
         &self,
-        produce: &mut ScriptLiveSeedProduce<'_>,
-        tip: IndexWatermark,
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<usize, IndexError>;
-    fn import_tx_lookup_stream(
+        capabilities: IndexCapabilities,
+        block: bitcoin_rs_storage::CommittedBlock,
+    ) -> Result<PreparedBlock, IndexError>;
+    fn stage_script_live_rows(
         &self,
-        produce: &mut PortableImportProduce<'_>,
-        base: IndexWatermark,
-        floor: u32,
+        rows: &mut dyn Iterator<Item = Vec<u8>>,
     ) -> Result<usize, IndexError>;
+    fn publish_script_live_seed(&self, seed_tip: IndexWatermark) -> Result<(), IndexError>;
+    fn attach_tx_lookup_segment(
+        &self,
+        segment: &crate::segment::import::ImportedSegment,
+        attachment: &TxLookupAttachment<'_>,
+    ) -> Result<u64, IndexError>;
+    fn attach_script_history_segment(
+        &self,
+        segment: &crate::segment::import::ImportedSegment,
+        attachment: &ScriptHistoryAttachment<'_>,
+    ) -> Result<u64, IndexError>;
+    fn attach_streamed_tx_lookup(
+        &self,
+        tx_dir: &crate::segment::import::StreamedFamily,
+        seal: &crate::segment::import::StreamedSeal,
+        attachment: &TxLookupAttachment<'_>,
+    ) -> Result<u64, IndexError>;
+    fn attach_streamed_script_history(
+        &self,
+        families: &[(ColumnFamily, crate::segment::import::StreamedFamily)],
+        seal: &crate::segment::import::StreamedSeal,
+        attachment: &ScriptHistoryAttachment<'_>,
+    ) -> Result<u64, IndexError>;
+    fn clear_unpublished_segments(&self) -> Result<(), IndexError>;
+    fn attach_compact_filter_segment(
+        &self,
+        by_height: &mut dyn Iterator<Item = CompactFilterRow>,
+        attachment: &CompactFilterAttachment<'_>,
+    ) -> Result<u64, IndexError>;
     fn commit_forward_with_cursor(
         &self,
         fence: IndexWriteFence,
@@ -48,7 +96,7 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         prev: Option<IndexWatermark>,
         body: &[u8],
         cursor: ConsumerCursorUpdate<'_>,
-        spent_scripts: &dyn SpentCoinScripts,
+        spent_scripts: &dyn SpentCoins,
     ) -> Result<(), IndexError>;
 
     fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError>;
@@ -81,7 +129,7 @@ where
         height: u32,
         hash: [u8; 32],
         body: &[u8],
-        spent_scripts: &dyn SpentCoinScripts,
+        spent_scripts: &dyn SpentCoins,
     ) -> Result<PreparedBlock, IndexError> {
         self.read().prepare_block_with_spent_scripts(
             capabilities,
@@ -90,6 +138,14 @@ where
             body,
             spent_scripts,
         )
+    }
+
+    fn prepare_block_from_facts(
+        &self,
+        capabilities: IndexCapabilities,
+        block: bitcoin_rs_storage::CommittedBlock,
+    ) -> Result<PreparedBlock, IndexError> {
+        self.read().prepare_block_from_facts(capabilities, block)
     }
 
     fn commit_forward_with_cursor(
@@ -102,23 +158,65 @@ where
             .commit_forward_with_cursor(fence, batch, cursor)
     }
 
-    fn seed_script_live_stream(
+    fn stage_script_live_rows(
         &self,
-        produce: &mut ScriptLiveSeedProduce<'_>,
-        tip: IndexWatermark,
-        cancelled: &dyn Fn() -> bool,
+        rows: &mut dyn Iterator<Item = Vec<u8>>,
     ) -> Result<usize, IndexError> {
-        self.write()
-            .seed_script_live_stream(produce, tip, cancelled)
+        self.write().stage_script_live_rows(rows)
     }
 
-    fn import_tx_lookup_stream(
+    fn publish_script_live_seed(&self, seed_tip: IndexWatermark) -> Result<(), IndexError> {
+        self.write().publish_script_live_seed(seed_tip)
+    }
+
+    fn attach_tx_lookup_segment(
         &self,
-        produce: &mut PortableImportProduce<'_>,
-        base: IndexWatermark,
-        floor: u32,
-    ) -> Result<usize, IndexError> {
-        self.write().import_tx_lookup_stream(produce, base, floor)
+        segment: &crate::segment::import::ImportedSegment,
+        attachment: &TxLookupAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        self.write().attach_tx_lookup_segment(segment, attachment)
+    }
+
+    fn attach_script_history_segment(
+        &self,
+        segment: &crate::segment::import::ImportedSegment,
+        attachment: &ScriptHistoryAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        self.write()
+            .attach_script_history_segment(segment, attachment)
+    }
+
+    fn attach_streamed_tx_lookup(
+        &self,
+        tx_dir: &crate::segment::import::StreamedFamily,
+        seal: &crate::segment::import::StreamedSeal,
+        attachment: &TxLookupAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        self.write()
+            .attach_streamed_tx_lookup(tx_dir, seal, attachment)
+    }
+
+    fn attach_streamed_script_history(
+        &self,
+        families: &[(ColumnFamily, crate::segment::import::StreamedFamily)],
+        seal: &crate::segment::import::StreamedSeal,
+        attachment: &ScriptHistoryAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        self.write()
+            .attach_streamed_script_history(families, seal, attachment)
+    }
+
+    fn attach_compact_filter_segment(
+        &self,
+        by_height: &mut dyn Iterator<Item = CompactFilterRow>,
+        attachment: &CompactFilterAttachment<'_>,
+    ) -> Result<u64, IndexError> {
+        self.write()
+            .attach_compact_filter_segment(by_height, attachment)
+    }
+
+    fn clear_unpublished_segments(&self) -> Result<(), IndexError> {
+        self.write().clear_unpublished_segments()
     }
 
     fn commit_rollback_one_for_with_cursor_with_spent_scripts(
@@ -128,7 +226,7 @@ where
         prev: Option<IndexWatermark>,
         body: &[u8],
         cursor: ConsumerCursorUpdate<'_>,
-        spent_scripts: &dyn SpentCoinScripts,
+        spent_scripts: &dyn SpentCoins,
     ) -> Result<(), IndexError> {
         self.write()
             .commit_rollback_one_for_with_cursor_with_spent_scripts(

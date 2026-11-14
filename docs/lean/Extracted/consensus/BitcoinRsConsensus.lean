@@ -199,7 +199,7 @@ structure primitives.layout.TxLayout where
   segwit : Bool
 
 /-- [bitcoin_rs_consensus::primitives::layout::ParsedTransaction]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 676:0-679:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 678:0-681:1
     Visibility: public -/
 structure primitives.layout.ParsedTransaction where
   bytes : Slice Std.U8

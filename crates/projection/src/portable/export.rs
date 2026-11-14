@@ -6,16 +6,13 @@ use super::chain::{BodyReader, ChainBase, Located};
 use super::manifest::{
     BundleFamily, BundleIdentity, IndexBundleManifestV1, IndexMode, MANIFEST_FILE, TxLookupArtifact,
 };
-use super::{
-    BundleHost, ExportReport, IndexBundleError, IndexBundleRequest, MAX_RESTORE_POSITIONS,
-    io_error, sync_dir,
-};
+use super::{BundleHost, ExportReport, IndexBundleError, IndexBundleRequest, io_error, sync_dir};
 #[cfg(test)]
 use crate::TxIndexSnapshot;
 use crate::types::{
     HASH_PREFIX_ROW_SIZE, HashPrefixRow, TxPosition, TxPositionValue, positions_are_valid,
 };
-use crate::{IndexCapability, IndexError, IndexWatermark, IndexWriteFence, TxIndexFamily};
+use crate::{IndexCapability, IndexError, IndexWatermark, IndexWriteFence};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use bitcoin_rs_storage::{PrefixScanLimit, StorageError};
 use std::cmp::Reverse;
@@ -50,8 +47,7 @@ fn stream_family_pages(
     let mut visited = 0_u64;
     let mut totals = (0_u64, 0_u64);
     loop {
-        let page =
-            snapshot.scan_family_page(TxIndexFamily::TxConfirmed, start_after.as_deref(), limit)?;
+        let page = snapshot.tx_lookup_page(start_after.as_deref(), limit)?;
         let mut last_key: Option<Vec<u8>> = None;
         for scan_row in page.rows {
             visited += 1;
@@ -144,7 +140,7 @@ impl Drop for Publication {
     }
 }
 
-fn create_new_file(path: &Path) -> Result<File, IndexBundleError> {
+pub(super) fn create_new_file(path: &Path) -> Result<File, IndexBundleError> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -602,11 +598,6 @@ impl RowExporter<'_> {
                 reason: "row carries no valid position list",
             })?;
         let total = total.saturating_add(u64::try_from(positions.len()).unwrap_or(u64::MAX));
-        if total > u64::try_from(MAX_RESTORE_POSITIONS).unwrap_or(u64::MAX) {
-            return Err(IndexBundleError::ExportTooLarge {
-                limit_positions: MAX_RESTORE_POSITIONS,
-            });
-        }
         Ok(total)
     }
 
@@ -632,11 +623,7 @@ impl RowExporter<'_> {
                 if snapshot.capability_floor(IndexCapability::TxLookup)? != self.floor {
                     return Err(IndexBundleError::Stale);
                 }
-                snapshot.scan_family_page(
-                    TxIndexFamily::TxConfirmed,
-                    start_after.as_deref(),
-                    limit,
-                )?
+                snapshot.tx_lookup_page(start_after.as_deref(), limit)?
             };
             for row in &page.rows {
                 scanned = scanned.saturating_add(1);
@@ -720,11 +707,6 @@ impl RowExporter<'_> {
             self.locate(row, value)?;
             positions =
                 positions.saturating_add(u64::try_from(self.located.len()).unwrap_or(u64::MAX));
-            if positions > u64::try_from(MAX_RESTORE_POSITIONS).unwrap_or(u64::MAX) {
-                return Err(IndexBundleError::ExportTooLarge {
-                    limit_positions: MAX_RESTORE_POSITIONS,
-                });
-            }
             let mut sequence_key = [0_u8; RESOLVED_SORT_KEY_LEN];
             sequence_key.copy_from_slice(&sequence.to_be_bytes());
             write_framed(
@@ -827,13 +809,6 @@ impl RowExporter<'_> {
                     .map(|(_, position)| *position),
             );
             let added = u64::try_from(run).unwrap_or(u64::MAX);
-            if self.positions_written.saturating_add(added)
-                > u64::try_from(MAX_RESTORE_POSITIONS).unwrap_or(u64::MAX)
-            {
-                return Err(IndexBundleError::ExportTooLarge {
-                    limit_positions: MAX_RESTORE_POSITIONS,
-                });
-            }
             self.positions_written += added;
             bytes += write_record(out, &txid, height, &self.positions)
                 .map_err(|error| io_error(self.path, error))?;

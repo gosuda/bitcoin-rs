@@ -3,6 +3,7 @@ mod construction;
 mod data_dir_lock;
 mod events;
 mod index;
+mod open;
 mod pow_valid_hook;
 mod prune;
 mod recovery;
@@ -52,7 +53,7 @@ fn publish_applied_tip_height(state: &NodeState, height: u32) {
         .store(Some(Arc::new(TipSnapshot {
             tip_id: bitcoin_rs_execution::chain::node::NodeId::new(height),
             height,
-            chainwork: bitcoin_rs_execution::chain::node::ChainWork::ZERO,
+            chainwork: bitcoin_rs_consensus::header_rules::ChainWork::ZERO,
             hash: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&hash),
             chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
         })));

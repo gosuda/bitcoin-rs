@@ -297,7 +297,7 @@ impl OverlayTransport {
     pub(crate) fn start(
         self: &Arc<Self>,
         shared: &crate::listener::ConnectionShared,
-        shutdown: &crate::latch::LatchReader,
+        shutdown: &bitcoin_rs_consensus::latch::LatchReader,
     ) -> io::Result<Vec<std::thread::JoinHandle<Result<(), crate::listener::ListenerError>>>> {
         self.config.validate()?;
         let i2p_key = if self.config.i2p_accept {

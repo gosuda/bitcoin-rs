@@ -195,6 +195,116 @@ fn exception_block_disconnect_drops_the_overwritten_engine_coin() -> TestResult 
     }
     Ok(())
 }
+// CMT-06
+#[test]
+fn overwriting_block_disconnect_derives_removal_as_before() -> TestResult {
+    let (exception_height, _) = BIP30_DUPLICATE_TXID_EXCEPTIONS[0];
+    let coinbase = coinbase_tx();
+    let txid = coinbase.txid();
+    let block = Block {
+        header: Header {
+            version: 1,
+            prev_blockhash: BlockHash(Hash256::default()),
+            merkle_root: Hash256::default(),
+            time: 1_300_000_000,
+            bits: CompactTarget::from_consensus(0x1d00ffff),
+            nonce: 1,
+        },
+        txs: vec![coinbase],
+    };
+    let block_hash = Hash256::from(block.block_hash());
+    let image = BlockImage::from_local(block.clone());
+    let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    let prior = OwnedUtxoOut {
+        vout: 0,
+        value: 50_000,
+        script_pubkey: vec![0x51],
+        coinbase: true,
+        height: 1,
+    };
+    let prior_record = UtxoRecord::from_owned_outputs(txid.0, &[prior])
+        .map_err(|_| TestError::Missing("prior coin record"))?;
+    let key = CoinKey(txid.0.to_le_bytes());
+    chain.commit_authority.store().put(
+        ColumnFamily::Coins,
+        CoinKey(txid.0.to_le_bytes()).as_bytes(),
+        prior_record.bytes(),
+    )?;
+    let txids = [txid];
+    let tx_plan = crate::prepare::plan_block_transactions(&image, &txids);
+    let resolved = Arc::new(crate::ResolvedUtxoView::resolve(
+        &crate::connect::ChainstateUtxoSource::new(&chain),
+        &image,
+        &tx_plan,
+    ));
+    let Ok((changes, undo, _totals)) = build_block_changes_checked(&ChangeRequest {
+        image: &image,
+        block_hash,
+        height: exception_height,
+        txids: &txids,
+        tx_plan: &tx_plan,
+        resolved: &resolved,
+    }) else {
+        return Err(TestError::Missing(
+            "the BIP30 exception block must build its changes",
+        ));
+    };
+    let created: Vec<OwnedUtxoOut> = changes
+        .adds()
+        .iter()
+        .filter(|add| add.outpoint.txid == txid)
+        .map(|add| OwnedUtxoOut {
+            vout: add.outpoint.vout,
+            value: add.txout.value.to_sat(),
+            script_pubkey: add.txout.script_pubkey.to_vec(),
+            coinbase: add.coinbase,
+            height: add.height,
+        })
+        .collect();
+    let pre_bytes = prior_record.bytes().to_vec();
+    if pre_bytes.is_empty() {
+        return Err(TestError::Missing(
+            "prior coin set must hold the overwritten coin",
+        ));
+    }
+    let post_connect = UtxoRecord::from_owned_outputs(txid.0, &created)
+        .map_err(|_| TestError::Missing("post-connect coin record"))?;
+    chain.coins.wipe()?;
+    chain.commit_authority.store().put(
+        ColumnFamily::Coins,
+        CoinKey(txid.0.to_le_bytes()).as_bytes(),
+        post_connect.bytes(),
+    )?;
+    let encoded = bitcoin_rs_storage::utxo::contract::encode_undo_record(&undo, block_hash);
+    let derived =
+        bitcoin_rs_storage::utxo::contract::decode_undo_record_for_block(&encoded, &block)
+            .map_err(|_| TestError::Missing("derived undo must decode"))?;
+    if !derived.restores().is_empty() {
+        return Err(TestError::Missing(
+            "derived undo must hold no overwritten restore",
+        ));
+    }
+    let overwritten = OutPoint::new(txid, 0);
+    if !derived.removes().contains(&overwritten) {
+        return Err(TestError::Missing(
+            "derived undo must remove the created outpoint",
+        ));
+    }
+    let delta = crate::disconnect::build_disconnect_delta(&chain.coins, &derived)?;
+    let (_, remaining) = delta
+        .records
+        .iter()
+        .find(|(record_key, _)| record_key.as_bytes() == key.as_bytes())
+        .ok_or(TestError::Missing(
+            "disconnect must rewrite the exception block's txid",
+        ))?;
+    if remaining.is_some() {
+        return Err(TestError::Missing(
+            "disconnect must drop the overwritten coin, as Bitcoin Core",
+        ));
+    }
+    Ok(())
+}
 
 struct FakeBlockLoader {
     height: u32,

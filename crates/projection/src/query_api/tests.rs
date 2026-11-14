@@ -153,7 +153,7 @@ mod script_live_outage_engine_tests {
         tip_reader.store(Some(Arc::clone(&tip)));
 
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded::<()>(16);
-        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+        let runtime = DerivedIndexRuntime::new(wake_tx);
         let outage = DerivedIndexWorkerError::ScriptLiveHistoryPruned;
         runtime.fail_script_live(&outage);
         assert!(runtime.script_live_failure().is_some());
@@ -169,9 +169,10 @@ mod script_live_outage_engine_tests {
                 body,
             })),
             QueryEngineLive {
-                utxo: None,
-                chain_transition: None,
                 enabled: IndexCapabilities::TX_AND_SCRIPTS,
+                generation: std::sync::Arc::new(crate::runtime::Generation::new(1)),
+                historical_verified: None,
+                chain_transition: None,
             },
         );
 
@@ -185,7 +186,13 @@ mod script_live_outage_engine_tests {
         );
 
         let txid = expected_txid(&block);
-        assert_eq!(engine.transaction_height(&txid)?, Some(0));
+        let expected_tx =
+            deserialize::<bitcoin_rs_consensus::primitives::Tx>(&serialize(&block.txdata[0]))?;
+        assert_eq!(expected_tx.txid(), txid);
+        assert_eq!(
+            engine.transaction_block(&txid)?,
+            Some((expected_tx, super::TransactionBlock { height: 0, hash }))
+        );
         let history = engine.confirmed_history(script_hash)?;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].txid, txid);
@@ -320,4 +327,36 @@ fn default_history_pages_are_bounded_by_the_page_max() -> Result<(), crate::port
         "a legacy page never exceeds the script-history page maximum"
     );
     Ok(())
+}
+
+// QRY-05
+#[test]
+fn query_miss_absent_maps_to_scoped_none() {
+    let absent = QueryMiss::Absent;
+    let scoped: Result<Option<u32>, TxQueryError> = absent.into_scoped();
+    assert_eq!(scoped, Ok(None));
+
+    let from_result: Result<Option<String>, TxQueryError> = QueryMiss::Absent.into();
+    assert_eq!(from_result, Ok(None));
+
+    let try_err = TxQueryError::try_from(QueryMiss::Absent);
+    assert_eq!(try_err, Err(()), "Absent inside coverage is not an error");
+
+    let unavailable = QueryMiss::Unavailable {
+        capability: IndexCapability::TxLookup,
+        declared_floor_or_tip: 42,
+    };
+    let unavail_scoped: Result<Option<u32>, TxQueryError> = unavailable.into_scoped();
+    assert_eq!(
+        unavail_scoped,
+        Err(TxQueryError::Unavailable(
+            TxUnavailableCause::OutsideCoverage {
+                declared_floor_or_tip: 42,
+            }
+        ))
+    );
+
+    let expired = QueryMiss::ExpiredView;
+    let expired_scoped: Result<Option<u32>, TxQueryError> = expired.into_scoped();
+    assert_eq!(expired_scoped, Err(TxQueryError::ExpiredView));
 }

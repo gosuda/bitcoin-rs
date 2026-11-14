@@ -126,7 +126,7 @@ pub(crate) fn loadtxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 pub(crate) fn dumptxoutset(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     super::ensure_at_most_params(params, 2)?;
     let path = required_str(params, 0, "path is required")?;
@@ -918,7 +918,7 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 pub(crate) fn syncwithvalidationinterfacequeue(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let _settled = loop {
@@ -964,7 +964,7 @@ pub(crate) fn invalidateblock(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 pub(crate) fn verifychain(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     super::ensure_at_most_params(params, 2)?;
     let array = params_array(params)?;
@@ -1133,7 +1133,7 @@ fn execute_txoutset_scan(
     ctx: &Context,
     hash_type: &str,
     permit: &bitcoin_rs_storage::utxo::scan::UtxoScanPermit<'_>,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<(AppliedView, TxOutSetScan), RpcError> {
     let cancelled = || permit.aborted() || cancellation.is_triggered();
     for _ in 0..4 {
@@ -1182,7 +1182,7 @@ fn format_txoutsetinfo_response(
 pub(crate) fn gettxoutsetinfo(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     let hash_type = parse_txoutsetinfo_params(params)?;
     let scan_permit = ctx.chain.utxo.reserve_scan().map_err(|error| match error {
@@ -1228,7 +1228,7 @@ pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let filter = index.block_filter(hash).map_err(|error| {
         use bitcoin_rs_projection::TxQueryError;
         match error {
-            TxQueryError::Retry => RpcError::Misc("Block filter index is still catching up; retry later".into()),
+            TxQueryError::Retry(_) | TxQueryError::ExpiredView => RpcError::Misc("Block filter index is still catching up; retry later".into()),
             TxQueryError::Unavailable(cause) =>
                 RpcError::Misc(format!("Block filter index unavailable: {cause}")),
             TxQueryError::Storage(reason) =>
@@ -1261,9 +1261,17 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         .filter(|_| index_name.as_deref().is_none_or(|name| name == "txindex"))
         .map(|derived_index| derived_index.index_info())
         .transpose()?;
-    let txindex_entry = txindex_entry.map(|info| v31::GetIndexInfoName {
-        synced: info.synced,
-        best_block_height: info.best_block_height,
+    let txindex_entry = txindex_entry.map(|info| {
+        tracing::debug!(
+            applied_height = info.applied_height,
+            verified_height = info.verified_height,
+            coverage_height = info.coverage_height,
+            "txindex three positions"
+        );
+        v31::GetIndexInfoName {
+            synced: info.synced,
+            best_block_height: info.best_block_height,
+        }
     });
     let mut indexes = alloc::collections::BTreeMap::new();
     if let Some(entry) = txindex_entry {
@@ -1311,7 +1319,7 @@ const MAX_SCAN_RESPONSE_BYTES: usize = 16 * 1_048_576;
 pub(crate) fn scantxoutset(
     ctx: &Arc<Context>,
     params: &Value,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     let (action, objects) = scan_arguments(params)?;
     match action {
@@ -1378,7 +1386,7 @@ fn scantxoutset_scan(
     ctx: &Context,
     permit: &bitcoin_rs_storage::utxo::scan::UtxoScanPermit<'_>,
     scan_scripts: &std::collections::BTreeMap<Vec<u8>, String>,
-    cancellation: &bitcoin_rs_execution::chain::LatchReader,
+    cancellation: &bitcoin_rs_consensus::latch::LatchReader,
 ) -> Result<Value, RpcError> {
     let scripts = scan_scripts.keys().cloned().collect();
     let (applied, complete, mut scan) = loop {
@@ -1977,8 +1985,9 @@ mod getdifficulty_tests {
 mod pruneblockchain_tests {
     use alloc::sync::Arc;
 
+    use bitcoin_rs_consensus::header_rules::ChainWork;
     use bitcoin_rs_consensus::primitives::Hash256;
-    use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot};
+    use bitcoin_rs_execution::chain::{NodeId, TipSnapshot};
 
     use super::*;
 
@@ -2201,8 +2210,9 @@ mod chaintxstats_window_tests;
 mod verification_progress_wiring_tests {
     use alloc::sync::Arc;
 
+    use bitcoin_rs_consensus::header_rules::ChainWork;
     use bitcoin_rs_consensus::primitives::Hash256;
-    use bitcoin_rs_execution::chain::{ChainWork, NodeStatus, TipSnapshot};
+    use bitcoin_rs_execution::chain::{NodeStatus, TipSnapshot};
     use sonic_rs::{JsonValueTrait, json};
 
     use super::*;
@@ -2328,7 +2338,7 @@ mod dumptxoutset_tests {
         fn dump_txoutset(
             &self,
             path: &std::path::Path,
-            cancellation: &bitcoin_rs_execution::chain::LatchReader,
+            cancellation: &bitcoin_rs_consensus::latch::LatchReader,
         ) -> Result<SnapshotExport, SnapshotControlError> {
             *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(path.to_path_buf());
             if cancellation.is_triggered() {
@@ -2355,7 +2365,7 @@ mod dumptxoutset_tests {
             &self,
             _check_level: u8,
             _nblocks: u32,
-            _cancellation: &bitcoin_rs_execution::chain::LatchReader,
+            _cancellation: &bitcoin_rs_consensus::latch::LatchReader,
         ) -> Result<bool, ChainControlError> {
             Ok(false)
         }

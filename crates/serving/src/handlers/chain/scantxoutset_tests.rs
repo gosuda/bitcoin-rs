@@ -2,14 +2,15 @@ fn scantxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     super::scantxoutset(
         ctx,
         params,
-        &bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+        &bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
     )
 }
 
 use alloc::sync::Arc;
 
+use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, TxOut, Txid};
-use bitcoin_rs_execution::chain::{ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_execution::chain::{NodeId, TipSnapshot};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 
 use super::*;
@@ -346,7 +347,7 @@ fn scantxoutset_status_abort_release_and_failure_cleanup() {
         &ctx,
         &permit,
         &std::collections::BTreeMap::new(),
-        &bitcoin_rs_execution::chain::LatchReader::fixture_never(),
+        &bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
     )
     .unwrap_or_else(|error| panic!("cancel result: {error}"));
     assert_eq!(result["success"].as_bool(), Some(false));
@@ -732,7 +733,7 @@ fn scan_expansion_observes_abort_shutdown_and_deadline() -> TestResult {
     let ctx = Arc::new(Context::new());
     for cause in ["abort", "shutdown", "deadline"] {
         let permit = ctx.chain.utxo.reserve_scan()?;
-        let cancellation_writer = bitcoin_rs_execution::chain::LatchWriter::new();
+        let cancellation_writer = bitcoin_rs_consensus::latch::LatchWriter::new();
         let cancellation = cancellation_writer.reader();
         let descriptor = scan_descriptor(
             &format!("wpkh({SCAN_XPUB}/<0;1>/*)"),
@@ -921,7 +922,7 @@ fn ranged_descriptor_budget_bounds_and_omitted_multipath_default() {
 fn cancellation_during_ranged_scan_releases_reservation() {
     let ctx = Arc::new(Context::new());
     let xpub = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
-    let stop = bitcoin_rs_execution::chain::LatchWriter::new();
+    let stop = bitcoin_rs_consensus::latch::LatchWriter::new();
     stop.trigger();
     let cancel_reader = stop.reader();
 

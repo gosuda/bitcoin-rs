@@ -110,7 +110,6 @@ impl SpentOutputLookup for NoSpend {
 fn sample_undo() -> UndoBatch {
     let mut undo = UndoBatch::empty();
     undo.restore(UtxoAdd::new(FUNDED, coin(900), false, 1));
-    undo.remove(CREATED);
     undo
 }
 #[test]
@@ -325,12 +324,9 @@ fn shaped_block() -> Block {
     }
 }
 
-fn shaped_undo(block: &Block) -> UndoBatch {
+fn shaped_undo(_block: &Block) -> UndoBatch {
     let mut undo = UndoBatch::empty();
     undo.restore(UtxoAdd::new(FUNDED, coin(90), false, HEIGHT - 1));
-    undo.remove(OutPoint::new(block.txs[0].txid(), 0));
-    undo.remove(OutPoint::new(block.txs[1].txid(), 1));
-    undo.remove(OutPoint::new(block.txs[2].txid(), 0));
     undo
 }
 
@@ -363,10 +359,10 @@ fn undo_validation_matches_the_block_shape() -> TestResult {
 
     let mut extra_remove = shaped_undo(&block);
     extra_remove.remove(OutPoint::new(block.txs[1].txid(), 0));
-    assert!(matches!(
+    assert_eq!(
         validate_undo_for_block(&check, HEIGHT, &extra_remove),
-        Err(UndoCodecError::BlockMismatch { .. })
-    ));
+        Ok(()),
+    );
 
     let mut foreign_restore = shaped_undo(&block);
     foreign_restore.restore(UtxoAdd::new(CREATED, coin(1), false, HEIGHT - 1));
@@ -382,10 +378,7 @@ fn undo_validation_matches_the_block_shape() -> TestResult {
         Err(UndoCodecError::BlockMismatch { .. })
     ));
 
-    let mut missing_restore = UndoBatch::empty();
-    missing_restore.remove(OutPoint::new(block.txs[0].txid(), 0));
-    missing_restore.remove(OutPoint::new(block.txs[1].txid(), 1));
-    missing_restore.remove(OutPoint::new(block.txs[2].txid(), 0));
+    let missing_restore = UndoBatch::empty();
     assert!(matches!(
         validate_undo_for_block(&check, HEIGHT, &missing_restore),
         Err(UndoCodecError::BlockMismatch { .. })
@@ -399,8 +392,6 @@ fn undo_validation_matches_the_block_shape() -> TestResult {
         false,
         HEIGHT - 2,
     ));
-    overwritten.remove(OutPoint::new(block.txs[0].txid(), 0));
-    overwritten.remove(OutPoint::new(block.txs[2].txid(), 0));
     assert_eq!(
         validate_undo_for_block(&check, HEIGHT, &overwritten),
         Ok(()),
@@ -424,7 +415,6 @@ fn every_undo_truncation_and_flip_is_refused_or_canonical() -> TestResult {
         false,
         12,
     ));
-    batch.remove(OutPoint::new(Txid(Hash256::from_le_bytes(&[0x33; 32])), 2));
     let bytes = crate::utxo::undo_codec::encode(&batch, hash);
     for cut in 0..bytes.len() {
         assert!(
@@ -482,5 +472,136 @@ fn coin_stats_feed_tracks_utxo_accounting_through_populate() -> TestResult {
     expected.insert_utxo(&FUNDED, &coin(800), 2, false);
     expected.finish_block(2, 1);
     assert_eq!(listener.snapshot(), expected);
+    Ok(())
+}
+// CMT-06
+#[test]
+fn undo_record_holds_only_spent_coins_and_derives_created_outputs() -> TestResult {
+    const MAX_SCRIPT_SIZE: usize = 10_000;
+    let mut blocks = Vec::new();
+    blocks.push(shaped_block());
+    let mut coinbase_only = shaped_block();
+    coinbase_only.txs.truncate(1);
+    blocks.push(coinbase_only);
+    let mut op_return_block = shaped_block();
+    op_return_block.txs[1].outputs[1] = TxOut {
+        value: Amount::from_sat(5),
+        script_pubkey: Script::from_bytes(vec![0x6a, 0x01]),
+    };
+    blocks.push(op_return_block);
+    for block in &blocks {
+        let txids: Vec<Txid> = block.txs.iter().map(|tx| tx.txid()).collect();
+        let mut created: Vec<OutPoint> = Vec::new();
+        for (tx, txid) in block.txs.iter().zip(txids.iter()) {
+            for (index, _) in tx.outputs.iter().enumerate() {
+                let vout = u32::try_from(index)
+                    .map_err(|_| TestError::Missing("block output index exceeds the vout range"))?;
+                created.push(OutPoint::new(*txid, vout));
+            }
+        }
+        let mut prior: hashbrown::HashSet<Txid> = hashbrown::HashSet::new();
+        let mut same_block: hashbrown::HashSet<OutPoint> = hashbrown::HashSet::new();
+        let mut external: Vec<OutPoint> = Vec::new();
+        for (tx, txid) in block.txs.iter().zip(txids.iter()) {
+            if tx.is_coinbase() {
+                prior.insert(*txid);
+                continue;
+            }
+            for input in &tx.inputs {
+                let prev = input.previous_output;
+                if prior.contains(&prev.txid) {
+                    same_block.insert(prev);
+                } else if !external.contains(&prev) {
+                    external.push(prev);
+                }
+            }
+            prior.insert(*txid);
+        }
+        let mut undo = UndoBatch::empty();
+        for prev in &external {
+            undo.restore(UtxoAdd::new(*prev, coin(90), false, HEIGHT - 1));
+        }
+        let hash = block.block_hash().0;
+        let bytes = crate::utxo::undo_codec::encode(&undo, hash);
+        let mut expected_len = 37_usize;
+        for add in undo.restores() {
+            let script_len = add.txout.script_pubkey.len();
+            let varint_len = if script_len < 253 { 1 } else { 3 };
+            expected_len = expected_len
+                .saturating_add(36)
+                .saturating_add(8)
+                .saturating_add(varint_len)
+                .saturating_add(script_len)
+                .saturating_add(1)
+                .saturating_add(4);
+        }
+        assert_eq!(bytes.len(), expected_len);
+        for point in &created {
+            if undo.restores().iter().any(|add| add.outpoint == *point) {
+                continue;
+            }
+            let mut needle = [0_u8; 36];
+            needle[..32].copy_from_slice(point.txid.as_bytes());
+            needle[32..].copy_from_slice(&point.vout.to_le_bytes());
+            let mut found = false;
+            if bytes.len() >= needle.len() {
+                for window in 0..=bytes.len() - needle.len() {
+                    if bytes[window..window + needle.len()] == needle {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            assert!(!found, "encoded record holds a created outpoint");
+        }
+        let decoded = decode_undo_record_for_block(&bytes, block)?;
+        assert_eq!(decoded.restores().len(), undo.restores().len());
+        for (got, want) in decoded.restores().iter().zip(undo.restores()) {
+            assert_eq!(got.outpoint, want.outpoint);
+            assert_eq!(got.txout, want.txout);
+            assert_eq!(got.coinbase, want.coinbase);
+            assert_eq!(got.height, want.height);
+        }
+        let mut retained: hashbrown::HashSet<OutPoint> = hashbrown::HashSet::new();
+        for (tx, txid) in block.txs.iter().zip(txids.iter()) {
+            for (index, txout) in tx.outputs.iter().enumerate() {
+                let vout = u32::try_from(index)
+                    .map_err(|_| TestError::Missing("block output index exceeds the vout range"))?;
+                let unstorable = txout.script_pubkey.first() == Some(&0x6a)
+                    || txout.script_pubkey.len() > MAX_SCRIPT_SIZE;
+                if !unstorable {
+                    retained.insert(OutPoint::new(*txid, vout));
+                }
+            }
+        }
+        let restored: hashbrown::HashSet<OutPoint> =
+            undo.restores().iter().map(|add| add.outpoint).collect();
+        let mut expected_removes: Vec<OutPoint> = retained
+            .into_iter()
+            .filter(|point| !same_block.contains(point) && !restored.contains(point))
+            .collect();
+        expected_removes.sort_by(|a, b| {
+            let a_txid = a.txid;
+            let b_txid = b.txid;
+            let a_vout = a.vout;
+            let b_vout = b.vout;
+            a_txid
+                .as_bytes()
+                .cmp(b_txid.as_bytes())
+                .then_with(|| a_vout.cmp(&b_vout))
+        });
+        let mut got_removes: Vec<OutPoint> = decoded.removes().to_vec();
+        got_removes.sort_by(|a, b| {
+            let a_txid = a.txid;
+            let b_txid = b.txid;
+            let a_vout = a.vout;
+            let b_vout = b.vout;
+            a_txid
+                .as_bytes()
+                .cmp(b_txid.as_bytes())
+                .then_with(|| a_vout.cmp(&b_vout))
+        });
+        assert_eq!(got_removes, expected_removes);
+    }
     Ok(())
 }

@@ -18,7 +18,7 @@ use super::model::{
     AddressTransactionSummary, BlockStatus, MempoolSummary, MerkleProof, Outspend,
     RecentTransaction, ScriptSummary, TransactionValue,
 };
-use super::projection::{Confirmation, ParentSource, Projection};
+use super::projection::{Confirmation, ParentSource, Projection, TxSource};
 use crate::context::Context;
 use crate::convert;
 use crate::decimal::parse_ascii_decimal;
@@ -167,44 +167,92 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Response {
     }
 }
 
-fn tx(ctx: &Context, id: &str) -> Response {
+fn fenced_tx(
+    ctx: &Context,
+    id: &str,
+    build: impl FnOnce(&Projection<'_>, Txid) -> (Response, TxSource),
+) -> Response {
+    let Ok(txid) = Txid::from_str(id) else {
+        return bad_request("txid must be 64 hex characters");
+    };
     let projection = Projection::new(ctx);
-    projection.required_transaction(id).map_or_else(
-        |r| r,
-        |(tx, status)| {
-            projection
-                .transaction_values([(&tx, status)], None)
-                .map_or_else(|r| r, |values| json_ok(&values[0]))
+    let view = projection.capture_chain_view();
+    let (response, source) = build(&projection, txid);
+    match source {
+        TxSource::Confirmed => response,
+        TxSource::Joined => match projection.ensure_chain_view(view.as_ref()) {
+            Ok(()) => response,
+            Err(unavailable) => unavailable,
         },
-    )
+    }
+}
+
+fn tx(ctx: &Context, id: &str) -> Response {
+    fenced_tx(ctx, id, |projection, txid| {
+        let transaction = match projection.transaction(&txid) {
+            Ok(transaction) => transaction,
+            Err(response) => return (response, TxSource::Confirmed),
+        };
+        let Some((transaction, status, source)) = transaction else {
+            return (not_found(), TxSource::Joined);
+        };
+        let response = projection
+            .transaction_values([(&transaction, status)], None)
+            .map_or_else(|response| response, |(values, _)| json_ok(&values[0]));
+        (response, source)
+    })
 }
 fn tx_hex(ctx: &Context, id: &str) -> Response {
-    Projection::new(ctx).required_transaction(id).map_or_else(
-        |r| r,
-        |(tx, _)| {
+    fenced_tx(ctx, id, |projection, txid| {
+        let transaction = match projection.transaction(&txid) {
+            Ok(transaction) => transaction,
+            Err(response) => return (response, TxSource::Confirmed),
+        };
+        let Some((transaction, _, source)) = transaction else {
+            return (not_found(), TxSource::Joined);
+        };
+        (
             text_response(
                 "text/plain",
-                consensus_bytes(&tx).to_lower_hex_string().into_bytes(),
-            )
-        },
-    )
+                consensus_bytes(&transaction)
+                    .to_lower_hex_string()
+                    .into_bytes(),
+            ),
+            source,
+        )
+    })
 }
 fn tx_raw(ctx: &Context, id: &str) -> Response {
-    Projection::new(ctx).required_transaction(id).map_or_else(
-        |r| r,
-        |(tx, _)| Response {
-            status: 200,
-            reason: "OK",
-            content_type: "application/octet-stream",
-            body: consensus_bytes(&tx),
-        },
-    )
+    fenced_tx(ctx, id, |projection, txid| {
+        let transaction = match projection.transaction(&txid) {
+            Ok(transaction) => transaction,
+            Err(response) => return (response, TxSource::Confirmed),
+        };
+        let Some((transaction, _, source)) = transaction else {
+            return (not_found(), TxSource::Joined);
+        };
+        (
+            Response {
+                status: 200,
+                reason: "OK",
+                content_type: "application/octet-stream",
+                body: consensus_bytes(&transaction),
+            },
+            source,
+        )
+    })
 }
 fn tx_status(ctx: &Context, id: &str) -> Response {
-    Projection::new(ctx).required_transaction(id).map_or_else(
-        |r| r,
-        |(_, status)| json_ok(Projection::status_value(status)),
-    )
+    fenced_tx(ctx, id, |projection, txid| {
+        let transaction = match projection.transaction(&txid) {
+            Ok(transaction) => transaction,
+            Err(response) => return (response, TxSource::Confirmed),
+        };
+        let Some((_, status, source)) = transaction else {
+            return (not_found(), TxSource::Joined);
+        };
+        (json_ok(Projection::status_value(status)), source)
+    })
 }
 
 fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
@@ -259,7 +307,10 @@ fn confirmed_block(
     ),
     Response,
 > {
-    let (transaction, Some(status)) = Projection::new(ctx).required_transaction(id)? else {
+    let (transaction, Some(status), _) = Projection::new(ctx)
+        .required_transaction(id)
+        .map_err(|(response, _)| response)?
+    else {
         return Err(not_found());
     };
     let txid = transaction.txid();
@@ -304,30 +355,41 @@ fn tx_outspend(ctx: &Context, id: &str, vout: &str) -> Response {
     let Some(vout) = parse_ascii_decimal::<u32>(vout) else {
         return bad_request("vout must be an unsigned integer");
     };
-    let projection = Projection::new(ctx);
-    projection.required_transaction(id).map_or_else(
-        |r| r,
-        |(transaction, _)| {
-            let Some(_) = transaction
-                .outputs
-                .get(usize::try_from(vout).unwrap_or(usize::MAX))
-            else {
-                return not_found();
-            };
-            outspend(&projection, OutPoint::new(transaction.txid(), vout))
-                .map_or_else(|r| r, json_ok)
-        },
-    )
+    fenced_tx(ctx, id, |projection, txid| {
+        let transaction = match projection.transaction(&txid) {
+            Ok(transaction) => transaction,
+            Err(response) => return (response, TxSource::Confirmed),
+        };
+        let Some((transaction, _, _)) = transaction else {
+            return (not_found(), TxSource::Joined);
+        };
+        let Some(_) = transaction
+            .outputs
+            .get(usize::try_from(vout).unwrap_or(usize::MAX))
+        else {
+            return (not_found(), TxSource::Joined);
+        };
+        match outspend(projection, OutPoint::new(transaction.txid(), vout)) {
+            Ok(outspend) => (json_ok(outspend), TxSource::Joined),
+            Err(response) => (response, TxSource::Joined),
+        }
+    })
 }
 
 fn tx_outspends(ctx: &Context, id: &str) -> Response {
-    let projection = Projection::new(ctx);
-    projection.required_transaction(id).map_or_else(
-        |r| r,
-        |(transaction, _)| {
-            outspends_for_transaction(&projection, &transaction).map_or_else(|r| r, json_ok)
-        },
-    )
+    fenced_tx(ctx, id, |projection, txid| {
+        let transaction = match projection.transaction(&txid) {
+            Ok(transaction) => transaction,
+            Err(response) => return (response, TxSource::Confirmed),
+        };
+        let Some((transaction, _, _)) = transaction else {
+            return (not_found(), TxSource::Joined);
+        };
+        match outspends_for_transaction(projection, &transaction) {
+            Ok(outspends) => (json_ok(outspends), TxSource::Joined),
+            Err(response) => (response, TxSource::Joined),
+        }
+    })
 }
 
 pub(super) fn outspends_for_transaction(
@@ -458,7 +520,8 @@ pub(super) fn block_txs(ctx: &Context, h: &str, start: usize) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    block_transaction_values(ctx, &record, &block, start, CHAIN_PAGE).map_or_else(|r| r, json_ok)
+    block_transaction_values(ctx, &record, &block, start, CHAIN_PAGE)
+        .map_or_else(|r| r, |(values, _)| json_ok(values))
 }
 
 pub(super) fn block_transaction_values(
@@ -467,7 +530,7 @@ pub(super) fn block_transaction_values(
     block: &Block,
     start: usize,
     limit: usize,
-) -> Result<Vec<TransactionValue>, Response> {
+) -> Result<(Vec<TransactionValue>, TxSource), Response> {
     let block_status = (ctx.chain.active_hash_at_height(record.height)
         == Some(Hash256::from(record.hash)))
     .then_some(Confirmation {
@@ -690,7 +753,7 @@ pub(super) fn mempool_history(ctx: &Context, h: ScriptHash) -> Response {
                 .map(|tx| (tx.as_ref(), None)),
             None,
         )
-        .map_or_else(|r| r, json_ok)
+        .map_or_else(|r| r, |(values, _)| json_ok(values))
 }
 
 fn history_scoped(
@@ -749,7 +812,7 @@ fn history_scoped(
                 .chain(chain.iter().map(|(tx, status)| (tx, *status))),
             None,
         )
-        .map_or_else(|r| r, json_ok)
+        .map_or_else(|r| r, |(values, _)| json_ok(values))
 }
 
 pub(super) fn address_transaction_summary(ctx: &Context, h: ScriptHash) -> Response {

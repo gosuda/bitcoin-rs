@@ -18,18 +18,33 @@ pub trait CompactFilterQuery: Send + Sync {
     fn filter_index_info(&self) -> Result<DerivedIndexInfo, TxQueryError>;
 }
 
+// PRJ-13
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DerivedIndexInfo {
     pub synced: bool,
     pub best_block_height: u32,
+    pub applied_height: u32,
+    pub historical_height: u32,
+    pub verified_height: u32,
+    pub coverage_height: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryReason {
+    TipMoved {
+        expected_commit: u64,
+        current_commit: u64,
+    },
 }
 
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TxQueryError {
     #[error("transaction index changed during query; retry")]
-    Retry,
+    Retry(RetryReason),
     #[error("transaction index unavailable: {0}")]
     Unavailable(TxUnavailableCause),
+    #[error("serving view expired due to generation retirement")]
+    ExpiredView,
     #[error("transaction index storage error: {0}")]
     Storage(CompactString),
 }
@@ -38,6 +53,7 @@ pub enum TxQueryError {
 pub enum TxUnavailableCause {
     ScriptHashLimitExceeded { limit: usize },
     RowBudgetExhausted,
+    NodeBudgetExhausted,
     RowBudgetExceeded,
     PrefixScanTruncated,
     LivePrefixScanTruncated,
@@ -45,7 +61,9 @@ pub enum TxUnavailableCause {
     BodyBudgetExceeded,
     PrunedPrefixUnproven { family: &'static str, floor: u32 },
     HistoryUnproven { floor: u32 },
+    OutsideCoverage { declared_floor_or_tip: u32 },
     CapabilityDisabled(IndexCapability),
+    CapabilityUnpublished(IndexCapability),
     WorkerFailed(CompactString),
     WorkerStopped,
     CompactFilterFailed(CompactString),
@@ -64,6 +82,7 @@ impl core::fmt::Display for TxUnavailableCause {
                 write!(f, "scripthash limit exceeded ({limit} entries)")
             }
             Self::RowBudgetExhausted => f.write_str("txindex query work budget exhausted"),
+            Self::NodeBudgetExhausted => f.write_str("txindex node budget exhausted"),
             Self::RowBudgetExceeded => f.write_str("txindex query work budget exceeded"),
             Self::PrefixScanTruncated => f.write_str("txindex prefix scan truncated"),
             Self::LivePrefixScanTruncated => f.write_str("txindex live prefix scan truncated"),
@@ -77,7 +96,18 @@ impl core::fmt::Display for TxUnavailableCause {
                 f,
                 "script history coverage starts at height {floor}; history cannot be proven complete"
             ),
+            Self::OutsideCoverage {
+                declared_floor_or_tip,
+            } => write!(
+                f,
+                "requested data is outside declared coverage ending at height {declared_floor_or_tip}"
+            ),
             Self::CapabilityDisabled(capability) => f.write_str(capability.disabled_message()),
+            Self::CapabilityUnpublished(capability) => write!(
+                f,
+                "{} index has no published generation yet",
+                capability.name()
+            ),
             Self::WorkerFailed(message)
             | Self::CompactFilterFailed(message)
             | Self::ScriptLiveUnavailable(message)
@@ -100,65 +130,110 @@ pub struct CoveredPrefix {
     pub hash: Hash256,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AtPrefix<T> {
-    pub prefix: CoveredPrefix,
-    pub answer: T,
+/// Chain identity of one applied epoch, captured once per read (`QRY-01`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AppliedEpoch {
+    pub hash: Hash256,
+    pub height: u32,
+    pub commit_id: u64,
 }
 
-#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
-pub enum HistoricalQueryError {
-    #[error("historical index query raced chain or index progress; retry")]
-    Retry,
-    #[error("historical index query unavailable: {0}")]
-    Unavailable(HistoricalUnavailableCause),
-    #[error("historical index storage error: {0}")]
-    Storage(CompactString),
+/// Declared, complete coverage of one index capability (`QRY-05`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapabilityCoverage {
+    pub floor: u32,
+    pub last_height: u32,
+    pub last_hash: Hash256,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HistoricalUnavailableCause {
-    Shared(TxUnavailableCause),
-    NoCoveredPrefix {
+/// Provenance of the chain history an answer was built from (`QRY-04`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VerificationState {
+    ChainVerified,
+    AssumedHistory {
+        verified_height: u32,
+        verified_hash: Hash256,
+    },
+}
+
+/// Why a request cannot produce a value (`QRY-05`, `QRY-06`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryMiss {
+    Absent,
+    Unavailable {
         capability: IndexCapability,
+        declared_floor_or_tip: u32,
     },
-    AncestryBudgetExhausted {
-        capability: IndexCapability,
-        watermark_height: u32,
-    },
-    PrefixBelowFloor {
-        floor: u32,
-    },
+    ExpiredView,
 }
 
-impl core::fmt::Display for HistoricalUnavailableCause {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl QueryMiss {
+    /// Maps a miss to a scoped result: `Absent` inside coverage produces `Ok(None)`,
+    /// while `Unavailable` and `ExpiredView` produce the corresponding errors (`QRY-05`, `QRY-06`).
+    pub const fn into_scoped<T>(self) -> Result<Option<T>, TxQueryError> {
         match self {
-            Self::Shared(cause) => core::fmt::Display::fmt(cause, f),
-            Self::NoCoveredPrefix { capability } => write!(
-                f,
-                "historical index has no covered prefix for {}",
-                capability.name()
-            ),
-            Self::AncestryBudgetExhausted {
-                capability,
-                watermark_height,
-            } => write!(
-                f,
-                "historical index ancestry budget exhausted for {} at height {watermark_height}",
-                capability.name()
-            ),
-            Self::PrefixBelowFloor { floor } => {
-                write!(f, "historical index prefix below floor {floor}")
-            }
+            Self::Absent => Ok(None),
+            Self::Unavailable {
+                declared_floor_or_tip,
+                ..
+            } => Err(TxQueryError::Unavailable(
+                TxUnavailableCause::OutsideCoverage {
+                    declared_floor_or_tip,
+                },
+            )),
+            Self::ExpiredView => Err(TxQueryError::ExpiredView),
         }
     }
+}
+
+impl<T> From<QueryMiss> for Result<Option<T>, TxQueryError> {
+    fn from(miss: QueryMiss) -> Self {
+        miss.into_scoped()
+    }
+}
+
+impl TryFrom<QueryMiss> for TxQueryError {
+    type Error = ();
+
+    fn try_from(miss: QueryMiss) -> Result<Self, Self::Error> {
+        match miss {
+            QueryMiss::Absent => Err(()),
+            QueryMiss::Unavailable {
+                declared_floor_or_tip,
+                ..
+            } => Ok(Self::Unavailable(TxUnavailableCause::OutsideCoverage {
+                declared_floor_or_tip,
+            })),
+            QueryMiss::ExpiredView => Ok(Self::ExpiredView),
+        }
+    }
+}
+
+/// A query result with its serving-view provenance (`QRY-04`). The external
+/// JSON-RPC, REST, and Esplora adapters strip every field except `value`;
+/// the embed API returns it whole.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Answer<T> {
+    pub value: T,
+    pub block_hash: Hash256,
+    pub height: u32,
+    pub coverage: CoveredPrefix,
+    pub verification_state: VerificationState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionBlock {
+    pub height: u32,
+    pub hash: Hash256,
 }
 
 pub trait DerivedIndexQuery: Send + Sync {
     fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError>;
     fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError>;
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
         let _ = txid;
         Ok(None)
     }

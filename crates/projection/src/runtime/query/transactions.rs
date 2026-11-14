@@ -1,7 +1,7 @@
 use super::{
     Arc, Block, BlockTree, DerivedIndexQueryEngine, Hash256, MAX_SERIALIZED_BLOCK_BYTES, OutPoint,
-    PrefixBound, QueryBudget, ReadPrefix, Tx, TxIndexSnapshot, TxPosition, TxPositionValue,
-    TxQueryError, TxUnavailableCause, Txid, deserialize,
+    QueryBudget, ReadPrefix, Tx, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError,
+    TxUnavailableCause, Txid, deserialize,
 };
 use crate::types::positions_are_valid;
 use bitcoin_rs_consensus::primitives::BlockHash;
@@ -12,25 +12,13 @@ impl DerivedIndexQueryEngine {
         height: u32,
         prefix: &ReadPrefix,
     ) -> Result<Hash256, TxQueryError> {
-        match prefix.bound {
-            PrefixBound::ExactTip => {
-                let tree = self.block_tree.read();
-                Self::hash_at_height(&tree, prefix.anchor_id, height).ok_or(TxQueryError::Retry)
-            }
-            PrefixBound::AtMost => {
-                let tree = self.block_tree.read();
-                let mut remaining = super::HISTORICAL_ANCESTRY_BUDGET;
-                let found = tree
-                    .node_at_height_from_bounded(prefix.anchor_id, height, &mut remaining)
-                    .map_err(|_| TxQueryError::Retry)?;
-                found
-                    .and_then(|id| tree.node(id).ok().map(|n| n.hash))
-                    .ok_or(TxQueryError::Retry)
-            }
-        }
+        let tree = self.block_tree.read();
+        Self::hash_at_height(&tree, prefix.anchor_id, height).ok_or(TxQueryError::Unavailable(
+            TxUnavailableCause::BlockBodyMissing { height },
+        ))
     }
 
-    fn hash_at_height(
+    pub(super) fn hash_at_height(
         tree: &BlockTree,
         tip_id: bitcoin_rs_execution::chain::NodeId,
         height: u32,
@@ -169,9 +157,13 @@ impl DerivedIndexQueryEngine {
             return Self::scoped_absence(prefix, "transaction index");
         }
 
+        let mut below_floor = false;
         for row in rows {
             let height = row.row.height();
             if !prefix.covers(height) {
+                if height < prefix.floor {
+                    below_floor = true;
+                }
                 continue;
             }
             let Some(positions) = Self::validated_positions(&row.value)? else {
@@ -198,6 +190,13 @@ impl DerivedIndexQueryEngine {
                 }
             }
         }
+        if below_floor {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::OutsideCoverage {
+                    declared_floor_or_tip: prefix.floor,
+                },
+            ));
+        }
         Self::scoped_absence(prefix, "transaction index")
     }
 
@@ -218,9 +217,10 @@ impl DerivedIndexQueryEngine {
         prefix: &ReadPrefix,
         family: &'static str,
     ) -> Result<Option<T>, TxQueryError> {
-        match prefix.bound {
-            PrefixBound::ExactTip => Self::none_below_floor(prefix.floor, family),
-            PrefixBound::AtMost => Ok(None),
+        if prefix.is_historical {
+            Ok(None)
+        } else {
+            Self::none_below_floor(prefix.floor, family)
         }
     }
 

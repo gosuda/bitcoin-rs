@@ -68,6 +68,7 @@ fn failing_commit_chain(
         capture_rawtx: false,
         capture_block_bytes: false,
         retention: MandatoryRetention::new(Arc::clone(&retention)),
+        window_limits: bitcoin_rs_execution::default_window_limits_source(),
         history: HistoryAccess::new(retention, RetentionBudget::from_blocks(288)),
         role: ChainstateRole::Ordinary,
     }));
@@ -90,15 +91,19 @@ fn failed_durable_commit_halts_apply_and_trips_the_shutdown_latch() -> Result<()
         handles.applied_tip_reader(),
         handles.block_tree_reader(),
     ));
-    let sync = Arc::new(crate::sync::block_sync(
-        Arc::clone(&handles),
+    let sync = Arc::new(crate::sync::block_sync(crate::sync::BlockSyncInputs {
+        handles: Arc::clone(&handles),
         followers,
-        peers,
+        peer_table: peers,
         inbound_headers_rx,
         inbound_blocks_rx,
         ibd,
-        None,
-    ));
+        assumeutxo: None,
+        budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            bitcoin_rs_storage::split_chainstate_cache_budget(16),
+            1,
+        )),
+    }));
 
     inbound_blocks_tx
         .send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))
@@ -130,7 +135,7 @@ fn failed_durable_commit_halts_apply_and_trips_the_shutdown_latch() -> Result<()
         "a halted sync must not commit the redelivered blocks"
     );
 
-    let latch = Arc::new(bitcoin_rs_execution::chain::LatchWriter::new());
+    let latch = Arc::new(bitcoin_rs_consensus::latch::LatchWriter::new());
     let verify_reader = latch.reader();
     let loop_reader = latch.reader();
     let shutdown_for_request = Arc::clone(&latch);

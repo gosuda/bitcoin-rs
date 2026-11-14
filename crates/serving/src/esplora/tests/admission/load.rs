@@ -7,6 +7,7 @@ use std::time::Instant;
 struct LoadTxIndex {
     transactions: std::collections::HashMap<Txid, Tx>,
     calls: AtomicUsize,
+    block: TransactionBlock,
 }
 
 impl crate::context::DerivedIndexQuery for LoadTxIndex {
@@ -15,8 +16,11 @@ impl crate::context::DerivedIndexQuery for LoadTxIndex {
         Ok(self.transactions.get(txid).cloned())
     }
 
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
-        Ok(self.transactions.contains_key(txid).then_some(0))
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
+        Ok(self.transaction(txid)?.map(|tx| (tx, self.block)))
     }
 
     fn outpoint_value(&self, _: &OutPoint) -> Result<Option<u64>, TxQueryError> {
@@ -27,6 +31,10 @@ impl crate::context::DerivedIndexQuery for LoadTxIndex {
         Ok(crate::context::DerivedIndexInfo {
             synced: true,
             best_block_height: 0,
+            applied_height: 0,
+            historical_height: 0,
+            verified_height: 0,
+            coverage_height: 0,
         })
     }
 }
@@ -67,17 +75,28 @@ fn large_script_projection_load() {
         })
         .collect::<Vec<_>>();
     let mut ctx = Context::new().with_esplora_query_limit(limit);
+    let mut block = fixture_genesis();
+    block.txs = transactions.clone();
+    block.header.merkle_root = merkle_root(&block.txs).expect("load transactions");
     ctx.chain
-        .add_block(bitcoin_rs_projection::block_log::BlockRecord::synthetic(
-            0,
-            BlockHash::default(),
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+            0, &block,
         ));
+    ctx.chain
+        .block_tree
+        .write()
+        .insert_node(None, block.header, NodeStatus::Active)
+        .expect("load block header");
     ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
         history,
         funding: funding.clone(),
         unspent: funding,
     }));
     let tx_index = Arc::new(LoadTxIndex {
+        block: TransactionBlock {
+            height: 0,
+            hash: Hash256::from(block.block_hash()),
+        },
         transactions: transactions.into_iter().map(|tx| (tx.txid(), tx)).collect(),
         calls: AtomicUsize::new(0),
     });

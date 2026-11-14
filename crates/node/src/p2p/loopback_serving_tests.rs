@@ -14,7 +14,10 @@ use bitcoin_rs_consensus::primitives::{
     OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
-use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
+use bitcoin_rs_storage::{
+    block_body::{BlockBodyReadError, BlockBodySource},
+    split_chainstate_cache_budget,
+};
 use parking_lot::RwLock;
 
 use crate::p2p::chain_query::{ActiveChainQuery, RecentBlockSlot};
@@ -204,7 +207,7 @@ struct Node {
     addr: PeerEndpoint,
     table: Arc<PeerTable>,
     aggregate: Arc<SharedOutboundBudget>,
-    shutdown: bitcoin_rs_wire::latch::LatchWriter,
+    shutdown: bitcoin_rs_consensus::latch::LatchWriter,
     listener: Option<JoinHandle<Result<(), ListenerError>>>,
 }
 
@@ -224,7 +227,7 @@ impl Node {
                 .unwrap_or_else(|| panic!("expected IP fixture")),
         )?;
         let addr = listener.local_addr()?;
-        let shutdown = bitcoin_rs_wire::latch::LatchWriter::new();
+        let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
         let reader = shutdown.reader();
         let thread = std::thread::spawn(move || serve(listener, reader, shared));
         Ok(Self {
@@ -709,5 +712,65 @@ fn the_saturated_aggregate_refuses_a_second_connection_until_the_first_closes() 
     assert!(!victim_session.lease.is_cancelled());
 
     drop(victim);
+    node.finish()
+}
+
+fn node_outbound_ledger(
+    peer_outbound: u64,
+) -> (
+    Arc<crate::budget::NodeBudget>,
+    Arc<crate::budget::BudgetedOutboundLedger>,
+) {
+    let mut caps = crate::budget::BudgetCaps::from_chainstate_cache_budget(
+        split_chainstate_cache_budget(64 * 1024 * 1024),
+    );
+    caps.peer_outbound = peer_outbound;
+    let budget = Arc::new(crate::budget::NodeBudget::new(caps, 4));
+    let ledger = Arc::new(crate::budget::BudgetedOutboundLedger::new(Arc::clone(
+        &budget,
+    )));
+    (budget, ledger)
+}
+
+// BUD-02
+#[test]
+fn a_node_ledger_without_peer_outbound_room_refuses_the_server_reply() -> TestResult {
+    let genesis = child_block(BlockHash::default(), 0, vec![coinbase(0, 1)])?;
+    let node = Node::start(chain_over(&[genesis], RecentBlockSlot::default())?)?;
+    let mut client = Client::connect(&node)?;
+
+    let (budget, ledger) = node_outbound_ledger(0);
+    node.aggregate.set_ledger(ledger);
+    client.ping()?;
+    assert!(
+        client
+            .frame(Instant::now() + Duration::from_millis(500))
+            .is_err(),
+        "a pong the node ledger refuses must not reach the peer"
+    );
+    assert_eq!(
+        budget.available_of_charges(bitcoin_rs_storage::budget::BudgetOwner::PeerOutbound),
+        0,
+        "a refused reply leaves no peer owner charge"
+    );
+    drop(client);
+    node.finish()
+}
+
+// BUD-02
+#[test]
+fn a_node_ledger_with_peer_outbound_room_delivers_the_server_reply() -> TestResult {
+    let genesis = child_block(BlockHash::default(), 0, vec![coinbase(0, 1)])?;
+    let node = Node::start(chain_over(&[genesis], RecentBlockSlot::default())?)?;
+    let mut client = Client::connect(&node)?;
+
+    let (budget, ledger) = node_outbound_ledger(64 * 1024 * 1024);
+    node.aggregate.set_ledger(ledger);
+    let nonce = client.ping()?;
+    client.read_through_pong(nonce)?;
+    wait_until("the pong's peer owner charge to return", || {
+        budget.available_of_charges(bitcoin_rs_storage::budget::BudgetOwner::PeerOutbound) == 0
+    })?;
+    drop(client);
     node.finish()
 }

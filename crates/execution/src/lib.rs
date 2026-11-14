@@ -1,14 +1,15 @@
 #[cfg(any(test, feature = "test-seam"))]
 use crate::chain::TransitionDomain;
 use crate::chain::{
-    BlockTree, BlockTreeReader, ChainError, ChainTxCount, LatchReader, LatchWriter, TipReader,
-    TipSnapshot, TransitionAuthority, TransitionAuthorityGuard,
+    BlockTree, BlockTreeReader, ChainError, ChainTxCount, TipReader, TipSnapshot,
+    TransitionAuthority, TransitionAuthorityGuard,
 };
 pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
 use assumeutxo::commit_error;
 use bitcoin_rs_consensus::ScriptExecutionCache;
 use bitcoin_rs_consensus::UtxoView;
+use bitcoin_rs_consensus::latch::{LatchReader, LatchWriter};
 use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network, OutPoint, TxOut, Txid};
 use bitcoin_rs_consensus::primitives::{Hash256, Header};
 use bitcoin_rs_storage::DurableHeadStore;
@@ -37,20 +38,22 @@ pub mod fuzzing;
 mod prepare;
 mod tip_wait;
 mod window;
+pub mod window_limits;
 mod workspace;
 pub use prepare::bytes_are_block;
 pub use window::classify_apply_error;
 
 pub mod assumeutxo;
+pub mod manifest;
 pub use assumeutxo::{
-    ActiveChainstateSummary, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager,
-    ChainstateRole, ChainstatesReport, ChainstatesSummary, HistoricalChainstateSummary,
-    HistoricalCheckpointRef, recover_snapshot_activation,
+    ActivatedSnapshot, ActiveChainstateSummary, AssumeUtxoDiskStatus, AssumeUtxoError,
+    AssumeUtxoManager, ChainstateRole, ChainstatesReport, ChainstatesSummary,
+    HistoricalChainstateSummary, HistoricalCheckpointRef, recover_snapshot_activation,
 };
 
 mod assumeutxo_snapshot;
 mod checkpoint;
-pub use assumeutxo_snapshot::SnapshotArchiveError;
+pub use assumeutxo_snapshot::SnapshotAnchorError;
 pub use checkpoint::{CheckpointError, CheckpointSetupError};
 mod error;
 pub mod events;
@@ -319,6 +322,7 @@ pub struct ConnectOutcome {
     pub txids: Vec<Txid>,
     pub block_bytes: bytes::Bytes,
     pub raw_txs: Option<Vec<Vec<u8>>>,
+    pub committed_facts: Option<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>>,
 }
 
 #[derive(Debug)]
@@ -395,10 +399,20 @@ pub struct Chainstate {
     pub(crate) checkpoint_publisher: Option<Arc<crate::checkpoint::publisher::CheckpointPublisher>>,
     pub(crate) capture_rawtx: bool,
     pub(crate) capture_block_bytes: bool,
+    pub(crate) facts: Arc<FactsGate>,
     pub(crate) retention: bitcoin_rs_storage::MandatoryRetention,
+    pub(crate) window_limits: crate::window_limits::WindowLimitsSource,
+    pub(crate) prevout_charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
     pub(crate) history: bitcoin_rs_storage::pruning::HistoryAccess,
     ibd: Arc<crate::chain::InitialBlockDownload>,
     pub(crate) role: Arc<RwLock<ChainstateRole>>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct FactsGate {
+    attached: AtomicBool,
+    #[cfg(any(test, feature = "test-seam"))]
+    builds: std::sync::atomic::AtomicUsize,
 }
 
 pub struct ChainstateParts {
@@ -421,6 +435,7 @@ pub struct ChainstateParts {
     pub capture_rawtx: bool,
     pub capture_block_bytes: bool,
     pub retention: bitcoin_rs_storage::MandatoryRetention,
+    pub window_limits: crate::window_limits::WindowLimitsSource,
     pub history: bitcoin_rs_storage::pruning::HistoryAccess,
     pub role: ChainstateRole,
 }
@@ -435,20 +450,6 @@ pub struct ChainTransition<'a> {
 }
 
 impl<'a> ChainTransition<'a> {
-    #[expect(dead_code)]
-    fn settle_apply<T>(
-        &self,
-        result: core::result::Result<T, ApplyError>,
-    ) -> core::result::Result<T, ApplyError> {
-        if result
-            .as_ref()
-            .is_err_and(|error| classify_apply_error(error) == WindowApplyDisposition::Fatal)
-        {
-            self.chainstate.fail_closed_for_recovery();
-        }
-        result
-    }
-
     pub fn connect(
         &self,
         payload: &BlockImage,
@@ -546,11 +547,18 @@ impl Chainstate {
             checkpoint_publisher: None,
             capture_rawtx: parts.capture_rawtx,
             capture_block_bytes: parts.capture_block_bytes,
+            facts: Arc::new(FactsGate::default()),
             retention: parts.retention,
+            window_limits: parts.window_limits,
+            prevout_charge: None,
             history: parts.history,
             ibd,
             role: Arc::new(RwLock::new(parts.role)),
         }
+    }
+
+    pub fn set_prevout_charge(&mut self, charge: bitcoin_rs_storage::budget::ChargeHandle) {
+        self.prevout_charge = Some(charge);
     }
 
     #[must_use]
@@ -563,22 +571,32 @@ impl Chainstate {
         *self.role.write() = role;
     }
 
-    fn install_snapshot(
+    fn install_snapshot<S, P>(
         &self,
-        snapshot_set: bitcoin_rs_storage::utxo::UtxoSet,
-        mut stats: bitcoin_rs_storage::utxo::stats::CoinStats,
         pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
-        persist: impl FnOnce(
-            &BlockTree,
+        declared_coins: u64,
+        stream: S,
+        persist: P,
+    ) -> Result<(), AssumeUtxoError>
+    where
+        S: FnOnce(
+            &bitcoin_rs_storage::CoinStore,
+        ) -> Result<assumeutxo_snapshot::StreamedCoins, AssumeUtxoError>,
+        P: FnOnce(
+            &bitcoin_rs_storage::CoinStore,
+            &parking_lot::RwLock<BlockTree>,
             &TipSnapshot,
             Option<&bitcoin_rs_storage::DurableHead>,
             &bitcoin_rs_storage::SnapshotActivationMarker,
+            &assumeutxo_snapshot::StreamedCoins,
         ) -> Result<(), AssumeUtxoError>,
-    ) -> Result<(), AssumeUtxoError> {
+    {
         let _guard = self.admission.enter()?;
         let _transition = self.chain_transition.lock();
-        let tree = self.block_tree.read();
-        let tip_snapshot = Self::snapshot_base_tip(&tree, pinned)?;
+        let tip_snapshot = {
+            let tree = self.block_tree.read();
+            Self::snapshot_base_tip(&tree, pinned)?
+        };
         let prior = self.durable_head.load().inspect_err(|_| {
             self.fail_closed_for_recovery();
         })?;
@@ -600,23 +618,9 @@ impl Chainstate {
         {
             return Err(AssumeUtxoError::ActivationBehindTip);
         }
-        let mut coin_records: Vec<(bitcoin_rs_storage::CoinKey, bytes::Bytes)> = snapshot_set
-            .all_records()
-            .into_iter()
-            .map(|record| {
-                let key = bitcoin_rs_storage::CoinKey(record.txid().to_le_bytes());
-                let value = bytes::Bytes::copy_from_slice(record.bytes());
-                (key, value)
-            })
-            .collect();
-        coin_records.sort_by_key(|(k, _)| *k);
         let marker = bitcoin_rs_storage::SnapshotActivationMarker {
             base_hash: pinned.block_hash,
-            coin_count: u64::try_from(coin_records.len()).map_err(|_| {
-                AssumeUtxoError::Storage(bitcoin_rs_storage::StorageError::InvalidOperation(
-                    "snapshot coin count exceeds u64",
-                ))
-            })?,
+            coin_count: declared_coins,
             coin_digest: pinned.hash_serialized,
         };
         self.commit_authority
@@ -627,21 +631,25 @@ impl Chainstate {
             .wipe()
             .inspect_err(|_| self.fail_closed_for_recovery())
             .map_err(AssumeUtxoError::Storage)?;
-        self.coins
-            .ingest_sorted(coin_records.into_iter())
-            .inspect_err(|_| self.fail_closed_for_recovery())
-            .map_err(AssumeUtxoError::Storage)?;
-
-        persist(&tree, &tip_snapshot, prior.as_ref(), &marker).inspect_err(|error| {
-            if !matches!(error, AssumeUtxoError::FullRevalidationRequired) {
-                self.fail_closed_for_recovery();
-            }
-        })?;
-        drop(tree);
+        let streamed = match stream(&self.coins) {
+            Ok(streamed) => streamed,
+            Err(error) => return Err(self.discard_partial_ingest(error, prior.as_ref())),
+        };
+        if let Err(error) = persist(
+            &self.coins,
+            &self.block_tree,
+            &tip_snapshot,
+            prior.as_ref(),
+            &marker,
+            &streamed,
+        ) {
+            return Err(self.discard_partial_ingest(error, prior.as_ref()));
+        }
         let mut tree = self.block_tree.write();
         tree.restore_chain_tx_count(tip_snapshot.tip_id, tip_snapshot.chain_tx_count)
             .map_err(ApplyError::from)
             .inspect_err(|_| self.fail_closed_for_recovery())?;
+        let mut stats = streamed.coin_stats;
         stats.tx_count = pinned.chain_tx_count;
         self.coin_stats.reset(stats);
         self.publish_applied(&tip_snapshot, crate::events::HintKind::Connected);
@@ -649,8 +657,40 @@ impl Chainstate {
             base_height: pinned.height,
             base_hash: pinned.block_hash,
         };
-
         Ok(())
+    }
+
+    fn discard_partial_ingest(
+        &self,
+        error: AssumeUtxoError,
+        prior: Option<&bitcoin_rs_storage::DurableHead>,
+    ) -> AssumeUtxoError {
+        match self.commit_authority.recover_snapshot_activation() {
+            Ok(_) => {
+                let rejected = matches!(
+                    error,
+                    AssumeUtxoError::SnapshotCommitmentMismatch { .. }
+                        | AssumeUtxoError::Codec(
+                            bitcoin_rs_storage::utxo::core_snapshot::SnapshotError::CommitmentMismatch { .. }
+                        )
+                );
+                if prior.is_some() || !rejected {
+                    self.fail_closed_for_recovery();
+                }
+                error
+            }
+            Err(discard) => {
+                self.fail_closed_for_recovery();
+                AssumeUtxoError::PartialIngestNotDiscarded {
+                    ingest: Box::new(error),
+                    discard: discard.to_string(),
+                }
+            }
+        }
+    }
+
+    pub(crate) fn has_durable_head(&self) -> Result<bool, AssumeUtxoError> {
+        Ok(self.durable_head.load()?.is_some())
     }
 
     fn snapshot_base_tip(
@@ -804,7 +844,10 @@ impl Chainstate {
             checkpoint_publisher: None,
             capture_rawtx: false,
             capture_block_bytes: false,
+            facts: Arc::new(FactsGate::default()),
             retention: self.retention.clone(),
+            window_limits: crate::window_limits::default_window_limits_source(),
+            prevout_charge: self.prevout_charge.clone(),
             history: self.history.clone(),
             ibd,
             role: Arc::new(RwLock::new(ChainstateRole::Historical {
@@ -816,7 +859,7 @@ impl Chainstate {
     }
 
     #[must_use]
-    pub fn shutdown_reader(&self) -> crate::chain::LatchReader {
+    pub fn shutdown_reader(&self) -> bitcoin_rs_consensus::latch::LatchReader {
         self.shutdown.reader()
     }
 
@@ -837,7 +880,7 @@ impl Chainstate {
     }
 
     #[must_use]
-    pub fn closed_for_recovery_reader(&self) -> crate::chain::LatchReader {
+    pub fn closed_for_recovery_reader(&self) -> bitcoin_rs_consensus::latch::LatchReader {
         self.admission.closed_reader()
     }
 
@@ -878,6 +921,15 @@ impl Chainstate {
     #[must_use]
     pub fn applied_tip_snapshot(&self) -> Option<Arc<TipSnapshot>> {
         self.applied_tip.load_full()
+    }
+
+    #[must_use]
+    pub fn durable_commit_id(&self) -> u64 {
+        self.durable_head
+            .load()
+            .ok()
+            .flatten()
+            .map_or(0, |head| head.commit_id)
     }
 
     pub fn set_pow_valid_block(&self, hook: PowValidBlockHook) -> Result<(), PowValidBlockHook> {
@@ -1029,6 +1081,21 @@ impl Chainstate {
         self.capture_block_bytes = block_bytes;
     }
 
+    pub fn set_committed_facts_consumer(&self, attached: bool) {
+        self.facts.attached.store(attached, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub(crate) fn wants_committed_facts(&self) -> bool {
+        self.facts.attached.load(Ordering::Relaxed)
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn committed_facts_builds(&self) -> usize {
+        self.facts.builds.load(Ordering::SeqCst)
+    }
+
     pub fn reevaluate_assume_valid(&self) {
         self.assume_valid_gate.evaluate(&self.block_tree.read());
     }
@@ -1160,7 +1227,10 @@ impl Chainstate {
             checkpoint_publisher: None,
             capture_rawtx: false,
             capture_block_bytes: false,
+            facts: Arc::new(FactsGate::default()),
             retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
+            window_limits: crate::window_limits::default_window_limits_source(),
+            prevout_charge: None,
             history: bitcoin_rs_storage::pruning::HistoryAccess::new(
                 retention,
                 bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(
@@ -1329,26 +1399,9 @@ struct DisconnectPlan {
     tx_count_delta: u64,
 }
 
-const SCRIPT_BATCH_WINDOW: usize = 1024;
-
-const SCRIPT_BATCH_MAX_BYTES: usize = 64 << 20;
-
-pub fn window_len(sizes: impl IntoIterator<Item = usize>) -> usize {
-    let mut count = 0_usize;
-    let mut bytes = 0_usize;
-    for size in sizes {
-        if count == SCRIPT_BATCH_WINDOW {
-            break;
-        }
-        let next = bytes.saturating_add(size);
-        if count > 0 && next > SCRIPT_BATCH_MAX_BYTES {
-            break;
-        }
-        bytes = next;
-        count = count.saturating_add(1);
-    }
-    count
-}
+pub use crate::window_limits::{
+    WindowLimits, WindowLimitsSource, default_window_limits_source, window_len_within,
+};
 
 #[derive(Debug)]
 pub struct WindowApplyError {
@@ -1473,27 +1526,174 @@ impl PrevoutMeta {
     }
 }
 
-struct ResolvedUtxoView {
-    external: HashMap<OutPoint, UtxoCoin>,
+pub(crate) struct PrevoutHold {
+    charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+    bytes: u64,
 }
 
+impl PrevoutHold {
+    pub(crate) fn charge(
+        handle: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+        bytes: u64,
+    ) -> core::result::Result<Option<Self>, ApplyError> {
+        let Some(handle) = handle else {
+            return Ok(None);
+        };
+        if bytes == 0 {
+            return Ok(Some(Self {
+                charge: Some(handle),
+                bytes: 0,
+            }));
+        }
+        handle
+            .charge(bytes)
+            .map_err(|_| ApplyError::StagedBudgetExhausted)?;
+        Ok(Some(Self {
+            charge: Some(handle),
+            bytes,
+        }))
+    }
+}
+
+impl Drop for PrevoutHold {
+    fn drop(&mut self) {
+        if let Some(charge) = self.charge.as_ref() {
+            charge.release(self.bytes);
+        }
+    }
+}
+
+fn resolved_view_bytes(view: &ResolvedUtxoView) -> u64 {
+    let slot = u64::try_from(core::mem::size_of::<Option<TxOut>>()).unwrap_or(u64::MAX);
+    let outpoint = u64::try_from(core::mem::size_of::<OutPoint>()).unwrap_or(u64::MAX);
+    view.external
+        .values()
+        .map(|coin| {
+            let script = u64::try_from(coin.txout.script_pubkey.len()).unwrap_or(u64::MAX);
+            slot.saturating_add(outpoint).saturating_add(script)
+        })
+        .fold(0_u64, u64::saturating_add)
+}
+
+pub(crate) fn prevout_vec_bytes(resolved: &[Vec<Option<TxOut>>]) -> u64 {
+    let slot = u64::try_from(core::mem::size_of::<Option<TxOut>>()).unwrap_or(u64::MAX);
+    resolved
+        .iter()
+        .flatten()
+        .map(|prevout| {
+            let script = prevout
+                .as_ref()
+                .map_or(0, |txout| txout.script_pubkey.len());
+            let script = u64::try_from(script).unwrap_or(u64::MAX);
+            slot.saturating_add(script)
+        })
+        .fold(0_u64, u64::saturating_add)
+}
+
+struct ResolvedUtxoView {
+    external: HashMap<OutPoint, UtxoCoin>,
+    _hold: Option<PrevoutHold>,
+}
+
+const RESOLVE_TXIDS_PER_FETCH: usize = 64;
+
 impl ResolvedUtxoView {
+    fn external_outpoints(image: &BlockImage, tx_plan: &BlockTxPlan) -> Vec<OutPoint> {
+        let same_block = tx_plan.same_block_spent.as_ref();
+        (0..image.tx_count())
+            .map(|i| image.tx(i))
+            .filter(|tx| !tx.is_coinbase())
+            .flat_map(|tx| (0..tx.input_count()).map(move |j| tx.input_outpoint(j)))
+            .filter(|outpoint| same_block.is_none_or(|set| !set.contains(outpoint)))
+            .collect()
+    }
+    fn ordered_prev_txids(outpoints: &[OutPoint]) -> Vec<Txid> {
+        let mut seen: hashbrown::HashSet<Txid> = hashbrown::HashSet::with_capacity(outpoints.len());
+        let mut txids = Vec::with_capacity(outpoints.len());
+        for outpoint in outpoints {
+            if seen.insert(outpoint.txid) {
+                txids.push(outpoint.txid);
+            }
+        }
+        txids
+    }
     fn resolve<S: bitcoin_rs_storage::utxo::contract::OutputSource + ?Sized>(
         utxo: &S,
         image: &BlockImage,
         tx_plan: &BlockTxPlan,
     ) -> Self {
-        let same_block = tx_plan.same_block_spent.as_ref();
-        let candidates = (0..image.tx_count())
-            .map(|i| image.tx(i))
-            .filter(|tx| !tx.is_coinbase())
-            .flat_map(|tx| (0..tx.input_count()).map(move |j| tx.input_outpoint(j)))
-            .filter(|outpoint| same_block.is_none_or(|set| !set.contains(outpoint)));
-        Self {
-            external: candidates
-                .filter_map(|outpoint| utxo.get_entry(&outpoint).map(|entry| (outpoint, entry)))
-                .collect(),
+        let outpoints = Self::external_outpoints(image, tx_plan);
+        let txids = Self::ordered_prev_txids(&outpoints);
+        let mut external = HashMap::with_capacity(outpoints.len());
+        for txids in txids.chunks(RESOLVE_TXIDS_PER_FETCH) {
+            let wanted: hashbrown::HashSet<Txid> = txids.iter().copied().collect();
+            let chunk: Vec<OutPoint> = outpoints
+                .iter()
+                .copied()
+                .filter(|outpoint| wanted.contains(&outpoint.txid))
+                .collect();
+            let entries = utxo.get_entries(&chunk);
+            external.extend(
+                chunk
+                    .into_iter()
+                    .zip(entries)
+                    .filter_map(|(outpoint, entry)| entry.map(|entry| (outpoint, entry))),
+            );
         }
+        Self {
+            external,
+            _hold: None,
+        }
+    }
+    fn resolve_charged<S: bitcoin_rs_storage::utxo::contract::OutputSource + ?Sized>(
+        utxo: &S,
+        image: &BlockImage,
+        tx_plan: &BlockTxPlan,
+        charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
+    ) -> core::result::Result<Self, ApplyError> {
+        if charge.is_none() {
+            return Ok(Self::resolve(utxo, image, tx_plan));
+        }
+        let outpoints = Self::external_outpoints(image, tx_plan);
+        let txids = Self::ordered_prev_txids(&outpoints);
+        let mut external = HashMap::with_capacity(outpoints.len());
+        let mut hold: Option<PrevoutHold> = None;
+        for txids in txids.chunks(RESOLVE_TXIDS_PER_FETCH) {
+            let wanted: hashbrown::HashSet<Txid> = txids.iter().copied().collect();
+            let chunk: Vec<OutPoint> = outpoints
+                .iter()
+                .copied()
+                .filter(|outpoint| wanted.contains(&outpoint.txid))
+                .collect();
+            let entries = utxo.get_entries(&chunk);
+            let probe = Self {
+                external: chunk
+                    .into_iter()
+                    .zip(entries)
+                    .filter_map(|(outpoint, entry)| entry.map(|entry| (outpoint, entry)))
+                    .collect(),
+                _hold: None,
+            };
+            let chunk_bytes = resolved_view_bytes(&probe);
+            if let Some(handle) = charge.clone() {
+                match hold.as_mut() {
+                    Some(held) => {
+                        handle
+                            .charge(chunk_bytes)
+                            .map_err(|_| ApplyError::StagedBudgetExhausted)?;
+                        held.bytes = held.bytes.saturating_add(chunk_bytes);
+                    }
+                    None => {
+                        hold = PrevoutHold::charge(Some(handle), chunk_bytes)?;
+                    }
+                }
+            }
+            external.extend(probe.external);
+        }
+        Ok(Self {
+            external,
+            _hold: hold,
+        })
     }
     fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
         self.external.get(outpoint).map(|entry| entry.txout.clone())

@@ -120,3 +120,7 @@ path = "tests/crash_recovery.rs"
 [[test]]
 name = "pool_ledger"
 path = "tests/pool_ledger.rs"
+
+[[test]]
+name = "global_pool"
+path = "tests/global_pool.rs"

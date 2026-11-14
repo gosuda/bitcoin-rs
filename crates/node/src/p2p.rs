@@ -180,7 +180,7 @@ pub struct NodeTxIngress {
     package_capacity: PackageCapacity,
     tx_policy: Arc<NodeTxPolicy>,
     inventory: Arc<NodeTxInventory>,
-    cancel: bitcoin_rs_execution::chain::LatchReader,
+    cancel: bitcoin_rs_consensus::latch::LatchReader,
 }
 
 impl NodeTxIngress {
@@ -189,7 +189,7 @@ impl NodeTxIngress {
         package_capacity: PackageCapacity,
         tx_policy: Arc<NodeTxPolicy>,
         inventory: Arc<NodeTxInventory>,
-        cancel: bitcoin_rs_execution::chain::LatchReader,
+        cancel: bitcoin_rs_consensus::latch::LatchReader,
     ) -> Self {
         Self {
             inbound_tx,

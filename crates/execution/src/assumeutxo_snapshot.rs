@@ -1,44 +1,14 @@
 //! Immutable snapshot input selected only by the authoritative durable head.
 
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _, OpenOptionsSyncExt as _};
-use cap_std::fs::Dir;
-
-use crate::chain::{BlockTree, ChainTxCount, TipSnapshot};
-use bitcoin_rs_consensus::primitives::{
-    AssumeUtxoData, DecodeError, Network, consensus_bytes, deserialize,
-};
-use bitcoin_rs_storage::checkpoint::fs::{create_file, open_data_dir, sync_dir};
-use bitcoin_rs_storage::utxo::core_snapshot::VerifiedSnapshotState;
-use bitcoin_rs_storage::utxo::snapshot::{SeedProvenance, VerifiedSnapshotArtifact};
+use bitcoin_rs_consensus::primitives::{AssumeUtxoData, Hash256, Network};
+use bitcoin_rs_storage::utxo::UtxoRecord;
 use bitcoin_rs_storage::utxo::stats::CoinStats;
-use bitcoin_rs_storage::utxo::{
-    SnapshotCoin, SnapshotCoinObserver, SnapshotLoad, UtxoSet, read_snapshot_strict_v4_witnessed,
-};
+use bitcoin_rs_storage::{Bytes, COIN_KEY_LEN, CoinKey, CoinStore, StorageError, WindowDelta};
 
 use crate::AssumeUtxoDiskStatus;
-use crate::recovery::{InitialChainstate, ResumeSource};
-
-const DIRECTORY: &str = "assumeutxo";
-
-static NEXT_ARCHIVE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
-pub enum SnapshotArchiveError {
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
-    #[error(transparent)]
-    Chain(#[from] crate::chain::ChainError),
-    #[error(transparent)]
-    Decode(#[from] DecodeError),
-    #[error("snapshot temporary reservation exhausted")]
-    ReservationExhausted,
+pub enum SnapshotAnchorError {
     #[error(
         "AssumeUTXO validation previously failed; preserve this datadir and resync into a separate directory"
     )]
@@ -49,287 +19,15 @@ pub enum SnapshotArchiveError {
     TrustAnchorIdentity,
     #[error("durable snapshot transaction count differs from the network trust anchor")]
     TrustAnchorTxCount,
-    #[error("snapshot header archive length does not match the pinned height")]
-    HeaderArchiveLength,
-    #[error("snapshot header archive does not end at the pinned block")]
-    HeaderArchiveEnd,
-    #[error("snapshot header height mismatch")]
-    HeaderHeightMismatch,
-    #[error("snapshot coin archive identity mismatch")]
-    CoinArchiveIdentity,
-}
-
-fn archive_directory(
-    data_dir: &Path,
-    base: bitcoin_rs_consensus::primitives::Hash256,
-) -> Result<Dir, SnapshotArchiveError> {
-    fn child(parent: &Dir, name: &str) -> std::io::Result<Dir> {
-        if let Err(error) = parent.create_dir(name)
-            && error.kind() != std::io::ErrorKind::AlreadyExists
-        {
-            return Err(error);
-        }
-        let directory = parent.open_dir_nofollow(name)?;
-        sync_dir(parent)?;
-        Ok(directory)
-    }
-    let data = open_data_dir(data_dir)?;
-    let root = child(&data, DIRECTORY)?;
-    Ok(child(&root, &base.to_string())?)
-}
-
-fn write_archive<T>(
-    directory: &Dir,
-    name: &str,
-    write: impl FnOnce(&mut BufWriter<File>) -> Result<T, SnapshotArchiveError>,
-) -> Result<T, SnapshotArchiveError> {
-    let mut reserved = None;
-    for _ in 0..32 {
-        let sequence = NEXT_ARCHIVE.fetch_add(1, Ordering::Relaxed);
-        let temporary = format!(".{name}.{}.{sequence}.tmp", std::process::id());
-        match create_file(directory, &temporary) {
-            Ok(file) => {
-                let file = file.into_std();
-                if let Err(error) = file.lock() {
-                    drop(file);
-                    let _abandoned_reservation_reclaimed_at_startup =
-                        directory.remove_file(&temporary);
-                    return Err(error.into());
-                }
-                reserved = Some((temporary, file));
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let (temporary, file) = reserved.ok_or(SnapshotArchiveError::ReservationExhausted)?;
-    let result = (|| {
-        let mut writer = BufWriter::new(file);
-        let write_result = write(&mut writer)?;
-        writer.flush()?;
-        writer.get_ref().sync_all()?;
-        directory.rename(&temporary, directory, name)?;
-        sync_dir(directory)?;
-        drop(writer);
-        Ok(write_result)
-    })();
-    if result.is_err() {
-        let _abandoned_reservation_reclaimed_at_startup = directory.remove_file(&temporary);
-    }
-    result
-}
-
-#[derive(Clone, Copy)]
-enum ReservationKind {
-    Coins,
-    Headers,
-}
-
-fn reservation_kind(name: &str) -> Option<ReservationKind> {
-    let (kind, suffix) = name
-        .strip_prefix(".coins.dat.")
-        .map(|suffix| (ReservationKind::Coins, suffix))
-        .or_else(|| {
-            name.strip_prefix(".headers.dat.")
-                .map(|suffix| (ReservationKind::Headers, suffix))
-        })?;
-    let mut parts = suffix.split('.');
-    let pid_text = parts.next()?;
-    let sequence_text = parts.next()?;
-    let pid = pid_text.parse::<u32>().ok()?;
-    let sequence = sequence_text.parse::<u64>().ok()?;
-    if pid == 0
-        || pid.to_string() != pid_text
-        || sequence.to_string() != sequence_text
-        || parts.next()? != "tmp"
-        || parts.next().is_some()
-    {
-        return None;
-    }
-    Some(kind)
-}
-
-fn recognized_reservation(
-    file: &mut File,
-    kind: ReservationKind,
-    network: Network,
-    pinned: &AssumeUtxoData,
-) -> std::io::Result<bool> {
-    match kind {
-        ReservationKind::Coins => {
-            match bitcoin_rs_storage::utxo::snapshot::read_snapshot_metadata_v4(file) {
-                Ok(metadata) => {
-                    Ok((metadata.tip_hash, metadata.height) == (pinned.block_hash, pinned.height))
-                }
-                Err(bitcoin_rs_storage::utxo::UtxoError::Io(error))
-                    if error.kind() != std::io::ErrorKind::UnexpectedEof =>
-                {
-                    Err(error)
-                }
-                Err(_) => Ok(false),
-            }
-        }
-        ReservationKind::Headers => {
-            let mut header = [0_u8; 80];
-            match file.read_exact(&mut header) {
-                Ok(()) => Ok(header.as_slice()
-                    == consensus_bytes(&network.genesis_block().header).as_slice()),
-                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
-                Err(error) => Err(error),
-            }
-        }
-    }
-}
-
-pub(super) fn cleanup_reservations(
-    data_dir: &Path,
-    network: Network,
-) -> Result<(), SnapshotArchiveError> {
-    let data = open_data_dir(data_dir)?;
-    let root = match data.open_dir_nofollow(DIRECTORY) {
-        Ok(root) => root,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    for pinned in network.assume_utxo_data() {
-        let directory = match root.open_dir_nofollow(pinned.block_hash.to_string()) {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let mut changed = false;
-        for entry in directory.entries()? {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            let name = entry.file_name();
-            let Some((name, kind)) = name
-                .to_str()
-                .and_then(|name| reservation_kind(name).map(|kind| (name, kind)))
-            else {
-                continue;
-            };
-            changed |= reclaim_reservation(&directory, name, kind, network, pinned)?;
-        }
-        if changed {
-            sync_dir(&directory)?;
-        }
-    }
-    Ok(())
-}
-
-fn reclaim_reservation(
-    directory: &Dir,
-    name: &str,
-    kind: ReservationKind,
-    network: Network,
-    pinned: &AssumeUtxoData,
-) -> std::io::Result<bool> {
-    let mut options = cap_std::fs::OpenOptions::new();
-    options
-        .read(true)
-        .write(true)
-        .follow(FollowSymlinks::No)
-        .nonblock(true);
-    let mut file = directory.open_with(name, &options)?.into_std();
-    if !file.metadata()?.is_file() {
-        return Ok(false);
-    }
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
-        Err(std::fs::TryLockError::Error(error)) => return Err(error),
-    }
-    if !recognized_reservation(&mut file, kind, network, pinned)? {
-        return Ok(false);
-    }
-    directory.remove_file(name)?;
-    Ok(true)
-}
-
-#[cfg(test)]
-pub(super) fn write_coins(
-    data_dir: &Path,
-    set: &UtxoSet,
-    pinned: &AssumeUtxoData,
-) -> Result<Option<bitcoin_rs_storage::utxo::V4Witness>, SnapshotArchiveError> {
-    let directory = archive_directory(data_dir, pinned.block_hash)?;
-    write_archive(&directory, "coins.dat", |writer| {
-        let (_, _, witness) = bitcoin_rs_storage::utxo::snapshot::write_snapshot_witnessed(
-            set,
-            &pinned.block_hash,
-            pinned.height,
-            writer,
-            bitcoin_rs_storage::utxo::stats::CoinStatsAccumulator::with_parallel_muhash(
-                pinned.height,
-            ),
-        )?;
-        Ok(witness)
-    })
-}
-
-struct SealedTrailer([u8; 384]);
-
-impl SnapshotCoinObserver for SealedTrailer {
-    fn observe_coin(&mut self, _: SnapshotCoin<'_>) {}
-    fn select_trailer(&mut self, _: [u8; 384]) -> [u8; 384] {
-        self.0
-    }
-}
-
-pub(super) fn write_coins_sealed(
-    data_dir: &Path,
-    state: VerifiedSnapshotState,
-    pinned: &AssumeUtxoData,
-) -> Result<
-    (
-        UtxoSet,
-        CoinStats,
-        Option<bitcoin_rs_storage::utxo::V4Witness>,
-    ),
-    SnapshotArchiveError,
-> {
-    let directory = archive_directory(data_dir, pinned.block_hash)?;
-    let (set, stats) = state.into_parts();
-    let trailer = stats.muhash.finalize();
-    let witness = write_archive(&directory, "coins.dat", |writer| {
-        let (_, _, witness) = bitcoin_rs_storage::utxo::snapshot::write_snapshot_witnessed(
-            &set,
-            &pinned.block_hash,
-            pinned.height,
-            writer,
-            SealedTrailer(trailer),
-        )?;
-        Ok(witness)
-    })?;
-    Ok((set, stats, witness))
-}
-
-pub(super) fn write_headers(
-    data_dir: &Path,
-    tree: &BlockTree,
-    base: &TipSnapshot,
-) -> Result<(), SnapshotArchiveError> {
-    let directory = archive_directory(data_dir, base.hash)?;
-    write_archive(&directory, "headers.dat", |writer| {
-        let mut ancestry = tree.ancestor_chain(base.tip_id)?;
-        ancestry.reverse();
-        for id in ancestry {
-            writer.write_all(&consensus_bytes(&tree.node(id)?.header))?;
-        }
-        Ok(())
-    })
 }
 
 pub(crate) fn trusted_anchor(
     network: Network,
     status: &AssumeUtxoDiskStatus,
-) -> Result<Option<&'static AssumeUtxoData>, SnapshotArchiveError> {
+) -> Result<Option<&'static AssumeUtxoData>, SnapshotAnchorError> {
     let (height, hash, commitment) = match status {
         AssumeUtxoDiskStatus::Uninitialized => return Ok(None),
-        AssumeUtxoDiskStatus::Failed { .. } => return Err(SnapshotArchiveError::PreviouslyFailed),
+        AssumeUtxoDiskStatus::Failed { .. } => return Err(SnapshotAnchorError::PreviouslyFailed),
         AssumeUtxoDiskStatus::Validating {
             base_height,
             base_hash,
@@ -344,272 +42,71 @@ pub(crate) fn trusted_anchor(
     };
     let pinned = network
         .assume_utxo_for_height(*height)
-        .ok_or(SnapshotArchiveError::UnrecognizedBase)?;
+        .ok_or(SnapshotAnchorError::UnrecognizedBase)?;
     if pinned.block_hash != *hash || pinned.hash_serialized != *commitment {
-        return Err(SnapshotArchiveError::TrustAnchorIdentity);
+        return Err(SnapshotAnchorError::TrustAnchorIdentity);
     }
     if let AssumeUtxoDiskStatus::Validating { chain_tx_count, .. } = status
         && *chain_tx_count != pinned.chain_tx_count
     {
-        return Err(SnapshotArchiveError::TrustAnchorTxCount);
+        return Err(SnapshotAnchorError::TrustAnchorTxCount);
     }
     Ok(Some(pinned))
 }
 
-pub(super) fn load_verified(
-    data_dir: &Path,
-    network: Network,
-    pinned: &AssumeUtxoData,
-) -> Result<InitialChainstate, SnapshotArchiveError> {
-    let path = data_dir.join(DIRECTORY).join(pinned.block_hash.to_string());
-    let mut headers = BufReader::new(File::open(path.join("headers.dat"))?);
-    if headers.get_ref().metadata()?.len() != (u64::from(pinned.height) + 1) * 80 {
-        return Err(SnapshotArchiveError::HeaderArchiveLength);
-    }
-    let mut tree = BlockTree::new();
-    for _ in 0..=pinned.height {
-        let mut bytes = [0; 80];
-        headers.read_exact(&mut bytes)?;
-        let header = deserialize(&bytes)?;
-        crate::chain::accept_headers(
-            &mut tree,
-            &[header],
-            network,
-            crate::chain::current_unix_seconds(),
-            crate::chain::HeaderValidationMode::HistoricalReplay,
-        )?;
-    }
-    let id = tree
-        .lookup(pinned.block_hash)
-        .ok_or(SnapshotArchiveError::HeaderArchiveEnd)?;
-    let node = tree.node(id)?;
-    if node.height != pinned.height {
-        return Err(SnapshotArchiveError::HeaderHeightMismatch);
-    }
-    let tip = TipSnapshot {
-        tip_id: id,
-        height: pinned.height,
-        hash: pinned.block_hash,
-        chainwork: node.chainwork,
-        chain_tx_count: ChainTxCount::established(pinned.chain_tx_count),
-    };
-    tree.restore_chain_tx_count(id, tip.chain_tx_count)?;
-    let mut coins = BufReader::new(File::open(path.join("coins.dat"))?);
-    let (
-        SnapshotLoad {
-            set,
-            height,
-            tip_hash,
-            ..
-        },
-        (),
-        witness,
-    ) = read_snapshot_strict_v4_witnessed(&mut coins, ())?;
-    if height != pinned.height || tip_hash != pinned.block_hash {
-        return Err(SnapshotArchiveError::CoinArchiveIdentity);
-    }
-    let mut stats = set.with_stable_view(|view| {
-        if view.hash_serialized_3_at_height(pinned.height)? != pinned.hash_serialized {
-            return Err(bitcoin_rs_storage::utxo::UtxoError::CorruptRecord);
-        }
-        bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)
-    })?;
-    stats.tx_count = pinned.chain_tx_count;
-    let seed = VerifiedSnapshotArtifact::seal(
-        coins.into_inner(),
-        witness,
-        SeedProvenance::AssumeUtxoArchive {
-            base: pinned.block_hash.to_le_bytes(),
-        },
-    );
-    Ok(InitialChainstate {
-        utxo: set,
-        coin_stats: stats,
-        tree,
-        applied_tip: Some(tip),
-        resume_source: ResumeSource::Snapshot,
-        script_live_seed: Some(seed),
-    })
+pub(super) struct StagedCoins {
+    delta: WindowDelta,
+    bytes: usize,
+    limit: usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::test_fixtures::{TestError, TestResult};
-
-    fn native_fixture() -> TestResult<(Vec<u8>, &'static AssumeUtxoData)> {
-        let core = include_bytes!("../../storage/tests/fixtures/core-v2/core200.dat");
-        let loaded = bitcoin_rs_storage::utxo::core_snapshot::read_and_verify(
-            &mut core.as_slice(),
-            Network::Regtest,
-            bitcoin_rs_storage::utxo::core_snapshot::SnapshotLimits::default(),
-        )?;
-        let mut native = Vec::new();
-        bitcoin_rs_storage::utxo::write_snapshot_observed(
-            &loaded.set,
-            &loaded.anchor.block_hash,
-            loaded.anchor.height,
-            &mut native,
-            (),
-        )?;
-        Ok((native, loaded.anchor))
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn fifo_replacement_after_entry_check_is_preserved_without_blocking() -> TestResult {
-        use std::os::unix::fs::FileTypeExt as _;
-
-        let dir = tempfile::tempdir()?;
-        let (_, pinned) = native_fixture()?;
-        let archive = archive_directory(dir.path(), pinned.block_hash)?;
-        let name = ".headers.dat.1234.5.tmp";
-        archive.write(
-            name,
-            consensus_bytes(&Network::Regtest.genesis_block().header),
-        )?;
-        let entry = archive
-            .entries()?
-            .next()
-            .ok_or(TestError::Missing("reservation entry must exist"))??;
-        assert!(entry.file_type()?.is_file());
-        archive.remove_file(name)?;
-        let path = dir
-            .path()
-            .join(DIRECTORY)
-            .join(pinned.block_hash.to_string())
-            .join(name);
-        let created = std::process::Command::new("mkfifo").arg(&path).status()?;
-        assert!(created.success(), "create isolated Unix FIFO");
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        let worker_directory = archive.try_clone()?;
-        let worker = std::thread::spawn(move || {
-            let result = reclaim_reservation(
-                &worker_directory,
-                name,
-                ReservationKind::Headers,
-                Network::Regtest,
-                pinned,
-            );
-            let _receiver_gone = sender.send(result);
-        });
-        let observed = receiver.recv_timeout(std::time::Duration::from_secs(5));
-        let rescue = if observed.is_err() {
-            let mut options = cap_std::fs::OpenOptions::new();
-            options.read(true).write(true).follow(FollowSymlinks::No);
-            cap_fs_ext::OpenOptionsSyncExt::nonblock(&mut options, true);
-            let mut file = archive.open_with(name, &options)?;
-            file.write_all(&[0_u8; 80])?;
-            Some(file)
-        } else {
-            None
-        };
-        worker
-            .join()
-            .map_err(|_| TestError::WorkerPanicked("cleanup worker panicked"))?;
-        drop(rescue);
-        assert!(
-            !observed.map_err(|_| TestError::Blocked("cleanup blocked on substituted FIFO"))??,
-            "cleanup must not block on a substituted FIFO"
-        );
-        assert!(std::fs::symlink_metadata(&path)?.file_type().is_fifo());
-        Ok(())
-    }
-
-    #[test]
-    fn live_archive_reservation_is_not_reclaimed() -> TestResult {
-        let dir = tempfile::tempdir()?;
-        let (native, pinned) = native_fixture()?;
-        let archive = archive_directory(dir.path(), pinned.block_hash)?;
-        write_archive(&archive, "coins.dat", |writer| {
-            writer.write_all(&native)?;
-            writer.flush()?;
-            writer.get_ref().sync_all()?;
-            let before = archive.entries()?.count();
-            cleanup_reservations(dir.path(), Network::Regtest)?;
-            assert_eq!(
-                archive.entries()?.count(),
-                before,
-                "live reservation retained"
-            );
-            Ok(())
-        })?;
-        assert_eq!(archive.read("coins.dat")?, native);
-        Ok(())
-    }
-
-    #[test]
-    fn abandoned_native_reservations_are_reclaimed_without_touching_unknowns() -> TestResult {
-        let dir = tempfile::tempdir()?;
-        let (native, pinned) = native_fixture()?;
-        let archive = archive_directory(dir.path(), pinned.block_hash)?;
-        let orphan = ".coins.dat.1234.0.tmp";
-        archive.write(orphan, &native)?;
-        let header_orphan = ".headers.dat.1234.1.tmp";
-        archive.write(
-            header_orphan,
-            consensus_bytes(&Network::Regtest.genesis_block().header),
-        )?;
-        let core = include_bytes!("../../storage/tests/fixtures/core-v2/core200.dat");
-        for (name, bytes) in [
-            ("coins.dat", native.as_slice()),
-            ("coins.tmp", core.as_slice()),
-            (".coins.dat.1234.2.tmp", core.as_slice()),
-            (".coins.dat.1234.3.tmp", &[0_u8][..]),
-            (".coins.dat.operator.tmp", native.as_slice()),
-            (".coins.dat.01234.4.tmp", native.as_slice()),
-        ] {
-            archive.write(name, bytes)?;
+impl StagedCoins {
+    pub(super) fn new(limit: usize) -> Self {
+        Self {
+            delta: WindowDelta::default(),
+            bytes: 0,
+            limit,
         }
-        cleanup_reservations(dir.path(), Network::Regtest)?;
-        assert!(!archive.try_exists(orphan)?);
-        assert!(!archive.try_exists(header_orphan)?);
-        for (name, bytes) in [
-            ("coins.dat", native.as_slice()),
-            ("coins.tmp", core.as_slice()),
-            (".coins.dat.1234.2.tmp", core.as_slice()),
-            (".coins.dat.1234.3.tmp", &[0_u8][..]),
-            (".coins.dat.operator.tmp", native.as_slice()),
-            (".coins.dat.01234.4.tmp", native.as_slice()),
-        ] {
-            assert_eq!(archive.read(name)?, bytes, "preserve {name}");
-        }
-        Ok(())
     }
 
-    #[test]
-    fn sealed_archive_matches_recomputed_archive_byte_for_byte() -> TestResult {
-        let core = include_bytes!("../../storage/tests/fixtures/core-v2/core200.dat");
-        let bare = bitcoin_rs_storage::utxo::core_snapshot::read_and_verify(
-            &mut core.as_slice(),
-            Network::Regtest,
-            bitcoin_rs_storage::utxo::core_snapshot::SnapshotLimits::default(),
-        )?;
-        let pinned = bare.anchor;
-        let dir_old = tempfile::tempdir()?;
-        write_coins(dir_old.path(), &bare.set, pinned)?;
-        let state = bitcoin_rs_storage::utxo::core_snapshot::VerifiedSnapshotState::verify(
-            bare.set, pinned,
-        )?;
-        let dir_new = tempfile::tempdir()?;
-        write_coins_sealed(dir_new.path(), state, pinned)?;
-        let archive_name = pinned.block_hash.to_string();
-        let old_bytes = std::fs::read(
-            dir_old
-                .path()
-                .join(DIRECTORY)
-                .join(&archive_name)
-                .join("coins.dat"),
-        )?;
-        let new_bytes = std::fs::read(
-            dir_new
-                .path()
-                .join(DIRECTORY)
-                .join(&archive_name)
-                .join("coins.dat"),
-        )?;
-        assert_eq!(old_bytes, new_bytes);
+    fn stage(&mut self, txid: Hash256, record: &UtxoRecord) {
+        let encoded = Bytes::copy_from_slice(record.bytes());
+        self.bytes += COIN_KEY_LEN + encoded.len();
+        self.delta
+            .push_final(CoinKey(txid.to_le_bytes()), Some(encoded));
+    }
+
+    fn flush(&mut self, coins: &CoinStore) -> Result<(), StorageError> {
+        coins.ingest_chunk(&self.delta)?;
+        self.delta = WindowDelta::default();
+        self.bytes = 0;
         Ok(())
     }
+}
+
+pub(super) fn stage_record(
+    staged: &mut StagedCoins,
+    coins: &CoinStore,
+    txid: Hash256,
+    record: &UtxoRecord,
+) -> Result<(), StorageError> {
+    staged.stage(txid, record);
+    if staged.bytes >= staged.limit {
+        staged.flush(coins)?;
+    }
+    Ok(())
+}
+
+pub(super) fn finish_stage(
+    staged: &mut StagedCoins,
+    coins: &CoinStore,
+) -> Result<(), StorageError> {
+    if staged.bytes > 0 {
+        staged.flush(coins)?;
+    }
+    Ok(())
+}
+
+pub(super) struct StreamedCoins {
+    pub(super) coin_stats: CoinStats,
 }

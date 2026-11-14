@@ -8,10 +8,10 @@ use bitcoin_rs_consensus::primitives::{
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, RocksDbStore};
 
 use super::{
-    IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer,
-    SpentCoinScripts,
+    IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer, SpentCoins,
 };
-use crate::{ScriptHash, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow};
+use crate::segment::tail::PreparedTail;
+use crate::{ScriptHash, ScriptLiveRow};
 
 type StoredRows = Vec<(ColumnFamily, Vec<u8>)>;
 
@@ -19,9 +19,16 @@ struct FixtureScripts;
 
 static FIXTURE_SPENT_SCRIPT: [u8; 2] = [0x51, 0x01];
 
-impl SpentCoinScripts for FixtureScripts {
-    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
-        Some(FIXTURE_SPENT_SCRIPT.as_slice())
+use crate::SpentCoin;
+
+impl SpentCoins for FixtureScripts {
+    fn spent_coin(&self, _txid: &[u8; 32], _vout: u32) -> Option<SpentCoin<'_>> {
+        Some(SpentCoin {
+            script: FIXTURE_SPENT_SCRIPT.as_slice(),
+            value: 0,
+            height: 0,
+            coinbase: false,
+        })
     }
 }
 
@@ -78,66 +85,41 @@ fn raw_op_return_check_matches_script_prefix_semantics() {
 }
 
 #[test]
-fn iter_funding_rows_returns_indexed_rows() -> Result<(), crate::portable::TestError> {
-    let script = vec![0x51, 0x01];
-    let tx = tx(spent_outpoint(1, 0), script.clone());
-    let (_dir, mut writer) = writer()?;
-
-    commit_block(&mut writer, 0, &consensus_bytes(&block(vec![tx])))?;
-
-    let scripthash = ScriptHash::from_script_bytes(&script);
-    assert_eq!(
-        writer.indexer().iter_funding_rows(scripthash)?,
-        vec![ScriptHashRow::row(scripthash, 0)]
-    );
-    Ok(())
-}
-
-#[test]
-fn iter_funding_rows_height_order_is_newest_first() -> Result<(), crate::portable::TestError> {
-    let script = vec![0x51, 0x01];
-    let scripthash = ScriptHash::from_script_bytes(&script);
-    let dir = tempfile::tempdir()?;
-    let store = Arc::new(RocksDbStore::open(dir.path())?);
-    put_funding_row(&store, scripthash, 1)?;
-    put_funding_row(&store, scripthash, 256)?;
-    let indexer = Indexer::new(store);
-
-    let rows = indexer.iter_funding_rows(scripthash)?;
-    assert_eq!(rows.len(), 2, "two heights funded the same script");
-
-    assert_eq!(
-        rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
-        vec![256, 1],
-        "inverted BE byte order is newest first"
-    );
-    Ok(())
-}
-
-#[test]
 fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), crate::portable::TestError>
 {
     let script = vec![0x51, 0x05];
     let scripthash = ScriptHash::from_script_bytes(&script);
     let dir = tempfile::tempdir()?;
     let store = Arc::new(RocksDbStore::open(dir.path())?);
-    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
 
     let outpoint = spent_outpoint(5, 0);
-    writer.seed_script_live(
-        [(outpoint, scripthash)],
-        IndexWatermark {
-            height: 7,
-            hash: [0x07; 32],
-        },
-    )?;
+    let row = crate::types::ScriptLiveRow::new(scripthash, &outpoint);
+    let coin = crate::types::ScriptLiveCoin::new(scripthash, 1_000, 1, false);
+    let mut bytes = row.as_bytes().to_vec();
+    bytes.extend_from_slice(&coin.encode_value()?);
+    let rows = [bytes];
+    writer.stage_script_live_rows(&mut rows.into_iter())?;
+    let bare_43 = crate::types::ScriptLiveRow::new(scripthash, &outpoint)
+        .as_bytes()
+        .to_vec();
+    assert_eq!(bare_43.len(), 43);
+    assert!(matches!(
+        writer.stage_script_live_rows(&mut [bare_43].into_iter()),
+        Err(IndexError::InvalidLiveRowValue { len: 43 })
+    ));
+    writer.publish_script_live_seed(IndexWatermark {
+        height: 7,
+        hash: [0x07; 32],
+    })?;
 
     let mut malformed = ScriptLiveRow::new(scripthash, &outpoint)
         .as_bytes()
         .to_vec();
     malformed.truncate(40);
+    let coin = crate::types::ScriptLiveCoin::new(scripthash, 1000, 1, false);
     let mut batch = store.new_batch();
-    batch.put(ColumnFamily::ScriptLive, &malformed, &[]);
+    batch.put(ColumnFamily::ScriptLive, &malformed, &coin.encode_value()?);
     store.write(batch)?;
 
     let Err(error) = writer.indexer().iter_live_outpoints(scripthash) else {
@@ -146,21 +128,6 @@ fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), crate::p
     assert!(
         matches!(error, IndexError::InvalidPrefixRowLength { len: 40 }),
         "malformed live-row key must report its length: {error:?}"
-    );
-    Ok(())
-}
-
-#[test]
-fn iter_spending_rows_returns_indexed_rows() -> Result<(), crate::portable::TestError> {
-    let outpoint = spent_outpoint(2, 3);
-    let tx = tx(outpoint, vec![0x51, 0x02]);
-    let (_dir, mut writer) = writer()?;
-
-    commit_block(&mut writer, 0, &consensus_bytes(&block(vec![tx])))?;
-
-    assert_eq!(
-        writer.indexer().iter_spending_rows(&outpoint)?,
-        vec![SpendingPrefixRow::row(&outpoint, 0)]
     );
     Ok(())
 }
@@ -185,9 +152,9 @@ fn rollback_removes_every_row_a_matching_commit_wrote() -> Result<(), crate::por
         "fixture must write rows to be a meaningful rollback test"
     );
     for cf in [
-        ColumnFamily::TxConfirmed,
-        ColumnFamily::Funding,
-        ColumnFamily::Spending,
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
         ColumnFamily::BlockHeaders,
     ] {
         assert!(
@@ -466,26 +433,13 @@ fn writer() -> Result<(tempfile::TempDir, IndexWriter<RocksDbStore>), crate::por
     Ok((dir, IndexWriter::open(store, 1)?))
 }
 
-fn put_funding_row(
-    store: &RocksDbStore,
-    scripthash: ScriptHash,
-    height: u32,
-) -> Result<(), crate::portable::TestError> {
-    let mut row = ScriptHashRow::row(scripthash, height).to_db_row();
-    row[crate::types::HASH_PREFIX_LEN..]
-        .copy_from_slice(&crate::types::encode_history_height(height));
-    let mut batch = store.new_batch();
-    batch.put(ColumnFamily::Funding, &row, &[]);
-    store.write(batch)?;
-    Ok(())
-}
-
 fn stored_rows(indexer: &Indexer<RocksDbStore>) -> Result<StoredRows, crate::portable::TestError> {
     let mut rows = Vec::new();
     for cf in [
-        ColumnFamily::TxConfirmed,
-        ColumnFamily::Funding,
-        ColumnFamily::Spending,
+        ColumnFamily::TxDir,
+        ColumnFamily::ScriptPost,
+        ColumnFamily::SpendDir,
+        ColumnFamily::ScriptLive,
         ColumnFamily::BlockHeaders,
     ] {
         for row in indexer.store.iter_prefix(cf, &[])? {
@@ -532,4 +486,209 @@ fn tx(previous_output: OutPoint, script_pubkey: Vec<u8>) -> Tx {
 
 fn spent_outpoint(label: u8, vout: u32) -> OutPoint {
     OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), vout)
+}
+
+fn tx_occurrences(first: u8, count: u8) -> Vec<crate::segment::import::TxOccurrence> {
+    (0..count)
+        .map(|i| crate::segment::import::TxOccurrence {
+            txid: [first + i; 32],
+            height: 1,
+            block_hash: [0x77; 32],
+            position: crate::types::TxPosition::new(u32::from(i) * 100, 100),
+        })
+        .collect()
+}
+
+fn tx_dir_rows(store: &RocksDbStore) -> Result<StoredRows, IndexError> {
+    let snapshot = store.snapshot()?;
+    snapshot
+        .iter_prefix(ColumnFamily::TxDir, &[])?
+        .map(|row| row.map(|(key, value)| (ColumnFamily::TxDir, [key, value].concat())))
+        .collect::<Result<_, _>>()
+        .map_err(IndexError::Storage)
+}
+
+// IDX-05
+#[test]
+fn restart_clears_a_staged_segment_and_keeps_the_published_one()
+-> Result<(), crate::portable::TestError> {
+    let dir = tempfile::tempdir()?;
+    let scratch = tempfile::tempdir()?;
+    let store = Arc::new(RocksDbStore::open(dir.path())?);
+    let base = IndexWatermark {
+        height: 1,
+        hash: [0x77; 32],
+    };
+    let coverage = crate::segment::Coverage::new(0, base.height, base.hash);
+    let published =
+        crate::segment::import::tx_lookup_segment(tx_occurrences(0x10, 3), coverage, 0)?;
+    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let attachment = crate::writer::TxLookupAttachment {
+        headers: &[],
+        base,
+        floor: 0,
+        scratch: scratch.path(),
+    };
+    writer.attach_tx_lookup_segment(&published, &attachment)?;
+    let published_rows = tx_dir_rows(&store)?;
+    assert!(!published_rows.is_empty(), "the attach must publish rows");
+
+    let staged = crate::segment::import::tx_lookup_segment(tx_occurrences(0x40, 2), coverage, 3)?;
+    let pending = crate::segment::import::next_segment_id(store.as_ref())?;
+    crate::segment::import::stage_segment(store.as_ref(), pending, &staged, scratch.path())?;
+    assert!(
+        tx_dir_rows(&store)?.len() > published_rows.len(),
+        "the interrupted stage must leave rows on disk"
+    );
+
+    drop(writer);
+    let reopened = IndexWriter::open(Arc::clone(&store), 2)?;
+    assert_eq!(
+        tx_dir_rows(&store)?,
+        published_rows,
+        "restart must clear the staged rows and leave the published segment unchanged"
+    );
+    let snapshot = reopened.indexer().snapshot()?;
+    assert_eq!(
+        snapshot.capability_watermark(IndexCapability::TxLookup)?,
+        Some(base)
+    );
+    let bulk_dir = tempfile::tempdir()?;
+    let bulk_store = RocksDbStore::open(bulk_dir.path())?;
+    let block = bitcoin_rs_storage::committed_facts::CommittedBlock {
+        height: 1,
+        hash: [0x77; 32],
+        parent_hash: [0; 32],
+        header: [0; 80],
+        txs: (0..3_u8)
+            .map(|i| bitcoin_rs_storage::committed_facts::TxFacts {
+                txid: [0x10 + i; 32],
+                offset: u32::from(i) * 100,
+                len: 100,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+            })
+            .collect(),
+    };
+    crate::segment::bulk_builder::BulkSegmentBuilder::new(
+        Arc::new(bitcoin_rs_storage::budget::UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    )
+    .build_and_ingest(&bulk_store, 1, std::slice::from_ref(&block))
+    .map_err(|error| std::io::Error::other(format!("bulk build: {error}")))?;
+    assert_eq!(
+        tx_dir_rows(&store)?,
+        tx_dir_rows(&bulk_store)?,
+        "the restored published segment equals a separate bulk build"
+    );
+    Ok(())
+}
+
+// PRJ-06
+#[test]
+fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation()
+-> Result<(), crate::portable::TestError> {
+    use crate::segment::format::{
+        TX_KIND_TXID, decode_tx_dir_key, decode_tx_dir_value, encode_spend_dir_key,
+        tx_dir_kind_prefix,
+    };
+    use bitcoin_rs_storage::committed_facts::{
+        CommittedBlock, CreatedOutput, SpentPrevout, TxFacts,
+    };
+
+    let dir = tempfile::tempdir()?;
+    let scratch = tempfile::tempdir()?;
+    let store = Arc::new(RocksDbStore::open(dir.path())?);
+    let created = CommittedBlock {
+        height: 1,
+        hash: [1; 32],
+        parent_hash: [0; 32],
+        header: [0; 80],
+        txs: vec![TxFacts {
+            txid: [0xA1; 32],
+            offset: 0,
+            len: 100,
+            inputs: Vec::new(),
+            outputs: vec![CreatedOutput {
+                vout: 0,
+                value: 5_000,
+                script: bitcoin_rs_storage::Bytes::from_static(b"\x51creator"),
+            }],
+        }],
+    };
+    let spending = CommittedBlock {
+        height: 2,
+        hash: [2; 32],
+        parent_hash: [1; 32],
+        header: [0; 80],
+        txs: vec![TxFacts {
+            txid: [0xB2; 32],
+            offset: 0,
+            len: 100,
+            inputs: vec![SpentPrevout {
+                txid: [0xA1; 32],
+                vout: 0,
+                value: 5_000,
+                script: bitcoin_rs_storage::Bytes::from_static(b"\x51creator"),
+                height: 1,
+                coinbase: false,
+            }],
+            outputs: Vec::new(),
+        }],
+    };
+
+    let mut state = crate::segment::TailWriterState::new();
+    let mut batch = store.new_batch();
+    batch.put(
+        ColumnFamily::UtxoMeta,
+        crate::types::INDEX_FORMAT_VERSION_KEY,
+        &crate::types::INDEX_FORMAT_VERSION_VALUE,
+    );
+    crate::segment::append_tail_block(
+        &mut batch,
+        &created,
+        &mut state,
+        &crate::segment::NoSealedTxOrdinals,
+    )?;
+    store.write_durable(batch)?;
+    crate::segment::seal_tail_generation(
+        store.as_ref(),
+        1,
+        1,
+        crate::IndexCapabilities::SCRIPT_HISTORY,
+        scratch.path(),
+    )?;
+
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let mut tail = writer.tail_for(None)?;
+    let mut batch = store.new_batch();
+    let prepared = PreparedTail::new_gated(&spending, true, true);
+    writer.append_forward_tail(&mut tail, &[(spending, prepared)], &mut batch)?;
+    store.write_durable(batch)?;
+
+    let snapshot = store.snapshot()?;
+    let mut creation = None;
+    let txid_rows = tx_dir_kind_prefix(1, TX_KIND_TXID);
+    for row in snapshot.iter_prefix(ColumnFamily::TxDir, &txid_rows)? {
+        let (key, value) = row?;
+        let (_, txid, _) = decode_tx_dir_key(&key).ok_or("tx directory key")?;
+        if txid == [0xA1; 32] {
+            let (_, ordinal, _, _) = decode_tx_dir_value(&value).ok_or("tx directory value")?;
+            creation = Some(ordinal);
+        }
+    }
+    let creation = creation.ok_or("the sealed generation names the creating transaction")?;
+    assert_eq!(creation, 0, "the first sealed transaction has ordinal zero");
+    let spends: Vec<_> = snapshot
+        .iter_prefix(ColumnFamily::SpendDir, &0_u64.to_be_bytes())?
+        .collect::<Result<_, _>>()?;
+    let expected_key = encode_spend_dir_key(0, 0, 0);
+    assert_eq!(
+        spends.len(),
+        1,
+        "the cross-capability spend writes one spend row"
+    );
+    assert_eq!(spends[0].0, expected_key.to_vec());
+    Ok(())
 }

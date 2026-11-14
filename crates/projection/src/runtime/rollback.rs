@@ -1,43 +1,49 @@
 use super::DerivedIndexWorkerError;
-use super::PendingForward;
-use super::ReconcileAction;
-use super::SeedBundle;
 use super::UndoScripts;
 use super::Worker;
 use crate::ConsumerCursorUpdate;
 use crate::IndexCapabilities;
 use crate::IndexCapability;
-use crate::IndexError;
 use crate::IndexWatermark;
 use crate::IndexWatermarks;
 use crate::IndexWriteFence;
 use crate::NoSpentScripts;
-use crate::ScriptHash;
 use crate::reconcile::ReconcileLeg;
+use crate::snapshot_seed::ScriptLiveSeedPhase;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_execution::chain::TipSnapshot;
-use bitcoin_rs_storage::StorageError;
-use bitcoin_rs_storage::pruning::{HistoryLease, HistoryUnavailable};
-use bitcoin_rs_storage::utxo::snapshot::RawSeedError;
-use bitcoin_rs_storage::utxo::snapshot::VerifiedSnapshotArtifact;
-use std::cell::Cell;
+use bitcoin_rs_storage::pruning::HistoryLease;
+use bitcoin_rs_storage::pruning::HistoryUnavailable;
+use std::sync::Arc;
 
 pub(super) fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<String> {
     let names: Vec<&str> = capabilities.iter().map(IndexCapability::name).collect();
     (!names.is_empty()).then(|| names.join(","))
 }
 
-pub(super) enum SeedFlow {
-    Return(ReconcileAction),
-    Seeded,
-    FallThrough { want_on_stall: bool },
+pub(super) enum SeedPass {
+    Idle,
+    Stall,
+    Published,
+    Discarded,
 }
+
+pub(super) enum SeedBatch {
+    Rows(Vec<Vec<u8>>),
+    Empty,
+    Disconnected,
+}
+
+const SEED_DRAIN_BATCH_ROWS: usize = 4_096;
 
 impl Worker {
     fn clear_interrupted_seed_for_replay(&self) -> Result<(), DerivedIndexWorkerError> {
         if !self.enabled.contains(IndexCapability::ScriptLive) {
             return Ok(());
         }
+        let Some(_idle) = self.runtime.script_live_seed().lock_idle() else {
+            return Ok(());
+        };
         if self
             .writer
             .reset_interrupted_script_live_seed()
@@ -48,176 +54,204 @@ impl Worker {
         Ok(())
     }
 
-    pub(super) fn seed_dispatch(
-        &self,
-        pending: Option<&PendingForward>,
-    ) -> Result<SeedFlow, DerivedIndexWorkerError> {
-        let has_artifact = self
-            .seed_bundle
-            .lock()
-            .as_ref()
-            .is_some_and(|bundle| bundle.artifact.is_some());
-        if has_artifact {
-            return self.seed_from_bundle();
-        }
-        let has_bundle = self.seed_bundle.lock().is_some();
-        if has_bundle {
-            let Some(slot) = self.seed_slot.as_ref() else {
-                return Ok(SeedFlow::FallThrough {
-                    want_on_stall: false,
-                });
-            };
-            let Some(artifact) = slot.take() else {
-                return Ok(SeedFlow::FallThrough {
-                    want_on_stall: false,
-                });
-            };
-            self.runtime.clear_script_live();
-            let mut bundle = self.seed_bundle.lock().take().unwrap_or(SeedBundle {
-                artifact: None,
-                lease: None,
-            });
-            bundle.artifact = Some(artifact);
-            *self.seed_bundle.lock() = Some(bundle);
-            return self.seed_from_bundle();
-        }
-        if pending.is_some_and(|state| state.capabilities.contains(IndexCapability::ScriptLive)) {
-            return Ok(SeedFlow::FallThrough {
-                want_on_stall: false,
-            });
-        }
-        let Some(slot) = self.seed_slot.as_ref() else {
-            self.clear_interrupted_seed_for_replay()?;
-            return Ok(SeedFlow::FallThrough {
-                want_on_stall: false,
-            });
-        };
-        if let Some(artifact) = slot.take() {
-            self.runtime.clear_script_live();
-            *self.seed_bundle.lock() = Some(SeedBundle {
-                artifact: Some(artifact),
-                lease: None,
-            });
-            self.seed_from_bundle()
-        } else {
-            self.clear_interrupted_seed_for_replay()?;
-            Ok(SeedFlow::FallThrough {
-                want_on_stall: true,
-            })
-        }
-    }
-
-    fn seed_from_bundle(&self) -> Result<SeedFlow, DerivedIndexWorkerError> {
-        if self.runtime.should_stop() {
-            return Ok(SeedFlow::Return(ReconcileAction::Stalled));
-        }
-        let mut bundle = self.seed_bundle.lock().take().unwrap_or(SeedBundle {
-            artifact: None,
-            lease: None,
-        });
-        let Some(mut artifact) = bundle.artifact.take() else {
-            return Ok(SeedFlow::FallThrough {
-                want_on_stall: false,
-            });
-        };
-        let (height, tip_hash) = artifact.tip();
-        if let Some(early_exit) = self.ensure_bundle_lease(height, &mut bundle, &artifact) {
-            if matches!(early_exit, SeedFlow::Return(ReconcileAction::Stalled)) {
-                *self.seed_bundle.lock() = Some(SeedBundle {
-                    artifact: Some(artifact),
-                    lease: None,
-                });
-            }
-            return Ok(early_exit);
-        }
-        let tip = IndexWatermark {
-            height,
-            hash: tip_hash.to_le_bytes(),
-        };
-        let poisoned: Cell<bool> = Cell::new(false);
-        let cancelled = || self.runtime.should_stop();
-        let result = self.writer.seed_script_live_stream(
-            &mut |emit| match artifact.for_each_coin_raw::<IndexError, _>(
-                &mut |outpoint, script| emit(*outpoint, ScriptHash::from_script_bytes(script)),
-                &cancelled,
-            ) {
-                Ok(()) => Ok(()),
-                Err(RawSeedError::Integrity) => {
-                    poisoned.set(true);
-                    Err(IndexError::InvalidWatermark)
-                }
-                Err(RawSeedError::Io(error)) => Err(IndexError::Storage(StorageError::Io(error))),
-                Err(RawSeedError::Emit(error)) => Err(error),
-                Err(RawSeedError::Cancelled) => Err(IndexError::Cancelled),
-            },
-            tip,
-            &cancelled,
-        );
-        self.handle_seed_result(result, height, artifact, bundle.lease, poisoned.take())
-    }
-
-    pub(super) fn rest_seed_cell(&self) {
-        if let Some(slot) = self.seed_slot.as_ref() {
-            slot.rest();
-        }
-    }
-
-    pub(super) fn release_seed_lease_if_superseded(&self, watermark: Option<IndexWatermark>) {
-        let mut guard = self.seed_bundle.lock();
-        let Some(bundle) = guard.as_mut() else {
-            return;
-        };
-        if watermark.is_some() {
-            bundle.artifact = None;
-        }
-        let release = self.runtime.should_stop()
-            || bundle.lease.as_ref().is_none_or(|lease| {
-                lease
-                    .floor()
-                    .is_none_or(|floor| watermark.is_some_and(|watermark| watermark.height > floor))
-            });
-        if release {
-            bundle.lease = None;
-        }
-        if bundle.artifact.is_none() && bundle.lease.is_none() {
-            guard.take();
-        }
-    }
-
     pub(super) fn take_seed_lease(&self) -> Option<HistoryLease> {
-        let mut guard = self.seed_bundle.lock();
-        let lease = if guard
-            .as_ref()
-            .is_some_and(|bundle| bundle.artifact.is_none())
-        {
-            guard.as_mut().and_then(|bundle| bundle.lease.take())
-        } else {
-            None
-        };
-        if guard
-            .as_ref()
-            .is_some_and(|bundle| bundle.artifact.is_none() && bundle.lease.is_none())
-        {
-            guard.take();
-        }
-        lease
+        self.seed_history_lease.lock().take()
     }
 
     pub(super) fn park_seed_lease(&self, lease: Option<HistoryLease>) {
         let Some(lease) = lease else {
             return;
         };
-        let mut guard = self.seed_bundle.lock();
-        match guard.as_mut() {
-            Some(bundle) if bundle.lease.is_none() => bundle.lease = Some(lease),
-            Some(_) => {}
-            None => {
-                *guard = Some(SeedBundle {
-                    artifact: None,
-                    lease: Some(lease),
-                });
+        let mut guard = self.seed_history_lease.lock();
+        if guard.is_none() {
+            *guard = Some(lease);
+        }
+    }
+
+    pub(super) fn release_seed_lease_if_superseded(&self, watermark: Option<IndexWatermark>) {
+        let mut guard = self.seed_history_lease.lock();
+        let release = self.runtime.should_stop()
+            || guard.as_ref().is_none_or(|lease| {
+                lease
+                    .floor()
+                    .is_none_or(|floor| watermark.is_some_and(|watermark| watermark.height > floor))
+            });
+        if release {
+            guard.take();
+        }
+    }
+
+    pub(super) fn dispatch_script_live_seed_pass(
+        &self,
+        fence: &mut IndexWriteFence,
+        watermarks: &mut IndexWatermarks,
+    ) -> Result<SeedPass, DerivedIndexWorkerError> {
+        if !self.enabled.contains(IndexCapability::ScriptLive) {
+            return Ok(SeedPass::Idle);
+        }
+        if self.runtime.script_live_failure.read().is_some()
+            && self.runtime.undo_gap().is_none()
+            && watermarks.script_live.is_some()
+        {
+            self.writer
+                .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
+                .map_err(DerivedIndexWorkerError::Index)?;
+            let (next_fence, next_watermarks) = self
+                .writer
+                .fenced_watermarks()
+                .map_err(DerivedIndexWorkerError::Index)?;
+            *fence = next_fence;
+            *watermarks = next_watermarks;
+        }
+        let seed = self.runtime.script_live_seed();
+        match seed.phase() {
+            ScriptLiveSeedPhase::Seeding => self.seed_pass_stage_rows(),
+            ScriptLiveSeedPhase::PublishPending { tip } => {
+                self.seed_pass_publish(seed, tip, fence, watermarks)
+            }
+            ScriptLiveSeedPhase::AbortPending => self.seed_pass_discard(seed),
+            ScriptLiveSeedPhase::Idle => {
+                self.clear_interrupted_seed_for_replay()?;
+                self.release_seed_lease_if_superseded(watermarks.script_live);
+                Ok(SeedPass::Idle)
             }
         }
+    }
+
+    fn seed_pass_stage_rows(&self) -> Result<SeedPass, DerivedIndexWorkerError> {
+        self.prepare_seed_rows()?;
+        if self.published_live_seed()?.is_some() {
+            return Ok(SeedPass::Stall);
+        }
+        loop {
+            match self.collect_seed_batch()? {
+                SeedBatch::Rows(rows) => self.stage_seed_rows(rows)?,
+                SeedBatch::Empty => return Ok(SeedPass::Stall),
+                SeedBatch::Disconnected => return Ok(SeedPass::Stall),
+            }
+        }
+    }
+
+    fn prepare_seed_rows(&self) -> Result<(), DerivedIndexWorkerError> {
+        if !self.runtime.script_live_seed().claim_row_reset() {
+            return Ok(());
+        }
+        self.clear_interrupted_seed_rows()
+    }
+
+    fn clear_interrupted_seed_rows(&self) -> Result<(), DerivedIndexWorkerError> {
+        if !self.enabled.contains(IndexCapability::ScriptLive) {
+            return Ok(());
+        }
+        if self
+            .writer
+            .reset_interrupted_script_live_seed()
+            .map_err(DerivedIndexWorkerError::Index)?
+        {
+            tracing::warn!("cleared ScriptLive rows left by an interrupted seed before staging");
+        }
+        Ok(())
+    }
+
+    fn seed_pass_publish(
+        &self,
+        seed: &Arc<crate::snapshot_seed::ScriptLiveSeedState>,
+        tip: IndexWatermark,
+        fence: &mut IndexWriteFence,
+        watermarks: &mut IndexWatermarks,
+    ) -> Result<SeedPass, DerivedIndexWorkerError> {
+        self.prepare_seed_rows()?;
+        let published = self.published_live_seed()?;
+        let covered = published.is_some_and(|watermark| tip.height <= watermark.height);
+        if covered && !seed.is_closed() {
+            return Ok(SeedPass::Stall);
+        }
+        if published.is_some() && !covered {
+            self.writer
+                .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
+                .map_err(DerivedIndexWorkerError::Index)?;
+            tracing::warn!("replaced the published ScriptLive base for the snapshot seed");
+        }
+        if !covered {
+            loop {
+                match self.collect_seed_batch()? {
+                    SeedBatch::Rows(rows) => self.stage_seed_rows(rows)?,
+                    SeedBatch::Empty => return Ok(SeedPass::Stall),
+                    SeedBatch::Disconnected => break,
+                }
+            }
+            self.writer
+                .publish_script_live_seed(tip)
+                .map_err(DerivedIndexWorkerError::Index)?;
+        }
+        self.runtime.clear_script_live();
+        seed.complete_publish();
+        let (next_fence, next_watermarks) = self
+            .writer
+            .fenced_watermarks()
+            .map_err(DerivedIndexWorkerError::Index)?;
+        *fence = next_fence;
+        *watermarks = next_watermarks;
+        Ok(SeedPass::Published)
+    }
+
+    fn seed_pass_discard(
+        &self,
+        seed: &Arc<crate::snapshot_seed::ScriptLiveSeedState>,
+    ) -> Result<SeedPass, DerivedIndexWorkerError> {
+        loop {
+            match self.collect_seed_batch()? {
+                SeedBatch::Rows(_) => {}
+                SeedBatch::Empty => return Ok(SeedPass::Stall),
+                SeedBatch::Disconnected => break,
+            }
+        }
+        if self
+            .writer
+            .reset_interrupted_script_live_seed()
+            .map_err(DerivedIndexWorkerError::Index)?
+        {
+            tracing::warn!("cleared ScriptLive rows left by an aborted seed");
+        }
+        seed.complete_abort();
+        Ok(SeedPass::Discarded)
+    }
+
+    fn stage_seed_rows(&self, rows: Vec<Vec<u8>>) -> Result<(), DerivedIndexWorkerError> {
+        self.writer
+            .stage_script_live_rows(&mut rows.into_iter())
+            .map_err(DerivedIndexWorkerError::Index)?;
+        Ok(())
+    }
+
+    /// SNP-07: a published ScriptLive watermark means the live base already
+    /// covers committed history; a seed replaces it only at publish time,
+    /// when the seed tip is known to be higher.
+    fn published_live_seed(&self) -> Result<Option<IndexWatermark>, DerivedIndexWorkerError> {
+        if !self.enabled.contains(IndexCapability::ScriptLive) {
+            return Ok(None);
+        }
+        Ok(self
+            .writer
+            .fenced_watermarks()
+            .map_err(DerivedIndexWorkerError::Index)?
+            .1
+            .script_live)
+    }
+
+    fn collect_seed_batch(&self) -> Result<SeedBatch, DerivedIndexWorkerError> {
+        let seed = self.runtime.script_live_seed();
+        let rows = seed
+            .take_backlog(SEED_DRAIN_BATCH_ROWS)
+            .map_err(DerivedIndexWorkerError::Index)?;
+        if rows.is_empty() {
+            return Ok(if seed.is_closed() {
+                SeedBatch::Disconnected
+            } else {
+                SeedBatch::Empty
+            });
+        }
+        Ok(SeedBatch::Rows(rows))
     }
 
     pub(super) fn reset_for_rebuild(
@@ -266,6 +300,7 @@ impl Worker {
         capabilities: IndexCapabilities,
         watermark: IndexWatermark,
     ) -> Result<Option<IndexWatermark>, DerivedIndexWorkerError> {
+        let capabilities = crate::index::tail_rollback_group(watermarks, capabilities);
         let watermark_hash = Hash256::from_le_bytes(&watermark.hash);
         let lease = match self.history.request_history(watermark.height) {
             Ok(lease) => lease,
@@ -281,14 +316,13 @@ impl Worker {
             Err(error) => return Err(DerivedIndexWorkerError::HistoryUnavailable(error)),
         };
         let body = self.load_body(watermark.height, watermark_hash, &lease)?;
-        let anchor = (capabilities.contains(IndexCapability::ScriptHistory)
-            || capabilities.contains(IndexCapability::ScriptLive)
-            || capabilities.contains(IndexCapability::CompactFilters))
-        .then(|| self.live_anchor(watermark.height, watermark.hash))
-        .transpose()?;
+        let anchor = capabilities
+            .contains(IndexCapability::ScriptLive)
+            .then(|| self.live_anchor(watermark.height, watermark.hash))
+            .transpose()?;
         lease.release();
 
-        let spent: &dyn crate::SpentCoinScripts =
+        let spent: &dyn crate::SpentCoins =
             anchor.as_ref().map_or(&NoSpentScripts, |anchor| anchor);
 
         let prev = if watermark.height == 0 {
@@ -297,7 +331,7 @@ impl Worker {
             let prepared = self
                 .writer
                 .prepare_block_with_spent_scripts(
-                    capabilities,
+                    crate::index::rollback_prepare_capabilities(capabilities),
                     watermark.height,
                     watermark.hash,
                     &body,
@@ -336,7 +370,7 @@ impl Worker {
         &self,
         height: u32,
         hash: Hash256,
-        lease: &bitcoin_rs_storage::pruning::HistoryLease,
+        lease: &HistoryLease,
     ) -> Result<Vec<u8>, DerivedIndexWorkerError> {
         let _ = lease;
         let Some(store) = self.body_store.as_ref() else {
@@ -355,7 +389,7 @@ impl Worker {
     ) -> Result<UndoScripts, DerivedIndexWorkerError> {
         if height == 0 {
             return Ok(UndoScripts {
-                scripts: hashbrown::HashMap::new(),
+                coins: hashbrown::HashMap::new(),
             });
         }
         let hash = Hash256::from_le_bytes(&hash_bytes);
@@ -368,100 +402,5 @@ impl Worker {
             .ok_or(DerivedIndexWorkerError::UndoUnavailable { height, hash })?;
         UndoScripts::from_undo_bytes(&bytes, hash)
             .map_err(|_| DerivedIndexWorkerError::UndoUnavailable { height, hash })
-    }
-}
-impl Worker {
-    fn ensure_bundle_lease(
-        &self,
-        height: u32,
-        bundle: &mut SeedBundle,
-        _artifact: &VerifiedSnapshotArtifact,
-    ) -> Option<SeedFlow> {
-        let lease_covers = bundle
-            .lease
-            .as_ref()
-            .is_some_and(|lease| lease.floor().is_some_and(|floor| floor <= height));
-        if !lease_covers {
-            bundle.lease = None;
-            match self.history.request_history(height) {
-                Ok(lease) => bundle.lease = Some(lease),
-                Err(HistoryUnavailable::Pruned { .. }) => {
-                    return Some(SeedFlow::FallThrough {
-                        want_on_stall: true,
-                    });
-                }
-                Err(_) => {
-                    return Some(SeedFlow::Return(ReconcileAction::Stalled));
-                }
-            }
-        }
-        None
-    }
-
-    fn handle_seed_result(
-        &self,
-        result: Result<usize, IndexError>,
-        height: u32,
-        artifact: VerifiedSnapshotArtifact,
-        lease: Option<HistoryLease>,
-        poisoned: bool,
-    ) -> Result<SeedFlow, DerivedIndexWorkerError> {
-        match result {
-            Ok(written) => {
-                drop(artifact);
-                self.runtime.clear_script_live();
-                tracing::info!(
-                    height,
-                    rows = written,
-                    "seeded ScriptLive from snapshot artifact"
-                );
-                *self.seed_bundle.lock() = Some(SeedBundle {
-                    artifact: None,
-                    lease,
-                });
-                Ok(SeedFlow::Seeded)
-            }
-            Err(IndexError::Cancelled) => {
-                *self.seed_bundle.lock() = Some(SeedBundle {
-                    artifact: Some(artifact),
-                    lease,
-                });
-                Ok(SeedFlow::Return(ReconcileAction::Stalled))
-            }
-            Err(_) if poisoned => {
-                drop(artifact);
-                drop(lease);
-                if let Err(error) = self
-                    .writer
-                    .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
-                {
-                    tracing::debug!(%error, "seed poison cleanup reset deferred");
-                    return Ok(SeedFlow::Return(ReconcileAction::Stalled));
-                }
-                Ok(SeedFlow::Seeded)
-            }
-            Err(IndexError::LiveAlreadySeeded) => {
-                drop(artifact);
-                *self.seed_bundle.lock() = Some(SeedBundle {
-                    artifact: None,
-                    lease,
-                });
-                Ok(SeedFlow::Seeded)
-            }
-            Err(
-                IndexError::StaleIndexState | IndexError::ResetInProgress | IndexError::Storage(_),
-            ) => {
-                *self.seed_bundle.lock() = Some(SeedBundle {
-                    artifact: Some(artifact),
-                    lease,
-                });
-                Ok(SeedFlow::Return(ReconcileAction::Stalled))
-            }
-            Err(error) => {
-                drop(artifact);
-                drop(lease);
-                Err(DerivedIndexWorkerError::Index(error))
-            }
-        }
     }
 }

@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::sync::LazyLock;
 use std::time::Instant;
 
 use crate::primitives::{Amount, OutPoint, Sequence, Tx, TxOut, TxView, Wtxid};
@@ -20,16 +19,7 @@ const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
 
 pub(crate) const COINBASE_MATURITY: u32 = 100;
 
-const MAX_SCRIPT_VERIFY_THREADS: usize = 32;
 const MIN_PARALLEL_SCRIPT_CHECKS: usize = 32;
-static SCRIPT_VERIFY_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
-    let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(available.min(MAX_SCRIPT_VERIFY_THREADS))
-        .thread_name(|index| format!("script-verify-{index}"))
-        .build()
-        .unwrap_or_else(|error| panic!("failed to build script verification pool: {error}"))
-});
 
 #[must_use]
 pub fn is_final_tx_view(tx: TxView<'_>, block_height: u32, locktime_cutoff: u32) -> bool {
@@ -440,7 +430,7 @@ fn run_prepared_checks(units: &[BlockScriptChecks<'_>]) -> Vec<Result<(), Consen
     if flat.len() < MIN_PARALLEL_SCRIPT_CHECKS {
         flat.iter().map(run).collect()
     } else {
-        SCRIPT_VERIFY_POOL.install(|| flat.par_iter().map(run).collect())
+        flat.par_iter().map(run).collect()
     }
 }
 

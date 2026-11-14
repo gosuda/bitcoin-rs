@@ -188,8 +188,7 @@ pub struct IndexedBlockBodyStore<S: KvStore> {
 enum PositionLookup {
     Direct,
     Prefetched {
-        entries: Vec<(u32, Hash256, Option<BlockFilePosition>)>,
-        next: usize,
+        entries: hashbrown::HashMap<(u32, Hash256), Option<BlockFilePosition>>,
     },
 }
 
@@ -216,14 +215,6 @@ struct IndexedBlockBodyReader<'a> {
 
 impl BlockBodyReader for IndexedBlockBodyReader<'_> {
     fn prefetch_positions(&mut self, requests: &[(u32, Hash256)]) -> Result<(), StorageError> {
-        if let PositionLookup::Prefetched { entries, next } = &self.positions
-            && *next != entries.len()
-        {
-            return Err(StorageError::InvalidOperation(
-                "prefetched body positions were not fully consumed",
-            ));
-        }
-
         let keys: Vec<_> = requests
             .iter()
             .map(|&(height, hash)| crate::pruning::block_body_key(height, hash))
@@ -244,10 +235,10 @@ impl BlockBodyReader for IndexedBlockBodyReader<'_> {
             .zip(values)
             .map(|((height, hash), value)| {
                 let position = decode_body_position(height, value.as_deref())?;
-                Ok((height, hash, position))
+                Ok(((height, hash), position))
             })
-            .collect::<Result<Vec<_>, StorageError>>()?;
-        self.positions = PositionLookup::Prefetched { entries, next: 0 };
+            .collect::<Result<hashbrown::HashMap<_, _>, StorageError>>()?;
+        self.positions = PositionLookup::Prefetched { entries };
         Ok(())
     }
 
@@ -256,25 +247,19 @@ impl BlockBodyReader for IndexedBlockBodyReader<'_> {
         height: u32,
         hash: bitcoin_rs_consensus::primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        let position = match &mut self.positions {
+        let position = match &self.positions {
             PositionLookup::Direct => {
                 let key = crate::pruning::block_body_key(height, hash);
                 let encoded = self.index.get(crate::pruning::BLOCK_DATA_CF, &key)?;
                 decode_body_position(height, encoded.as_deref())?
             }
-            PositionLookup::Prefetched { entries, next } => {
-                let Some(&(expected_height, expected_hash, position)) = entries.get(*next) else {
+            PositionLookup::Prefetched { entries } => {
+                let Some(position) = entries.get(&(height, hash)) else {
                     return Err(StorageError::InvalidOperation(
-                        "prefetched body positions are exhausted",
+                        "body position was not prefetched",
                     ));
                 };
-                if expected_height != height || expected_hash != hash {
-                    return Err(StorageError::InvalidOperation(
-                        "prefetched body position consumed out of order",
-                    ));
-                }
-                *next += 1;
-                position
+                *position
             }
         };
         let Some(position) = position else {
@@ -603,22 +588,63 @@ mod body_position_prefetch_tests {
     }
 
     #[test]
-    fn prefetched_positions_stream_bodies_in_exact_request_order() -> TestResult {
+    fn prefetched_positions_are_keyed_not_positional() -> TestResult {
         let temp = tempfile::tempdir()?;
         let index = Arc::new(crate::RocksDbStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
         let store = IndexedBlockBodyStore::new(index, files);
         let hash1 = Hash256::from_le_bytes(&[1_u8; 32]);
         let hash2 = Hash256::from_le_bytes(&[2_u8; 32]);
+        let hash3 = Hash256::from_le_bytes(&[3_u8; 32]);
+        let hash4 = Hash256::from_le_bytes(&[4_u8; 32]);
         store.persist_block_body(1, hash1, b"first body")?;
         store.persist_block_body(2, hash2, b"second body")?;
-
+        store.persist_block_body(3, hash3, b"third body")?;
         let mut reader = store.reader()?;
-        reader.prefetch_positions(&[(1, hash1), (2, hash2)])?;
+        reader.prefetch_positions(&[(1, hash1), (2, hash2), (3, hash3)])?;
+        assert_eq!(
+            reader.load_block_body(2, hash2)?.as_deref(),
+            Some(b"second body".as_slice())
+        );
+        assert_eq!(
+            reader.load_block_body(3, hash3)?.as_deref(),
+            Some(b"third body".as_slice())
+        );
+        assert_eq!(
+            reader.load_block_body(1, hash1)?.as_deref(),
+            Some(b"first body".as_slice())
+        );
         assert!(matches!(
-            reader.load_block_body(2, hash2),
+            reader.load_block_body(4, hash4),
             Err(StorageError::InvalidOperation(_))
         ));
+        reader.prefetch_positions(&[(1, hash1)])?;
+        assert_eq!(
+            reader.load_block_body(1, hash1)?.as_deref(),
+            Some(b"first body".as_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prefetched_bodies_resolve_by_key_with_bounded_retention() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let index = Arc::new(crate::RocksDbStore::open(temp.path().join("index"))?);
+        let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
+        let store = IndexedBlockBodyStore::new(index, files);
+        let hash1 = Hash256::from_le_bytes(&[1_u8; 32]);
+        let hash2 = Hash256::from_le_bytes(&[2_u8; 32]);
+        let hash3 = Hash256::from_le_bytes(&[3_u8; 32]);
+        let hash4 = Hash256::from_le_bytes(&[9_u8; 32]);
+        store.persist_block_body(1, hash1, b"first body")?;
+        store.persist_block_body(2, hash2, b"second body")?;
+        store.persist_block_body(3, hash3, b"third body")?;
+        let mut reader = store.reader()?;
+        reader.prefetch_positions(&[(1, hash1), (2, hash2), (3, hash3)])?;
+        assert_eq!(
+            reader.load_block_body(3, hash3)?.as_deref(),
+            Some(b"third body".as_slice())
+        );
         assert_eq!(
             reader.load_block_body(1, hash1)?.as_deref(),
             Some(b"first body".as_slice())
@@ -628,9 +654,22 @@ mod body_position_prefetch_tests {
             Some(b"second body".as_slice())
         );
         assert!(matches!(
-            reader.load_block_body(2, hash2),
+            reader.load_block_body(4, hash4),
             Err(StorageError::InvalidOperation(_))
         ));
+        reader.prefetch_positions(&[(2, hash2)])?;
+        assert!(matches!(
+            reader.load_block_body(1, hash1),
+            Err(StorageError::InvalidOperation(_))
+        ));
+        assert_eq!(
+            reader.load_block_body(2, hash2)?.as_deref(),
+            Some(b"second body".as_slice())
+        );
+        assert_eq!(
+            reader.load_block_body(2, hash2)?.as_deref(),
+            Some(b"second body".as_slice())
+        );
         Ok(())
     }
 

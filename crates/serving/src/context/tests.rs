@@ -1,4 +1,5 @@
 use super::*;
+use bitcoin_rs_consensus::latch::{LatchReader, LatchWriter};
 
 struct ReadySource;
 
@@ -33,7 +34,8 @@ fn eight_threads_share_one_context_for_getblockcount() {
 
 #[test]
 fn applied_view_uses_one_publication() {
-    use bitcoin_rs_execution::chain::{ChainTxCount, ChainWork, NodeId};
+    use bitcoin_rs_consensus::header_rules::ChainWork;
+    use bitcoin_rs_execution::chain::{ChainTxCount, NodeId};
 
     let ctx = Context::new();
     let tip = |height: u32, byte: u8, work: u64, count| {
@@ -94,7 +96,7 @@ fn applied_view_does_not_wait_for_transition() -> Result<(), crate::test_error::
     ctx.chain.applied_tip.store(Some(Arc::new(TipSnapshot {
         tip_id: bitcoin_rs_execution::chain::NodeId::new(0),
         height: 5,
-        chainwork: bitcoin_rs_execution::chain::ChainWork::ZERO,
+        chainwork: bitcoin_rs_consensus::header_rules::ChainWork::ZERO,
         hash: bitcoin_rs_consensus::primitives::Hash256::default(),
         chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::established(1),
     })));
@@ -251,7 +253,7 @@ fn from_handles_shares_chain_handles_with_caller() {
     );
     let p2p = Arc::new(bitcoin_rs_wire::P2pService::new(
         bitcoin_rs_wire::P2pServiceConfig::default(),
-        bitcoin_rs_wire::LatchReader::fixture_never(),
+        LatchReader::fixture_never(),
     ));
     let chain_transition = bitcoin_rs_execution::chain::TransitionDomain::new().stable_read();
     let fixture_reader = bitcoin_rs_storage::utxo::UtxoReader::fixture_with_set(Arc::clone(&utxo))
@@ -301,7 +303,7 @@ fn from_handles_shares_chain_handles_with_caller() {
         Arc::new(TipSnapshot {
             tip_id: bitcoin_rs_execution::chain::NodeId::new(0),
             height: 7,
-            chainwork: bitcoin_rs_execution::chain::ChainWork::ZERO,
+            chainwork: bitcoin_rs_consensus::header_rules::ChainWork::ZERO,
             hash: Hash256::from_le_bytes(&[7; 32]),
             chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::established(count),
         })
@@ -365,7 +367,7 @@ fn status_keeps_the_captured_applied_pair() {
         Arc::new(TipSnapshot {
             tip_id: bitcoin_rs_execution::chain::NodeId::new(height),
             height,
-            chainwork: bitcoin_rs_execution::chain::ChainWork::from(work),
+            chainwork: bitcoin_rs_consensus::header_rules::ChainWork::from(work),
             hash: Hash256::from_le_bytes(&[byte; 32]),
             chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::established(count),
         })
@@ -386,7 +388,7 @@ fn status_keeps_the_captured_applied_pair() {
         progress.chain_work,
         format!(
             "{:064x}",
-            bitcoin_rs_execution::chain::ChainWork::from(7_u64)
+            bitcoin_rs_consensus::header_rules::ChainWork::from(7_u64)
         ),
         "chainwork must stay at the capture"
     );
@@ -769,7 +771,7 @@ fn ibd_latch_judges_the_contexts_own_tree() {
             chain_network: Network::Mainnet,
             block_body_source: None,
             block_undo_source: None,
-            closed_for_recovery: bitcoin_rs_execution::chain::LatchWriter::new().reader(),
+            closed_for_recovery: LatchWriter::new().reader(),
             rollback_warnings: None,
         },
         mempool: MempoolHandles {

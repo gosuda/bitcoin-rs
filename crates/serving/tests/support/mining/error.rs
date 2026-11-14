@@ -71,7 +71,13 @@ pub(crate) enum TestError {
     #[error("missing expected value: {0}")]
     Missing(&'static str),
     #[error(transparent)]
-    Support(#[from] crate::support::error::TestError),
+    Support(Box<crate::support::error::TestError>),
+}
+
+impl From<crate::support::error::TestError> for TestError {
+    fn from(error: crate::support::error::TestError) -> Self {
+        Self::Support(Box::new(error))
+    }
 }
 
 impl From<&'static str> for TestError {

@@ -6,8 +6,7 @@ use bitcoin_rs_projection::CapabilitySnapshot;
 use bitcoin_rs_projection::IndexCapability;
 use bitcoin_rs_projection::ScriptHash;
 use bitcoin_rs_projection::query_api::{
-    AtPrefix, HistoricalQueryError, HistoricalUnavailableCause, ScriptIndexSnapshot,
-    SpendingRecord, TxUnavailableCause,
+    Answer, ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
 };
 pub(crate) use bitcoin_rs_serving::context::SyncProgress;
 use bitcoin_rs_serving::context::{ChainAdmissionView, DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB};
@@ -75,12 +74,17 @@ impl Node {
             .map_err(|error| NodeError::Unavailable(error.to_string()))
     }
 
-    pub async fn activate_assumeutxo_snapshot_file(
+    pub async fn import_manifest(
         &self,
         path: impl AsRef<std::path::Path>,
-    ) -> Result<(), NodeError> {
+    ) -> Result<bitcoin_rs_serving::context::SnapshotImport, NodeError> {
         self.state
-            .activate_assumeutxo_snapshot_file(path)
+            .import_manifest(path)
+            .map_err(|error| NodeError::Snapshot(error.to_string()))
+    }
+    pub fn three_positions(&self) -> Result<crate::snapshot::ThreePositions, NodeError> {
+        self.state
+            .three_positions()
             .map_err(|error| NodeError::Snapshot(error.to_string()))
     }
 
@@ -118,12 +122,10 @@ impl Node {
     pub fn transaction_at_prefix(
         &self,
         txid: &Txid,
-    ) -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError> {
+    ) -> Result<Answer<Option<(u32, Tx)>>, TxQueryError> {
         let Some(adapter) = self.state.historical_index_adapter() else {
-            return Err(HistoricalQueryError::Unavailable(
-                HistoricalUnavailableCause::Shared(TxUnavailableCause::CapabilityDisabled(
-                    IndexCapability::TxLookup,
-                )),
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::CapabilityDisabled(IndexCapability::TxLookup),
             ));
         };
         adapter.transaction_at_prefix(txid)
@@ -132,12 +134,10 @@ impl Node {
     pub fn script_history_at_prefix(
         &self,
         script: ScriptHash,
-    ) -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError> {
+    ) -> Result<Answer<ScriptIndexSnapshot>, TxQueryError> {
         let Some(adapter) = self.state.historical_index_adapter() else {
-            return Err(HistoricalQueryError::Unavailable(
-                HistoricalUnavailableCause::Shared(TxUnavailableCause::CapabilityDisabled(
-                    IndexCapability::ScriptHistory,
-                )),
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptHistory),
             ));
         };
         adapter.script_history_at_prefix(script)
@@ -146,12 +146,10 @@ impl Node {
     pub fn spender_at_prefix(
         &self,
         outpoint: OutPoint,
-    ) -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError> {
+    ) -> Result<Answer<Option<SpendingRecord>>, TxQueryError> {
         let Some(adapter) = self.state.historical_index_adapter() else {
-            return Err(HistoricalQueryError::Unavailable(
-                HistoricalUnavailableCause::Shared(TxUnavailableCause::CapabilityDisabled(
-                    IndexCapability::ScriptHistory,
-                )),
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptHistory),
             ));
         };
         adapter.spender_at_prefix(outpoint)

@@ -130,6 +130,7 @@ fn publish_fixture_at(
             utxo_count: 0,
             muhash: "00".repeat(32),
         },
+        engine: None,
     };
     commit_publication(stage, &manifest)
 }
@@ -576,7 +577,7 @@ fn format_and_schema_helpers_round_trip() -> TestResult {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     ensure_current_schema(&data)?;
-    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"4\n");
+    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"6\n");
     let mut oversized = data.create("oversized")?;
     oversized.write_all(&[0_u8; 17])?;
     oversized.sync_all()?;
@@ -585,7 +586,7 @@ fn format_and_schema_helpers_round_trip() -> TestResult {
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData
     ));
     data.remove_file(CURRENT_SCHEMA_FILE)?;
-    for epoch in [b"0\n", b"1\n", b"2\n", b"3\n"] {
+    for epoch in [b"0\n", b"1\n", b"2\n", b"3\n", b"4\n", b"5\n"] {
         let mut stale_schema = data.create(CURRENT_SCHEMA_FILE)?;
         stale_schema.write_all(epoch)?;
         stale_schema.sync_all()?;
@@ -614,7 +615,7 @@ fn schema_init_exempts_only_a_regular_lock_file() -> TestResult {
         lock.sync_all()?;
     }
     ensure_current_schema(&data)?;
-    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"4\n");
+    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"6\n");
     {
         let mut other = data.create("other")?;
         other.write_all(b"data")?;
@@ -886,5 +887,61 @@ fn rename_noreplace_refuses_an_existing_destination_and_keeps_both_files() -> Te
     super::fs::rename_noreplace(&data, "staged", "free")?;
     assert_eq!(fs::read(dir.path().join("free"))?, b"new");
     assert!(!dir.path().join("staged").exists());
+    Ok(())
+}
+
+#[test]
+fn nonempty_write_ahead_log_refuses_digest() -> TestResult {
+    let dir = tempdir()?;
+    let image_path = dir.path().join("chainstate");
+    std::fs::create_dir_all(&image_path)?;
+    std::fs::write(image_path.join("000008.sst"), b"table")?;
+    std::fs::write(image_path.join("000009.log"), b"unflushed")?;
+    let image = open_root(&image_path)?;
+    let Err(CheckpointError::Invalid(_)) = super::digest::digest_engine_dir(&image) else {
+        return Err(TestError::Missing(
+            "digest accepted a WAL carrying unflushed writes",
+        ));
+    };
+    Ok(())
+}
+
+#[test]
+fn engine_manifest_byte_change_requires_resync() -> TestResult {
+    let live_temp = tempfile::tempdir()?;
+    let store = crate::RocksDbStore::open(live_temp.path().join("db"))?;
+    {
+        use crate::KvStore as _;
+        let mut batch = store.new_batch();
+        batch.put(crate::ColumnFamily::Coins, &[7u8; 32], &[9u8; 16]);
+        store.write(batch)?;
+    }
+    let image_temp = tempfile::tempdir()?;
+    let image_path = image_temp.path().join("chainstate");
+    {
+        use crate::KvStore as _;
+        store.checkpoint(&image_path)?;
+    }
+    drop(store);
+    let image = open_root(&image_path)?;
+    let artifact = super::digest::digest_engine_dir(&image)?;
+    let manifest_name = artifact
+        .files
+        .iter()
+        .find(|file| file.file.starts_with("MANIFEST-"))
+        .ok_or(TestError::Missing("checkpoint image has no manifest"))?
+        .file
+        .clone();
+    let manifest_path = image_path.join(&manifest_name);
+    let mut bytes = fs::read(&manifest_path)?;
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0x01;
+    fs::write(&manifest_path, &bytes)?;
+    let Err(CheckpointError::Invalid(_)) = super::digest::verify_engine_artifact(&image, &artifact)
+    else {
+        return Err(TestError::Missing(
+            "mutated engine manifest passed verification",
+        ));
+    };
     Ok(())
 }
