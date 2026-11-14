@@ -50,8 +50,7 @@ pub(crate) enum Command {
 }
 
 impl CliArgs {
-    /// The convert-mode roots; `None` when the invoked subcommand replaces
-    /// the default conversion flow.
+    /// The convert-mode roots; errors when `--from` or `--to` is absent.
     pub(crate) fn convert_roots(&self) -> Result<(&PathBuf, &PathBuf), ConvertError> {
         let Some(from) = self.from.as_ref() else {
             return Err(ConvertError::InvalidOperation(
