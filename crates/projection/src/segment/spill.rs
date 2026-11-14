@@ -237,27 +237,19 @@ fn write_row(out: &mut impl Write, key: &[u8], value: &[u8]) -> std::io::Result<
 }
 
 fn read_row(reader: &mut impl Read) -> std::io::Result<Option<(Vec<u8>, Vec<u8>)>> {
-    let mut first = [0u8; 1];
-    match reader.read_exact(&mut first) {
+    let mut lens = [0u8; 8];
+    match reader.read_exact(&mut lens[..1]) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
             return Ok(None);
         }
         Err(error) => return Err(error),
     }
-    let mut rest = [0u8; 7];
-    reader.read_exact(&mut rest)?;
-    let mut lens = [0u8; 8];
-    lens[0] = first[0];
-    lens[1..].copy_from_slice(&rest);
-    let key_len = usize::try_from(u32::from_le_bytes(lens[..4].try_into().map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "spill row is truncated")
-    })?))
-    .unwrap_or(usize::MAX);
-    let value_len = usize::try_from(u32::from_le_bytes(lens[4..].try_into().map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "spill row is truncated")
-    })?))
-    .unwrap_or(usize::MAX);
+    reader.read_exact(&mut lens[1..])?;
+    let key_len = usize::try_from(u32::from_le_bytes([lens[0], lens[1], lens[2], lens[3]]))
+        .unwrap_or(usize::MAX);
+    let value_len = usize::try_from(u32::from_le_bytes([lens[4], lens[5], lens[6], lens[7]]))
+        .unwrap_or(usize::MAX);
     let mut key = Vec::new();
     reader
         .by_ref()
