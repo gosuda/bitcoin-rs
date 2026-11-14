@@ -156,6 +156,20 @@ fn coinbase_tx() -> Tx {
     }
 }
 
+fn local_block(txs: Vec<Tx>) -> Block {
+    Block {
+        header: Header {
+            version: 1,
+            prev_blockhash: BlockHash(Hash256::default()),
+            merkle_root: Hash256::default(),
+            time: 1_300_000_000,
+            bits: CompactTarget::from_consensus(0x1d00ffff),
+            nonce: 1,
+        },
+        txs,
+    }
+}
+
 fn funded_record(txid: Txid, base: u64) -> TestResult<(UtxoRecord, Vec<UtxoCoin>)> {
     let outputs: Vec<OwnedUtxoOut> = (0..3_u32)
         .map(|vout| OwnedUtxoOut::new(vout, base + u64::from(vout), vec![OP_PUSHNUM_1], false, 7))
@@ -216,17 +230,7 @@ fn inputs_sharing_a_previous_transaction_resolve_in_one_batch() -> TestResult {
     ];
     let txs = vec![coinbase_tx(), spend_tx(&spent_a), spend_tx(&spent_b)];
     let txids: Vec<Txid> = txs.iter().map(Tx::txid).collect();
-    let block = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash: BlockHash(Hash256::default()),
-            merkle_root: Hash256::default(),
-            time: 1_300_000_000,
-            bits: CompactTarget::from_consensus(0x1d00ffff),
-            nonce: 1,
-        },
-        txs,
-    };
+    let block = local_block(txs);
     let image = BlockImage::from_local(block);
     let tx_plan = crate::prepare::plan_block_transactions(&image, &txids);
     let input_count = spent_a.len() + spent_b.len();
@@ -321,17 +325,7 @@ fn many_previous_transactions_resolve_in_bounded_batches() -> TestResult {
     let (funded, spent) = fund_many(&mut chain, distinct)?;
     let txs = vec![coinbase_tx(), spend_tx(&spent)];
     let txids: Vec<Txid> = txs.iter().map(Tx::txid).collect();
-    let block = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash: BlockHash(Hash256::default()),
-            merkle_root: Hash256::default(),
-            time: 1_300_000_000,
-            bits: CompactTarget::from_consensus(0x1d00ffff),
-            nonce: 1,
-        },
-        txs,
-    };
+    let block = local_block(txs);
     let image = BlockImage::from_local(block);
     let tx_plan = crate::prepare::plan_block_transactions(&image, &txids);
     let gets_before = store.coin_gets.load(Ordering::SeqCst);
@@ -393,17 +387,7 @@ fn same_block_spend_resolves_from_the_block_and_absent_stays_missing() -> TestRe
     let second = spend_tx(&[same, absent]);
     let txs = vec![coinbase_tx(), first, second];
     let txids: Vec<Txid> = txs.iter().map(Tx::txid).collect();
-    let block = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash: BlockHash(Hash256::default()),
-            merkle_root: Hash256::default(),
-            time: 1_300_000_000,
-            bits: CompactTarget::from_consensus(0x1d00ffff),
-            nonce: 1,
-        },
-        txs,
-    };
+    let block = local_block(txs);
     let image = BlockImage::from_local(block);
     let tx_plan = crate::prepare::plan_block_transactions(&image, &txids);
     assert!(
@@ -463,17 +447,7 @@ fn refused_charge_stops_resolution_after_the_first_chunk() -> TestResult {
     let (_, spent) = fund_many(&mut chain, distinct)?;
     let txs = vec![coinbase_tx(), spend_tx(&spent)];
     let txids: Vec<Txid> = txs.iter().map(Tx::txid).collect();
-    let block = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash: BlockHash(Hash256::default()),
-            merkle_root: Hash256::default(),
-            time: 1_300_000_000,
-            bits: CompactTarget::from_consensus(0x1d00ffff),
-            nonce: 1,
-        },
-        txs,
-    };
+    let block = local_block(txs);
     let image = BlockImage::from_local(block);
     let tx_plan = crate::prepare::plan_block_transactions(&image, &txids);
     let handle = ChargeHandle::new(Arc::new(RefusingCharge), BudgetOwner::StagedImages);
