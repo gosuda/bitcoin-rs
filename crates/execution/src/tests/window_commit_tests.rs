@@ -1220,6 +1220,7 @@ impl bitcoin_rs_storage::budget::BudgetCharge for RefusingCharge {
 struct BoundedCharge {
     limit: u64,
     current: parking_lot::Mutex<u64>,
+    peak: parking_lot::Mutex<u64>,
 }
 
 impl BoundedCharge {
@@ -1227,6 +1228,7 @@ impl BoundedCharge {
         Self {
             limit,
             current: parking_lot::Mutex::new(0),
+            peak: parking_lot::Mutex::new(0),
         }
     }
 }
@@ -1250,6 +1252,8 @@ impl bitcoin_rs_storage::budget::BudgetCharge for BoundedCharge {
             return Err(bitcoin_rs_storage::budget::BudgetError::BudgetExhausted);
         }
         *cur += bytes;
+        let mut peak = self.peak.lock();
+        *peak = (*peak).max(*cur);
         Ok(())
     }
 
@@ -1262,6 +1266,126 @@ impl bitcoin_rs_storage::budget::BudgetCharge for BoundedCharge {
         let cur = *self.current.lock();
         self.limit.saturating_sub(cur)
     }
+}
+
+fn spend_of(previous: bitcoin_rs_consensus::primitives::Txid, sats: u64) -> Tx {
+    Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(previous, 0),
+            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(sats),
+            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
+        }],
+        lock_time: LockTime::ZERO,
+    }
+}
+
+fn bip30_tail_fixture() -> TestResult<(Block, Block, Vec<bitcoin_rs_consensus::primitives::Txid>)> {
+    let genesis = Network::Regtest.genesis_block();
+    let first_owner = spend_of(genesis.txs[0].txid(), 50_000).txid();
+    let tail_owners: Vec<_> = (0..4_u64)
+        .map(|index| spend_of(genesis.txs[0].txid(), 51_000 + index).txid())
+        .collect();
+    let mut b1 = mined_child(genesis.block_hash(), 1)?;
+    b1.txs.push(spend_of(first_owner, 40_000));
+    remine(&mut b1)?;
+    let mut b2 = mined_child(b1.block_hash(), 2)?;
+    for (index, owner) in tail_owners.iter().enumerate() {
+        b2.txs
+            .push(spend_of(*owner, 30_000 + u64::try_from(index)?));
+    }
+    remine(&mut b2)?;
+    let mut engine_coins = vec![first_owner, b2.txs[0].txid()];
+    engine_coins.extend(tail_owners);
+    Ok((b1, b2, engine_coins))
+}
+
+fn bip30_tail_chain(
+    b1: &Block,
+    b2: &Block,
+    engine_coins: &[bitcoin_rs_consensus::primitives::Txid],
+) -> TestResult<Chainstate> {
+    let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    commit_genesis_head(&chain)?;
+    for txid in engine_coins {
+        insert_engine_coin(&chain, *txid)?;
+    }
+    apply_headers(&chain, &[b1, b2])?;
+    Ok(chain)
+}
+
+// BUD-06, WIN-07
+#[test]
+fn tail_window_after_a_duplicate_split_is_not_starved_by_the_completed_window() -> TestResult {
+    let (b1, b2, engine_coins) = bip30_tail_fixture()?;
+    let payloads = dump_payloads(&[b1.clone(), b2.clone()]);
+
+    let mut separate = bip30_tail_chain(&b1, &b2, &engine_coins)?;
+    let first_window = Arc::new(BoundedCharge::new(u64::MAX));
+    separate.set_prevout_charge(bitcoin_rs_storage::budget::ChargeHandle::new(
+        first_window.clone(),
+        bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
+    ));
+    separate.apply_window(&[&payloads[0]])?;
+    let tail_window = Arc::new(BoundedCharge::new(u64::MAX));
+    separate.set_prevout_charge(bitcoin_rs_storage::budget::ChargeHandle::new(
+        tail_window.clone(),
+        bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
+    ));
+    let refused = separate
+        .apply_window(&[&payloads[1]])
+        .err()
+        .ok_or(TestError::Missing("the duplicate block must be refused"))?;
+    assert!(matches!(
+        *refused.source,
+        ApplyError::Consensus(ConsensusError::Bip { .. })
+    ));
+    let (first_settled, first_peak) = (*first_window.current.lock(), *first_window.peak.lock());
+    let (tail_settled, tail_peak) = (*tail_window.current.lock(), *tail_window.peak.lock());
+    assert_eq!((first_settled, tail_settled), (0, 0));
+    assert!(first_peak > 0, "the first window must charge its prevouts");
+    assert!(
+        tail_peak > first_peak,
+        "the tail window must need more than the first window"
+    );
+
+    let mut chained = bip30_tail_chain(&b1, &b2, &engine_coins)?;
+    let bounded = Arc::new(BoundedCharge::new(tail_peak));
+    chained.set_prevout_charge(bitcoin_rs_storage::budget::ChargeHandle::new(
+        bounded.clone(),
+        bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
+    ));
+    let payload_refs: Vec<&BlockImage> = payloads.iter().collect();
+    let error = chained
+        .apply_window(&payload_refs)
+        .err()
+        .ok_or(TestError::Missing("the duplicate block must be refused"))?;
+    assert!(
+        matches!(
+            *error.source,
+            ApplyError::Consensus(ConsensusError::Bip { .. })
+        ),
+        "the duplicate block must reach the BIP30 rule: {:?}",
+        error.source
+    );
+    assert_eq!(
+        *bounded.peak.lock(),
+        tail_peak,
+        "the tail window must be admitted with the first window's charge released"
+    );
+    assert_eq!(*bounded.current.lock(), 0);
+    let head = chained
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("durable head"))?;
+    assert_eq!(head.height, 1);
+    Ok(())
 }
 
 #[test]
