@@ -7,6 +7,18 @@ use bitcoin_rs_storage::utxo::UtxoReader;
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_storage::{CoinStore, MemoryKvStore};
 
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    TryFromInt(#[from] std::num::TryFromIntError),
+    #[error(transparent)]
+    Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+}
+
+type TestResult = Result<(), TestError>;
+
 struct TrackingAllocator;
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 
@@ -44,8 +56,7 @@ static ALLOCATOR: TrackingAllocator = TrackingAllocator;
 
 // ARCH-07a
 #[test]
-fn dropping_last_query_view_releases_derived_image_while_readers_survive()
--> Result<(), Box<dyn std::error::Error>> {
+fn dropping_last_query_view_releases_derived_image_while_readers_survive() -> TestResult {
     const RECORDS: u32 = 4096;
     const SCRIPT_BYTES: usize = 512;
     let store = Arc::new(MemoryKvStore::new());
@@ -80,7 +91,7 @@ fn dropping_last_query_view_releases_derived_image_while_readers_survive()
             let outpoint = OutPoint::new(Hash256::from_le_bytes(&bytes).into(), index % 3);
             let coin = view
                 .get_entry(&outpoint)
-                .ok_or("fixture coin missing from view")?;
+                .ok_or(TestError::Missing("fixture coin missing from view"))?;
             assert_eq!(coin.outpoint, outpoint);
             assert_eq!(coin.height, index + 7);
             assert_eq!(coin.coinbase, index % 2 == 0);
