@@ -471,3 +471,46 @@ fn refused_charge_stops_resolution_after_the_first_chunk() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn duplicate_outpoints_preserve_zip_association_and_first_seen_order() -> TestResult {
+    let store = Arc::new(CountingStore::default());
+    let mut chain = handles_with_store(
+        Network::Regtest,
+        Arc::new(UtxoSet::new()),
+        Arc::clone(&store),
+    );
+    let dyn_store: Arc<dyn KvStore> = store.clone();
+    chain.coins = Arc::new(CoinStore::open(dyn_store, 0));
+
+    let txid = Txid(Hash256::from_le_bytes(&[0x33; 32]));
+    let (record, coins) = funded_record(txid, 5_000)?;
+    chain.commit_authority.store().put(
+        ColumnFamily::Coins,
+        CoinKey(txid.0.to_le_bytes()).as_bytes(),
+        record.bytes(),
+    )?;
+
+    let spent = [
+        OutPoint::new(txid, 0),
+        OutPoint::new(txid, 0),
+        OutPoint::new(txid, 1),
+    ];
+    let txs = vec![
+        coinbase_tx(),
+        spend_tx(&spent[0..1]),
+        spend_tx(&spent[1..2]),
+        spend_tx(&spent[2..3]),
+    ];
+    let txids: Vec<Txid> = txs.iter().map(Tx::txid).collect();
+    let block = local_block(txs);
+    let image = BlockImage::from_local(block);
+    let tx_plan = crate::prepare::plan_block_transactions(&image, &txids);
+    let source = ChainstateUtxoSource::new(&chain);
+    let resolved = crate::ResolvedUtxoView::resolve(&source, &image, &tx_plan);
+    source.into_result()?;
+
+    assert_eq!(resolved.entry(&OutPoint::new(txid, 0)), Some(&coins[0]));
+    assert_eq!(resolved.entry(&OutPoint::new(txid, 1)), Some(&coins[1]));
+    Ok(())
+}
