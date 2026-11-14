@@ -295,7 +295,6 @@ impl<'a> Captured<'a> {
             reader: BodyReader::new(self.bodies),
             located: Vec::new(),
             positions: Vec::new(),
-            positions_written: 0,
             path,
         };
         let (records, payload_bytes) = rows.stream(self.base, &mut out)?;
@@ -333,7 +332,6 @@ struct RowExporter<'a> {
     reader: BodyReader<'a>,
     located: Vec<([u8; 32], TxPosition)>,
     positions: Vec<TxPosition>,
-    positions_written: u64,
     path: &'a Path,
 }
 
@@ -667,7 +665,6 @@ impl RowExporter<'_> {
         let mut resolved = tempfile::tempfile().map_err(failed)?;
         let mut seen = 0_u64;
         let mut visited = 0_u64;
-        let mut positions = 0_u64;
         while seen < rows {
             let Some((sort_key, payload)) =
                 read_framed(staged, STAGED_SORT_KEY_LEN).map_err(failed)?
@@ -705,8 +702,6 @@ impl RowExporter<'_> {
                 return Err(IndexBundleError::Cancelled);
             }
             self.locate(row, value)?;
-            positions =
-                positions.saturating_add(u64::try_from(self.located.len()).unwrap_or(u64::MAX));
             let mut sequence_key = [0_u8; RESOLVED_SORT_KEY_LEN];
             sequence_key.copy_from_slice(&sequence.to_be_bytes());
             write_framed(
@@ -808,8 +803,6 @@ impl RowExporter<'_> {
                     .iter()
                     .map(|(_, position)| *position),
             );
-            let added = u64::try_from(run).unwrap_or(u64::MAX);
-            self.positions_written += added;
             bytes += write_record(out, &txid, height, &self.positions)
                 .map_err(|error| io_error(self.path, error))?;
             records += 1;
