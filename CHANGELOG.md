@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Projection spill sorting charges retained payload capacities and row-vector backing storage. Spill, finish, and drop free row storage before returning its budget charge; a failed spill keeps its retained rows charged.
+- A filter catch-up that seals a shared transaction tail preserves publication for every existing capability whose rows move. Seal recovery uses the same owners, and unrelated capability watermarks do not advance.
 - BREAKING CHANGE: `DerivedIndexQuery::transaction_height` is replaced by `transaction_block`, which returns the transaction body with its captured occurrence height and block hash. Esplora confirmation metadata uses that block identity across reorgs, including ABA publication changes.
 - Projection enforces serving-view expiry at read completion and between emitted compact-filter records.
 - Network ingress leaves the existing foreground reserve available within the staged-image allowance. Its capacity and atomic admission check use the reduced ceiling; execution retains the full owner cap. The node-wide total, cache shares, and resource-refusal classification are unchanged.

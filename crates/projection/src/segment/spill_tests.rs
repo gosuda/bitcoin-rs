@@ -1,6 +1,115 @@
 use super::{SpillBudget, SpillSet, cursor_peak, merge, reset_cursor_peak};
 use std::io::Result as IoResult;
 
+// SNP-05, PRJ-09
+#[test]
+fn retained_row_capacity_is_charged_and_released() -> IoResult<()> {
+    let scratch = tempfile::tempdir()?;
+    let budget = SpillBudget::new(4096);
+    let set = SpillSet::new(&budget, scratch.path().to_path_buf());
+    let mut sorter = set.sorter("capacity");
+    let mut key = Vec::with_capacity(71);
+    key.push(2);
+    let mut value = Vec::with_capacity(113);
+    value.push(9);
+    sorter.push(key, value)?;
+    for key in [1, 2, 0, 3] {
+        sorter.push(vec![key], vec![9])?;
+    }
+    {
+        let sorters = set.sorters.borrow();
+        let state = &sorters[0];
+        let retained = state.buffer.capacity() * std::mem::size_of::<(Vec<u8>, Vec<u8>)>()
+            + state
+                .buffer
+                .iter()
+                .map(|(key, value)| key.capacity() + value.capacity())
+                .sum::<usize>();
+        let retained = u64::try_from(retained).map_err(std::io::Error::other)?;
+        assert_eq!(budget.current_bytes(), retained);
+        assert_eq!(state.buffered, retained);
+        assert!(budget.current_bytes() <= budget.limit);
+    }
+    let runs = sorter.finish()?;
+    assert_eq!(set.sorters.borrow()[0].buffer.capacity(), 0);
+    assert_eq!(budget.current_bytes(), 0);
+    let rows = merge(&runs)?.collect::<IoResult<Vec<_>>>()?;
+    assert_eq!(
+        rows,
+        vec![
+            (vec![0], vec![9]),
+            (vec![1], vec![9]),
+            (vec![2], vec![9]),
+            (vec![2], vec![9]),
+            (vec![3], vec![9])
+        ]
+    );
+    Ok(())
+}
+
+// SNP-05, PRJ-09
+#[test]
+fn backing_slots_force_spill_before_another_sorter_is_admitted() -> IoResult<()> {
+    let scratch = tempfile::tempdir()?;
+    let slot = std::mem::size_of::<(Vec<u8>, Vec<u8>)>();
+    let budget = SpillBudget::new(u64::try_from(4 * slot + 17).map_err(std::io::Error::other)?);
+    let set = SpillSet::new(&budget, scratch.path().to_path_buf());
+    let mut first = set.sorter("first");
+    let mut second = set.sorter("second");
+    first.push(vec![1], vec![7; 16])?;
+    second.push(vec![2], vec![8; 16])?;
+    let sorters = set.sorters.borrow();
+    assert_eq!(sorters[0].buffer.capacity(), 0);
+    assert_eq!(sorters[0].buffered, 0);
+    assert_eq!(sorters[0].runs.len(), 1);
+    let retained = sorters[1].buffer.capacity() * slot
+        + sorters[1]
+            .buffer
+            .iter()
+            .map(|(key, value)| key.capacity() + value.capacity())
+            .sum::<usize>();
+    assert_eq!(
+        budget.current_bytes(),
+        u64::try_from(retained).map_err(std::io::Error::other)?
+    );
+    assert!(budget.peak_bytes() <= budget.limit);
+    drop(sorters);
+    drop(set);
+    assert_eq!(budget.current_bytes(), 0);
+    Ok(())
+}
+
+// SNP-05, PRJ-09
+#[test]
+fn refused_spill_keeps_existing_capacity_charged_until_drop() -> IoResult<()> {
+    let scratch = tempfile::tempdir()?;
+    let slot = std::mem::size_of::<(Vec<u8>, Vec<u8>)>();
+    let budget = SpillBudget::new(u64::try_from(4 * slot + 17).map_err(std::io::Error::other)?);
+    let set = SpillSet::new(&budget, scratch.path().join("missing"));
+    let mut sorter = set.sorter("refused");
+    sorter.push(vec![1], vec![7; 16])?;
+    assert!(sorter.push(vec![2], vec![8; 16]).is_err());
+    {
+        let sorters = set.sorters.borrow();
+        let state = &sorters[0];
+        let retained = state.buffer.capacity() * slot
+            + state
+                .buffer
+                .iter()
+                .map(|(key, value)| key.capacity() + value.capacity())
+                .sum::<usize>();
+        assert_eq!(state.buffer.len(), 1);
+        assert_eq!(
+            budget.current_bytes(),
+            u64::try_from(retained).map_err(std::io::Error::other)?
+        );
+        assert!(state.runs.is_empty());
+    }
+    drop(set);
+    assert_eq!(budget.current_bytes(), 0);
+    Ok(())
+}
+
 // PRJ-09
 #[test]
 fn bounded_merge_matches_sorted_reference() -> IoResult<()> {
