@@ -561,7 +561,7 @@ struct ScriptQuery {
 struct HistoryWindow {
     max_groups: usize,
     max_bytes: usize,
-    groups: Vec<(u32, Vec<ScriptHistoryOccurrence>, usize)>,
+    groups: Vec<(u32, Vec<ScriptHistoryOccurrence>)>,
     current: Option<(u32, Vec<ScriptHistoryOccurrence>)>,
     bytes: usize,
     dropped: bool,
@@ -615,7 +615,7 @@ impl HistoryWindow {
             && (kept == 0 || self.bytes.saturating_add(row_bytes) <= self.max_bytes);
         if fits {
             self.bytes = self.bytes.saturating_add(row_bytes);
-            self.groups.push((height, group, row_bytes));
+            self.groups.push((height, group));
         } else {
             self.dropped = true;
         }
@@ -624,9 +624,6 @@ impl HistoryWindow {
     fn into_groups(mut self) -> Vec<(u32, Vec<ScriptHistoryOccurrence>)> {
         self.close_current();
         self.groups
-            .into_iter()
-            .map(|(height, group, _)| (height, group))
-            .collect()
     }
 
     fn finish(mut self, scripthash: ScriptHash) -> TxIndexScan {
@@ -634,7 +631,7 @@ impl HistoryWindow {
         let rows = self
             .groups
             .into_iter()
-            .map(|(height, group, _)| TxIndexScanRow {
+            .map(|(height, group)| TxIndexScanRow {
                 row: HashPrefixRow {
                     prefix: ScriptHashRow::scan_prefix(scripthash),
                     height: crate::types::encode_height(height),
