@@ -44,7 +44,6 @@ fn commit_rollback_one_with_spent_scripts<S: KvStore>(
 #[derive(Default)]
 struct MapScripts(hashbrown::HashMap<(Txid, u32), FixtureCoin>);
 
-#[derive(Clone)]
 struct FixtureCoin {
     script: Vec<u8>,
     value: u64,
@@ -366,6 +365,13 @@ fn tx_lookup_only_reopen<S: KvStore>(
     Ok(())
 }
 
+fn seed_row(outpoint: &NativeOutPoint, coin: &ScriptLiveCoin) -> Result<Vec<u8>, TestError> {
+    let row = ScriptLiveRow::new(coin.scripthash, outpoint);
+    let mut bytes = row.as_bytes().to_vec();
+    bytes.extend_from_slice(&coin.encode_value()?);
+    Ok(bytes)
+}
+
 fn seed_live_and_reopen<S: KvStore>(
     open: impl Fn() -> Result<S, bitcoin_rs_storage::StorageError>,
     store: Arc<S>,
@@ -392,12 +398,7 @@ fn seed_live_and_reopen<S: KvStore>(
     ];
     let rows = coins
         .into_iter()
-        .map(|(outpoint, coin)| -> Result<Vec<u8>, TestError> {
-            let row = ScriptLiveRow::new(coin.scripthash, &outpoint);
-            let mut bytes = row.as_bytes().to_vec();
-            bytes.extend_from_slice(&coin.encode_value()?);
-            Ok(bytes)
-        })
+        .map(|(outpoint, coin)| seed_row(&outpoint, &coin))
         .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(writer.stage_script_live_rows(&mut rows.into_iter())?, 2);
     writer.publish_script_live_seed(seed_tip)?;
@@ -918,12 +919,7 @@ fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), TestError> {
 
     let rows = coins
         .iter()
-        .map(|(outpoint, coin)| -> Result<Vec<u8>, TestError> {
-            let row = ScriptLiveRow::new(coin.scripthash, outpoint);
-            let mut bytes = row.as_bytes().to_vec();
-            bytes.extend_from_slice(&coin.encode_value()?);
-            Ok(bytes)
-        })
+        .map(|(outpoint, coin)| seed_row(outpoint, coin))
         .collect::<Result<Vec<_>, _>>()?;
     let written = writer.stage_script_live_rows(&mut rows.into_iter())?;
     assert_eq!(written, 3);
@@ -965,19 +961,9 @@ fn seed_stream_fenced_write_failure_does_not_publish_watermark() -> Result<(), T
             )
         })
         .collect::<Vec<_>>();
-    let _seed_tip = IndexWatermark {
-        height: 7,
-        hash: [0x07_u8; 32],
-    };
-
     let rows = coins
         .iter()
-        .map(|(outpoint, coin)| -> Result<Vec<u8>, TestError> {
-            let row = ScriptLiveRow::new(coin.scripthash, outpoint);
-            let mut bytes = row.as_bytes().to_vec();
-            bytes.extend_from_slice(&coin.encode_value()?);
-            Ok(bytes)
-        })
+        .map(|(outpoint, coin)| seed_row(outpoint, coin))
         .collect::<Result<Vec<_>, _>>()?;
     let result = writer.stage_script_live_rows(&mut rows.into_iter());
     assert!(
