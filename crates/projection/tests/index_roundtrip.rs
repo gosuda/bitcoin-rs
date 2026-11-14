@@ -1595,8 +1595,6 @@ const CURSOR_KEY: &[u8] = &[0x00, b'C'];
 
 const FORMAT_KEY: &[u8] = &[0x00, b'V'];
 
-const FORMAT_VALUE: [u8; 4] = bitcoin_rs_projection::INDEX_FORMAT_VERSION_VALUE;
-
 #[derive(Clone, Copy, Debug)]
 struct CompetingClaim {
     generation: u64,
@@ -1672,7 +1670,11 @@ impl ForeignFenceStore {
         };
         let mut batch = self.inner.new_batch();
         batch.put(ColumnFamily::UtxoMeta, RESET_KEY, &published_claim);
-        batch.put(ColumnFamily::UtxoMeta, FORMAT_KEY, &FORMAT_VALUE);
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_KEY,
+            &bitcoin_rs_projection::INDEX_FORMAT_VERSION_VALUE,
+        );
         if mask & TX_LOOKUP_MASK != 0 {
             batch.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
         }
@@ -2131,7 +2133,11 @@ fn inject_full_claim(store: &MemoryStore, process_epoch: u64) -> Result<(), Test
         RESET_KEY,
         &claim_bytes(TX_LOOKUP_MASK | SCRIPT_HISTORY_MASK, process_epoch, 0),
     );
-    claim.put(ColumnFamily::UtxoMeta, FORMAT_KEY, &FORMAT_VALUE);
+    claim.put(
+        ColumnFamily::UtxoMeta,
+        FORMAT_KEY,
+        &bitcoin_rs_projection::INDEX_FORMAT_VERSION_VALUE,
+    );
     claim.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
     claim.delete(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY);
     claim.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
