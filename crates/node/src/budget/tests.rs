@@ -86,7 +86,6 @@ fn assert_ledger_matches(budget: &NodeBudget, state: &budget_model::BudgetState,
             "reserved diverges at owner {index} after {site}"
         );
     }
-    let _ = (charges, reserved, refused);
     assert_eq!(
         refused, state.block_refused,
         "refusal flag diverges after {site}"
