@@ -226,8 +226,16 @@ impl CoinCache {
 
     pub fn fill_after_read_guarded(&self, key: &CoinKey, value: Bytes, expected_epoch: u64) {
         let shard_lock = &self.shards[usize::from(key.shard())];
-        if shard_lock.epoch.load(Ordering::Acquire) != expected_epoch {
-            return;
+        {
+            let mut shard = shard_lock.lock();
+            if shard_lock.epoch.load(Ordering::Acquire) != expected_epoch {
+                return;
+            }
+            let hash = self.hasher.hash_one(key.0);
+            if let Some(position) = shard.position(key, hash) {
+                shard.entries[position].referenced = true;
+                return;
+            }
         }
         let value_bytes = u64::try_from(value.len()).unwrap_or(u64::MAX);
         let Some(charged) = self.charge_with_eviction(shard_lock, Some(value_bytes)) else {
@@ -937,6 +945,46 @@ mod tests {
         assert!(cache.lookup(&k1).is_none());
         assert!(cache.lookup(&k2).is_some());
         assert!(cache.lookup(&k3).is_some());
+    }
+
+    #[test]
+    fn duplicate_resident_fill_with_saturated_ledger_does_not_evict_or_change_balance() {
+        let (cache, ledger) = equal_cap_cache();
+        let k1 = key(1, 1);
+        let k2 = key(1, 2);
+        let k3 = key(1, 3);
+        let v1_orig = Bytes::from(vec![0x11_u8; 100_000]);
+        let v2_orig = Bytes::from(vec![0x22_u8; 100_000]);
+        let v3_orig = Bytes::from(vec![0x33_u8; 100_000]);
+        cache.fill_after_read(&k1, v1_orig.clone());
+        cache.fill_after_read(&k2, v2_orig.clone());
+        cache.fill_after_read(&k3, v3_orig.clone());
+
+        let baseline_ledger = ledger_outstanding(&ledger);
+        let baseline_resident = cache.resident_bytes();
+        assert_eq!(baseline_ledger, 300_000);
+        assert_eq!(baseline_resident, 300_000 + backing_of(&cache, 1));
+
+        let v1_dup = Bytes::from(vec![0xaa_u8; 100_000]);
+        let v2_dup = Bytes::from(vec![0xbb_u8; 100_000]);
+        let v3_dup = Bytes::from(vec![0xcc_u8; 100_000]);
+        cache.fill_after_read(&k1, v1_dup);
+        cache.fill_after_read(&k2, v2_dup);
+        cache.fill_after_read(&k3, v3_dup);
+
+        assert_eq!(
+            ledger_outstanding(&ledger),
+            baseline_ledger,
+            "charged balance must remain unchanged on duplicate resident fill"
+        );
+        assert_eq!(
+            cache.resident_bytes(),
+            baseline_resident,
+            "resident balance must remain unchanged on duplicate resident fill"
+        );
+        assert_eq!(cache.lookup(&k1).as_ref(), Some(&v1_orig));
+        assert_eq!(cache.lookup(&k2).as_ref(), Some(&v2_orig));
+        assert_eq!(cache.lookup(&k3).as_ref(), Some(&v3_orig));
     }
 
     // BUD-07
