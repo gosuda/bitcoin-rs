@@ -3410,7 +3410,7 @@ fn block_parent_reuse_checks_readiness_only_when_needed() -> Result<(), TestErro
         checks: Arc::clone(&checks),
         synced: true,
     }));
-    let Ok((_, _)) = Projection::new(&ctx).transaction_values(
+    let Ok((values, _)) = Projection::new(&ctx).transaction_values(
         [(&child, None)],
         Some(super::projection::ParentSource::Block(
             std::slice::from_ref(&child),
@@ -3418,6 +3418,7 @@ fn block_parent_reuse_checks_readiness_only_when_needed() -> Result<(), TestErro
     ) else {
         return Err("external parent".into());
     };
+    assert_eq!(values[0].fee, 25);
     assert_eq!(
         checks.load(Ordering::Relaxed),
         0,
@@ -3431,6 +3432,7 @@ fn block_parent_reuse_checks_readiness_only_when_needed() -> Result<(), TestErro
     ) else {
         return Err("in-block parent".into());
     };
+    assert_eq!(values[0].fee, 25);
     assert_eq!(values[1].fee, 25);
     assert_eq!(
         checks.load(Ordering::Relaxed),
