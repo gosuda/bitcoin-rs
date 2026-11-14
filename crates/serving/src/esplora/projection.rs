@@ -28,7 +28,7 @@ pub(super) struct Confirmation {
     pub time: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum TxSource {
     Confirmed,
     Joined,
