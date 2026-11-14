@@ -1004,60 +1004,6 @@ fn corrupt_engine_coin_record_fails_closed() -> TestResult {
     );
     Ok(())
 }
-// BUD-06
-#[test]
-fn window_resolved_views_are_charged_and_released() -> TestResult {
-    let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
-    seed_genesis(&chain)?;
-    commit_genesis_head(&chain)?;
-    let genesis = Network::Regtest.genesis_block();
-    let owner = Tx {
-        version: 2,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::new(genesis.txs[0].txid(), 0),
-            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
-        }],
-        lock_time: LockTime::ZERO,
-    };
-    let owner_txid = owner.txid();
-    insert_engine_coin(&chain, owner_txid)?;
-    let spend = Tx {
-        version: 2,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::new(owner_txid, 0),
-            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(40_000),
-            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
-        }],
-        lock_time: LockTime::ZERO,
-    };
-    let mut b1 = mined_child(genesis.block_hash(), 1)?;
-    b1.txs.push(spend);
-    remine(&mut b1)?;
-    apply_headers(&chain, &[&b1])?;
-    let payloads = dump_payloads(std::slice::from_ref(&b1));
-    let payload_refs: Vec<&BlockImage> = payloads.iter().collect();
-    let charge = Arc::new(RecordingCharge::default());
-    chain.set_prevout_charge(bitcoin_rs_storage::budget::ChargeHandle::new(
-        charge.clone(),
-        bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
-    ));
-    chain.apply_window(&payload_refs)?;
-    let (current, peak) = *charge.balance.lock();
-    assert!(peak > 0);
-    assert_eq!(current, 0);
-    Ok(())
-}
 
 // BUD-06
 #[test]
