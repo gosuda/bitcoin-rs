@@ -954,7 +954,7 @@ pub(crate) fn worker_shares() -> u32 {
 }
 
 fn cap_global_thread_pool() {
-    let threads = worker_shares().max(1);
+    let threads = worker_shares();
     if let Err(error) = rayon::ThreadPoolBuilder::new()
         .num_threads(usize::try_from(threads).unwrap_or(GLOBAL_RAYON_THREADS))
         .build_global()
