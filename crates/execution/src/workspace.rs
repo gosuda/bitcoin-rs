@@ -8,10 +8,11 @@
 use std::collections::BTreeMap;
 
 use bitcoin_rs_consensus::primitives::{Amount, Block, Hash256, OutPoint, TxOut, Txid};
-use bitcoin_rs_storage::utxo::UtxoCoin;
 use bitcoin_rs_storage::utxo::contract::OutputSource;
-use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
-use bitcoin_rs_storage::utxo::set::UtxoError;
+use bitcoin_rs_storage::utxo::record::{
+    OutputSizeTracker, OwnedUtxoOut, RecordFraming, UtxoRecord,
+};
+use bitcoin_rs_storage::utxo::{UtxoCoin, UtxoError};
 use bitcoin_rs_storage::{CoinKey, CoinStore, StorageError, WindowDelta};
 use bytes::Bytes;
 use hashbrown::{HashMap, HashSet};
@@ -37,8 +38,6 @@ fn count_fold_visit() {
 
 #[cfg(not(test))]
 const fn count_fold_visit() {}
-#[cfg(not(test))]
-const fn count_fold_event() {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CreatedOwned {
@@ -92,6 +91,12 @@ pub(crate) enum WindowReadError {
     Record(#[from] UtxoError),
 }
 
+/// Per-txid staged coin state: vout-ordered outputs, the exact encoded-size
+/// tracker matching `txid_entry`'s B-framed record, and nothing else.
+struct CoinState {
+    outputs: BTreeMap<u32, OwnedUtxoOut>,
+    size: OutputSizeTracker,
+}
 pub(crate) struct WindowWorkspace {
     max_script_size: usize,
     live: HashMap<Txid, Vec<LiveOut>>,
@@ -104,8 +109,9 @@ pub(crate) struct WindowWorkspace {
     engine_presence: HashMap<Txid, bool>,
     coin_cursor: usize,
     coin_entries: HashMap<Txid, usize>,
+    coin_states: HashMap<Txid, CoinState>,
     coin_bytes: usize,
-    coin_states: HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>>,
+    retained_working_bytes: usize,
 }
 
 impl WindowWorkspace {
@@ -125,6 +131,7 @@ impl WindowWorkspace {
             coin_entries: HashMap::new(),
             coin_bytes: 0,
             coin_states: HashMap::new(),
+            retained_working_bytes: 0,
         }
     }
     #[must_use]
@@ -168,7 +175,16 @@ impl WindowWorkspace {
         self.coin_entries.clear();
         self.coin_bytes = 0;
         self.coin_states.clear();
+        self.retained_working_bytes = 0;
         Ok(delta)
+    }
+
+    pub(crate) fn staged_total_flush_bytes(
+        &mut self,
+        pending_count: usize,
+    ) -> Result<usize, UtxoError> {
+        let encoded = self.staged_coin_bytes(pending_count)?;
+        Ok(encoded.saturating_add(self.retained_working_bytes))
     }
 
     pub(crate) fn staged_coin_bytes(&mut self, pending_count: usize) -> Result<usize, UtxoError> {
@@ -179,21 +195,30 @@ impl WindowWorkspace {
                 &mut self.coin_states,
                 &self.initial_records,
                 &self.transitions[index],
-            );
+                Some(&mut self.retained_working_bytes),
+            )?;
             let mut seen = HashSet::new();
             for txid in transition_txids(&self.transitions[index]) {
                 if !seen.insert(txid) {
                     continue;
                 }
-                let bytes = {
-                    let current: Vec<_> = self
-                        .coin_states
-                        .get(&txid)
-                        .into_iter()
-                        .flat_map(|outputs| outputs.values().cloned())
-                        .collect();
-                    let entry = txid_entry(&self.initial_records, txid, &current)?;
-                    entry.as_ref().map_or(0, entry_encoded_len)
+                let bytes = match self.coin_states.get(&txid) {
+                    Some(state) if state.outputs.is_empty() => {
+                        let existed_before = self
+                            .initial_records
+                            .get(&txid)
+                            .and_then(Option::as_ref)
+                            .is_some();
+                        if existed_before {
+                            core::mem::size_of::<CoinKey>()
+                        } else {
+                            0
+                        }
+                    }
+                    Some(state) => {
+                        core::mem::size_of::<CoinKey>().saturating_add(state.size.encoded_len()?)
+                    }
+                    None => 0,
                 };
                 let previous = self.coin_entries.insert(txid, bytes).unwrap_or(0);
                 self.coin_bytes = self
@@ -378,13 +403,13 @@ impl WindowWorkspace {
         prefix: &[BlockTransition],
         initial_records: &HashMap<Txid, Option<UtxoRecord>>,
     ) -> Result<WindowDelta, UtxoError> {
-        let mut states: HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>> = HashMap::new();
+        let mut states: HashMap<Txid, CoinState> = HashMap::new();
         for transition in prefix {
-            Self::apply_transition(&mut states, initial_records, transition);
+            Self::apply_transition(&mut states, initial_records, transition, None)?;
         }
         let mut delta = WindowDelta::default();
-        for (txid, current_outputs) in states {
-            let current_outputs: Vec<_> = current_outputs.into_values().collect();
+        for (txid, state) in states {
+            let current_outputs: Vec<_> = state.outputs.into_values().collect();
             if let Some((key, record)) = txid_entry(initial_records, txid, &current_outputs)? {
                 delta.push_final(key, record);
             }
@@ -394,39 +419,80 @@ impl WindowWorkspace {
     }
 
     fn apply_transition(
-        states: &mut HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>>,
+        states: &mut HashMap<Txid, CoinState>,
         initial_records: &HashMap<Txid, Option<UtxoRecord>>,
         transition: &BlockTransition,
-    ) {
-        let mut seen = HashSet::new();
-        for txid in transition_txids(transition) {
-            if seen.insert(txid) {
-                count_fold_event();
+        mut retained_bytes: Option<&mut usize>,
+    ) -> Result<(), UtxoError> {
+        #[cfg(test)]
+        {
+            let mut seen = HashSet::new();
+            for txid in transition_txids(transition) {
+                if seen.insert(txid) {
+                    count_fold_event();
+                }
             }
         }
         for overwrite in &transition.bip30_overwrites {
             count_fold_visit();
-            outputs_for(states, initial_records, overwrite.outpoint.txid).clear();
+            let state = outputs_for(
+                states,
+                initial_records,
+                overwrite.outpoint.txid,
+                retained_bytes.as_deref_mut(),
+            )?;
+            if let Some(retained) = &mut retained_bytes {
+                for out in state.outputs.values() {
+                    **retained = (*retained).saturating_sub(retained_out_bytes(out));
+                }
+            }
+            state.outputs.clear();
+            state.size.clear();
         }
         for created in &transition.created {
             count_fold_visit();
-            let outputs = outputs_for(states, initial_records, created.txid);
-            outputs.insert(
-                created.vout,
-                OwnedUtxoOut {
-                    vout: created.vout,
-                    value: created.value,
-                    script_pubkey: created.script_pubkey.to_vec(),
-                    coinbase: created.coinbase,
-                    height: created.height,
-                },
-            );
+            let state = outputs_for(
+                states,
+                initial_records,
+                created.txid,
+                retained_bytes.as_deref_mut(),
+            )?;
+            let out = OwnedUtxoOut {
+                vout: created.vout,
+                value: created.value,
+                script_pubkey: created.script_pubkey.to_vec(),
+                coinbase: created.coinbase,
+                height: created.height,
+            };
+            let added_bytes = retained_out_bytes(&out);
+            state.size.insert(&out)?;
+            if let Some(displaced) = state.outputs.insert(created.vout, out) {
+                state.size.remove(&displaced)?;
+                if let Some(retained) = &mut retained_bytes {
+                    **retained = (*retained).saturating_sub(retained_out_bytes(&displaced));
+                }
+            }
+            if let Some(retained) = &mut retained_bytes {
+                **retained = (*retained).saturating_add(added_bytes);
+            }
         }
         for spent in &transition.spent_outpoints {
             count_fold_visit();
+            let state = outputs_for(
+                states,
+                initial_records,
+                spent.txid,
+                retained_bytes.as_deref_mut(),
+            )?;
             let vout = spent.vout;
-            outputs_for(states, initial_records, spent.txid).remove(&vout);
+            if let Some(removed) = state.outputs.remove(&vout) {
+                state.size.remove(&removed)?;
+                if let Some(retained) = &mut retained_bytes {
+                    **retained = (*retained).saturating_sub(retained_out_bytes(&removed));
+                }
+            }
         }
+        Ok(())
     }
 }
 
@@ -589,14 +655,37 @@ fn transition_txids(transition: &BlockTransition) -> impl Iterator<Item = Txid> 
         )
 }
 
+/// Logical owned footprint charged once per `coin_states` entry: the
+/// `CoinState` value plus its `Txid` key. Charged even when the state's
+/// output map is empty, and cleared on flush.
+const RETAINED_STATE_ENTRY_BYTES: usize =
+    core::mem::size_of::<CoinState>() + core::mem::size_of::<Txid>();
+
+/// Logical owned footprint of one retained output: the `OwnedUtxoOut`
+/// value, its `u32` vout key, and the heap capacity of its script `Vec`.
+/// This bounds retained owned payload/state, not an allocator or RSS
+/// estimate.
+#[inline]
+fn retained_out_bytes(out: &OwnedUtxoOut) -> usize {
+    core::mem::size_of::<OwnedUtxoOut>()
+        .saturating_add(core::mem::size_of::<u32>())
+        .saturating_add(out.script_pubkey.capacity())
+}
+
 fn outputs_for<'s>(
-    states: &'s mut HashMap<Txid, BTreeMap<u32, OwnedUtxoOut>>,
+    states: &'s mut HashMap<Txid, CoinState>,
     initial_records: &HashMap<Txid, Option<UtxoRecord>>,
     txid: Txid,
-) -> &'s mut BTreeMap<u32, OwnedUtxoOut> {
-    states
-        .entry(txid)
-        .or_insert_with(|| initial_outputs_for_txid(initial_records, txid))
+    retained_bytes: Option<&mut usize>,
+) -> Result<&'s mut CoinState, UtxoError> {
+    use hashbrown::hash_map::Entry;
+    match states.entry(txid) {
+        Entry::Occupied(entry) => Ok(entry.into_mut()),
+        Entry::Vacant(entry) => {
+            let state = initial_coin_state(initial_records, txid, retained_bytes)?;
+            Ok(entry.insert(state))
+        }
+    }
 }
 
 fn index_transition(
@@ -637,6 +726,7 @@ fn txid_entry(
     }
 }
 
+#[cfg(test)]
 fn entry_encoded_len(entry: &CoinEntry) -> usize {
     entry.0.as_bytes().len() + entry.1.as_ref().map_or(0, Bytes::len)
 }
@@ -656,28 +746,34 @@ fn merge_delta_records<'r>(
     Ok(())
 }
 
-fn initial_outputs_for_txid(
+fn initial_coin_state(
     initial_records: &HashMap<Txid, Option<UtxoRecord>>,
     txid: Txid,
-) -> BTreeMap<u32, OwnedUtxoOut> {
-    match initial_records.get(&txid) {
-        Some(Some(record)) => record
-            .outputs()
-            .map(|out| {
-                (
-                    out.vout,
-                    OwnedUtxoOut {
-                        vout: out.vout,
-                        value: out.value,
-                        script_pubkey: out.script_pubkey.to_vec(),
-                        coinbase: out.coinbase,
-                        height: out.height,
-                    },
-                )
-            })
-            .collect(),
-        _ => BTreeMap::new(),
+    retained_bytes: Option<&mut usize>,
+) -> Result<CoinState, UtxoError> {
+    let mut state = CoinState {
+        outputs: BTreeMap::new(),
+        size: OutputSizeTracker::empty(RecordFraming::B),
+    };
+    let mut retained_added = RETAINED_STATE_ENTRY_BYTES;
+    if let Some(Some(record)) = initial_records.get(&txid) {
+        for out in record.outputs() {
+            let owned = OwnedUtxoOut {
+                vout: out.vout,
+                value: out.value,
+                script_pubkey: out.script_pubkey.to_vec(),
+                coinbase: out.coinbase,
+                height: out.height,
+            };
+            state.size.insert(&owned)?;
+            retained_added = retained_added.saturating_add(retained_out_bytes(&owned));
+            state.outputs.insert(out.vout, owned);
+        }
     }
+    if let Some(retained) = retained_bytes {
+        *retained = retained.saturating_add(retained_added);
+    }
+    Ok(state)
 }
 
 impl OutputSource for WindowWorkspace {
@@ -1821,6 +1917,130 @@ mod tests {
             staged, reference_bytes,
             "staged coin bytes must equal the modelled records"
         );
+        Ok(())
+    }
+
+    // WIN-05
+    #[test]
+    fn retained_working_set_tracks_output_churn_without_affecting_encoded_oracle()
+    -> Result<(), CoinBytesError> {
+        let txid_churn = Txid(Hash256::from_le_bytes(&[0xcc; 32]));
+        let script = Bytes::from_static(&[0x51; 25]);
+        let create = |txid: Txid, vout: u32, value: u64, height: u32| CreatedOwned {
+            txid,
+            vout,
+            coinbase: false,
+            height,
+            value,
+            script_pubkey: script.clone(),
+        };
+        let block =
+            |height: u32, created: Vec<CreatedOwned>, spent: Vec<OutPoint>| BlockTransition {
+                height,
+                hash: Hash256::default(),
+                prev_hash: Hash256::default(),
+                created,
+                spent_outpoints: spent,
+                bip30_overwrites: Vec::new(),
+            };
+
+        let mut created_b1: Vec<_> = (0..20)
+            .map(|vout| create(txid_churn, vout, 1_000 + u64::from(vout), 1))
+            .collect();
+        created_b1.push(create(txid_churn, 5_000, 6_000, 1));
+        created_b1.push(CreatedOwned {
+            script_pubkey: Bytes::from(vec![0x51_u8; 300]),
+            ..create(txid_churn, 5_001, 6_001, 1)
+        });
+        let spent_b2: Vec<_> = (0..15_u32)
+            .map(|vout| OutPoint::new(txid_churn, vout))
+            .chain([
+                OutPoint::new(txid_churn, 5_000),
+                OutPoint::new(txid_churn, 5_001),
+            ])
+            .collect();
+        let spent_b3: Vec<_> = (15..20_u32)
+            .map(|vout| OutPoint::new(txid_churn, vout))
+            .collect();
+
+        let prefix = vec![
+            block(1, created_b1, Vec::new()),
+            block(2, Vec::new(), spent_b2),
+            block(3, Vec::new(), spent_b3),
+        ];
+
+        let mut workspace = WindowWorkspace::new(10_000);
+        workspace.transitions = prefix;
+        for (index, transition) in workspace.transitions.iter().enumerate() {
+            crate::workspace::index_transition(&mut workspace.touched, index, transition);
+        }
+
+        let encoded_1 = workspace.staged_coin_bytes(1)?;
+        let working_set_1 = workspace.retained_working_bytes;
+        let total_1 = workspace.staged_total_flush_bytes(1)?;
+        assert_eq!(total_1, encoded_1 + working_set_1);
+        assert!(working_set_1 > 0, "working set must track retained outputs");
+
+        let delta_1 = WindowWorkspace::build_window_delta(
+            &workspace.transitions[..1],
+            &workspace.initial_records,
+        )?;
+        let oracle_1: usize = delta_1.records.iter().map(super::entry_encoded_len).sum();
+        assert_eq!(
+            encoded_1, oracle_1,
+            "encoded length must match delta oracle"
+        );
+
+        let encoded_2 = workspace.staged_coin_bytes(2)?;
+        let working_set_2 = workspace.retained_working_bytes;
+        let total_2 = workspace.staged_total_flush_bytes(2)?;
+        assert_eq!(total_2, encoded_2 + working_set_2);
+        assert!(
+            working_set_2 < working_set_1,
+            "working set must decrease when outputs are spent"
+        );
+        assert!(
+            working_set_2 > 0,
+            "working set must remain positive for surviving outputs"
+        );
+
+        let delta_2 = WindowWorkspace::build_window_delta(
+            &workspace.transitions[..2],
+            &workspace.initial_records,
+        )?;
+        let oracle_2: usize = delta_2.records.iter().map(super::entry_encoded_len).sum();
+        assert_eq!(
+            encoded_2, oracle_2,
+            "encoded length must match delta oracle after spend churn"
+        );
+
+        let encoded_3 = workspace.staged_coin_bytes(3)?;
+        let working_set_3 = workspace.retained_working_bytes;
+        let total_3 = workspace.staged_total_flush_bytes(3)?;
+        assert_eq!(total_3, encoded_3 + working_set_3);
+        assert_eq!(
+            encoded_3, 0,
+            "spending every output leaves no encoded delta"
+        );
+        assert!(
+            working_set_3 > 0,
+            "empty coin state entries stay charged until flush"
+        );
+
+        let delta_3 = WindowWorkspace::build_window_delta(
+            &workspace.transitions[..3],
+            &workspace.initial_records,
+        )?;
+        let oracle_3: usize = delta_3.records.iter().map(super::entry_encoded_len).sum();
+        assert_eq!(
+            encoded_3, oracle_3,
+            "encoded length must match empty delta oracle"
+        );
+
+        let _ = workspace.build_flush_delta(3)?;
+        assert_eq!(workspace.retained_working_bytes, 0);
+        assert_eq!(workspace.coin_bytes, 0);
+
         Ok(())
     }
 }

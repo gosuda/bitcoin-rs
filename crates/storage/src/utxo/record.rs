@@ -1218,5 +1218,123 @@ impl OwnedUtxoOut {
     }
 }
 
+/// Allocation-free tracker for the exact encoded length of a record's output
+/// set under one framing. Mirrors `encode_record`'s directory-width and
+/// payload accounting: width histograms for max-vout and max-payload-width
+/// plus count/payload totals make insert, remove, and `encoded_len` O(1)
+/// without iterating or re-encoding outputs.
+#[derive(Clone, Debug)]
+pub struct OutputSizeTracker {
+    framing: RecordFraming,
+    count: usize,
+    payload_total: usize,
+    vout_widths: [u32; MAX_DIR_WIDTH + 1],
+    len_widths: [u32; MAX_DIR_WIDTH + 1],
+}
+
+impl OutputSizeTracker {
+    pub fn empty(framing: RecordFraming) -> Self {
+        Self {
+            framing,
+            count: 0,
+            payload_total: 0,
+            vout_widths: [0; MAX_DIR_WIDTH + 1],
+            len_widths: [0; MAX_DIR_WIDTH + 1],
+        }
+    }
+
+    pub fn insert(&mut self, owned: &OwnedUtxoOut) -> Result<(), UtxoError> {
+        let output = OutputParts::from_owned(owned);
+        let len = output.payload_len(self.framing)?;
+        let payload_total =
+            self.payload_total
+                .checked_add(len)
+                .ok_or(UtxoError::RecordTooLarge {
+                    len: self.payload_total,
+                })?;
+        u32::try_from(len).map_err(|_| UtxoError::RecordTooLarge { len })?;
+        let count = self
+            .count
+            .checked_add(1)
+            .ok_or(UtxoError::RecordTooLarge { len: self.count })?;
+        u32::try_from(count).map_err(|_| UtxoError::RecordTooLarge { len: count })?;
+        add_width(&mut self.vout_widths, width_for(u64::from(output.vout)))?;
+        add_width(
+            &mut self.len_widths,
+            width_for(u64::try_from(len).unwrap_or(u64::MAX)),
+        )?;
+        self.count = count;
+        self.payload_total = payload_total;
+        Ok(())
+    }
+
+    /// Removes a previously inserted output; the argument must be the same
+    /// output value that was inserted, or the tracked totals corrupt.
+    pub fn remove(&mut self, owned: &OwnedUtxoOut) -> Result<(), UtxoError> {
+        let output = OutputParts::from_owned(owned);
+        let len = output.payload_len(self.framing)?;
+        if self.count == 0 {
+            return Err(UtxoError::CorruptRecord);
+        }
+        let payload_total = self
+            .payload_total
+            .checked_sub(len)
+            .ok_or(UtxoError::CorruptRecord)?;
+        sub_width(&mut self.vout_widths, width_for(u64::from(output.vout)))?;
+        sub_width(
+            &mut self.len_widths,
+            width_for(u64::try_from(len).unwrap_or(u64::MAX)),
+        )?;
+        self.count -= 1;
+        self.payload_total = payload_total;
+        Ok(())
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::empty(self.framing);
+    }
+
+    /// Exact `encode_record` output length for the tracked output set,
+    /// including the same `RecordTooLarge` bound the encoder enforces.
+    pub fn encoded_len(&self) -> Result<usize, UtxoError> {
+        let vout_width = self
+            .vout_widths
+            .iter()
+            .rposition(|count| *count != 0)
+            .unwrap_or(1);
+        let len_width = self
+            .len_widths
+            .iter()
+            .rposition(|count| *count != 0)
+            .unwrap_or(1);
+        let layout = V5Layout::new(self.count, vout_width, len_width)?;
+        let payload_len =
+            layout
+                .payloads
+                .checked_add(self.payload_total)
+                .ok_or(UtxoError::RecordTooLarge {
+                    len: self.payload_total,
+                })?;
+        if payload_len > usize::try_from(isize::MAX).unwrap_or(usize::MAX) {
+            return Err(UtxoError::RecordTooLarge { len: payload_len });
+        }
+        Ok(payload_len)
+    }
+}
+
+fn add_width(histogram: &mut [u32; MAX_DIR_WIDTH + 1], width: usize) -> Result<(), UtxoError> {
+    let slot = histogram.get_mut(width).ok_or(UtxoError::CorruptRecord)?;
+    *slot = slot.checked_add(1).ok_or(UtxoError::RecordTooLarge {
+        len: usize::try_from(*slot).unwrap_or(usize::MAX),
+    })?;
+    Ok(())
+}
+
+fn sub_width(histogram: &mut [u32; MAX_DIR_WIDTH + 1], width: usize) -> Result<(), UtxoError> {
+    let slot = histogram.get_mut(width).ok_or(UtxoError::CorruptRecord)?;
+    *slot = slot.checked_sub(1).ok_or(UtxoError::CorruptRecord)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;
