@@ -6,7 +6,8 @@ use crate::chain::ActiveTipWait as _;
 use crate::chain::regtest_fixture::{coinbase, mined_regtest_child_at as mined_child};
 use bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
 use bitcoin_rs_consensus::primitives::{
-    Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, Network, OutPoint, Tx,
+    AssumeUtxoData, Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, Network,
+    OutPoint, Tx,
 };
 use bitcoin_rs_storage::utxo::UtxoSet;
 use bitcoin_rs_storage::utxo::contract::{BlockChangeInputs, build_block_changes};
@@ -14,8 +15,8 @@ use bitcoin_rs_storage::{CommitRecords, DurableHead, InMemoryDurableHeadStore, P
 
 use hashbrown::HashMap;
 
-use super::{ApplyError, ResolvedUtxoView};
-use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
+use super::{ApplyError, AssumeUtxoError, ResolvedUtxoView};
+use crate::test_fixtures::{TestError, TestResult, handles, handles_with_store, seed_genesis};
 
 #[test]
 fn canonical_regtest_chain_connects_through_bip34_activation() -> TestResult {
@@ -320,5 +321,120 @@ fn current_schema_version_mismatch_and_corruption_refuses_open() -> TestResult {
 
     std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"6\n")?;
     assert!(ensure_current_schema(&dir).is_ok());
+    Ok(())
+}
+
+#[test]
+fn fresh_node_rejected_snapshot_ingest_clears_marker_and_preserves_later_coins() -> TestResult {
+    let network = Network::Regtest;
+    let genesis = network.genesis_block();
+    let genesis_header = genesis.header;
+    let store = Arc::new(bitcoin_rs_storage::memory_kv::MemoryKvStore::new());
+    let utxo = Arc::new(UtxoSet::new());
+    let chain = handles_with_store(network, utxo, Arc::clone(&store));
+
+    crate::chain::accept_headers(
+        &mut chain.block_tree.write(),
+        core::slice::from_ref(&genesis_header),
+        network,
+        crate::chain::current_unix_seconds(),
+        crate::chain::HeaderValidationMode::LiveAdmission,
+    )?;
+
+    let pinned = AssumeUtxoData {
+        height: 0,
+        block_hash: Hash256::from(genesis.block_hash()),
+        hash_serialized: Hash256::from_le_bytes(&[0x11; 32]),
+        chain_tx_count: 1,
+        index_commitments: [None; 4],
+    };
+
+    let outcome = chain.install_snapshot(
+        &pinned,
+        0,
+        |_coins| {
+            Err(AssumeUtxoError::SnapshotCommitmentMismatch {
+                expected: pinned.hash_serialized,
+                found: Hash256::from_le_bytes(&[0x22; 32]),
+            })
+        },
+        |_coins, _tree, _tip, _prior, _marker, _streamed| Ok(()),
+    );
+
+    assert!(matches!(
+        outcome,
+        Err(AssumeUtxoError::SnapshotCommitmentMismatch { .. })
+    ));
+    assert!(
+        chain
+            .commit_authority
+            .in_flight_snapshot_activation()?
+            .is_none()
+    );
+    assert!(!chain.is_closed_for_recovery());
+    assert!(chain.begin_transition().is_ok());
+
+    chain.apply_block(&BlockImage::from_local(genesis.clone()))?;
+    let first = mined_child(genesis.block_hash(), 1)?;
+    chain.apply_block(&BlockImage::from_local(first.clone()))?;
+    let first_outpoint = OutPoint::new(first.txs[0].txid(), 0);
+    assert!(chain.utxo_reader().get(&first_outpoint)?.is_some());
+
+    let store: Arc<dyn bitcoin_rs_storage::KvStore> = store;
+    let coins_reopened = Arc::new(bitcoin_rs_storage::CoinStore::open(
+        Arc::clone(&store),
+        64 * 1024 * 1024,
+    ));
+    let authority_reopened =
+        bitcoin_rs_storage::CommitAuthority::new(store, Arc::clone(&coins_reopened));
+    assert!(
+        matches!(authority_reopened.recover_snapshot_activation(), Ok(None)),
+        "no leftover marker must be recovered on restart"
+    );
+    let first_txid_le = first.txs[0].txid().0.to_le_bytes();
+    let first_key = bitcoin_rs_storage::CoinKey(first_txid_le);
+    let Some(encoded) = coins_reopened.get(&first_key)? else {
+        return Err(TestError::Missing(
+            "coin committed after rejected ingest must survive restart/recovery",
+        ));
+    };
+    let record =
+        bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(encoded.to_vec().into_boxed_slice())?;
+    assert_eq!(
+        record.txid().to_le_bytes(),
+        first_txid_le,
+        "recovered coin row must carry the committed coinbase txid"
+    );
+    let expected = &first.txs[0].outputs[0];
+    let mut saw_vout_zero = false;
+    for output in record.outputs() {
+        if output.vout != 0 {
+            continue;
+        }
+        saw_vout_zero = true;
+        assert_eq!(
+            output.value,
+            expected.value.to_sat(),
+            "recovered coin value must match the committed block output"
+        );
+        assert_eq!(
+            output.script_pubkey,
+            expected.script_pubkey.as_bytes(),
+            "recovered coin script must match the committed block output"
+        );
+        assert!(
+            output.coinbase,
+            "recovered coin must be the height-1 coinbase output"
+        );
+        assert_eq!(
+            output.height, 1,
+            "recovered coin must have creation height 1"
+        );
+    }
+    assert!(
+        saw_vout_zero,
+        "recovered coin record must contain the block's output 0"
+    );
+
     Ok(())
 }

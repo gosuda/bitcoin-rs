@@ -571,7 +571,7 @@ impl Chainstate {
         *self.role.write() = role;
     }
 
-    fn install_snapshot<S, P>(
+    pub(crate) fn install_snapshot<S, P>(
         &self,
         pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
         declared_coins: u64,
@@ -676,6 +676,14 @@ impl Chainstate {
                 );
                 if prior.is_some() || !rejected {
                     self.fail_closed_for_recovery();
+                } else if let Err(discard) =
+                    self.commit_authority.clear_snapshot_activation_marker()
+                {
+                    self.fail_closed_for_recovery();
+                    return AssumeUtxoError::PartialIngestNotDiscarded {
+                        ingest: Box::new(error),
+                        discard: discard.to_string(),
+                    };
                 }
                 error
             }
