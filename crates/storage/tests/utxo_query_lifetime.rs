@@ -42,6 +42,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 #[global_allocator]
 static ALLOCATOR: TrackingAllocator = TrackingAllocator;
 
+// ARCH-07a
 #[test]
 fn dropping_last_query_view_releases_derived_image_while_readers_survive()
 -> Result<(), Box<dyn std::error::Error>> {

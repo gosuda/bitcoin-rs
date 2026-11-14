@@ -193,10 +193,11 @@ impl ChainView for RawChainView<'_> {
                 ))
             };
         };
-        if let Some(height) = transactions
-            .transaction_height(&txid)
+        if let Some((_, identity)) = transactions
+            .transaction_block(&txid)
             .map_err(|error| ChainViewError(error.to_string()))?
         {
+            let height = identity.height;
             let Some(tip) = self.chainstate.applied_tip_snapshot() else {
                 return Err(ChainViewError(
                     "applied chain tip is unavailable".to_owned(),

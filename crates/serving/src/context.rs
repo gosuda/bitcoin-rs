@@ -259,7 +259,7 @@ pub enum ChainControlError {
 
 pub use bitcoin_rs_projection::{
     DerivedIndexInfo, DerivedIndexQuery, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
-    ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
+    ScriptIndexSnapshot, SpendingRecord, TransactionBlock, TxQueryError, TxUnavailableCause,
 };
 
 pub struct ContextHandles {
@@ -991,8 +991,9 @@ impl<'ctx> RpcPrevoutResolver<'ctx> {
         }
         let height = match self.ctx.indexes.derived_index.as_ref() {
             Some(index) => index
-                .transaction_height(&outpoint.txid)
-                .map_err(|_| LookupError::Missing)?,
+                .transaction_block(&outpoint.txid)
+                .map_err(|_| LookupError::Missing)?
+                .map(|(_, identity)| identity.height),
             None => None,
         };
         let Some(height) = height else {

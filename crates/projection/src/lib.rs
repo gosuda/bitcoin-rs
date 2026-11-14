@@ -41,7 +41,8 @@ pub use query_api::{
     Answer, AppliedEpoch, CapabilityCoverage, CompactFilterQuery, CoveredPrefix, DerivedIndexInfo,
     DerivedIndexQuery, QueryMiss, RetryReason, RollbackWarningSource, SCRIPT_HISTORY_PAGE_MAX,
     ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
-    ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause, VerificationState,
+    ScriptIndexSnapshot, SpendingRecord, TransactionBlock, TxQueryError, TxUnavailableCause,
+    VerificationState,
 };
 pub use reconcile::{CURSOR_BYTE_LEN, ConsumerCursor, CursorDecodeError};
 pub use types::{

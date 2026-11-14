@@ -353,8 +353,14 @@ class ModelEvidenceTests(unittest.TestCase):
         for pid_file in (next(sessions), *sessions):
             descendant = int(pid_file.read_text())
             result = json.loads((pid_file.parent / "result.json").read_text())
-            self.assertIsNone(result["native_rc"])
-            self.assertEqual(result["evidence_rc"], 14)
+            self.assertEqual(
+                result,
+                {
+                    "k": int(pid_file.parent.parent.name[1:]),
+                    "native_rc": None,
+                    "evidence_rc": 14,
+                },
+            )
             try:
                 stat = Path(f"/proc/{descendant}/stat").read_text(encoding="ascii")
             except (ProcessLookupError, FileNotFoundError):

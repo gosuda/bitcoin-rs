@@ -12,7 +12,7 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_execution::chain::{NodeStatus, regtest_fixture::merkle_root};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, MempoolObserver, MutationEnvelope};
-use bitcoin_rs_projection::ScriptHash;
+use bitcoin_rs_projection::{ScriptHash, TransactionBlock};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
@@ -155,14 +155,14 @@ fn transaction_with_funded_input(ctx: &Context, input_value: u64) -> (Tx, Tx) {
 
 struct StaticTxIndex {
     transaction: Tx,
-    height: Option<u32>,
+    block: Option<TransactionBlock>,
 }
 
 impl StaticTxIndex {
     fn new(transaction: Tx) -> Self {
         Self {
             transaction,
-            height: None,
+            block: None,
         }
     }
 }
@@ -184,10 +184,14 @@ impl crate::context::DerivedIndexQuery for StaticTxIndex {
             .map(|output| output.value.to_sat()))
     }
 
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
         Ok((self.transaction.txid() == *txid)
-            .then_some(self.height)
-            .flatten())
+            .then_some(self.block)
+            .flatten()
+            .map(|block| (self.transaction.clone(), block)))
     }
 
     fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
@@ -205,6 +209,7 @@ impl crate::context::DerivedIndexQuery for StaticTxIndex {
 struct CountingTxIndex {
     transactions: Vec<Tx>,
     calls: Arc<AtomicUsize>,
+    block: Option<bitcoin_rs_projection::block_log::BlockRecord>,
 }
 
 impl crate::context::DerivedIndexQuery for CountingTxIndex {
@@ -221,12 +226,22 @@ impl crate::context::DerivedIndexQuery for CountingTxIndex {
         Ok(None)
     }
 
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
         Ok(self
-            .transactions
-            .iter()
-            .any(|tx| tx.txid() == *txid)
-            .then_some(0))
+            .transaction(txid)?
+            .zip(self.block.as_ref())
+            .map(|(tx, block)| {
+                (
+                    tx,
+                    TransactionBlock {
+                        height: block.height,
+                        hash: Hash256::from(block.hash),
+                    },
+                )
+            }))
     }
 
     fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
@@ -241,7 +256,7 @@ impl crate::context::DerivedIndexQuery for CountingTxIndex {
     }
 }
 
-struct FixtureTxIndex(Vec<(Tx, u32)>);
+struct FixtureTxIndex(Vec<(Tx, TransactionBlock)>);
 
 impl crate::context::DerivedIndexQuery for FixtureTxIndex {
     fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
@@ -266,22 +281,50 @@ impl crate::context::DerivedIndexQuery for FixtureTxIndex {
             .map(|output| output.value.to_sat()))
     }
 
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
         Ok(self
             .0
             .iter()
             .find(|(transaction, _)| transaction.txid() == *txid)
-            .map(|(_, height)| *height))
+            .map(|(transaction, block)| (transaction.clone(), *block)))
     }
 
     fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
         Ok(crate::context::DerivedIndexInfo {
             synced: true,
-            best_block_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
-            applied_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
-            historical_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
-            verified_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
-            coverage_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
+            best_block_height: self
+                .0
+                .iter()
+                .map(|(_, block)| block.height)
+                .max()
+                .unwrap_or(0),
+            applied_height: self
+                .0
+                .iter()
+                .map(|(_, block)| block.height)
+                .max()
+                .unwrap_or(0),
+            historical_height: self
+                .0
+                .iter()
+                .map(|(_, block)| block.height)
+                .max()
+                .unwrap_or(0),
+            verified_height: self
+                .0
+                .iter()
+                .map(|(_, block)| block.height)
+                .max()
+                .unwrap_or(0),
+            coverage_height: self
+                .0
+                .iter()
+                .map(|(_, block)| block.height)
+                .max()
+                .unwrap_or(0),
         })
     }
 }
@@ -365,6 +408,7 @@ struct AdvanceTipTxIndex {
     extended: Arc<bitcoin_rs_execution::chain::TipSnapshot>,
     tx: Tx,
     height: u32,
+    hash: Hash256,
 }
 
 impl crate::context::DerivedIndexQuery for AdvanceTipTxIndex {
@@ -377,8 +421,20 @@ impl crate::context::DerivedIndexQuery for AdvanceTipTxIndex {
         Ok(None)
     }
 
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
-        Ok((self.tx.txid() == *txid).then_some(self.height))
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
+        self.applied_tip.store(Some(Arc::clone(&self.extended)));
+        Ok((self.tx.txid() == *txid).then(|| {
+            (
+                self.tx.clone(),
+                TransactionBlock {
+                    height: self.height,
+                    hash: self.hash,
+                },
+            )
+        }))
     }
 
     fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
@@ -525,8 +581,13 @@ fn contract_fixture() -> Result<(Handler, Tx, Block, String), TestError> {
             .clone()
     };
     context.chain.applied_tip.store(Some(Arc::new(tip)));
-    context.indexes.esplora_tx_index =
-        Some(Arc::new(FixtureTxIndex(vec![(transaction.clone(), 0)])));
+    context.indexes.esplora_tx_index = Some(Arc::new(FixtureTxIndex(vec![(
+        transaction.clone(),
+        TransactionBlock {
+            height: 0,
+            hash: Hash256::from(block.block_hash()),
+        },
+    )])));
     let funding = vec![ScriptIndexRecord {
         txid,
         height: 0,
@@ -1135,8 +1196,13 @@ fn chain_only_history_survives_an_ordinary_extension() -> Result<(), TestError> 
         "the extension adds exactly one block"
     );
     context.chain.applied_tip.store(Some(tip));
-    context.indexes.esplora_tx_index =
-        Some(Arc::new(FixtureTxIndex(vec![(block.txs[0].clone(), 0)])));
+    context.indexes.esplora_tx_index = Some(Arc::new(FixtureTxIndex(vec![(
+        block.txs[0].clone(),
+        TransactionBlock {
+            height: 0,
+            hash: Hash256::from(block.block_hash()),
+        },
+    )])));
     context.indexes.script_index = Some(Arc::new(AdvanceTipScriptIndex {
         applied_tip: context.chain.applied_tip.clone(),
         extended,
@@ -1218,6 +1284,7 @@ fn confirmed_transaction_survives_an_ordinary_extension() -> Result<(), TestErro
         extended,
         tx: block.txs[0].clone(),
         height: 0,
+        hash: Hash256::from(block.block_hash()),
     }));
     let ctx = Arc::new(context);
     let handler = Handler::new(Arc::clone(&ctx));
@@ -1238,6 +1305,151 @@ fn confirmed_transaction_survives_an_ordinary_extension() -> Result<(), TestErro
         Some(extended_height),
         "the index read must have advanced the applied tip"
     );
+    Ok(())
+}
+
+// QRY-01, QRY-02, QRY-03, SYNC-05
+#[test]
+fn transaction_status_keeps_occurrence_identity_across_reorg_and_aba() -> Result<(), TestError> {
+    struct ReorgTxIndex {
+        source: StaticTxIndex,
+        applied_tip: bitcoin_rs_execution::chain::TipReader,
+        replacement: Arc<bitcoin_rs_execution::chain::TipSnapshot>,
+        restored: Option<Arc<bitcoin_rs_execution::chain::TipSnapshot>>,
+        transitioned: Arc<AtomicBool>,
+    }
+
+    impl crate::context::DerivedIndexQuery for ReorgTxIndex {
+        fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
+            crate::context::DerivedIndexQuery::transaction(&self.source, txid)
+        }
+
+        fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
+            crate::context::DerivedIndexQuery::outpoint_value(&self.source, outpoint)
+        }
+
+        fn transaction_block(
+            &self,
+            txid: &Txid,
+        ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
+            let found = crate::context::DerivedIndexQuery::transaction_block(&self.source, txid)?;
+            self.applied_tip.store(Some(Arc::clone(&self.replacement)));
+            if let Some(restored) = &self.restored {
+                self.applied_tip.store(Some(Arc::clone(restored)));
+            }
+            self.transitioned.store(true, Ordering::SeqCst);
+            Ok(found)
+        }
+
+        fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+            crate::context::DerivedIndexQuery::index_info(&self.source)
+        }
+    }
+
+    let genesis = fixture_genesis();
+    let mut original = genesis.clone();
+    original.header.prev_blockhash = genesis.block_hash();
+    original.header.time += 1;
+    original.txs[0].outputs[0].value = Amount::from_sat(4_999_999_999);
+    original.header.merkle_root = merkle_root(&original.txs).expect("original transactions");
+    let mut replacement = original.clone();
+    replacement.header.time += 1;
+    replacement.txs[0].outputs[0].value = Amount::from_sat(4_999_999_998);
+    replacement.header.merkle_root =
+        merkle_root(&replacement.txs).expect("replacement transactions");
+    let extension = Block {
+        header: Header {
+            prev_blockhash: replacement.block_hash(),
+            time: replacement.header.time + 1,
+            ..replacement.header
+        },
+        txs: replacement.txs.clone(),
+    };
+    let txid = original.txs[0].txid();
+    assert!(original.txs.iter().any(|tx| tx.txid() == txid));
+    assert!(replacement.txs.iter().all(|tx| tx.txid() != txid));
+    assert_ne!(original.block_hash(), replacement.block_hash());
+    let mut context = Context::new();
+    for (height, block) in [
+        (0, &genesis),
+        (1, &original),
+        (1, &replacement),
+        (2, &extension),
+    ] {
+        context
+            .chain
+            .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+                height, block,
+            ));
+    }
+    let (original_tip, replacement_tip) = {
+        let mut tree = context.chain.block_tree.write();
+        let root = tree.insert_node(None, genesis.header, NodeStatus::Active)?;
+        tree.insert_node(Some(root), original.header, NodeStatus::Active)?;
+        let original_tip = tree
+            .tip()
+            .ok_or_else(|| std::io::Error::other("original tip missing"))?;
+        let fork = tree.insert_node(Some(root), replacement.header, NodeStatus::Active)?;
+        tree.insert_node(Some(fork), extension.header, NodeStatus::Active)?;
+        let replacement_tip = tree
+            .tip()
+            .ok_or_else(|| std::io::Error::other("replacement tip missing"))?;
+        (original_tip, replacement_tip)
+    };
+    assert_eq!(original_tip.hash, Hash256::from(original.block_hash()));
+    assert_eq!(replacement_tip.hash, Hash256::from(extension.block_hash()));
+    context
+        .chain
+        .applied_tip
+        .store(Some(Arc::clone(&original_tip)));
+    assert_eq!(
+        context
+            .chain
+            .block_by_height(1)
+            .expect("original block")
+            .hash,
+        original.block_hash()
+    );
+    for restore in [false, true] {
+        context
+            .chain
+            .applied_tip
+            .store(Some(Arc::clone(&original_tip)));
+        let transitioned = Arc::new(AtomicBool::new(false));
+        context.indexes.esplora_tx_index = Some(Arc::new(ReorgTxIndex {
+            source: StaticTxIndex {
+                transaction: original.txs[0].clone(),
+                block: Some(TransactionBlock {
+                    height: 1,
+                    hash: Hash256::from(original.block_hash()),
+                }),
+            },
+            applied_tip: context.chain.applied_tip.clone(),
+            replacement: Arc::clone(&replacement_tip),
+            restored: restore.then(|| Arc::clone(&original_tip)),
+            transitioned: Arc::clone(&transitioned),
+        }));
+        let response = super::public::get(&context, &format!("/tx/{txid}/status"));
+        assert!(transitioned.load(Ordering::SeqCst));
+        assert_eq!(
+            context
+                .chain
+                .block_by_height(1)
+                .expect("current block")
+                .hash,
+            if restore {
+                original.block_hash()
+            } else {
+                replacement.block_hash()
+            }
+        );
+        assert_eq!(response.status, 200);
+        let status: Value = sonic_rs::from_slice(&response.body)?;
+        assert_eq!(status["confirmed"], true);
+        assert_eq!(status["block_hash"], original.block_hash().to_string());
+        assert_eq!(status["block_height"], 1);
+        assert_eq!(status["block_time"], original.header.time);
+    }
     Ok(())
 }
 
@@ -1296,6 +1508,7 @@ fn mempool_transaction_refuses_when_the_applied_tip_moves_between_reads() -> Res
         extended,
         tx: parent.clone(),
         height: 0,
+        hash: Hash256::from(block.block_hash()),
     }));
     assert!(
         context
@@ -2063,6 +2276,7 @@ fn history_hydrates_only_the_requested_chain_page() {
         unspent: Vec::new(),
     }));
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        block: ctx.chain.block_by_height(0),
         transactions,
         calls: Arc::clone(&calls),
     }));
@@ -2156,6 +2370,7 @@ fn chain_history_does_not_enumerate_script_live_or_poll_mempool() {
         history_calls: Arc::clone(&history_calls),
     }));
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        block: ctx.chain.block_by_height(0),
         transactions,
         calls: Arc::clone(&tx_calls),
     }));
@@ -2266,6 +2481,7 @@ fn chain_history_pagination_traversal_multi_page_and_pruned_blocks() {
         unspent: Vec::new(),
     }));
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        block: ctx.chain.block_by_height(0),
         transactions,
         calls: Arc::clone(&calls),
     }));
@@ -2406,6 +2622,7 @@ fn chain_history_deduplicates_multiple_outputs_in_same_transaction() {
         unspent: Vec::new(),
     }));
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        block: ctx.chain.block_by_height(0),
         transactions: vec![tx],
         calls: Arc::new(AtomicUsize::new(0)),
     }));
@@ -2465,6 +2682,7 @@ fn address_statistics_read_no_transactions_beyond_the_script_index() {
         unspent: vec![funding[0]],
     }));
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        block: ctx.chain.block_by_height(0),
         transactions,
         calls: Arc::clone(&calls),
     }));
@@ -2690,6 +2908,7 @@ fn history_resolves_shared_parents_once_per_page() {
         unspent: vec![],
     }));
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        block: ctx.chain.block_by_height(0),
         transactions: transactions
             .iter()
             .cloned()
@@ -2754,6 +2973,7 @@ fn history_resolves_shared_parents_once_per_page() {
     assert_eq!(mixed[0]["fee"], 50);
     assert_eq!(calls.load(Ordering::Relaxed), CHAIN_PAGE + 1);
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        block: ctx.chain.block_by_height(0),
         transactions,
         calls,
     }));
@@ -2854,6 +3074,7 @@ fn block_page_reuses_parent_outside_the_selected_page() {
         bodies: vec![(0, record.hash, consensus_bytes(&block))],
     }));
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        block: ctx.chain.block_by_height(0),
         transactions: block.txs.clone(),
         calls: Arc::clone(&calls),
     }));
@@ -2879,6 +3100,7 @@ fn block_page_reuses_parent_outside_the_selected_page() {
     let stale_record =
         bitcoin_rs_projection::block_log::BlockRecord::synthetic(0, BlockHash::default());
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        block: ctx.chain.block_by_height(0),
         transactions: vec![],
         calls,
     }));
@@ -2945,6 +3167,7 @@ fn block_transactions_reject_corrupt_witness_commitments() {
     };
     ctx.chain.applied_tip.store(Some(tip));
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        block: ctx.chain.block_by_height(0),
         transactions: vec![parent],
         calls: Arc::new(AtomicUsize::new(0)),
     }));
@@ -3116,6 +3339,7 @@ fn backend_mempool_get_bounds_prevouts_without_limiting_rows() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut ctx = Context::new();
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        block: ctx.chain.block_by_height(0),
         transactions: vec![parent],
         calls: Arc::clone(&calls),
     }));
@@ -3200,7 +3424,10 @@ fn backend_mempool_get_keeps_captured_parents_across_batches() {
         fn outpoint_value(&self, _: &OutPoint) -> Result<Option<u64>, TxQueryError> {
             Ok(None)
         }
-        fn transaction_height(&self, _: &Txid) -> Result<Option<u32>, TxQueryError> {
+        fn transaction_block(
+            &self,
+            _: &Txid,
+        ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
             Ok(None)
         }
         fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
@@ -3256,12 +3483,20 @@ fn backend_transaction_batches_share_duplicate_bodies_and_preserve_rows() {
         .expect("request");
     let calls = Arc::new(AtomicUsize::new(0));
     let mut ctx = Context::new();
+    let mut block = fixture_genesis();
+    block.txs = vec![first.clone(), second.clone()];
+    block.header.merkle_root = merkle_root(&block.txs).expect("batch transactions");
     ctx.chain
-        .add_block(bitcoin_rs_projection::block_log::BlockRecord::synthetic(
-            0,
-            BlockHash::default(),
+        .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+            0, &block,
         ));
+    ctx.chain
+        .block_tree
+        .write()
+        .insert_node(None, block.header, NodeStatus::Active)
+        .expect("batch block header");
     ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        block: ctx.chain.block_by_height(0),
         transactions: vec![first.clone(), second.clone()],
         calls: Arc::clone(&calls),
     }));
@@ -3323,8 +3558,19 @@ impl crate::context::DerivedIndexQuery for FailingParentIndex {
     fn outpoint_value(&self, _: &OutPoint) -> Result<Option<u64>, TxQueryError> {
         Ok(None)
     }
-    fn transaction_height(&self, _: &Txid) -> Result<Option<u32>, TxQueryError> {
-        Ok(Some(0))
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
+        Ok(self.transaction(txid)?.map(|tx| {
+            (
+                tx,
+                TransactionBlock {
+                    height: 0,
+                    hash: Hash256::from(fixture_genesis().block_hash()),
+                },
+            )
+        }))
     }
     fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
         self.error.clone().map_or(

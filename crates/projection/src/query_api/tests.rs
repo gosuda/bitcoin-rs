@@ -186,7 +186,13 @@ mod script_live_outage_engine_tests {
         );
 
         let txid = expected_txid(&block);
-        assert_eq!(engine.transaction_height(&txid)?, Some(0));
+        let expected_tx =
+            deserialize::<bitcoin_rs_consensus::primitives::Tx>(&serialize(&block.txdata[0]))?;
+        assert_eq!(expected_tx.txid(), txid);
+        assert_eq!(
+            engine.transaction_block(&txid)?,
+            Some((expected_tx, super::TransactionBlock { height: 0, hash }))
+        );
         let history = engine.confirmed_history(script_hash)?;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].txid, txid);

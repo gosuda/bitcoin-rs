@@ -2403,6 +2403,82 @@ fn historical_reorg_below_anchor_stays_valid() -> Result<(), crate::portable::Te
     Ok(())
 }
 
+// QRY-01, QRY-02, QRY-03, PRJ-06
+#[test]
+fn transaction_block_retains_membership_across_reorg_and_aba()
+-> Result<(), crate::portable::TestError> {
+    for restore in [false, true] {
+        let genesis = Network::Regtest.genesis_block();
+        let original = child_block(&genesis, vec![genesis.txs[0].clone()])?;
+        let mut other_tx = genesis.txs[0].clone();
+        other_tx.outputs[0].value = Amount::from_sat(123);
+        let replacement = child_block(&genesis, vec![other_tx])?;
+        let txid = original.txs[0].txid();
+        assert!(original.txs.iter().any(|tx| tx.txid() == txid));
+        assert!(replacement.txs.iter().all(|tx| tx.txid() != txid));
+        let mut tree = BlockTree::new();
+        tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+        let original_id = tree.insert_header(original.header, NodeStatus::HeaderValid)?;
+        let replacement_id = tree.insert_header(replacement.header, NodeStatus::HeaderValid)?;
+        let original_tip = tip_snapshot_for(&tree, original_id)?;
+        let replacement_tip = tip_snapshot_for(&tree, replacement_id)?;
+        let watermark = watermark_for(&tree, original_id)?;
+        let tip_cell = Arc::new(ArcSwapOption::empty());
+        tip_cell.store(Some(Arc::new(original_tip.clone())));
+        let moved = Arc::new(AtomicUsize::new(0));
+        let on_read: Option<Box<dyn Fn() + Send>> = {
+            let tips = Arc::clone(&tip_cell);
+            let moved = Arc::clone(&moved);
+            Some(Box::new(move || {
+                tips.store(Some(Arc::new(replacement_tip.clone())));
+                moved.fetch_add(1, Ordering::SeqCst);
+                if restore {
+                    tips.store(Some(Arc::new(original_tip.clone())));
+                    moved.fetch_add(1, Ordering::SeqCst);
+                }
+            }))
+        };
+        let body = Arc::new(MovingBody::new(
+            vec![(1, original.block_hash(), consensus_bytes(&original))],
+            on_read,
+        ));
+        let reader = Arc::new(QueryReader {
+            snapshot: QuerySnapshot {
+                watermark,
+                scans: vec![scan_response(
+                    ColumnFamily::TxConfirmed,
+                    TxidRow::scan_prefix(&txid),
+                    vec![(TxidRow::row(&txid, 1).to_db_row().to_vec(), vec![0])],
+                    true,
+                )],
+            },
+        });
+        let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+        let engine = DerivedIndexQueryEngine::new(
+            DerivedIndexRuntime::new(wake_tx),
+            reader,
+            bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+            bitcoin_rs_execution::chain::TipReader::new(tip_cell),
+            Some(body),
+            QueryEngineLive {
+                enabled: IndexCapabilities::ALL,
+                generation: Arc::new(Generation::new(1)),
+                historical_verified: None,
+                chain_transition: None,
+            },
+        );
+        let (transaction, identity) = engine
+            .transaction_block(&txid)?
+            .ok_or_else(|| std::io::Error::other("captured occurrence missing"))?;
+        assert_eq!(moved.load(Ordering::SeqCst), if restore { 2 } else { 1 });
+        assert_eq!(identity.height, 1);
+        assert_eq!(identity.hash, Hash256::from(original.block_hash()));
+        assert_eq!(transaction, original.txs[0]);
+        assert_ne!(identity.hash, Hash256::from(replacement.block_hash()));
+    }
+    Ok(())
+}
+
 #[test]
 fn historical_unknown_watermark_hash_refuses_prefix() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
@@ -3641,7 +3717,7 @@ fn tx_lookups_refuse_with_retry_while_watermark_lags_the_tip()
         matches!(&found, Err(TxQueryError::Retry(_))),
         "a current-tip tx lookup must refuse with Retry while the watermark lags: {found:?}"
     );
-    let height = fixture.engine.transaction_height(&genesis_txid);
+    let height = fixture.engine.transaction_block(&genesis_txid);
     assert!(
         matches!(&height, Err(TxQueryError::Retry(_))),
         "a current-tip height lookup must refuse with Retry while the watermark lags: {height:?}"

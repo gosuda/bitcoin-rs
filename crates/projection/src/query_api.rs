@@ -221,10 +221,19 @@ pub struct Answer<T> {
     pub verification_state: VerificationState,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionBlock {
+    pub height: u32,
+    pub hash: Hash256,
+}
+
 pub trait DerivedIndexQuery: Send + Sync {
     fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError>;
     fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError>;
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
         let _ = txid;
         Ok(None)
     }

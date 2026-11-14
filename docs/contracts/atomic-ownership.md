@@ -311,6 +311,7 @@ Nothing below the owner facade can interpret or copy the same data again.
 ### `QRY-02`: Mutation-isolated query traversal
 
 - A query must traverse its serving view without observing concurrent mutations in progress.
+- `DerivedIndexQuery::transaction_block` MUST return the transaction body, occurrence height, and occurrence block hash from one captured read prefix. A caller MUST resolve confirmation metadata by that block hash. It MUST NOT join the occurrence height to a later active-chain publication.
 
 ### `QRY-03`: Extension stability for historical queries
 

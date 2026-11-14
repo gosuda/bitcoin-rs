@@ -9,7 +9,7 @@ use super::{
 };
 use crate::query_api::{
     Answer, AppliedEpoch, CapabilityCoverage, CoveredPrefix, QueryMiss, RetryReason,
-    ScriptHistoryPage, VerificationState,
+    ScriptHistoryPage, TransactionBlock, VerificationState,
 };
 use bitcoin_rs_execution::chain::{NodeId, TipReader};
 
@@ -790,18 +790,9 @@ pub(crate) struct IndexProgress {
 
 impl DerivedIndexQuery for DerivedIndexQueryEngine {
     fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
-        let (view, snapshot) = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
-        self.with_view(
-            IndexCapabilities::TX_LOOKUP,
-            &view,
-            snapshot.as_ref(),
-            |snapshot, view, budget| {
-                Self::require_tip_coverage_on_view(view, IndexCapabilities::TX_LOOKUP)?;
-                let prefix = Self::require_tip_prefix(view, IndexCapability::TxLookup)?;
-                let found = self.transaction_for(snapshot, &prefix, budget, txid)?;
-                self.scoped_or_outside(view, IndexCapability::TxLookup, found)
-            },
-        )
+        Ok(self
+            .transaction_block(txid)?
+            .map(|(transaction, _)| transaction))
     }
 
     fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
@@ -819,7 +810,10 @@ impl DerivedIndexQuery for DerivedIndexQueryEngine {
         )
     }
 
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
         let (view, snapshot) = self.capture_view(IndexCapabilities::TX_LOOKUP)?;
         self.with_view(
             IndexCapabilities::TX_LOOKUP,
@@ -828,10 +822,14 @@ impl DerivedIndexQuery for DerivedIndexQueryEngine {
             |snapshot, view, budget| {
                 Self::require_tip_coverage_on_view(view, IndexCapabilities::TX_LOOKUP)?;
                 let prefix = Self::require_tip_prefix(view, IndexCapability::TxLookup)?;
-                let height = self
+                let found = self
                     .locate_transaction_for(snapshot, &prefix, budget, txid)?
-                    .map(|(height, _)| height);
-                self.scoped_or_outside(view, IndexCapability::TxLookup, height)
+                    .map(|(height, transaction)| {
+                        let hash = self.resolve_hash_at_height(height, &prefix)?;
+                        Ok::<_, TxQueryError>((transaction, TransactionBlock { height, hash }))
+                    })
+                    .transpose()?;
+                self.scoped_or_outside(view, IndexCapability::TxLookup, found)
             },
         )
     }

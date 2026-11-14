@@ -20,7 +20,8 @@ use crate::capabilities::{
 };
 use crate::query_api::{
     Answer, DerivedIndexInfo, DerivedIndexQuery, ScriptHistoryRecord, ScriptIndexQuery,
-    ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError, TxUnavailableCause,
+    ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TransactionBlock, TxQueryError,
+    TxUnavailableCause,
 };
 
 use bitcoin_rs_storage::{
@@ -369,9 +370,12 @@ impl DerivedIndexQuery for DerivedIndexQueryAdapter {
         engine.outpoint_value(outpoint)
     }
 
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
         let engine = self.load_engine()?;
-        engine.transaction_height(txid)
+        engine.transaction_block(txid)
     }
 
     fn index_info(&self) -> Result<DerivedIndexInfo, TxQueryError> {

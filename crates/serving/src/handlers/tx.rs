@@ -100,9 +100,10 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
         let tx = derived_index.transaction(&txid).map_err(RpcError::from)?;
         if let Some(tx) = tx {
             let record = derived_index
-                .transaction_height(&txid)
+                .transaction_block(&txid)
                 .map_err(RpcError::from)?
-                .and_then(|height| {
+                .and_then(|(_, identity)| {
+                    let height = identity.height;
                     if verbose == 2 && ctx.chain.block_undo_source.is_some() {
                         ctx.chain
                             .block_hash_at_height_in_view(&view, height)
@@ -388,10 +389,10 @@ fn block_via_index(
     let Some(derived_index) = ctx.indexes.derived_index.as_ref() else {
         return Ok(None);
     };
-    match derived_index.transaction_height(txid) {
-        Ok(Some(height)) => ctx
+    match derived_index.transaction_block(txid) {
+        Ok(Some((_, identity))) => ctx
             .chain
-            .block_by_height(height)
+            .block_by_height(identity.height)
             .map(Some)
             .ok_or_else(|| RpcError::CoreInternal("Transaction index corrupt".to_owned())),
         Ok(None) => Ok(None),

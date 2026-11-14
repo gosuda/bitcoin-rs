@@ -63,6 +63,7 @@ struct ChainFixture {
     bodies: Arc<BodyMap>,
     tip: Arc<TipSnapshot>,
     txids: Vec<(Txid, u32)>,
+    block_hashes: Vec<Hash256>,
 }
 
 impl ChainFixture {
@@ -70,6 +71,7 @@ impl ChainFixture {
         let mut tree = BlockTree::new();
         let mut bodies = BodyMap::new();
         let mut txids = Vec::new();
+        let mut block_hashes = Vec::new();
         let mut prev = [0_u8; 32];
         let mut tip_id = None;
         for height in 0..=blocks {
@@ -91,6 +93,7 @@ impl ChainFixture {
             .expect("fixture node exists");
             txids.extend(parsed.txids().into_iter().map(|txid| (txid, height)));
             let hash = block.block_hash().to_byte_array();
+            block_hashes.push(Hash256::from_le_bytes(&hash));
             bodies.insert((height, hash), bytes);
             prev = hash;
             tip_id = Some(id);
@@ -111,6 +114,7 @@ impl ChainFixture {
             bodies: Arc::new(bodies),
             tip,
             txids,
+            block_hashes,
         }
     }
 
@@ -871,9 +875,20 @@ fn export_then_restore_serves_the_same_queries_as_backfill() {
     source_node.wait_synced(fixture.tip.height);
     restored.wait_synced(fixture.tip.height);
     for (txid, height) in &fixture.txids {
-        let expected = source_node.adapter.transaction_height(txid);
-        assert_eq!(expected, Ok(Some(*height)));
-        assert_eq!(restored.adapter.transaction_height(txid), expected);
+        let expected = source_node.adapter.transaction_block(txid);
+        let expected_identity = bitcoin_rs_projection::TransactionBlock {
+            height: *height,
+            hash: fixture.block_hashes
+                [usize::try_from(*height).expect("fixture height fits usize")],
+        };
+        let (source_tx, source_identity) = expected
+            .as_ref()
+            .expect("source lookup")
+            .as_ref()
+            .expect("source transaction");
+        assert_eq!(source_tx.txid(), *txid);
+        assert_eq!(*source_identity, expected_identity);
+        assert_eq!(restored.adapter.transaction_block(txid), expected);
         let served = restored.adapter.transaction(txid);
         assert!(matches!(&served, Ok(Some(tx)) if tx.txid() == *txid));
         assert_eq!(served, source_node.adapter.transaction(txid));
@@ -969,7 +984,20 @@ fn restore_below_a_restarted_receivers_tip_then_reconciles_forward() {
     );
     node.wait_synced(receiver_chain.tip.height);
     for (txid, height) in &receiver_chain.txids {
-        assert_eq!(node.adapter.transaction_height(txid), Ok(Some(*height)));
+        let (tx, identity) = node
+            .adapter
+            .transaction_block(txid)
+            .expect("receiver lookup")
+            .expect("receiver transaction");
+        assert_eq!(tx.txid(), *txid);
+        assert_eq!(
+            identity,
+            bitcoin_rs_projection::TransactionBlock {
+                height: *height,
+                hash: receiver_chain.block_hashes
+                    [usize::try_from(*height).expect("fixture height fits usize")],
+            }
+        );
     }
     node.stop();
     assert_eq!(durable(&receiver), truth_state);
@@ -1439,7 +1467,7 @@ fn missing_bodies_withhold_readiness_until_ordinary_backfill() {
             "{name}: withheld bundle made the index ready"
         );
         assert!(
-            !matches!(node.adapter.transaction_height(&probe_txid), Ok(Some(_))),
+            !matches!(node.adapter.transaction_block(&probe_txid), Ok(Some(_))),
             "{name}: withheld bundle served a lookup"
         );
         node.stop();

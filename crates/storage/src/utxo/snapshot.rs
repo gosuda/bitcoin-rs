@@ -166,18 +166,29 @@ fn write_snapshot_view<O: SnapshotCoinObserver, W: Write + ?Sized>(
         record_count,
     };
     write_v4_header(writer, &declaration)?;
+    let mut snapshot_stats = view.snapshot_muhash_accumulator();
     for shard_idx in 0_u8..=u8::MAX {
         view.shard(usize::from(shard_idx)).with_table(|table| {
             for record in &table.table {
-                write_record_v4(writer, record, &mut observer, &mut audit)?;
+                write_record_v4(
+                    writer,
+                    record,
+                    &mut observer,
+                    &mut snapshot_stats,
+                    &mut audit,
+                )?;
             }
             Ok::<(), UtxoError>(())
         })?;
     }
 
-    let fallback = view
-        .listener_muhash3072()
-        .unwrap_or([0_u8; MUHASH_TRAILER_LEN]);
+    let fallback = snapshot_stats.map_or_else(
+        || {
+            view.listener_muhash3072()
+                .unwrap_or([0_u8; MUHASH_TRAILER_LEN])
+        },
+        |stats| stats.into_stats().muhash.finalize(),
+    );
     let trailer = observer.select_trailer(fallback);
     writer.write_all(&trailer)?;
     Ok((trailer, observer, audit))
@@ -216,7 +227,7 @@ where
             });
         }
         previous_shard = Some(shard_idx);
-        write_record_v4(&mut tee, &record, &mut (), &mut audit)?;
+        write_record_v4(&mut tee, &record, &mut (), &mut None, &mut audit)?;
     }
     tee.write_all(trailer)?;
     let (sha256, len) = tee.finish();
@@ -251,6 +262,7 @@ fn write_record_v4<O: SnapshotCoinObserver, W: Write + ?Sized>(
     writer: &mut W,
     record: &UtxoRecord,
     observer: &mut O,
+    snapshot_stats: &mut Option<CoinStatsAccumulator>,
     audit: &mut WriteAudit,
 ) -> Result<(), UtxoError> {
     let output_count = u32::try_from(record.output_count()).map_err(|_| {
@@ -285,14 +297,18 @@ fn write_record_v4<O: SnapshotCoinObserver, W: Write + ?Sized>(
         };
         writer.write_all(vout_header.as_bytes())?;
         writer.write_all(output.script_pubkey)?;
-        observer.observe_coin(SnapshotCoin {
+        let coin = SnapshotCoin {
             txid,
             vout: output.vout,
             value: output.value,
             script_pubkey: output.script_pubkey,
             height: output.height,
             coinbase: output.coinbase,
-        });
+        };
+        if let Some(stats) = snapshot_stats {
+            stats.observe_coin(coin);
+        }
+        observer.observe_coin(coin);
     }
     Ok(())
 }
