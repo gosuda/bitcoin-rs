@@ -1760,7 +1760,7 @@ fn restart_without_checkpoint_at_snapshot_base_refuses() -> TestResult {
     assert!(
         matches!(
             result,
-            Err(crate::recovery::RecoveryError::PinnedCheckpointMismatch)
+            Err(crate::recovery::RecoveryError::SnapshotBaseCheckpointMissing)
         ),
         "a snapshot base without its checkpoint must fail closed"
     );
