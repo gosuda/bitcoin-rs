@@ -295,38 +295,19 @@ impl crate::context::DerivedIndexQuery for FixtureTxIndex {
     }
 
     fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+        let best = self
+            .0
+            .iter()
+            .map(|(_, block)| block.height)
+            .max()
+            .unwrap_or(0);
         Ok(crate::context::DerivedIndexInfo {
             synced: true,
-            best_block_height: self
-                .0
-                .iter()
-                .map(|(_, block)| block.height)
-                .max()
-                .unwrap_or(0),
-            applied_height: self
-                .0
-                .iter()
-                .map(|(_, block)| block.height)
-                .max()
-                .unwrap_or(0),
-            historical_height: self
-                .0
-                .iter()
-                .map(|(_, block)| block.height)
-                .max()
-                .unwrap_or(0),
-            verified_height: self
-                .0
-                .iter()
-                .map(|(_, block)| block.height)
-                .max()
-                .unwrap_or(0),
-            coverage_height: self
-                .0
-                .iter()
-                .map(|(_, block)| block.height)
-                .max()
-                .unwrap_or(0),
+            best_block_height: best,
+            applied_height: best,
+            historical_height: best,
+            verified_height: best,
+            coverage_height: best,
         })
     }
 }
