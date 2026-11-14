@@ -80,7 +80,7 @@ impl WindowGroup {
         }
         let coin_bytes = match workspace {
             Some(workspace) => workspace
-                .staged_coin_bytes(self.pending.len())
+                .staged_total_flush_bytes(self.pending.len())
                 .map_err(ApplyError::UtxoCommit)?,
             None => 0,
         };
