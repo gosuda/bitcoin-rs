@@ -173,12 +173,7 @@ fn apply_live_ops_oriented(
     let mut last: hashbrown::HashMap<[u8; crate::types::SCRIPT_LIVE_ROW_SIZE], PendingWrite> =
         hashbrown::HashMap::new();
     let invert = matches!(orientation, LiveOpsOrientation::Inverse);
-    let ordered: Box<dyn Iterator<Item = &LiveOp>> = if invert {
-        Box::new(ops.iter().rev())
-    } else {
-        Box::new(ops.iter())
-    };
-    for op in ordered {
+    let mut stage = |op: &LiveOp| {
         let put = matches!(op, LiveOp::Insert { .. }) != invert;
         let write = if put {
             PendingWrite::Put(op.coin())
@@ -186,6 +181,10 @@ fn apply_live_ops_oriented(
             PendingWrite::Remove
         };
         last.insert(*op.row().as_bytes(), write);
+    };
+    match orientation {
+        LiveOpsOrientation::Forward => ops.iter().for_each(&mut stage),
+        LiveOpsOrientation::Inverse => ops.iter().rev().for_each(&mut stage),
     }
     for (key, write) in last {
         match write {
