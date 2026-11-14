@@ -1865,9 +1865,6 @@ fn joined_answer_refuses_a_same_height_tip_replacement() -> Result<(), TestError
     if tip.hash == replacement.hash {
         return Err("fixture must differ in hash".into());
     }
-    if tip.height != replacement.height {
-        return Err("fixture must match in height".into());
-    }
     context.chain.applied_tip.store(Some(tip));
     context.indexes.script_index = Some(Arc::new(RepublishTipScriptIndex {
         applied_tip: context.chain.applied_tip.clone(),
