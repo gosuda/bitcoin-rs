@@ -8,6 +8,7 @@
 - A rejected snapshot ingest on a fresh node clears the activation marker it wrote. If the marker cannot be cleared, the chain closes for recovery and the call reports `PartialIngestNotDiscarded`.
 - Startup treats any in-flight snapshot activation marker as a cold start with no engine image, including when a published checkpoint exists below the marker base.
 - BREAKING CHANGE: `RecoveryError::SnapshotBaseCheckpointMissing` reports a pinned snapshot base without a compatible checkpoint. `PinnedCheckpointMismatch` is limited to a checkpoint that disagrees with the pin.
+- Recovery and converter checks of a snapshot-base checkpoint stream the engine coin rows into the pinned commitment. They no longer build a resident `UtxoSet`.
 - Manifest import and startup attachment resolve relative paths under the data directory and use the same bounded manifest reader.
 - Streamed coin commitments reject rows whose key length or transaction ID differs from the encoded coin record.
 - Checkpoint restore copies recorded engine files into a newly claimed scratch directory. It leaves pre-existing directories and published file bytes unchanged.

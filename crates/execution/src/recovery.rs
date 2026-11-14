@@ -647,22 +647,13 @@ fn checkpoint_image_matches_pin(
         return Ok(false);
     };
     let snapshot = image.snapshot().map_err(ConvertedCheckpointError::Engine)?;
-    let coins = UtxoSet::new();
-    for row in snapshot
-        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])
-        .map_err(ConvertedCheckpointError::Engine)?
-    {
-        let (_key, value) = row.map_err(ConvertedCheckpointError::Engine)?;
-        coins.insert_parsed_record(
-            bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
-                .map_err(ConvertedCheckpointError::Coins)?,
-        );
-    }
-    Ok(coins
-        .lock_stable_view()
-        .hash_serialized_3_at_height(pinned.height)
-        .map_err(ConvertedCheckpointError::Coins)?
-        == pinned.hash_serialized)
+    let coins_match = bitcoin_rs_storage::utxo::snapshot::hash_serialized_3_snapshot(
+        snapshot.as_ref(),
+        Some(pinned.height),
+    )
+    .map_err(ConvertedCheckpointError::Coins)?
+        == pinned.hash_serialized;
+    Ok(coins_match)
 }
 
 /// Publishes a checkpoint at the snapshot base from converted engine coins
@@ -707,32 +698,22 @@ pub fn publish_snapshot_base_checkpoint(
     let chain_tx_count = crate::chain::ChainTxCount::from_wire(pinned.chain_tx_count);
     tree.restore_chain_tx_count(tip_id, chain_tx_count)
         .map_err(ConvertedCheckpointError::Headers)?;
-    let coins = UtxoSet::new();
-    for row in engine
+    let rows = engine
         .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])
-        .map_err(ConvertedCheckpointError::Engine)?
-    {
-        let (_key, value) = row.map_err(ConvertedCheckpointError::Engine)?;
-        coins.insert_parsed_record(
-            bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
-                .map_err(ConvertedCheckpointError::Coins)?,
-        );
-    }
-    let commitment = coins
-        .lock_stable_view()
-        .hash_serialized_3_at_height(pinned.height)
-        .map_err(ConvertedCheckpointError::Coins)?;
-    if commitment != pinned.hash_serialized {
+        .map_err(ConvertedCheckpointError::Engine)?;
+    let commitment = bitcoin_rs_storage::coins::CoinCommitment::from_rows(
+        rows,
+        pinned.height,
+        Some(pinned.height),
+    )
+    .map_err(ConvertedCheckpointError::Coins)?;
+    if commitment.hash_serialized != pinned.hash_serialized {
         return Err(ConvertedCheckpointError::EngineCommitmentMismatch {
             expected: pinned.hash_serialized.to_string_be(),
-            found: commitment.to_string_be(),
+            found: commitment.hash_serialized.to_string_be(),
         });
     }
-    let mut stats = coins
-        .with_stable_view(|view| {
-            bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)
-        })
-        .map_err(ConvertedCheckpointError::Coins)?;
+    let mut stats = commitment.stats;
     stats.tx_count = pinned.chain_tx_count;
     let applied = TipSnapshot {
         tip_id,

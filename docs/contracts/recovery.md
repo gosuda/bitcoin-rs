@@ -113,7 +113,12 @@ struct DurableHead {
 - These bytes use datadir schema epoch 4; older datadirs are refused without offline conversion.
 - A checkpoint exactly at the pinned snapshot base MUST match its commitment and transaction count.
 - The checkpoint MUST contain no coin created above that base height.
-- Recovery uses the same height-bounded commitment traversal as snapshot activation and immutable archive restoration.
+- Recovery checks an engine checkpoint at the pinned base with `hash_serialized_3_snapshot(snapshot, Some(pinned.height))`.
+- The recovery helper `publish_snapshot_base_checkpoint` streams engine `Coins` rows through `CoinCommitment::from_rows`.
+- That helper bounds coin heights by `pinned.height`. It checks the commitment before publishing the checkpoint.
+- Neither recovery path rebuilds a resident `UtxoSet` to check the pinned commitment.
+- Activation has a separate path in `assumeutxo.rs`. Its persist closure rescans installed coins with `CoinStore::commitment(pinned.height, None)`.
+- That activation rescan supplies the checkpoint statistics. It does not replace the recovery helpers above.
 - Valid file checksums do not waive this rule.
 - Ordinary and historical checkpoints share the same generation and manifest-digest reference and manifest/artifact verification.
 - The ordinary owner selects that reference through `CURRENT`.
