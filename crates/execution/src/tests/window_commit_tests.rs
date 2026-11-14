@@ -1216,3 +1216,109 @@ impl bitcoin_rs_storage::budget::BudgetCharge for RefusingCharge {
         0
     }
 }
+
+struct BoundedCharge {
+    limit: u64,
+    current: parking_lot::Mutex<u64>,
+}
+
+impl BoundedCharge {
+    fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            current: parking_lot::Mutex::new(0),
+        }
+    }
+}
+
+impl bitcoin_rs_storage::budget::BudgetCharge for BoundedCharge {
+    fn reserve_bytes(
+        &self,
+        _owner: bitcoin_rs_storage::budget::BudgetOwner,
+        _bytes: u64,
+    ) -> Result<(), bitcoin_rs_storage::budget::BudgetError> {
+        Ok(())
+    }
+
+    fn allocate_bytes(
+        &self,
+        _owner: bitcoin_rs_storage::budget::BudgetOwner,
+        bytes: u64,
+    ) -> Result<(), bitcoin_rs_storage::budget::BudgetError> {
+        let mut cur = self.current.lock();
+        if cur.saturating_add(bytes) > self.limit {
+            return Err(bitcoin_rs_storage::budget::BudgetError::BudgetExhausted);
+        }
+        *cur += bytes;
+        Ok(())
+    }
+
+    fn release_bytes(&self, _owner: bitcoin_rs_storage::budget::BudgetOwner, bytes: u64) {
+        let mut cur = self.current.lock();
+        *cur = cur.saturating_sub(bytes);
+    }
+
+    fn available_bytes(&self, _owner: bitcoin_rs_storage::budget::BudgetOwner) -> u64 {
+        let cur = *self.current.lock();
+        self.limit.saturating_sub(cur)
+    }
+}
+
+#[test]
+fn window_prevouts_refusal_releases_charge_without_leak() -> TestResult {
+    let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    commit_genesis_head(&chain)?;
+
+    let genesis = Network::Regtest.genesis_block();
+    let duplicate_tx = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(genesis.txs[0].txid(), 0),
+            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    insert_engine_coin(&chain, duplicate_tx.txid())?;
+
+    let spend_tx = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(duplicate_tx.txid(), 0),
+            script_sig: Script::from_bytes(vec![OP_PUSHNUM_1]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(40_000),
+            script_pubkey: Script::from_bytes(vec![OP_PUSHNUM_1]),
+        }],
+        lock_time: LockTime::ZERO,
+    };
+    let mut b1 = mined_child(genesis.block_hash(), 1)?;
+    b1.txs.push(spend_tx);
+    remine(&mut b1)?;
+    apply_headers(&chain, &[&b1])?;
+    let payloads = dump_payloads(std::slice::from_ref(&b1));
+    let payload_refs: Vec<&BlockImage> = payloads.iter().collect();
+
+    let bounded = Arc::new(BoundedCharge::new(1));
+    chain.set_prevout_charge(bitcoin_rs_storage::budget::ChargeHandle::new(
+        bounded.clone(),
+        bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
+    ));
+    let result = chain.apply_window(&payload_refs);
+    assert!(result.is_err());
+    assert_eq!(
+        *bounded.current.lock(),
+        0,
+        "a refused window must release any partial prevout charge"
+    );
+    Ok(())
+}

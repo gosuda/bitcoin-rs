@@ -420,8 +420,14 @@ fn same_block_spend_resolves_from_the_block_and_absent_stays_missing() -> TestRe
     assert_eq!(resolved.entry(&funded_out), Some(&coins[0]));
     assert_eq!(resolved.entry(&same), None);
     assert_eq!(resolved.entry(&absent), None);
-    let prevouts =
-        crate::prepare::resolve_block_prevouts(Arc::new(resolved), &image, &tx_plan, 2, &txids)?;
+    let prevouts = crate::prepare::resolve_block_prevouts(
+        Arc::new(resolved),
+        &image,
+        &tx_plan,
+        2,
+        &txids,
+        None,
+    )?;
     assert_eq!(prevouts.len(), 3);
     assert_eq!(prevouts[1].len(), 1);
     assert_eq!(prevouts[2].len(), 2);

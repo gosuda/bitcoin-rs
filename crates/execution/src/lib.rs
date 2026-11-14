@@ -1805,6 +1805,24 @@ impl<'b> BlockLocalUtxoView<'b> {
         }
         Ok(())
     }
+
+    fn script_len(&self, outpoint: &OutPoint) -> Option<usize> {
+        if let Some(entry) = self.overlay.get(outpoint) {
+            let derived_index = usize::try_from((*entry)?).ok()?;
+            let vout = usize::try_from(outpoint.vout).ok()?;
+            if derived_index >= self.image.tx_count() {
+                return None;
+            }
+            let tx = self.image.tx(derived_index);
+            if vout >= tx.output_count() {
+                return None;
+            }
+            return Some(tx.output_script(vout).len());
+        }
+        self.base
+            .entry(outpoint)
+            .map(|coin| coin.txout.script_pubkey.len())
+    }
 }
 
 impl UtxoView for BlockLocalUtxoView<'_> {

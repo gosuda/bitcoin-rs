@@ -7,7 +7,7 @@ use super::{
 };
 use crate::chain::NodeStatus;
 use crate::error::ApplyError;
-use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Txid};
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -242,7 +242,7 @@ impl WindowGroup {
     }
 }
 
-struct WindowPrevouts {
+pub(crate) struct WindowPrevouts {
     charge: Option<bitcoin_rs_storage::budget::ChargeHandle>,
     bytes: u64,
 }
@@ -252,7 +252,7 @@ impl WindowPrevouts {
         Self { charge, bytes: 0 }
     }
 
-    fn admit(&mut self, bytes: u64) -> bool {
+    pub(crate) fn admit(&mut self, bytes: u64) -> bool {
         let Some(charge) = self.charge.as_ref() else {
             return true;
         };
@@ -262,6 +262,13 @@ impl WindowPrevouts {
         self.bytes += bytes;
         true
     }
+
+    pub(crate) fn release(&mut self, bytes: u64) {
+        if let Some(charge) = self.charge.as_ref() {
+            charge.release(bytes);
+        }
+        self.bytes = self.bytes.saturating_sub(bytes);
+    }
 }
 
 impl Drop for WindowPrevouts {
@@ -270,20 +277,6 @@ impl Drop for WindowPrevouts {
             charge.release(self.bytes);
         }
     }
-}
-
-fn prevout_bytes(resolved: &[Vec<Option<TxOut>>]) -> u64 {
-    let slot = std::mem::size_of::<Option<TxOut>>();
-    resolved
-        .iter()
-        .flatten()
-        .map(|prevout| {
-            let script = prevout
-                .as_ref()
-                .map_or(0, |txout| txout.script_pubkey.len());
-            u64::try_from(slot + script).unwrap_or(u64::MAX)
-        })
-        .fold(0_u64, u64::saturating_add)
 }
 
 #[derive(Default)]
@@ -905,6 +898,7 @@ fn prove_window_scripts<'a, 'h>(
             &unit.tx_plan,
             context.height,
             unit.view.txids(),
+            Some(&mut prevouts),
         ) else {
             if let Some(takes) = takes.take() {
                 takes.rollback();
@@ -914,15 +908,6 @@ fn prove_window_scripts<'a, 'h>(
             }
             return None;
         };
-        if !prevouts.admit(prevout_bytes(&resolved)) {
-            if let Some(takes) = takes.take() {
-                takes.rollback();
-            }
-            for unit in prepared.iter_mut() {
-                unit.view.set_resolved(Vec::new());
-            }
-            return None;
-        }
         unit.view.set_resolved(resolved);
         if let Ok(checks) = bitcoin_rs_consensus::verify_tx::prepare_block_script_checks(
             &mut unit.view,
