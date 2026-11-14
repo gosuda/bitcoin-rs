@@ -14,6 +14,13 @@ use crate::p2p::sync::chain::{SyncChain, WindowApplyDisposition, WindowCommitErr
 use crate::test_support::TestError;
 use bitcoin_rs_execution::Chainstate;
 
+fn sync_unit_test_budget() -> Arc<crate::budget::NodeBudget> {
+    Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+        split_chainstate_cache_budget(16),
+        1,
+    ))
+}
+
 #[test]
 fn window_failure_keeps_committed_followers_and_native_retry_policy()
 -> Result<(), crate::test_support::TestError> {
@@ -53,10 +60,7 @@ fn window_failure_keeps_committed_followers_and_native_retry_policy()
         handles: Arc::clone(&handles),
         followers: followers.clone(),
         assumeutxo: None,
-        budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
-            split_chainstate_cache_budget(16),
-            1,
-        )),
+        budget: sync_unit_test_budget(),
     };
     adapter.bootstrap_genesis();
     let mut mutated = invalid.clone();
@@ -460,10 +464,7 @@ fn refusal_window_fixture(payload_blocks: &[Block]) -> Result<RefusalWindowFixtu
         handles: Arc::clone(&handles),
         followers: followers.clone(),
         assumeutxo: None,
-        budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
-            split_chainstate_cache_budget(16),
-            1,
-        )),
+        budget: sync_unit_test_budget(),
     });
     adapter.bootstrap_genesis();
     assert!(
