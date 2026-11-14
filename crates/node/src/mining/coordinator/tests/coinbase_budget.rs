@@ -409,6 +409,10 @@ impl MempoolSnapshotSource for BudgetGate {
         self.inner.current_revisions()
     }
 
+    fn settled_generation(&self) -> (u64, u64, u64) {
+        self.inner.settled_generation()
+    }
+
     fn select_template(
         &self,
         expected_sequences: Option<(u64, u64)>,
