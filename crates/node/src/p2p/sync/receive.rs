@@ -450,7 +450,6 @@ impl BlockSync {
             {
                 let hash = Hash256::from(inbound.payload().block_hash());
                 let source = inbound.source;
-                let _ = inbound.forward_credit;
                 let memory_credit = inbound.memory_credit.take();
                 let payload = inbound.into_payload();
                 if matches!(admission, BodyAdmission::Staged) {

@@ -209,7 +209,6 @@ impl BlockSync {
                 next_expected,
                 ..
             } = &mut *historical;
-            let _ = inbound.forward_credit;
             let memory_credit = inbound.memory_credit.take();
             match stager.insert_with_credit(
                 hash,
