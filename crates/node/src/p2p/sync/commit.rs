@@ -21,7 +21,6 @@ pub(super) fn restore_split(chunk_start: usize, stopped: usize, chunk_len: usize
 struct CommitWindowErrorOutcome {
     stopped: usize,
     failed_hash: Option<Hash256>,
-    failed_permanent: bool,
     restore_from: usize,
     failed_delivery: Option<(Option<bitcoin_rs_wire::connection::PeerSource>, Hash256)>,
 }
@@ -128,7 +127,7 @@ impl BlockSync {
                         .lock()
                         .stager
                         .restore_many(drained.drain(outcome.restore_from..));
-                    if outcome.failed_permanent {
+                    if error.disposition == WindowApplyDisposition::Permanent {
                         self.purge_invalidated(&error.invalidated);
                         metrics::counter!("node.sync.invalidated_blocks")
                             .increment(u64::try_from(error.invalidated.len()).unwrap_or(u64::MAX));
@@ -181,7 +180,6 @@ impl BlockSync {
         let blocker = chunk.get(stopped);
         let failed_delivery = blocker.map(|block| (block.source(), block.hash));
         let failed_hash = blocker.map(|b| b.hash);
-        let failed_permanent = error.disposition == WindowApplyDisposition::Permanent;
         if error.disposition == WindowApplyDisposition::Fatal {
             self.note_fatal_settlement(stopped, &error.source);
         } else if let Some(blocker) = blocker {
@@ -201,7 +199,6 @@ impl BlockSync {
         CommitWindowErrorOutcome {
             stopped,
             failed_hash,
-            failed_permanent,
             restore_from,
             failed_delivery,
         }
