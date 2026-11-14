@@ -7,6 +7,7 @@ use crate::{
     AdmissionChain, AdmissionOrigin, LocalOrigin, MempoolGateway, MutationResult, PeerToken,
     SubmitError,
 };
+use alloc::borrow::Cow;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bitcoin_rs_consensus::primitives::{Tx, Txid, Wtxid, unix_time_secs};
@@ -72,8 +73,7 @@ fn ordered(mut txs: Vec<Tx>) -> Result<Vec<Tx>, SubmitError> {
     Ok(txs)
 }
 
-fn ancestors_in_topological_order(txs: &[Tx]) -> alloc::borrow::Cow<'_, [Tx]> {
-    use alloc::borrow::Cow;
+fn ancestors_in_topological_order(txs: &[Tx]) -> Cow<'_, [Tx]> {
     let Some((_, ancestors)) = txs.split_last() else {
         return Cow::Borrowed(txs);
     };
@@ -156,7 +156,7 @@ impl MempoolGateway {
             package_error: None,
             tx_results: Vec::with_capacity(txs.len()),
         };
-        let mut reconsider = Vec::new();
+        let mut reconsider: Vec<(usize, Arc<Tx>)> = Vec::new();
         let mut quit_early = false;
         for (index, tx) in txs.iter().enumerate() {
             let single = Arc::new(tx.clone());
@@ -183,7 +183,7 @@ impl MempoolGateway {
                             | AcceptanceRejectReason::MissingInputs
                     )
                 ) {
-                    reconsider.push(index);
+                    reconsider.push((index, single));
                 } else {
                     quit_early = true;
                 }
@@ -191,10 +191,7 @@ impl MempoolGateway {
             result.tx_results.push(row);
         }
         if !quit_early && reconsider.len() > 1 {
-            let pending: Vec<Arc<Tx>> = reconsider
-                .iter()
-                .map(|&index| Arc::new(txs[index].clone()))
-                .collect();
+            let pending: Vec<Arc<Tx>> = reconsider.iter().map(|(_, tx)| Arc::clone(tx)).collect();
             match self.submit_package_attempt(
                 &pending,
                 AdmissionOrigin::from(LocalOrigin::Rpc),
@@ -215,15 +212,15 @@ impl MempoolGateway {
                     }) {
                         result.package_error = Some(AcceptanceRejectReason::MissingEphemeralSpends);
                     }
-                    for (index, row) in reconsider.into_iter().zip(attempt.results) {
+                    for ((index, _), row) in reconsider.into_iter().zip(attempt.results) {
                         if row != PackageTxResult::Unvalidated {
                             result.tx_results[index] = row;
                         }
                     }
                 }
                 Err(error) => {
-                    for index in reconsider {
-                        result.tx_results[index] = PackageTxResult::Rejected(error);
+                    for (index, _) in &reconsider {
+                        result.tx_results[*index] = PackageTxResult::Rejected(error);
                     }
                 }
             }
@@ -296,7 +293,10 @@ impl MempoolGateway {
         let txs = ancestors_in_topological_order(txs);
         crate::package::check_structure(&txs)?;
         check_ancestor_shape(&txs)?;
-        let shared: Vec<Arc<Tx>> = txs.iter().map(|tx| Arc::new(tx.clone())).collect();
+        let shared: Vec<Arc<Tx>> = match txs {
+            Cow::Owned(txs) => txs.into_iter().map(Arc::new).collect(),
+            Cow::Borrowed(txs) => txs.iter().map(|tx| Arc::new(tx.clone())).collect(),
+        };
         self.submit_package_atomic(
             &shared,
             AdmissionOrigin::Peer(source),
