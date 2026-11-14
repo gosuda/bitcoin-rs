@@ -156,7 +156,7 @@ impl<S: KvStore> IndexWriter<S> {
                 state,
                 &older,
                 snapshot
-                    .get(ColumnFamily::IdxMeta, &tail::log_key_for(block.height))?
+                    .get(ColumnFamily::IdxMeta, &tail::log_key(block.height))?
                     .as_deref(),
             )?;
         }
@@ -197,10 +197,7 @@ impl<S: KvStore> IndexWriter<S> {
             && self
                 .indexer
                 .store
-                .get(
-                    ColumnFamily::IdxMeta,
-                    &tail::log_key_for(step.current.height),
-                )?
+                .get(ColumnFamily::IdxMeta, &tail::log_key(step.current.height))?
                 .is_none()
         {
             return Ok(());
@@ -748,7 +745,7 @@ mod rollback_retire_tests {
         let mut batch = store.new_batch();
         batch.delete(
             ColumnFamily::IdxMeta,
-            &crate::segment::tail::log_key_for(tip.height),
+            &crate::segment::tail::log_key(tip.height),
         );
         store.write_durable(batch)?;
         writer.tail = None;

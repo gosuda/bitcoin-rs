@@ -570,7 +570,7 @@ fn tail_log_without_hash_is_corrupt() -> Result<(), crate::portable::TestError> 
     writer.commit_forward(batch)?;
     drop(writer);
     let snapshot = store.snapshot()?;
-    let key = crate::segment::tail::log_key_for(0);
+    let key = crate::segment::tail::log_key(0);
     let Some(value) = snapshot.get(bitcoin_rs_storage::ColumnFamily::IdxMeta, &key)? else {
         return Err("tail log".into());
     };

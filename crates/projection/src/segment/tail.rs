@@ -274,14 +274,10 @@ fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-fn log_key(height: u32) -> Vec<u8> {
+pub(crate) fn log_key(height: u32) -> Vec<u8> {
     let mut key = LOG_PREFIX.to_vec();
     key.extend_from_slice(&height.to_be_bytes());
     key
-}
-
-pub(crate) fn log_key_for(height: u32) -> Vec<u8> {
-    log_key(height)
 }
 
 fn log_height(key: &[u8]) -> Option<u32> {
@@ -357,7 +353,6 @@ pub fn block_tail_bytes_bound(block: &CommittedBlock) -> u64 {
 /// builds them once; the tail append consumes them, so no path builds a
 /// block's filter or hashes its scripts twice.
 pub(crate) struct PreparedTail {
-    pub(crate) has_filter: bool,
     pub(crate) capabilities: IndexCapabilities,
     pub(crate) filter_bytes: Vec<u8>,
     pub(crate) filter_hash: [u8; 32],
@@ -366,11 +361,12 @@ pub(crate) struct PreparedTail {
 }
 
 impl PreparedTail {
-    pub(crate) fn new_gated(
+    pub(crate) fn for_capabilities(
         block: &CommittedBlock,
-        needs_filter: bool,
-        needs_hashes: bool,
+        capabilities: IndexCapabilities,
     ) -> Self {
+        let needs_filter = capabilities.contains(IndexCapability::CompactFilters);
+        let needs_hashes = capabilities.contains(IndexCapability::ScriptHistory);
         let (filter_bytes, filter_hash) = if needs_filter {
             build_filter(block)
         } else {
@@ -403,32 +399,12 @@ impl PreparedTail {
             })
             .collect();
         Self {
-            has_filter: needs_filter,
-            capabilities: {
-                let mut caps = IndexCapabilities::TX_LOOKUP;
-                if needs_filter {
-                    caps = caps.insert(IndexCapability::CompactFilters);
-                }
-                if needs_hashes {
-                    caps = caps.insert(IndexCapability::ScriptHistory);
-                }
-                caps
-            },
+            capabilities,
             filter_bytes,
             filter_hash,
             inputs,
             outputs,
         }
-    }
-    pub(crate) fn for_capabilities(
-        block: &CommittedBlock,
-        capabilities: IndexCapabilities,
-    ) -> Self {
-        let needs_filter = capabilities.contains(IndexCapability::CompactFilters);
-        let needs_hashes = capabilities.contains(IndexCapability::ScriptHistory);
-        let mut prepared = Self::new_gated(block, needs_filter, needs_hashes);
-        prepared.capabilities = capabilities;
-        prepared
     }
 }
 
@@ -456,7 +432,10 @@ pub fn append_tail_block(
     state: &mut TailWriterState,
     older: &dyn CreationOrdinals,
 ) -> Result<(), IndexError> {
-    let prepared = PreparedTail::new_gated(block, true, true);
+    let prepared = PreparedTail::for_capabilities(
+        block,
+        IndexCapabilities::HISTORICAL.with_compact_filters(true),
+    );
     append_prepared_tail_block(batch, block, &prepared, state, older, None)
 }
 
@@ -494,6 +473,7 @@ pub(crate) fn append_prepared_tail_block(
     rec.hash_anchor(&block.hash);
     let mut block_next_ordinal =
         existing_log.map_or(state.next_ordinal, |value| read_u32_le(value, 0));
+    let needs_directory = needs_transaction_directory(prepared);
     for (tx, (input_hashes, output_hashes)) in block
         .txs
         .iter()
@@ -502,21 +482,18 @@ pub(crate) fn append_prepared_tail_block(
         let ordinal =
             if let Some(ordinal) = existing_log.and_then(|_| state.txid_to_ordinal.get(&tx.txid)) {
                 *ordinal
-            } else if needs_transaction_directory(prepared) {
+            } else if needs_directory {
                 let ordinal = state.next_ordinal;
                 state.next_ordinal = state.next_ordinal.saturating_add(1);
                 ordinal
             } else {
                 state.next_ordinal
             };
-        if needs_transaction_directory(prepared) {
+        if needs_directory {
             block_next_ordinal = block_next_ordinal.max(ordinal.saturating_add(1));
         }
-        let needs_tx_dir = prepared.capabilities.contains(IndexCapability::TxLookup)
-            || prepared
-                .capabilities
-                .contains(IndexCapability::ScriptHistory);
-        if needs_tx_dir && (existing_log.is_none() || !state.txid_to_ordinal.contains_key(&tx.txid))
+        if needs_directory
+            && (existing_log.is_none() || !state.txid_to_ordinal.contains_key(&tx.txid))
         {
             state.txid_to_ordinal.insert(tx.txid, ordinal);
             let tx_key = format::encode_tx_dir_key(0, &tx.txid, block.height);
@@ -545,7 +522,10 @@ pub(crate) fn append_prepared_tail_block(
             append_outputs(&mut rec, funding, state);
         }
     }
-    if prepared.has_filter {
+    if prepared
+        .capabilities
+        .contains(IndexCapability::CompactFilters)
+    {
         append_filter(&mut rec, block, prepared, state);
     }
 
@@ -1189,10 +1169,11 @@ pub fn load(snapshot: &dyn KvSnapshot) -> Result<TailWriterState, IndexError> {
             }
         }
     }
-    for capability in [IndexCapability::TxLookup, IndexCapability::ScriptHistory] {
-        for generation in sealed_generations(snapshot, capability)? {
-            state.next_ordinal = state.next_ordinal.max(generation.next_ordinal);
-        }
+    for generation in &state.sealed {
+        state.next_ordinal = state.next_ordinal.max(generation.next_ordinal);
+    }
+    for generation in sealed_generations(snapshot, IndexCapability::ScriptHistory)? {
+        state.next_ordinal = state.next_ordinal.max(generation.next_ordinal);
     }
     state.prev_filter_header = filter_chain_head(snapshot)?;
     Ok(state)
