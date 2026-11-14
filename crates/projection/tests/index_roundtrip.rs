@@ -549,7 +549,6 @@ struct GoldenFacts {
     funding_outputs: usize,
     funding_scripts: std::collections::BTreeSet<Vec<u8>>,
     spending_inputs: usize,
-    spending_transactions: usize,
     in_block_spends: usize,
 }
 
@@ -558,13 +557,11 @@ fn golden_facts(block: &Block) -> GoldenFacts {
         funding_outputs: 0,
         funding_scripts: std::collections::BTreeSet::new(),
         spending_inputs: 0,
-        spending_transactions: 0,
         in_block_spends: 0,
     };
     let mut earlier_txids: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
     for tx in &block.txs {
         if !tx.is_coinbase() {
-            facts.spending_transactions += 1;
             facts.spending_inputs += tx.inputs.len();
             facts.in_block_spends += tx
                 .inputs
