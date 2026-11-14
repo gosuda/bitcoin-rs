@@ -725,7 +725,6 @@ fn check_memory_checkpoint_for_historical_restore(epoch: u32) -> TestResult<()> 
     let historical_root = source.join(HISTORICAL_CHECKPOINT_ROOT);
     let generation = historical_root.join(&current.directory);
     fs::create_dir_all(&generation)?;
-    fs::write(historical_root.join(CURRENT_FILE), &current_bytes)?;
     for artifact in [MANIFEST_FILE, HEADERS_FILE, COINSTATS_FILE] {
         fs::copy(
             ordinary_root.join(&current.directory).join(artifact),
