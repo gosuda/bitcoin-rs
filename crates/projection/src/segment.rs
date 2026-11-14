@@ -869,7 +869,7 @@ pub fn recover_segments<S: bitcoin_rs_storage::KvStore>(
         let landed = snapshot
             .get(
                 bitcoin_rs_storage::ColumnFamily::IdxMeta,
-                &tail::log_key_for(coverage.first_height),
+                &tail::log_key(coverage.first_height),
             )?
             .is_none();
         drop(snapshot);

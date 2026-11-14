@@ -663,7 +663,10 @@ fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation(
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let mut tail = writer.tail_for(None)?;
     let mut batch = store.new_batch();
-    let prepared = PreparedTail::new_gated(&spending, true, true);
+    let prepared = PreparedTail::for_capabilities(
+        &spending,
+        crate::IndexCapabilities::HISTORICAL.with_compact_filters(true),
+    );
     writer.append_forward_tail(&mut tail, &[(spending, prepared)], &mut batch)?;
     store.write_durable(batch)?;
 
