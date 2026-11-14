@@ -538,10 +538,26 @@ const TAIL_BOUND_CAPABILITIES: [IndexCapability; 3] = [
     IndexCapability::CompactFilters,
 ];
 
-fn clears_shared_tail_logs(capabilities: IndexCapabilities) -> bool {
-    TAIL_BOUND_CAPABILITIES
+fn clears_shared_tail_logs<S: KvStore>(
+    store: &S,
+    capabilities: IndexCapabilities,
+) -> Result<bool, IndexError> {
+    if !TAIL_BOUND_CAPABILITIES
         .iter()
-        .all(|capability| capabilities.contains(*capability))
+        .any(|capability| capabilities.contains(*capability))
+    {
+        return Ok(false);
+    }
+    for capability in TAIL_BOUND_CAPABILITIES {
+        if !capabilities.contains(capability)
+            && store
+                .get(ColumnFamily::UtxoMeta, capability.watermark_key())?
+                .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn build_reset_batch<S: KvStore>(
@@ -570,7 +586,7 @@ fn build_reset_batch<S: KvStore>(
         let (sealed_start, sealed_end) = crate::segment::sealed_gen_range(capability);
         batch.delete_range(ColumnFamily::IdxMeta, &sealed_start, &sealed_end);
     }
-    if clears_shared_tail_logs(capabilities) {
+    if clears_shared_tail_logs(store, capabilities)? {
         batch.delete_range(
             ColumnFamily::IdxMeta,
             crate::segment::tail::LOG_PREFIX,
@@ -620,7 +636,7 @@ fn reset_scan_families<S: KvStore>(
             ));
         }
     }
-    if clears_shared_tail_logs(capabilities) {
+    if clears_shared_tail_logs(store, capabilities)? {
         scans.push((
             ColumnFamily::IdxMeta,
             crate::segment::tail::LOG_PREFIX.to_vec(),

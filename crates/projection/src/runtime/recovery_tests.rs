@@ -748,14 +748,38 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
         h.runtime.phase(),
         ReconcilePhase::FORWARD.with_leg(IndexCapabilities::HISTORICAL, ReconcileLeg::Rebuilding)
     );
-    let watermarks = h.watermarks();
-    assert!(
-        watermarks.tx_lookup.is_none_or(|w| w.height < 3),
-        "reset discarded the stale rows"
-    );
-
-    h.settle(&mut pending);
+    for _ in 0..64 {
+        let action = h.worker.reconcile_once(&mut pending).expect("rebuild pass");
+        if matches!(action, ReconcileAction::CaughtUp) {
+            break;
+        }
+        assert!(!matches!(action, ReconcileAction::Stalled));
+        assert_eq!(
+            h.runtime.phase(),
+            ReconcilePhase::FORWARD
+                .with_leg(IndexCapabilities::HISTORICAL, ReconcileLeg::Rebuilding)
+        );
+    }
     h.assert_at(&b3);
+    let blocks = committed_chain(&f, &f.b, 0, b3.height);
+    let oracle = bulk_oracle(&blocks);
+    let bulk_view =
+        crate::segment::SegmentSnapshot::open(oracle.store.snapshot().expect("bulk snapshot"))
+            .expect("bulk view");
+    let live_view =
+        crate::segment::SegmentSnapshot::open(h.store.snapshot().expect("live snapshot"))
+            .expect("live view");
+    assert_eq!(
+        winner_answers(&live_view, &blocks),
+        winner_answers(&bulk_view, &blocks),
+        "rebuilt transaction positions and script history equal an independent bulk build"
+    );
+    let abandoned = committed_chain(&f, &f.a, 1, a3.height);
+    assert_eq!(
+        winner_answers(&live_view, &abandoned),
+        winner_answers(&bulk_view, &abandoned),
+        "abandoned branch answers equal the winning-chain bulk build"
+    );
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
 }
 

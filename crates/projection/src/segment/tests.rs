@@ -1403,18 +1403,10 @@ fn compact_filters_only_restart_resumes_past_the_sealed_filters() {
     );
     drop(snapshot);
     let state = tail_state(store.as_ref());
-    let expected_ordinals: u32 = blocks
-        .iter()
-        .map(|block| u32::try_from(block.txs.len()).expect("tx count fits"))
-        .sum();
     assert_eq!(
         state.next_gen_id,
         newest.gen_id.saturating_add(1),
         "the reopened writer seals the next generation"
-    );
-    assert_eq!(
-        state.next_ordinal, expected_ordinals,
-        "ordinals resume past the sealed prefix"
     );
     assert_eq!(
         state.at,

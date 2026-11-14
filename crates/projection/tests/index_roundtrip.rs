@@ -1265,31 +1265,55 @@ fn resetting_the_only_cursor_removes_shared_identity() -> Result<(), TestError> 
     Ok(())
 }
 
+// IDX-04, IDX-05
 #[test]
 fn open_resumes_interrupted_capability_reset() -> Result<(), TestError> {
-    let store = Arc::new(MemoryStore::default());
-    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    let body = read_fixture(0)?;
-    let hash = block_hash(&body);
-    let block = prepare_for(&writer, IndexCapabilities::HISTORICAL, 0, hash, &body)?;
-    let prepared = common::single_block_batch(block);
-    writer.commit_forward(prepared)?;
-    drop(writer);
+    for reset_tx_lookup in [false, true] {
+        let store = Arc::new(MemoryStore::default());
+        let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+        let body = read_fixture(0)?;
+        let hash = block_hash(&body);
+        let block = prepare_for(&writer, IndexCapabilities::HISTORICAL, 0, hash, &body)?;
+        let prepared = common::single_block_batch(block);
+        writer.commit_forward(prepared)?;
+        assert!(
+            !tail_log_keys(&store)?.is_empty(),
+            "the committed block supplies recovery history before interruption"
+        );
+        drop(writer);
 
-    let mut interrupted = store.new_batch();
-    interrupted.put(ColumnFamily::UtxoMeta, RESET_KEY, &claim_bytes(0b10, 3, 0));
-    interrupted.delete(ColumnFamily::UtxoMeta, &[0x00, b'S']);
-    interrupted.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
-    store.write_durable(interrupted)?;
+        let mask = if reset_tx_lookup {
+            SCRIPT_HISTORY_MASK | TX_LOOKUP_MASK
+        } else {
+            SCRIPT_HISTORY_MASK
+        };
+        let mut interrupted = store.new_batch();
+        interrupted.put(ColumnFamily::UtxoMeta, RESET_KEY, &claim_bytes(mask, 3, 0));
+        interrupted.delete(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY);
+        if reset_tx_lookup {
+            interrupted.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
+        }
+        interrupted.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
+        store.write_durable(interrupted)?;
 
-    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
+        let writer = IndexWriter::open(Arc::clone(&store), 1)?;
 
-    assert!(writer.watermarks()?.tx_lookup.is_some());
-    assert!(writer.watermarks()?.script_history.is_none());
-    assert_eq!(tx_row_count(&store, &coinbase_txid(&body)?)?, 1);
-    assert_eq!(funding_row_count(&store, coinbase_scripthash(&body)?)?, 0);
-    assert_eq!(store.count(ColumnFamily::SpendDir), 0);
-    assert_eq!(stored_idle_version(&store)?, 1);
+        assert_eq!(writer.watermarks()?.tx_lookup.is_none(), reset_tx_lookup);
+        assert!(writer.watermarks()?.script_history.is_none());
+        assert_eq!(
+            tx_row_count(&store, &coinbase_txid(&body)?)?,
+            usize::from(!reset_tx_lookup)
+        );
+        assert_eq!(funding_row_count(&store, coinbase_scripthash(&body)?)?, 0);
+        assert_eq!(store.count(ColumnFamily::SpendDir), 0);
+        assert_eq!(stored_idle_version(&store)?, 1);
+        if reset_tx_lookup {
+            assert!(
+                tail_log_keys(&store)?.is_empty(),
+                "resuming the last published tail-owner reset removes abandoned recovery history"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2839,11 +2863,6 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state() -> Resul
     store.write_durable(crash)?;
 
     let baseline = store.logged_batches().len();
-    let tail_logs_before = tail_log_keys(&store)?;
-    assert!(
-        !tail_logs_before.is_empty(),
-        "the seeded block anchored shared tail undo logs"
-    );
     writer.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
 
     let markers: Vec<BatchLog> = store.logged_batches()[baseline..]
@@ -2861,12 +2880,6 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state() -> Resul
         markers[0].marker_put.as_deref(),
         Some(claim_bytes(TX_LOOKUP_MASK | SCRIPT_HISTORY_MASK, 9, 3).as_slice()),
         "growth changes byte zero only; width, process epoch, and base survive raw"
-    );
-    assert_eq!(
-        tail_log_keys(&store)?,
-        tail_logs_before,
-        "a union reset that omits the tail-bound CompactFilters keeps the \
-         shared tail undo logs"
     );
     assert_eq!(
         markers[1].marker_put.as_deref(),

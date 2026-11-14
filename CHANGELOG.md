@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Index resets remove abandoned shared recovery logs when the last published owner resets, including after an interrupted reset. Recovery history remains intact for published sibling indexes.
 - Spender queries retain confirmed spends after independent transaction-lookup and script-history artifact imports. New spend rows resolve the funding transaction through the script-history directory before falling back to transaction lookup.
 - Projection spill sorting charges retained payload capacities and row-vector backing storage. Spill, finish, and drop free row storage before returning its budget charge; a failed spill keeps its retained rows charged.
 - A filter catch-up that seals a shared transaction tail preserves publication for every existing capability whose rows move. Seal recovery uses the same owners, and unrelated capability watermarks do not advance.
