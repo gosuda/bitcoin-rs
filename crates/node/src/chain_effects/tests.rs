@@ -696,17 +696,8 @@ fn reentrant_connect_past_the_ceiling_is_refused_before_the_epoch_advances() -> 
     ));
     *observer.gateway.lock() = Some(Arc::clone(&gateway));
     let publisher = Arc::new(RecordingPublisher::default());
-    let followers = Arc::new(
-        ChainFollowers::new(
-            Arc::new(RwLock::new(BlockLog::new())),
-            Arc::new(crate::NoOpZmqPublisher),
-            None,
-            None,
-            Arc::new(crate::mining::MiningGenerationSignal::new()),
-            Some(Arc::clone(&gateway)),
-        )
-        .with_zmq_publisher(publisher.clone()),
-    );
+    let followers =
+        Arc::new(followers_with_gateway(&gateway).with_zmq_publisher(publisher.clone()));
     *observer.followers.lock() = Some(Arc::clone(&followers));
     let first = Arc::clone(&gateway);
     let first_handle = std::thread::spawn(move || {
@@ -866,14 +857,7 @@ fn refused_mempool_settlement_closes_the_chain_for_recovery() -> Result<(), Test
             BodyInterest::Metadata,
         )
         .map_err(TestError::message)?;
-    let followers = Arc::new(ChainFollowers::new(
-        Arc::new(RwLock::new(BlockLog::new())),
-        Arc::new(crate::NoOpZmqPublisher),
-        None,
-        None,
-        Arc::new(crate::mining::MiningGenerationSignal::new()),
-        Some(state.mempool_gateway()),
-    ));
+    let followers = Arc::new(followers_with_gateway(&state.mempool_gateway()));
     *observer.gateway.lock() = Some(state.mempool_gateway());
     *observer.followers.lock() = Some(Arc::clone(&followers));
     *observer.chainstate.lock() = Some(state.chainstate());
