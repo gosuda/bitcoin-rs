@@ -394,7 +394,13 @@ fn rewind_one_step(
             max_script_size: bitcoin_rs_consensus::MAX_SCRIPT_SIZE,
         },
     )
-    .map_err(|_| rewind_refused(handles, head, "a rewound block's undo record does not load"))?;
+    .map_err(|_| {
+        rewind_refused(
+            handles,
+            head,
+            "a rewound block's undo record does not load or does not match the block",
+        )
+    })?;
     let tx_count_delta = tx_count_delta_for(&block);
     let parent_tip = rewound_parent(handles, head, applied, &block, tx_count_delta)?;
     let coin_delta = super::disconnect::build_disconnect_delta(&handles.coins, &undo)
