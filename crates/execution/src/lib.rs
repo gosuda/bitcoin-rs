@@ -1615,15 +1615,22 @@ impl ResolvedUtxoView {
             .filter(|outpoint| same_block.is_none_or(|set| !set.contains(outpoint)))
             .collect()
     }
-    fn ordered_prev_txids(outpoints: &[OutPoint]) -> Vec<Txid> {
-        let mut seen: hashbrown::HashSet<Txid> = hashbrown::HashSet::with_capacity(outpoints.len());
+    fn group_outpoints_by_txid(
+        outpoints: &[OutPoint],
+    ) -> (Vec<Txid>, HashMap<Txid, Vec<OutPoint>>) {
         let mut txids = Vec::with_capacity(outpoints.len());
+        let mut groups: HashMap<Txid, Vec<OutPoint>> = HashMap::with_capacity(outpoints.len());
         for outpoint in outpoints {
-            if seen.insert(outpoint.txid) {
-                txids.push(outpoint.txid);
-            }
+            let txid = outpoint.txid;
+            groups
+                .entry(txid)
+                .or_insert_with(|| {
+                    txids.push(txid);
+                    Vec::new()
+                })
+                .push(*outpoint);
         }
-        txids
+        (txids, groups)
     }
     fn resolve<S: bitcoin_rs_storage::utxo::contract::OutputSource + ?Sized>(
         utxo: &S,
@@ -1631,15 +1638,20 @@ impl ResolvedUtxoView {
         tx_plan: &BlockTxPlan,
     ) -> Self {
         let outpoints = Self::external_outpoints(image, tx_plan);
-        let txids = Self::ordered_prev_txids(&outpoints);
+        let (txids, mut grouped) = Self::group_outpoints_by_txid(&outpoints);
         let mut external = HashMap::with_capacity(outpoints.len());
         for txids in txids.chunks(RESOLVE_TXIDS_PER_FETCH) {
-            let wanted: hashbrown::HashSet<Txid> = txids.iter().copied().collect();
-            let chunk: Vec<OutPoint> = outpoints
+            let chunk_len: usize = txids
                 .iter()
-                .copied()
-                .filter(|outpoint| wanted.contains(&outpoint.txid))
-                .collect();
+                .filter_map(|txid| grouped.get(txid))
+                .map(Vec::len)
+                .sum();
+            let mut chunk = Vec::with_capacity(chunk_len);
+            for txid in txids {
+                if let Some(pts) = grouped.remove(txid) {
+                    chunk.extend(pts);
+                }
+            }
             let entries = utxo.get_entries(&chunk);
             external.extend(
                 chunk
@@ -1663,16 +1675,21 @@ impl ResolvedUtxoView {
             return Ok(Self::resolve(utxo, image, tx_plan));
         }
         let outpoints = Self::external_outpoints(image, tx_plan);
-        let txids = Self::ordered_prev_txids(&outpoints);
+        let (txids, mut grouped) = Self::group_outpoints_by_txid(&outpoints);
         let mut external = HashMap::with_capacity(outpoints.len());
         let mut hold: Option<PrevoutHold> = None;
         for txids in txids.chunks(RESOLVE_TXIDS_PER_FETCH) {
-            let wanted: hashbrown::HashSet<Txid> = txids.iter().copied().collect();
-            let chunk: Vec<OutPoint> = outpoints
+            let chunk_len: usize = txids
                 .iter()
-                .copied()
-                .filter(|outpoint| wanted.contains(&outpoint.txid))
-                .collect();
+                .filter_map(|txid| grouped.get(txid))
+                .map(Vec::len)
+                .sum();
+            let mut chunk = Vec::with_capacity(chunk_len);
+            for txid in txids {
+                if let Some(pts) = grouped.remove(txid) {
+                    chunk.extend(pts);
+                }
+            }
             let entries = utxo.get_entries(&chunk);
             let probe = Self {
                 external: chunk
