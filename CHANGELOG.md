@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Checkpoint manifests reject colons in engine-image path components, including drive-relative paths and alternate data-stream names.
 - Filling an already resident coin-cache key leaves its cached bytes and ledger charge unchanged, even when the shared budget is full.
 - Index resets remove abandoned shared recovery logs when the last published owner resets, including after an interrupted reset. Recovery history remains intact for published sibling indexes.
 - Spender queries retain confirmed spends after independent transaction-lookup and script-history artifact imports. New spend rows resolve the funding transaction through the script-history directory before falling back to transaction lookup.

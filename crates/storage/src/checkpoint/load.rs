@@ -161,7 +161,11 @@ fn is_relative_image_path(path: &str) -> bool {
         return false;
     }
     path.split('/').all(|component| {
-        !component.is_empty() && component != "." && component != ".." && !component.contains('\\')
+        !component.is_empty()
+            && component != "."
+            && component != ".."
+            && !component.contains('\\')
+            && !component.contains(':')
     })
 }
 
@@ -330,5 +334,10 @@ mod tests {
         assert!(!is_relative_image_path(".."));
         assert!(!is_relative_image_path("a\\b"));
         assert!(!is_relative_image_path("\\"));
+        assert!(!is_relative_image_path("C:foo"));
+        assert!(!is_relative_image_path("C:/foo"));
+        assert!(!is_relative_image_path("a:b"));
+        assert!(!is_relative_image_path("dir/C:foo"));
+        assert!(!is_relative_image_path("dir/file:stream"));
     }
 }
