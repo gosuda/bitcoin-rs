@@ -594,6 +594,40 @@ fn convert_generation_image(
         }
         Err(err) => return Err(ConvertError::Io(err)),
     };
+    let memory_name = bitcoin_rs_storage::memory_kv::MEMORY_KV_FILE;
+    match engine_dir.symlink_metadata(memory_name) {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return Err(ConvertError::IncompatibleData(
+                    "checkpoint memory image must be a regular file".into(),
+                ));
+            }
+            for entry in engine_dir.entries()? {
+                if entry?.file_name() != std::ffi::OsStr::new(memory_name) {
+                    return Err(ConvertError::IncompatibleData(
+                        "checkpoint memory image contains unrelated engine files".into(),
+                    ));
+                }
+            }
+            let mut file = open_file_read_no_follow(&engine_dir, memory_name)?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            bitcoin_rs_storage::memory_kv::MemoryKvStore::from_bytes(&bytes)?;
+            let destination = open_or_create_dir_nofollow(&dst_gen, GENERATION_ENGINE_DIR)?;
+            copy_independent_file(
+                &engine_dir,
+                &destination,
+                memory_name,
+                &format!("{report_prefix}/{GENERATION_ENGINE_DIR}/{memory_name}"),
+                ctx.copied_files,
+            )?;
+            sync_dir(&destination)?;
+            sync_dir(&dst_gen)?;
+            return Ok(());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     drop(engine_dir);
     let report_name = format!("{root_name}/{name}/{GENERATION_ENGINE_DIR}");
     let scratch_base = ctx.to_base.join(root_name).join(name).join(".convert-src");

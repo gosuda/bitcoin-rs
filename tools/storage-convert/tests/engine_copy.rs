@@ -413,6 +413,182 @@ fn verify_nested_checkpoint_images(
 const ORDINARY_CKPT_CURRENT_GENERATION: u64 = 77_102_004;
 const HISTORICAL_CKPT_CURRENT_GENERATION: u64 = 5_004_411;
 
+fn copy_memory_fixture_tree(from: &Path, to: &Path) -> TestResult<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let destination = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_memory_fixture_tree(&entry.path(), &destination)?;
+        } else {
+            fs::copy(entry.path(), destination)?;
+        }
+    }
+    Ok(())
+}
+
+// RCV-04
+#[test]
+fn engine_copy_preserves_memory_checkpoint_for_historical_restore() -> TestResult<()> {
+    use bitcoin_rs_consensus::primitives::{Hash256, Network};
+    use bitcoin_rs_execution::{AssumeUtxoManager, HistoricalCheckpointRef};
+    use bitcoin_rs_storage::checkpoint::CheckpointReference;
+    use bitcoin_rs_storage::memory_kv::{MEMORY_KV_FILE, MemoryKvStore};
+    use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
+
+    let temporary = tempdir()?;
+    let legacy = temporary.path().join("legacy");
+    let source = temporary.path().join("source");
+    let destination = temporary.path().join("destination");
+    copy_memory_fixture_tree(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/epoch3-regtest"),
+        &legacy,
+    )?;
+    let path_text = |path: &Path| -> TestResult<String> {
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| TestError::Assertion("non-UTF8 fixture path".into()))
+    };
+    parse_report(&run_converter(&[
+        "--from",
+        &path_text(&legacy)?,
+        "--to",
+        &path_text(&source)?,
+    ])?)?;
+    let ordinary_root = source.join(CHECKPOINT_ROOT);
+    let current_bytes = fs::read(ordinary_root.join(CURRENT_FILE))?;
+    let current: CurrentV1 = sonic_rs::from_slice(&current_bytes)?;
+    let historical_root = source.join(HISTORICAL_CHECKPOINT_ROOT);
+    let generation = historical_root.join(&current.directory);
+    fs::create_dir_all(&generation)?;
+    fs::write(historical_root.join(CURRENT_FILE), &current_bytes)?;
+    for artifact in [MANIFEST_FILE, HEADERS_FILE, COINSTATS_FILE] {
+        fs::copy(
+            ordinary_root.join(&current.directory).join(artifact),
+            generation.join(artifact),
+        )?;
+    }
+    let manifest_bytes = fs::read(generation.join(MANIFEST_FILE))?;
+    let manifest: CheckpointManifestV1 = sonic_rs::from_slice(&manifest_bytes)?;
+    let reference = HistoricalCheckpointRef {
+        checkpoint: CheckpointReference {
+            generation: current.generation,
+            manifest_sha256: Sha256::digest(&manifest_bytes).into(),
+        },
+        height: manifest.applied_tip.height,
+        hash: Hash256::from_str_be(&manifest.applied_tip.hash)
+            .map_err(|error| TestError::Assertion(error.to_string()))?,
+    };
+    let memory = MemoryKvStore::new();
+    let coin_key = [0x67; 32];
+    let record = UtxoRecord::from_owned_outputs(
+        Hash256::from_le_bytes(&coin_key),
+        &[OwnedUtxoOut {
+            vout: 3,
+            value: 27_001,
+            script_pubkey: vec![0x51],
+            coinbase: false,
+            height: 1,
+        }],
+    )
+    .map_err(|error| TestError::Assertion(error.to_string()))?;
+    let rows = [
+        (
+            ColumnFamily::UndoData,
+            vec![0x29; 36],
+            bitcoin_rs_storage::utxo::contract::encode_undo_record(
+                &bitcoin_rs_storage::utxo::contract::UndoBatch::from_parts(
+                    Vec::new(),
+                    vec![bitcoin_rs_consensus::primitives::OutPoint::new(
+                        bitcoin_rs_consensus::primitives::Txid(Hash256::from_le_bytes(&[0x92; 32])),
+                        7,
+                    )],
+                ),
+                Hash256::from_le_bytes(&[0x38; 32]),
+            ),
+        ),
+        (
+            ColumnFamily::Coins,
+            coin_key.to_vec(),
+            record.bytes().to_vec(),
+        ),
+        (
+            ColumnFamily::UtxoMeta,
+            b"memory:identity".to_vec(),
+            vec![0x46, 0x19],
+        ),
+    ];
+    for (family, key, value) in &rows {
+        memory.put(*family, key, value)?;
+    }
+    memory.checkpoint(&generation.join("chainstate"))?;
+    let memory_bytes = fs::read(generation.join("chainstate").join(MEMORY_KV_FILE))?;
+    let source_digest = recursive_dir_digest(&source)?;
+    #[cfg(feature = "mdbx")]
+    let backend = "mdbx";
+    #[cfg(not(feature = "mdbx"))]
+    let backend = "surrealkv";
+    parse_report(&run_converter(&[
+        "--from",
+        &path_text(&source)?,
+        "--to",
+        &path_text(&destination)?,
+        "--to-engine",
+        backend,
+    ])?)?;
+    assert_eq!(recursive_dir_digest(&source)?, source_digest);
+    let restored_generation = destination
+        .join(HISTORICAL_CHECKPOINT_ROOT)
+        .join(&current.directory);
+    assert_eq!(
+        fs::read(restored_generation.join("chainstate").join(MEMORY_KV_FILE))?,
+        memory_bytes,
+    );
+    for artifact in [HEADERS_FILE, COINSTATS_FILE] {
+        assert_eq!(
+            fs::read(restored_generation.join(artifact))?,
+            fs::read(generation.join(artifact))?,
+        );
+    }
+    assert_eq!(
+        fs::read(restored_generation.join(MANIFEST_FILE))?,
+        manifest_bytes
+    );
+    assert_eq!(
+        fs::read(
+            destination
+                .join(HISTORICAL_CHECKPOINT_ROOT)
+                .join(CURRENT_FILE)
+        )?,
+        current_bytes
+    );
+    let restored =
+        AssumeUtxoManager::historical_checkpoint_engine(Network::Regtest, destination, &reference)
+            .map_err(|error| TestError::Assertion(error.to_string()))?
+            .ok_or_else(|| TestError::Assertion("memory checkpoint engine missing".into()))?;
+    for (family, key, value) in &rows {
+        assert_eq!(
+            restored.get(*family, key)?.as_deref(),
+            Some(value.as_slice())
+        );
+    }
+    fs::write(
+        generation.join("chainstate").join("foreign-engine"),
+        b"unknown",
+    )?;
+    let refused = temporary.path().join("refused");
+    let output = run_converter(&[
+        "--from",
+        &path_text(&source)?,
+        "--to",
+        &path_text(&refused)?,
+        "--to-engine",
+        backend,
+    ])?;
+    assert!(!output.status.success());
+    assert!(!refused.join("CURRENT_SCHEMA").exists());
+    Ok(())
+}
 #[cfg(feature = "mdbx")]
 #[test]
 fn engine_copy_rocksdb_to_mdbx_and_back_is_identical() -> TestResult<()> {

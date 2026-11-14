@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Epoch-4 backend conversion preserves production historical memory-engine checkpoints and their undo rows. It validates the memory image through the existing loader and rejects mixed engine files without publishing a schema marker.
 - Coin statistics retain unchanged outputs during partial spends. The committed feed emits only removed, inserted, or changed coins, including height and coinbase changes; final-record precedence and the existing point-read path are unchanged.
 - Snapshot serialization derives a reader-owned view's MuHash trailer from the captured coins, not from a later live listener or a zero fallback.
 - Production chainstate readers no longer expose writable coin-store or commit-authority handles. The retained fixture accessors require the existing test seam.
