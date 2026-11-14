@@ -9,6 +9,7 @@
 - Network ingress leaves the existing foreground reserve available within the staged-image allowance. Its capacity and atomic admission check use the reduced ceiling; execution retains the full owner cap. The node-wide total, cache shares, and resource-refusal classification are unchanged.
 - Epoch-5 conversion converts retained ordinary and historical checkpoint engine images to the requested backend and schema-6 undo format. Epoch-5 and current-epoch backend copies preserve the root `full-revalidation` marker.
 - Projection preserves blockwise ScriptLive rollback when sealed historical generations retire. Compact-filter attachment and restart preserve transaction ordinals. Same-height capability backfill merges undo logs and retains the original rollback frontier.
+- Coin statistics retain unchanged outputs during partial spends. The committed feed emits only removed, inserted, or changed coins, including height and coinbase changes; final-record precedence and the existing point-read path are unchanged.
 - Production chainstate readers no longer expose writable coin-store or commit-authority handles. The retained fixture accessors require the existing test seam.
 - Snapshot serialization derives a reader-owned view's MuHash trailer from the captured coins, not from a later live listener or a zero fallback.
 - Production UTXO readers no longer expose writable coin stores or mutable backing sets. Whole-set query images belong to their captured views and are released when those views drop. Transaction confirmation-height lookup uses the typed reader query.
