@@ -327,7 +327,7 @@ fn retire_tombstone_key(capability: IndexCapability, gen_id: u64) -> Vec<u8> {
     key
 }
 
-fn decode_tombstone_key(key: &[u8]) -> Option<(Vec<u8>, u64, IndexCapability)> {
+fn decode_tombstone_key(key: &[u8]) -> Option<(u64, IndexCapability)> {
     let rest = key.strip_prefix(RETIRE_TOMBSTONE_PREFIX)?;
     if rest.len() < 9 {
         return None;
@@ -337,7 +337,7 @@ fn decode_tombstone_key(key: &[u8]) -> Option<(Vec<u8>, u64, IndexCapability)> {
     let capability = IndexCapability::ALL
         .into_iter()
         .find(|capability| capability.name() == name)?;
-    Some((key.to_vec(), gen_id, capability))
+    Some((gen_id, capability))
 }
 
 /// Marker-first retirement of one sealed segment: the tombstone is durable
@@ -915,7 +915,7 @@ fn recover_retirements<S: bitcoin_rs_storage::KvStore>(store: &S) -> Result<(), 
         RETIRE_TOMBSTONE_PREFIX,
     )? {
         let (key, _value) = item?;
-        if let Some((key, gen_id, capability)) = decode_tombstone_key(&key) {
+        if let Some((gen_id, capability)) = decode_tombstone_key(&key) {
             tombstones.push((key, gen_id, capability));
         }
     }
