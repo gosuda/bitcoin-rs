@@ -1,5 +1,19 @@
 use super::format::*;
 
+fn publish_segment<S: bitcoin_rs_storage::KvStore>(
+    store: &S,
+    segment: &crate::segment::import::ImportedSegment,
+    scratch: &std::path::Path,
+    capabilities: crate::IndexCapabilities,
+) -> Result<(), crate::IndexError> {
+    let gen_id = crate::segment::import::next_segment_id(store)?;
+    crate::segment::import::stage_segment(store, gen_id, segment, scratch)?;
+    let mut batch = store.new_batch();
+    crate::segment::import::put_segment(&mut batch, gen_id, segment, capabilities);
+    store.write_durable(batch)?;
+    Ok(())
+}
+
 // PRJ-08
 #[test]
 fn posting_holds_reference_and_flags_only() {
@@ -40,9 +54,7 @@ fn posting_holds_reference_and_flags_only() {
 // PRJ-08, IDX-12
 #[test]
 fn history_pages_walk_more_than_256_posting_chunks() -> Result<(), crate::portable::TestError> {
-    use crate::segment::import::{
-        TxOccurrence, next_segment_id, put_segment, stage_segment, tx_lookup_segment,
-    };
+    use crate::segment::import::{TxOccurrence, tx_lookup_segment};
     use crate::segment::{Coverage, SegmentSnapshot};
     use crate::types::{ScriptHash, TxPosition};
     use crate::{IndexCapabilities, IndexCapability, TxIndexSnapshot};
@@ -87,11 +99,7 @@ fn history_pages_walk_more_than_256_posting_chunks() -> Result<(), crate::portab
         .push((ColumnFamily::ScriptDict, vec![dict_row]));
     segment.families.push((ColumnFamily::ScriptPost, post_rows));
     let caps = IndexCapabilities::TX_LOOKUP.insert(IndexCapability::ScriptHistory);
-    let gen_id = next_segment_id(&store)?;
-    stage_segment(&store, gen_id, &segment, dir.path())?;
-    let mut batch = store.new_batch();
-    put_segment(&mut batch, gen_id, &segment, caps);
-    store.write_durable(batch)?;
+    publish_segment(&store, &segment, dir.path(), caps)?;
 
     let snapshot = SegmentSnapshot::open(store.snapshot()?)?;
     let page_of = |max_rows| PrefixScanLimit {
@@ -123,9 +131,7 @@ fn history_pages_walk_more_than_256_posting_chunks() -> Result<(), crate::portab
 // PRJ-06
 #[test]
 fn rekeyed_sealed_generation_serves_its_script_history() -> Result<(), crate::portable::TestError> {
-    use crate::segment::import::{
-        TxOccurrence, next_segment_id, put_segment, stage_segment, tx_lookup_segment,
-    };
+    use crate::segment::import::{TxOccurrence, tx_lookup_segment};
     use crate::segment::{Coverage, SegmentSnapshot};
     use crate::types::{ScriptHash, TxPosition};
     use crate::{IndexCapabilities, IndexCapability, TxIndexSnapshot};
@@ -175,11 +181,7 @@ fn rekeyed_sealed_generation_serves_its_script_history() -> Result<(), crate::po
             .families
             .push((ColumnFamily::ScriptPost, funding_postings(chunk_ordinals)));
         let caps = IndexCapabilities::TX_LOOKUP.insert(IndexCapability::ScriptHistory);
-        let gen_id = next_segment_id(&store)?;
-        stage_segment(&store, gen_id, &segment, dir.path())?;
-        let mut batch = store.new_batch();
-        put_segment(&mut batch, gen_id, &segment, caps);
-        store.write_durable(batch)?;
+        publish_segment(&store, &segment, dir.path(), caps)?;
         Ok(())
     };
 
@@ -731,15 +733,7 @@ fn window_history_for_a_shared_script_matches_bulk() {
         .expect("writer")
         .with_seal_scratch(scratch.path().to_path_buf());
     for block in &blocks {
-        let prepared = writer
-            .prepare_block_from_facts(crate::IndexCapabilities::ALL, block.clone())
-            .expect("prepare");
-        let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
-            max_rows: usize::MAX,
-            max_bytes: usize::MAX,
-        });
-        assert!(batch.try_push(prepared).is_ok(), "contiguous block");
-        writer.commit_forward(batch).expect("commit");
+        commit_from_facts(&mut writer, crate::IndexCapabilities::ALL, block).expect("commit");
     }
     super::seal_tail_generation(
         store.as_ref(),
@@ -836,20 +830,28 @@ fn tail_state<S: bitcoin_rs_storage::KvStore>(store: &S) -> crate::segment::tail
     let snapshot = store.snapshot().expect("snapshot");
     crate::segment::tail::load(snapshot.as_ref()).expect("tail state")
 }
+fn commit_from_facts<S: bitcoin_rs_storage::KvStore>(
+    writer: &mut crate::IndexWriter<S>,
+    capabilities: crate::IndexCapabilities,
+    block: &bitcoin_rs_storage::CommittedBlock,
+) -> Result<(), crate::IndexError> {
+    let prepared = writer.prepare_block_from_facts(capabilities, block.clone())?;
+    let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+        max_rows: usize::MAX,
+        max_bytes: usize::MAX,
+    });
+    batch
+        .try_push(prepared)
+        .map_err(|_| crate::IndexError::NonContiguousPrepared { watermark: None })?;
+    writer.commit_forward(batch).map(|_| ())
+}
+
 #[expect(clippy::expect_used)]
 fn commit_one<S: bitcoin_rs_storage::KvStore>(
     writer: &mut crate::IndexWriter<S>,
     block: &bitcoin_rs_storage::CommittedBlock,
 ) {
-    let prepared = writer
-        .prepare_block_from_facts(crate::IndexCapabilities::ALL, block.clone())
-        .expect("prepare");
-    let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
-        max_rows: usize::MAX,
-        max_bytes: usize::MAX,
-    });
-    assert!(batch.try_push(prepared).is_ok(), "contiguous block");
-    writer.commit_forward(batch).expect("commit");
+    commit_from_facts(writer, crate::IndexCapabilities::ALL, block).expect("commit");
 }
 
 // PRJ-05
@@ -961,7 +963,7 @@ fn oversized_crash_before_its_seal_is_sealed_before_the_next_append() {
             .expect("writer")
             .with_seal_scratch(scratch.path().to_path_buf());
         arm_seal_fault(Some(SealFault::AfterStaging));
-        let outcome = try_commit_one(&mut writer, &oversized);
+        let outcome = commit_from_facts(&mut writer, crate::IndexCapabilities::ALL, &oversized);
         arm_seal_fault(None);
         assert!(
             matches!(
@@ -1040,21 +1042,6 @@ fn oversized_crash_before_its_seal_is_sealed_before_the_next_append() {
             block.height
         );
     }
-}
-
-fn try_commit_one<S: bitcoin_rs_storage::KvStore>(
-    writer: &mut crate::IndexWriter<S>,
-    block: &bitcoin_rs_storage::CommittedBlock,
-) -> Result<(), crate::IndexError> {
-    let prepared = writer.prepare_block_from_facts(crate::IndexCapabilities::ALL, block.clone())?;
-    let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
-        max_rows: usize::MAX,
-        max_bytes: usize::MAX,
-    });
-    batch
-        .try_push(prepared)
-        .map_err(|_| crate::IndexError::NonContiguousPrepared { watermark: None })?;
-    writer.commit_forward(batch).map(|_| ())
 }
 
 // PRJ-05
@@ -1230,9 +1217,7 @@ impl bitcoin_rs_storage::KvSnapshot for ChunkCounter<'_> {
 // PRJ-08, IDX-12
 #[test]
 fn history_pages_seek_from_cursor_across_segments() -> Result<(), Box<dyn std::error::Error>> {
-    use crate::segment::import::{
-        TxOccurrence, next_segment_id, put_segment, stage_segment, tx_lookup_segment,
-    };
+    use crate::segment::import::{TxOccurrence, tx_lookup_segment};
     use crate::segment::{Coverage, SegmentSnapshot};
     use crate::types::{ScriptHash, TxPosition};
     use crate::{IndexCapabilities, IndexCapability, TxIndexSnapshot};
@@ -1279,11 +1264,7 @@ fn history_pages_seek_from_cursor_across_segments() -> Result<(), Box<dyn std::e
         restored
             .families
             .push((ColumnFamily::ScriptPost, chunk_postings(0, 0, items)));
-        let gen_id = next_segment_id(&store)?;
-        stage_segment(&store, gen_id, &restored, dir.path())?;
-        let mut batch = store.new_batch();
-        put_segment(&mut batch, gen_id, &restored, caps);
-        store.write_durable(batch)?;
+        publish_segment(&store, &restored, dir.path(), caps)?;
     }
 
     let chunks = Arc::new(AtomicUsize::new(0));
@@ -1364,15 +1345,12 @@ fn compact_filters_only_restart_resumes_past_the_sealed_filters() {
         std::sync::Arc::new(bitcoin_rs_storage::RocksDbStore::open(dir.path()).expect("store"));
     let mut writer = crate::IndexWriter::open(std::sync::Arc::clone(&store), 1).expect("writer");
     for block in &blocks {
-        let prepared = writer
-            .prepare_block_from_facts(crate::IndexCapabilities::COMPACT_FILTERS, block.clone())
-            .expect("prepare");
-        let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
-            max_rows: usize::MAX,
-            max_bytes: usize::MAX,
-        });
-        assert!(batch.try_push(prepared).is_ok(), "contiguous block");
-        writer.commit_forward(batch).expect("commit");
+        commit_from_facts(
+            &mut writer,
+            crate::IndexCapabilities::COMPACT_FILTERS,
+            block,
+        )
+        .expect("commit");
     }
     super::seal_tail_generation(
         store.as_ref(),
@@ -1442,15 +1420,8 @@ fn lagging_filters_seal_full_transaction_tail_without_losing_its_owner() {
             .expect("writer")
             .with_seal_scratch(scratch.path().to_path_buf());
         for block in &blocks {
-            let prepared = writer
-                .prepare_block_from_facts(crate::IndexCapabilities::TX_LOOKUP, block.clone())
-                .expect("prepare transaction");
-            let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
-                max_rows: usize::MAX,
-                max_bytes: usize::MAX,
-            });
-            assert!(batch.try_push(prepared).is_ok());
-            writer.commit_forward(batch).expect("commit transaction");
+            commit_from_facts(&mut writer, crate::IndexCapabilities::TX_LOOKUP, block)
+                .expect("commit transaction");
         }
         let before = writer.watermarks().expect("watermarks");
         assert!(before.compact_filters.is_none());
@@ -1459,15 +1430,11 @@ fn lagging_filters_seal_full_transaction_tail_without_losing_its_owner() {
             usize::try_from(TAIL_MAX_BLOCKS).expect("block bound")
         );
         super::arm_seal_fault(fault);
-        let prepared = writer
-            .prepare_block_from_facts(crate::IndexCapabilities::COMPACT_FILTERS, blocks[0].clone())
-            .expect("prepare filter");
-        let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
-            max_rows: usize::MAX,
-            max_bytes: usize::MAX,
-        });
-        assert!(batch.try_push(prepared).is_ok());
-        let result = writer.commit_forward(batch);
+        let result = commit_from_facts(
+            &mut writer,
+            crate::IndexCapabilities::COMPACT_FILTERS,
+            &blocks[0],
+        );
         super::arm_seal_fault(None);
         if fault.is_some() {
             assert!(matches!(
@@ -1488,18 +1455,12 @@ fn lagging_filters_seal_full_transaction_tail_without_losing_its_owner() {
             assert_eq!(found.len(), 1);
             assert_eq!(found[0].0, 0);
             drop(view);
-            let prepared = writer
-                .prepare_block_from_facts(
-                    crate::IndexCapabilities::COMPACT_FILTERS,
-                    blocks[0].clone(),
-                )
-                .expect("prepare retry");
-            let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
-                max_rows: usize::MAX,
-                max_bytes: usize::MAX,
-            });
-            assert!(batch.try_push(prepared).is_ok());
-            writer.commit_forward(batch).expect("retry filter");
+            commit_from_facts(
+                &mut writer,
+                crate::IndexCapabilities::COMPACT_FILTERS,
+                &blocks[0],
+            )
+            .expect("retry filter");
         } else {
             result.expect("commit filter");
         }
@@ -1594,15 +1555,7 @@ fn tail_resume_chains_onto_the_newest_durable_filter_row() {
         } else {
             crate::IndexCapabilities::TX_LOOKUP
         };
-        let prepared = writer
-            .prepare_block_from_facts(capabilities, block.clone())
-            .expect("prepare");
-        let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
-            max_rows: usize::MAX,
-            max_bytes: usize::MAX,
-        });
-        assert!(batch.try_push(prepared).is_ok(), "contiguous block");
-        writer.commit_forward(batch).expect("commit");
+        commit_from_facts(&mut writer, capabilities, block).expect("commit");
     }
     super::seal_tail_generation(
         store.as_ref(),
