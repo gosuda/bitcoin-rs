@@ -388,18 +388,7 @@ fn convert_namespace_with_undo_recode(
         if cf == ColumnFamily::UndoData {
             let mut writer = BatchWriter::new(dest_store.as_ref());
             let row_count = source_ns.for_each_row(cf, |key, value| {
-                if key.len() != 37 {
-                    return Err(ConvertError::IncompatibleData(
-                        "undo key is not 37 bytes".into(),
-                    ));
-                }
-                let mut hash_bytes = [0_u8; 32];
-                hash_bytes.copy_from_slice(&key[5..37]);
-                let hash = Hash256::from_le_bytes(&hash_bytes);
-                let batch = decode_legacy_undo_record(value, hash).map_err(|e| {
-                    ConvertError::IncompatibleData(format!("legacy undo record is unreadable: {e}"))
-                })?;
-                let recoded = encode_undo_record(&batch, hash);
+                let recoded = recode_legacy_undo_row(key, value)?;
                 writer.put(cf, key, &recoded)?;
                 Ok(())
             })?;
@@ -448,6 +437,21 @@ fn convert_namespace_with_undo_recode(
         engine: engine_label.to_string(),
         families: family_reports,
     })
+}
+
+fn recode_legacy_undo_row(key: &[u8], value: &[u8]) -> Result<Vec<u8>, ConvertError> {
+    if key.len() != 37 {
+        return Err(ConvertError::IncompatibleData(
+            "undo key is not 37 bytes".into(),
+        ));
+    }
+    let mut hash_bytes = [0_u8; 32];
+    hash_bytes.copy_from_slice(&key[5..37]);
+    let hash = Hash256::from_le_bytes(&hash_bytes);
+    let batch = decode_legacy_undo_record(value, hash).map_err(|error| {
+        ConvertError::IncompatibleData(format!("legacy undo record is unreadable: {error}"))
+    })?;
+    Ok(encode_undo_record(&batch, hash))
 }
 
 struct IndependentCopyPlan {
@@ -793,6 +797,31 @@ fn convert_generation_image(
             ))
         })?;
     }
+    let memory_name = bitcoin_rs_storage::memory_kv::MEMORY_KV_FILE;
+    let memory = match engine_dir.symlink_metadata(memory_name) {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return Err(ConvertError::IncompatibleData(
+                    "checkpoint memory image must be a regular file".into(),
+                ));
+            }
+            for entry in engine_dir.entries()? {
+                if entry?.file_name() != std::ffi::OsStr::new(memory_name) {
+                    return Err(ConvertError::IncompatibleData(
+                        "checkpoint memory image contains unrelated engine files".into(),
+                    ));
+                }
+            }
+            let mut file = open_file_read_no_follow(&engine_dir, memory_name)?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            let memory = bitcoin_rs_storage::memory_kv::MemoryKvStore::from_bytes(&bytes)?;
+            Some(memory)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let memory_image = memory.is_some();
     drop(engine_dir);
     let report_name = format!("{root_name}/{name}/{GENERATION_ENGINE_DIR}");
     let stage_base = ctx
@@ -812,18 +841,46 @@ fn convert_generation_image(
         from_root: &src_gen,
         to_root: &stage_dir,
     };
-    let mut report = if ctx.source_epoch == 3 || ctx.source_epoch == 4 || ctx.source_epoch == 5 {
-        convert_namespace_with_undo_recode(paths, ctx.source_epoch, ctx.target_engine)?
+    let (mut report, store): (_, Box<dyn KvStore>) = if let Some(memory) = memory {
+        if ctx.source_epoch < 6 {
+            for row in memory.iter_prefix(ColumnFamily::UndoData, &[])? {
+                let (key, value) = row?;
+                let recoded = recode_legacy_undo_row(&key, &value)?;
+                memory.put(ColumnFamily::UndoData, &key, &recoded)?;
+            }
+        }
+        let mut families = Vec::new();
+        for cf in ColumnFamily::ALL.iter().copied() {
+            let (row_count, digest) = compute_destination_digest(&memory, cf)?;
+            families.push(FamilyReport {
+                family: cf.name().to_owned(),
+                row_count,
+                digest,
+            });
+        }
+        (
+            NamespaceReport {
+                namespace: report_name,
+                engine: "memory".to_owned(),
+                families,
+            },
+            Box::new(memory),
+        )
     } else {
-        convert_namespace(paths, ctx.source_epoch, ctx.target_engine)?
+        let report = if ctx.source_epoch < 6 {
+            convert_namespace_with_undo_recode(paths, ctx.source_epoch, ctx.target_engine)?
+        } else {
+            convert_namespace(paths, ctx.source_epoch, ctx.target_engine)?
+        };
+        if report.engine == "empty" {
+            record_generation(ctx, root_name, old_reference, old_manifest_sha256, None)?;
+            cleanup_scratch(&dst_gen)?;
+            sync_dir(&dst_gen)?;
+            return Ok(());
+        }
+        let store = open_destination_store(&stage_store_path, ctx.target_engine)?;
+        (report, store)
     };
-    if report.engine == "empty" {
-        record_generation(ctx, root_name, old_reference, old_manifest_sha256, None)?;
-        cleanup_scratch(&dst_gen)?;
-        sync_dir(&dst_gen)?;
-        return Ok(());
-    }
-    let store = open_destination_store(&stage_store_path, ctx.target_engine)?;
     if rebind_store_historical_refs(store.as_ref(), ctx)? {
         let (count, digest) = compute_destination_digest(store.as_ref(), ColumnFamily::UtxoMeta)?;
         set_family_report(&mut report, ColumnFamily::UtxoMeta, count, digest);
@@ -835,6 +892,14 @@ fn convert_generation_image(
         .join(name)
         .join(GENERATION_ENGINE_DIR);
     store.checkpoint(&generation_engine_path)?;
+    if memory_image {
+        let destination = dst_gen.open_dir_nofollow(GENERATION_ENGINE_DIR)?;
+        collect_copied_files_from_dir(
+            &destination,
+            &format!("{report_prefix}/{GENERATION_ENGINE_DIR}"),
+            ctx.copied_files,
+        )?;
+    }
     drop(store);
     cleanup_scratch(&dst_gen)?;
     sync_dir(&dst_gen)?;

@@ -2,7 +2,6 @@
 
 ## Unreleased
 
-// refused_by: statement_fold · collision: none (no common ancestor text)
 - Projection spill sorting charges retained payload capacities and row-vector backing storage. Spill, finish, and drop free row storage before returning its budget charge; a failed spill keeps its retained rows charged.
 - A filter catch-up that seals a shared transaction tail preserves publication for every existing capability whose rows move. Seal recovery uses the same owners, and unrelated capability watermarks do not advance.
 - BREAKING CHANGE: `DerivedIndexQuery::transaction_height` is replaced by `transaction_block`, which returns the transaction body with its captured occurrence height and block hash. Esplora confirmation metadata uses that block identity across reorgs, including ABA publication changes.
@@ -10,6 +9,7 @@
 - Network ingress leaves the existing foreground reserve available within the staged-image allowance. Its capacity and atomic admission check use the reduced ceiling; execution retains the full owner cap. The node-wide total, cache shares, and resource-refusal classification are unchanged.
 - Epoch-5 conversion converts retained ordinary and historical checkpoint engine images to the requested backend and schema-6 undo format. Epoch-5 and current-epoch backend copies preserve the root `full-revalidation` marker.
 - Projection preserves blockwise ScriptLive rollback when sealed historical generations retire. Compact-filter attachment and restart preserve transaction ordinals. Same-height capability backfill merges undo logs and retains the original rollback frontier.
+- Epoch-4, epoch-5, and current-epoch backend conversion preserve production historical memory-engine checkpoints. Legacy memory undo rows are converted to schema 6. Conversion validates the image through the existing loader and rejects mixed engine files without publishing a schema marker.
 - Coin statistics retain unchanged outputs during partial spends. The committed feed emits only removed, inserted, or changed coins, including height and coinbase changes; final-record precedence and the existing point-read path are unchanged.
 - Production chainstate readers no longer expose writable coin-store or commit-authority handles. The retained fixture accessors require the existing test seam.
 - Snapshot serialization derives a reader-owned view's MuHash trailer from the captured coins, not from a later live listener or a zero fallback.
