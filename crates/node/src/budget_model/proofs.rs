@@ -4,22 +4,26 @@ use super::{
 };
 
 fn any_budget_state() -> BudgetState {
+    let total_budget: u32 = 4;
     let mut charges = [0u32; 7];
     let mut reserved = [0u32; 7];
+    let mut owner_caps = [0u32; 7];
     let mut i = 0;
     while i < 7 {
         let c: u32 = kani::any();
         let r: u32 = kani::any();
+        let cap: u32 = kani::any();
         kani::assume(c <= 4);
         kani::assume(r <= 4);
+        kani::assume(cap <= total_budget);
         charges[i] = c;
         reserved[i] = r;
+        owner_caps[i] = cap;
         i += 1;
     }
     let block_staged: bool = kani::any();
     let block_refused: bool = kani::any();
     let is_mdbx: bool = kani::any();
-    let total_budget: u32 = 4;
     let foreground_reserve: u32 = 1;
     let consensus_invalid: bool = kani::any();
     kani::assume(!consensus_invalid);
@@ -33,7 +37,7 @@ fn any_budget_state() -> BudgetState {
         is_mdbx,
         total_budget,
         foreground_reserve,
-        owner_caps: [total_budget; 7],
+        owner_caps,
     }
 }
 
