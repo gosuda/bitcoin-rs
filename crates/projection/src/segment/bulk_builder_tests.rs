@@ -71,14 +71,12 @@ impl BudgetCharge for PoolBudget {
         }
     }
 
-    fn allocate_bytes(&self, owner: BudgetOwner, _bytes: u64) -> Result<(), BudgetError> {
-        let _unused = owner;
+    fn allocate_bytes(&self, _owner: BudgetOwner, _bytes: u64) -> Result<(), BudgetError> {
         Ok(())
     }
 
     fn release_bytes(&self, _owner: BudgetOwner, bytes: u64) {
         self.remaining.fetch_add(bytes, Ordering::SeqCst);
-        let _unused = self.remaining.load(Ordering::SeqCst);
     }
 
     fn available_bytes(&self, _owner: BudgetOwner) -> u64 {
