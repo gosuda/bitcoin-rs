@@ -44,9 +44,9 @@ struct CreationsAcross<'a> {
 
 impl CreationOrdinals for CreationsAcross<'_> {
     fn creation_ordinal(&self, txid: &[u8; 32]) -> Result<Option<u32>, IndexError> {
-        match self.tail_gens.creation_ordinal(txid)? {
+        match self.script_gens.creation_ordinal(txid)? {
             Some(ordinal) => Ok(Some(ordinal)),
-            None => self.script_gens.creation_ordinal(txid),
+            None => self.tail_gens.creation_ordinal(txid),
         }
     }
 }

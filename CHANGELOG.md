@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Spender queries retain confirmed spends after independent transaction-lookup and script-history artifact imports. New spend rows resolve the funding transaction through the script-history directory before falling back to transaction lookup.
 - Projection spill sorting charges retained payload capacities and row-vector backing storage. Spill, finish, and drop free row storage before returning its budget charge; a failed spill keeps its retained rows charged.
 - A filter catch-up that seals a shared transaction tail preserves publication for every existing capability whose rows move. Seal recovery uses the same owners, and unrelated capability watermarks do not advance.
 - BREAKING CHANGE: `DerivedIndexQuery::transaction_height` is replaced by `transaction_block`, which returns the transaction body with its captured occurrence height and block hash. Esplora confirmation metadata uses that block identity across reorgs, including ABA publication changes.
