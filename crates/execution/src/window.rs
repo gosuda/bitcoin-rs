@@ -373,6 +373,10 @@ pub(super) fn apply_window_admitted(
                 return Err(error);
             }
             restore_uncommitted_takes(takes.take(), &take_starts, committed.len());
+            drop(proven);
+            drop(_window_prevouts);
+            drop(workspace);
+            drop(group);
             return match apply_window_admitted(handles, &payloads[index..]) {
                 Ok(outcomes) => {
                     committed.extend(outcomes);
