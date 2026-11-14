@@ -25,7 +25,7 @@ pub trait IngressLedger: Send + Sync {
 pub struct FixedIngressLedger {
     capacity: usize,
     used: Arc<Mutex<usize>>,
-    released: Arc<Condvar>,
+    released: Condvar,
 }
 
 impl IngressLedger for FixedIngressLedger {
@@ -118,7 +118,7 @@ impl BlockMemory {
 impl Default for BlockMemory {
     fn default() -> Self {
         let used = Arc::new(Mutex::new(0));
-        let released = Arc::new(Condvar::new());
+        let released = Condvar::new();
         let ledger = Arc::new(FixedIngressLedger {
             capacity: BLOCK_INGRESS_BYTES,
             used: Arc::clone(&used),
