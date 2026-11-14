@@ -1048,6 +1048,26 @@ impl MempoolObserver for BackpressureObserver {
     }
 }
 
+fn wait_for_publication_settle(
+    gateway: &MempoolGateway,
+    stream: &Mutex<Vec<u64>>,
+) -> Result<(), crate::test_error::TestError> {
+    let deadline = std::time::Instant::now() + core::time::Duration::from_secs(10);
+    loop {
+        let sequence = gateway.read().sequence_number();
+        let published = u64::try_from(stream.lock().len())?;
+        if published == sequence {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "publication never settled: {published} of {sequence} batches published"
+        );
+        std::thread::yield_now();
+    }
+    Ok(())
+}
+
 // MPS-04
 #[test]
 fn bounded_delivery_queue_never_exceeds_capacity_and_keeps_sequence_order()
@@ -1099,19 +1119,7 @@ fn bounded_delivery_queue_never_exceeds_capacity_and_keeps_sequence_order()
     let Ok(()) = first_handle.join() else {
         return Err("first publisher panicked".into());
     };
-    let deadline = std::time::Instant::now() + core::time::Duration::from_secs(10);
-    loop {
-        let sequence = gateway.read().sequence_number();
-        let published = u64::try_from(observer.stream.lock().len())?;
-        if published == sequence {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "publication never settled: {published} of {sequence} batches published"
-        );
-        std::thread::yield_now();
-    }
+    wait_for_publication_settle(&gateway, &observer.stream)?;
     assert!(
         gateway.publish_high_water() <= DELIVERY_QUEUE_CAPACITY,
         "the queue length never exceeds the bound"
@@ -1237,19 +1245,7 @@ fn reentrant_mutation_completes_when_the_delivery_queue_is_full()
     let Ok(()) = first_handle.join() else {
         return Err("first publisher panicked".into());
     };
-    let deadline = std::time::Instant::now() + core::time::Duration::from_secs(10);
-    loop {
-        let sequence = gateway.read().sequence_number();
-        let published = u64::try_from(observer.stream.lock().len())?;
-        if published == sequence {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "publication never settled: {published} of {sequence} batches published"
-        );
-        std::thread::yield_now();
-    }
+    wait_for_publication_settle(&gateway, &observer.stream)?;
     assert_eq!(
         gateway.publish_high_water(),
         DELIVERY_QUEUE_CAPACITY + 1,
@@ -1362,19 +1358,7 @@ fn reentrant_mutations_past_the_ceiling_are_refused_with_delivery_queue_full()
     let Ok(()) = first_handle.join() else {
         return Err("first publisher panicked".into());
     };
-    let deadline = std::time::Instant::now() + core::time::Duration::from_secs(10);
-    loop {
-        let sequence = gateway.read().sequence_number();
-        let published = u64::try_from(observer.stream.lock().len())?;
-        if published == sequence {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "publication never settled: {published} of {sequence} batches published"
-        );
-        std::thread::yield_now();
-    }
+    wait_for_publication_settle(&gateway, &observer.stream)?;
     let allowance = u64::try_from(DELIVERY_REENTRANT_ALLOWANCE)?;
     let capacity = u64::try_from(DELIVERY_QUEUE_CAPACITY)?;
     assert_eq!(
@@ -1513,19 +1497,7 @@ fn chain_driven_reentrant_mutations_past_the_ceiling_are_refused()
     let Ok(()) = first_handle.join() else {
         return Err("first publisher panicked".into());
     };
-    let deadline = std::time::Instant::now() + core::time::Duration::from_secs(10);
-    loop {
-        let sequence = gateway.read().sequence_number();
-        let published = u64::try_from(observer.stream.lock().len())?;
-        if published == sequence {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "publication never settled: {published} of {sequence} batches published"
-        );
-        std::thread::yield_now();
-    }
+    wait_for_publication_settle(&gateway, &observer.stream)?;
     let allowance = u64::try_from(DELIVERY_REENTRANT_ALLOWANCE)?;
     let capacity = u64::try_from(DELIVERY_QUEUE_CAPACITY)?;
     assert_eq!(
