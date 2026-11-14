@@ -134,6 +134,23 @@ struct TxRef {
     position: TxPosition,
 }
 
+fn decode_tx_dir_row(
+    scope: Scope,
+    key: &[u8],
+    value: &[u8],
+) -> Result<Option<(u32, u32, u32, u32)>, IndexError> {
+    let Some((_gen, _txid, height)) = format::decode_tx_dir_key(key) else {
+        return Err(malformed("tx_dir key"));
+    };
+    if !scope.covers(height) {
+        return Ok(None);
+    }
+    let Some((_hash, ordinal, offset, len)) = format::decode_tx_dir_value(value) else {
+        return Err(malformed("tx_dir value"));
+    };
+    Ok(Some((height, ordinal, offset, len)))
+}
+
 fn collect_prefix_rows(
     kv: &dyn KvSnapshot,
     stream: &mut TxidRowStream,
@@ -148,13 +165,9 @@ fn collect_prefix_rows(
         let Some((key, value)) = stream.rows.pop_front() else {
             return Ok(());
         };
-        let (_gen, _txid, height) =
-            format::decode_tx_dir_key(&key).ok_or_else(|| malformed("tx_dir key"))?;
-        if !stream.scope.covers(height) {
+        let Some((height, _, offset, len)) = decode_tx_dir_row(stream.scope, &key, &value)? else {
             continue;
-        }
-        let (_hash, _ordinal, offset, len) =
-            format::decode_tx_dir_value(&value).ok_or_else(|| malformed("tx_dir value"))?;
+        };
         by_height
             .entry(height)
             .or_default()
@@ -224,13 +237,9 @@ impl<'a> SegmentSnapshot<'a> {
             let scan = self.scan(ColumnFamily::TxDir, &prefix, limit)?;
             complete &= scan.complete;
             for (key, value) in scan.rows {
-                let (_gen, _txid, height) =
-                    format::decode_tx_dir_key(&key).ok_or_else(|| malformed("tx_dir key"))?;
-                if !scope.covers(height) {
+                let Some((height, _, offset, len)) = decode_tx_dir_row(scope, &key, &value)? else {
                     continue;
-                }
-                let (_hash, _ordinal, offset, len) =
-                    format::decode_tx_dir_value(&value).ok_or_else(|| malformed("tx_dir value"))?;
+                };
                 rows.entry(height)
                     .or_insert_with(|| TxPosition::new(offset, len));
             }
@@ -440,13 +449,9 @@ impl<'a> SegmentSnapshot<'a> {
             let scan = self.scan(ColumnFamily::TxDir, &prefix, limit)?;
             complete &= scan.complete;
             for (key, value) in scan.rows {
-                let (_gen, _txid, height) =
-                    format::decode_tx_dir_key(&key).ok_or_else(|| malformed("tx_dir key"))?;
-                if !scope.covers(height) {
+                let Some((_, ordinal, ..)) = decode_tx_dir_row(scope, &key, &value)? else {
                     continue;
-                }
-                let (_hash, ordinal, _offset, _len) =
-                    format::decode_tx_dir_value(&value).ok_or_else(|| malformed("tx_dir value"))?;
+                };
                 creations.push(ordinal);
             }
         }
@@ -1046,13 +1051,9 @@ impl SegmentSnapshot<'_> {
                 return Err(malformed("creation rows exceed the reader bound"));
             }
             for (key, value) in scan.rows {
-                let (_gen, _txid, height) =
-                    format::decode_tx_dir_key(&key).ok_or_else(|| malformed("tx_dir key"))?;
-                if !scope.covers(height) {
+                let Some((_, ordinal, ..)) = decode_tx_dir_row(scope, &key, &value)? else {
                     continue;
-                }
-                let (_hash, ordinal, _offset, _len) =
-                    format::decode_tx_dir_value(&value).ok_or_else(|| malformed("tx_dir value"))?;
+                };
                 creations.push(ordinal);
             }
         }
