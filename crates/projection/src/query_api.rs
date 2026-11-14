@@ -29,17 +29,22 @@ pub struct DerivedIndexInfo {
     pub coverage_height: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RetryReason {
+    #[error("index tip moved during query; retry")]
     TipMoved {
         expected_commit: u64,
         current_commit: u64,
     },
+    #[error("applied tip is missing; retry")]
+    MissingAppliedTip,
+    #[error("{} has not reached the applied tip; retry", .0.name())]
+    PendingCapabilityCoverage(IndexCapability),
 }
 
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TxQueryError {
-    #[error("transaction index changed during query; retry")]
+    #[error("{0}")]
     Retry(RetryReason),
     #[error("transaction index unavailable: {0}")]
     Unavailable(TxUnavailableCause),
@@ -100,7 +105,7 @@ impl core::fmt::Display for TxUnavailableCause {
                 declared_floor_or_tip,
             } => write!(
                 f,
-                "requested data is outside declared coverage ending at height {declared_floor_or_tip}"
+                "requested data is outside declared coverage (declared boundary height {declared_floor_or_tip})"
             ),
             Self::CapabilityDisabled(capability) => f.write_str(capability.disabled_message()),
             Self::CapabilityUnpublished(capability) => write!(
@@ -135,7 +140,7 @@ pub struct CoveredPrefix {
 pub struct AppliedEpoch {
     pub hash: Hash256,
     pub height: u32,
-    pub commit_id: u64,
+    pub runtime_revision: u64,
 }
 
 /// Declared, complete coverage of one index capability (`QRY-05`).

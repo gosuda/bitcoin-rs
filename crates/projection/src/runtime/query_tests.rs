@@ -633,7 +633,9 @@ fn transaction_rejects_watermark_from_rival_tip() -> Result<(), crate::portable:
 
     assert!(matches!(
         fixture.engine.transaction(&txid),
-        Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+        Err(TxQueryError::Retry(RetryReason::PendingCapabilityCoverage(
+            IndexCapability::TxLookup
+        )))
     ));
     Ok(())
 }
@@ -771,7 +773,7 @@ fn engine_with_body_error(
 
 #[derive(Default)]
 struct RecordingQueryCharge {
-    balance: ParkMutex<(u64, u64)>,
+    balance: ParkMutex<u64>,
 }
 
 impl bitcoin_rs_storage::budget::BudgetCharge for RecordingQueryCharge {
@@ -788,15 +790,13 @@ impl bitcoin_rs_storage::budget::BudgetCharge for RecordingQueryCharge {
         _owner: bitcoin_rs_storage::budget::BudgetOwner,
         bytes: u64,
     ) -> Result<(), bitcoin_rs_storage::budget::BudgetError> {
-        let mut balance = self.balance.lock();
-        balance.0 += bytes;
-        balance.1 = balance.1.max(balance.0);
+        *self.balance.lock() += bytes;
         Ok(())
     }
 
     fn release_bytes(&self, _owner: bitcoin_rs_storage::budget::BudgetOwner, bytes: u64) {
         let mut balance = self.balance.lock();
-        balance.0 = balance.0.saturating_sub(bytes);
+        *balance = balance.saturating_sub(bytes);
     }
 
     fn available_bytes(&self, _owner: bitcoin_rs_storage::budget::BudgetOwner) -> u64 {
@@ -818,11 +818,11 @@ fn query_view_capture_charges_query_views_and_drop_returns_it()
     let (view, snapshot) = engine
         .capture_view(IndexCapabilities::TX_LOOKUP)
         .map_err(|_| std::io::Error::other("query view capture refused"))?;
-    let (held, _) = *charge.balance.lock();
+    let held = *charge.balance.lock();
     assert!(held > 0, "capturing a view charges the query views owner");
     drop(snapshot);
     drop(view);
-    let (current, _) = *charge.balance.lock();
+    let current = *charge.balance.lock();
     assert_eq!(current, 0, "dropping the view returns its charge");
     Ok(())
 }
@@ -2134,7 +2134,7 @@ fn historical_extension_during_read_keeps_same_anchor() -> Result<(), crate::por
             chain_transition: None,
         },
     );
-    let at = engine.transaction_at_prefix(&txid)?;
+    let at = engine.transaction_at_answer(&txid)?;
     assert_eq!(at.coverage.height, 0);
     assert_eq!(at.coverage.floor, 0);
     assert!(at.value.is_some());
@@ -2199,7 +2199,7 @@ fn historical_wake_without_tip_move_stays_valid_for_strict_reads()
             chain_transition: None,
         },
     );
-    let at = historical.transaction_at_prefix(&txid)?;
+    let at = historical.transaction_at_answer(&txid)?;
     assert_eq!(at.coverage.height, 0);
     assert!(at.value.is_some());
     let runtime_clone = Arc::clone(&runtime);
@@ -2281,7 +2281,7 @@ fn historical_reorg_above_anchor_stays_valid() -> Result<(), crate::portable::Te
             chain_transition: None,
         },
     );
-    let at = engine.transaction_at_prefix(&txid)?;
+    let at = engine.transaction_at_answer(&txid)?;
     assert_eq!(at.coverage.height, 0);
     assert!(at.value.is_some());
     Ok(())
@@ -2340,7 +2340,7 @@ fn historical_reset_completing_after_snapshot_stays_valid() -> Result<(), crate:
             chain_transition: None,
         },
     );
-    let at = engine.transaction_at_prefix(&txid)?;
+    let at = engine.transaction_at_answer(&txid)?;
     assert_eq!(at.coverage.height, 0);
     assert_eq!(at.coverage.floor, 0);
     assert!(at.value.is_some());
@@ -2415,7 +2415,7 @@ fn historical_reorg_below_anchor_stays_valid() -> Result<(), crate::portable::Te
             chain_transition: None,
         },
     );
-    let at = engine.transaction_at_prefix(&txid)?;
+    let at = engine.transaction_at_answer(&txid)?;
     assert!(at.value.is_some());
     assert_eq!(at.coverage.height, 2);
     Ok(())
@@ -2535,8 +2535,10 @@ fn historical_unknown_watermark_hash_refuses_prefix() -> Result<(), crate::porta
         },
     );
     assert!(matches!(
-        engine.transaction_at_prefix(&txid),
-        Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+        engine.transaction_at_answer(&txid),
+        Err(TxQueryError::Retry(RetryReason::PendingCapabilityCoverage(
+            IndexCapability::TxLookup
+        )))
     ));
     Ok(())
 }
@@ -2593,8 +2595,10 @@ fn historical_stale_watermark_refuses_prefix() -> Result<(), crate::portable::Te
         },
     );
     assert!(matches!(
-        engine.transaction_at_prefix(&stale_txid),
-        Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+        engine.transaction_at_answer(&stale_txid),
+        Err(TxQueryError::Retry(RetryReason::PendingCapabilityCoverage(
+            IndexCapability::TxLookup
+        )))
     ));
     Ok(())
 }
@@ -2656,12 +2660,16 @@ fn historical_off_chain_watermark_refuses_prefix_reads() -> Result<(), crate::po
         },
     );
     assert!(matches!(
-        engine.transaction_at_prefix(&stale_txid),
-        Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+        engine.transaction_at_answer(&stale_txid),
+        Err(TxQueryError::Retry(RetryReason::PendingCapabilityCoverage(
+            IndexCapability::TxLookup
+        )))
     ));
     assert!(matches!(
-        engine.script_history_at_prefix(script),
-        Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+        engine.script_history_at_answer(script),
+        Err(TxQueryError::Retry(RetryReason::PendingCapabilityCoverage(
+            IndexCapability::ScriptHistory
+        )))
     ));
     Ok(())
 }
@@ -2715,7 +2723,7 @@ fn assumed_history_view_reports_verified_frontier() -> Result<(), crate::portabl
     );
     let verified_hash: Hash256 = genesis.block_hash().into();
     *frontier.write() = Some((0, verified_hash));
-    let assumed = engine.transaction_at_prefix(&txid)?;
+    let assumed = engine.transaction_at_answer(&txid)?;
     assert_eq!(
         assumed.verification_state,
         crate::query_api::VerificationState::AssumedHistory {
@@ -2724,13 +2732,13 @@ fn assumed_history_view_reports_verified_frontier() -> Result<(), crate::portabl
         }
     );
     *frontier.write() = Some((1, child.block_hash().into()));
-    let caught_up = engine.transaction_at_prefix(&txid)?;
+    let caught_up = engine.transaction_at_answer(&txid)?;
     assert_eq!(
         caught_up.verification_state,
         crate::query_api::VerificationState::ChainVerified
     );
     *frontier.write() = None;
-    let verified = engine.transaction_at_prefix(&txid)?;
+    let verified = engine.transaction_at_answer(&txid)?;
     assert_eq!(
         verified.verification_state,
         crate::query_api::VerificationState::ChainVerified
@@ -2766,7 +2774,7 @@ fn historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor()
             enabled: IndexCapabilities::ALL,
         },
     )?;
-    let at = fixture.engine.transaction_at_prefix(&txid)?;
+    let at = fixture.engine.transaction_at_answer(&txid)?;
     assert_eq!(at.coverage.floor, 1);
     assert_eq!(at.coverage.height, 1);
     assert_eq!(at.value, None);
@@ -2791,7 +2799,7 @@ fn historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor()
         },
     )?;
     assert!(matches!(
-        floor_fixture.engine.transaction_at_prefix(&txid),
+        floor_fixture.engine.transaction_at_answer(&txid),
         Err(TxQueryError::Unavailable(
             TxUnavailableCause::OutsideCoverage {
                 declared_floor_or_tip: 5
@@ -2835,7 +2843,7 @@ fn historical_full_history_positive_floor_is_unproven() -> Result<(), crate::por
         },
     )?;
     assert!(matches!(
-        fixture.engine.script_history_at_prefix(scripthash),
+        fixture.engine.script_history_at_answer(scripthash),
         Err(TxQueryError::Unavailable(
             TxUnavailableCause::HistoryUnproven { floor: 1 }
         ))
@@ -2877,7 +2885,7 @@ fn historical_standalone_spender_scoped_none_above_floor() -> Result<(), crate::
             enabled: IndexCapabilities::ALL,
         },
     )?;
-    let at = fixture.engine.spender_at_prefix(outpoint)?;
+    let at = fixture.engine.spender_at_answer(outpoint)?;
     assert_eq!(at.coverage.floor, 1);
     assert_eq!(at.coverage.height, 1);
     assert_eq!(at.value, None);
@@ -2946,7 +2954,7 @@ fn historical_mixed_cap_script_anchors_at_sh_watermark() -> Result<(), crate::po
             enabled: IndexCapabilities::ALL,
         },
     )?;
-    let script_at = script_fixture.engine.script_history_at_prefix(scripthash)?;
+    let script_at = script_fixture.engine.script_history_at_answer(scripthash)?;
     assert_eq!(script_at.coverage.height, 1);
     assert_eq!(script_at.coverage.floor, 0);
     for record in &script_at.value.history {
@@ -3002,7 +3010,7 @@ fn historical_mixed_cap_tx_anchors_at_tx_watermark() -> Result<(), crate::portab
     )?;
     let tx_at = tx_fixture
         .engine
-        .transaction_at_prefix(&funding_txid_height_two)?;
+        .transaction_at_answer(&funding_txid_height_two)?;
     assert_eq!(tx_at.coverage.height, 2);
     assert!(tx_at.value.is_some());
     assert_eq!(tx_at.value.as_ref().map(|(h, _)| *h), Some(2));
@@ -3054,7 +3062,7 @@ fn historical_duplicate_txid_returns_earliest_verified_and_skips_stale()
             enabled: IndexCapabilities::ALL,
         },
     )?;
-    let at = fixture.engine.transaction_at_prefix(&target_txid)?;
+    let at = fixture.engine.transaction_at_answer(&target_txid)?;
     assert_eq!(at.coverage.height, 3);
     let Some((height, _)) = at.value else {
         return Err(std::io::Error::other("duplicate must verify").into());
@@ -3084,13 +3092,13 @@ fn historical_no_covered_prefix_for_reset_claim() -> Result<(), crate::portable:
         },
     )?;
     assert!(matches!(
-        fixture.engine.transaction_at_prefix(&txid),
+        fixture.engine.transaction_at_answer(&txid),
         Err(TxQueryError::Retry(_))
     ));
     assert!(matches!(
         fixture
             .engine
-            .script_history_at_prefix(ScriptHash::new(&[])),
+            .script_history_at_answer(ScriptHash::new(&[])),
         Err(TxQueryError::Retry(_))
     ));
     Ok(())
@@ -3125,7 +3133,7 @@ fn historical_budgets_truncation_and_missing_map_to_shared()
     )?
     .0;
     assert!(matches!(
-        truncated.engine.transaction_at_prefix(&txid),
+        truncated.engine.transaction_at_answer(&txid),
         Err(TxQueryError::Unavailable(
             TxUnavailableCause::PrefixScanTruncated
         ))
@@ -3154,7 +3162,7 @@ fn historical_budgets_truncation_and_missing_map_to_shared()
     )?
     .0;
     assert!(matches!(
-        missing.engine.transaction_at_prefix(&txid),
+        missing.engine.transaction_at_answer(&txid),
         Err(TxQueryError::Unavailable(
             TxUnavailableCause::BlockBodyMissing { .. }
         ))
@@ -3188,7 +3196,7 @@ fn historical_budgets_health_and_capability_map_to_shared() -> Result<(), crate:
         .runtime
         .publish_failed("injected worker failure");
     assert!(matches!(
-        failed_fixture.engine.transaction_at_prefix(&txid),
+        failed_fixture.engine.transaction_at_answer(&txid),
         Err(TxQueryError::Unavailable(TxUnavailableCause::WorkerFailed(
             _
         )))
@@ -3213,12 +3221,12 @@ fn historical_budgets_health_and_capability_map_to_shared() -> Result<(), crate:
     assert!(matches!(
         disabled_fixture
             .engine
-            .script_history_at_prefix(ScriptHash::new(&[])),
+            .script_history_at_answer(ScriptHash::new(&[])),
         Err(TxQueryError::Unavailable(
             TxUnavailableCause::CapabilityDisabled(_)
         ))
     ));
-    let tx_only = disabled_fixture.engine.transaction_at_prefix(&txid)?;
+    let tx_only = disabled_fixture.engine.transaction_at_answer(&txid)?;
     assert_eq!(tx_only.coverage.height, 0);
     Ok(())
 }
@@ -3261,8 +3269,10 @@ fn historical_deep_stale_branch_refuses_prefix() -> Result<(), crate::portable::
         },
     )?;
     assert!(matches!(
-        fixture.engine.transaction_at_prefix(&txid),
-        Err(TxQueryError::Retry(RetryReason::TipMoved { .. }))
+        fixture.engine.transaction_at_answer(&txid),
+        Err(TxQueryError::Retry(RetryReason::PendingCapabilityCoverage(
+            IndexCapability::TxLookup
+        )))
     ));
     Ok(())
 }
@@ -3433,7 +3443,7 @@ fn history_query_survives_chain_extension() -> Result<(), crate::portable::TestE
         },
     );
 
-    let at = engine.transaction_at_prefix(&txid)?;
+    let at = engine.transaction_at_answer(&txid)?;
     assert_eq!(at.height, 1);
     assert_eq!(at.coverage.height, 1);
     assert!(at.value.is_some());
@@ -3505,7 +3515,7 @@ fn answer_reads_the_captured_snapshot_when_tail_rows_are_rewritten()
         },
     );
 
-    let at = engine.transaction_at_prefix(&txid_a)?;
+    let at = engine.transaction_at_answer(&txid_a)?;
     assert!(
         at.value.is_some(),
         "the answer must come from the capture-time snapshot even though the read rewrote the tail rows, got value {:?}",
@@ -3563,7 +3573,7 @@ fn below_floor_point_lookups_refuse_with_outside_coverage() -> Result<(), crate:
         },
     )?;
 
-    let located = fixture.engine.transaction_at_prefix(&genesis_txid);
+    let located = fixture.engine.transaction_at_answer(&genesis_txid);
     assert!(
         matches!(
             &located,
@@ -3576,7 +3586,7 @@ fn below_floor_point_lookups_refuse_with_outside_coverage() -> Result<(), crate:
         "a below-floor txid must refuse instead of returning scoped absence: {located:?}"
     );
 
-    let spent = fixture.engine.spender_at_prefix(outpoint);
+    let spent = fixture.engine.spender_at_answer(outpoint);
     assert!(
         matches!(
             &spent,
@@ -3620,7 +3630,7 @@ fn outside_coverage_is_unavailable() -> Result<(), crate::portable::TestError> {
     )?;
 
     let unknown_txid = Txid(Hash256::from_le_bytes(&[0xEE; 32]));
-    let result = fixture.engine.transaction_at_prefix(&unknown_txid);
+    let result = fixture.engine.transaction_at_answer(&unknown_txid);
     assert!(
         matches!(
             result,
@@ -4201,6 +4211,47 @@ fn view_charge_refusal_reports_node_budget() -> Result<(), crate::portable::Test
         Err(TxQueryError::Unavailable(
             TxUnavailableCause::NodeBudgetExhausted
         ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn uninitialized_applied_tip_returns_missing_applied_tip_retry()
+-> Result<(), crate::portable::TestError> {
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
+    let tree = Arc::new(RwLock::new(BlockTree::new()));
+    let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+    let runtime = DerivedIndexRuntime::new(wake_tx);
+    let reader = Arc::new(HistoricalReader {
+        snapshot: HistoricalSnapshot {
+            tx_watermark: None,
+            sh_watermark: None,
+            tx_floor: 0,
+            sh_floor: 0,
+            scans: Vec::new(),
+        },
+    });
+    let engine = DerivedIndexQueryEngine::new(
+        runtime,
+        reader,
+        bitcoin_rs_execution::chain::BlockTreeReader::new(tree),
+        bitcoin_rs_execution::chain::TipReader::new(Arc::new(ArcSwapOption::empty())),
+        None,
+        QueryEngineLive {
+            enabled: IndexCapabilities::ALL,
+            generation: Arc::new(Generation::new(1)),
+            historical_verified: None,
+            chain_transition: None,
+        },
+    );
+    assert!(matches!(
+        engine.transaction(&txid),
+        Err(TxQueryError::Retry(RetryReason::MissingAppliedTip))
+    ));
+    assert!(matches!(
+        engine.index_progress_for(IndexCapabilities::ALL),
+        Err(TxQueryError::Retry(RetryReason::MissingAppliedTip))
     ));
     Ok(())
 }

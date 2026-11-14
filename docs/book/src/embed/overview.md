@@ -25,11 +25,13 @@ In-process embedding fits tools that already own a Tokio runtime or an execution
 | Mining control | `mining_control()` | Bounded to the node's lifetime |
 | Chainstates | `chainstates_summary()` | Active and historical roles |
 | Settled reads | `settled_snapshot()`, `subscribe_chain()`, `poll_chain()`, `pin_chain()`, `replay_chain()` | Replay is positional and bounded |
-| Historical index reads | `transaction_at_prefix()`, `script_history_at_prefix()`, `spender_at_prefix()` | Synchronous, caller-selected prefix |
+| Historical index reads | `transaction_at_prefix()`, `script_history_at_prefix()`, `spender_at_prefix()` | Synchronous, server-selected covered prefix |
 
 Every read mirrors an RPC fact without JSON: `snapshot()` is the coherent applied-tip cell, and `sync_progress()` runs the `getblockchaininfo` projection through the same `ChainHandles` code the RPC dispatcher uses. Settled reads exist for followers that must not observe a half-applied transition; the plain `snapshot()` keeps live applied-tip semantics.
 
 Historical prefix reads are blocking and take no live UTXO or chain-transition lock. Each call returns its own covered prefix, so compare prefixes instead of assuming one anchor. Absence is scoped to the returned range, never a global negative, and no mempool data is merged in. The consistency rules are owned by `IDX-12`; the calling shape is in the [embedding contract](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/embedding.md#historical-prefix-reads).
+
+`transaction_at_prefix(&txid)` returns `Result<Answer<Option<(u32, Tx)>>, TxQueryError>`, `script_history_at_prefix(script)` returns `Result<Answer<ScriptIndexSnapshot>, TxQueryError>`, and `spender_at_prefix(outpoint)` returns `Result<Answer<Option<SpendingRecord>>, TxQueryError>`. The script argument is a `ScriptHash`; the spender argument is an `OutPoint`. `Answer<T>` carries `value`, `block_hash`, `height`, `coverage`, and `verification_state`. A successful transaction or spender answer can contain `None`, scoped to its `coverage`.
 
 ## Feature flags
 
@@ -116,7 +118,9 @@ The node itself spawns the event loop, RPC listeners, P2P workers, index worker,
 
 ## Failures you will see
 
-`Node::start` returns `NodeError::Startup` for configuration, storage, recovery, or bind failures, and it rolls back through the same ordered teardown with no clean checkpoint. `Node::shutdown` returns `NodeError::Shutdown` only from a consuming shutdown, never from `Drop`. Reads return `Unavailable` when a capability is disabled and `NotFound` when a proven-absent transaction is requested. Prefix reads return `HistoricalQueryError`, not `NodeError`.
+`Node::start` returns `NodeError::Startup` for configuration, storage, recovery, or bind failures, and it rolls back through the same ordered teardown with no clean checkpoint. `Node::shutdown` returns `NodeError::Shutdown` only from a consuming shutdown, never from `Drop`. Reads return `Unavailable` when a capability is disabled and `NotFound` when a proven-absent transaction is requested. Prefix reads return `TxQueryError`, not `NodeError`.
+
+The projection query API defines `TxQueryError::Retry(RetryReason)` for retryable conditions: `TipMoved { expected_commit, current_commit }`, `MissingAppliedTip`, or `PendingCapabilityCoverage(IndexCapability)`. The other query error variants are `Unavailable(TxUnavailableCause)`, `ExpiredView`, and `Storage(CompactString)`. Do not treat an error as an absent transaction or spender; scoped absence is a successful answer whose `value` is `None`.
 
 Two startup refusals matter for embedders:
 

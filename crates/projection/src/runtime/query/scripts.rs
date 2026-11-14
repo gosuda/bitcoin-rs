@@ -317,15 +317,12 @@ impl DerivedIndexQueryEngine {
         budget: &mut QueryBudget,
         script: ScriptHash,
         last: Option<Txid>,
-        view_id: u64,
         limit: usize,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
-        let page = Self::confirmed_history_page_for(
-            snapshot, prefix, budget, script, last, view_id, limit,
-        )?;
+        let page = Self::confirmed_history_page_for(snapshot, prefix, budget, script, last, limit)?;
         if last.is_some() && !page.cursor_found {
             return Ok(Self::confirmed_history_page_for(
-                snapshot, prefix, budget, script, None, view_id, limit,
+                snapshot, prefix, budget, script, None, limit,
             )?
             .records);
         }
@@ -427,7 +424,6 @@ impl DerivedIndexQueryEngine {
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
         cursor: Option<Txid>,
-        view_id: u64,
         limit: usize,
     ) -> Result<ScriptHistoryPage, TxQueryError> {
         Self::require_full_history(prefix)?;
@@ -437,11 +433,8 @@ impl DerivedIndexQueryEngine {
             None => None,
         };
         let cursor_found = cursor.is_none() || resolved.is_some();
-        let occurrence_cursor = resolved.map(|(height, tx_pos)| OccurrenceCursor {
-            view_id,
-            height,
-            tx_pos,
-        });
+        let occurrence_cursor =
+            resolved.map(|(height, tx_pos)| OccurrenceCursor { height, tx_pos });
         if limit == 0 {
             return Ok(ScriptHistoryPage {
                 records: Vec::new(),
@@ -743,7 +736,6 @@ mod tests {
                 &mut QueryBudget::new(),
                 script,
                 None,
-                0,
                 25,
             )
             .unwrap_or_else(|error| panic!("bounded page failed: {error}"));
@@ -775,7 +767,6 @@ mod tests {
             budget,
             script,
             None,
-            0,
             25,
         )
         .unwrap_or_else(|error| panic!("first page failed: {error}"));
@@ -786,7 +777,6 @@ mod tests {
             budget,
             script,
             cursor,
-            0,
             25,
         )
         .unwrap_or_else(|error| panic!("cursor page failed: {error}"));
@@ -799,7 +789,6 @@ mod tests {
             budget,
             script,
             cursor,
-            0,
             0,
         )
         .unwrap_or_else(|error| panic!("empty page failed: {error}"));
@@ -819,7 +808,6 @@ mod tests {
             Some(Txid(
                 bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[200; 32]),
             )),
-            0,
             25,
         )
         .unwrap_or_else(|error| panic!("cursor restart failed: {error}"));
@@ -848,7 +836,6 @@ mod tests {
             &mut QueryBudget::new(),
             script,
             None,
-            0,
             25,
         )
         .unwrap_or_else(|error| panic!("collision page failed: {error}"));
@@ -874,7 +861,6 @@ mod tests {
             &mut QueryBudget::new(),
             script,
             None,
-            0,
             25,
         )
         .unwrap_or_else(|error| panic!("duplicate page failed: {error}"));
@@ -1032,7 +1018,6 @@ mod tests {
                 budget,
                 script,
                 cursor,
-                0,
                 limit,
             )
             .unwrap_or_else(|error| panic!("history page failed: {error}"));
@@ -1069,7 +1054,6 @@ mod tests {
                 budget,
                 script,
                 cursor,
-                0,
                 2,
             )
             .unwrap_or_else(|error| panic!("cursor page failed: {error}"));
@@ -1111,7 +1095,6 @@ mod tests {
             &mut QueryBudget::new(),
             script,
             None,
-            0,
             25,
         )
         .unwrap_or_else(|error| panic!("dedup page failed: {error}"));

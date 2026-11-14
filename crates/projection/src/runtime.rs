@@ -255,7 +255,7 @@ impl DerivedIndexRuntime {
             &self.tx_lookup_failure,
             error.to_string().into(),
             error,
-            "TxLookup paused at a missing undo record; other indexes continue",
+            "TxLookup paused; other indexes continue",
         );
     }
 

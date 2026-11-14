@@ -51,14 +51,11 @@ impl CompactFilterQuery for DerivedIndexQueryEngine {
                         return Ok(None);
                     }
                     let hash_at = |height| {
-                        tree.node_at_height_from(view.tip_id, height)
-                            .and_then(|id| tree.node(id).ok())
-                            .map(|node| node.hash)
-                            .ok_or_else(|| {
-                                TxQueryError::Unavailable(TxUnavailableCause::BlockBodyMissing {
-                                    height,
-                                })
+                        Self::hash_at_height(&tree, view.tip_id, height).ok_or_else(|| {
+                            TxQueryError::Unavailable(TxUnavailableCause::BlockBodyMissing {
+                                height,
                             })
+                        })
                     };
                     let previous = if start == 0 {
                         None
