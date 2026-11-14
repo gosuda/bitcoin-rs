@@ -633,8 +633,7 @@ fn staged_images_charge_follows_retained_images() -> TestResult {
         sync.scheduler.lock().stager.contains(&hash),
         "the future body must stay staged without its predecessor"
     );
-    let charged =
-        budget.available_of_charges(bitcoin_rs_storage::budget::BudgetOwner::StagedImages);
+    let charged = budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages);
     assert_eq!(
         charged,
         u64::try_from(retained).map_err(|_| TestError::message("size overflow"))?,

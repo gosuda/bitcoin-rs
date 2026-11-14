@@ -67,7 +67,7 @@ const ALL_OWNERS: [BudgetOwner; 7] = [
 ];
 
 fn ledger_of(budget: &NodeBudget) -> ([u64; 7], [u64; 7], bool) {
-    let charges = ALL_OWNERS.map(|owner| budget.available_of_charges(owner));
+    let charges = ALL_OWNERS.map(|owner| budget.charged_bytes(owner));
     let reserved = ALL_OWNERS.map(|owner| budget.available_of_reservations(owner));
     (charges, reserved, budget.ingress_refused())
 }
@@ -340,23 +340,23 @@ fn engine_cache_charge_follows_the_model_gate_and_cap() {
     let caps = differential_caps();
     let budget = NodeBudget::new(caps, 4);
     budget.grow_engine_cache(1_500);
-    assert_eq!(budget.available_of_charges(BudgetOwner::EngineCache), 1_500);
+    assert_eq!(budget.charged_bytes(BudgetOwner::EngineCache), 1_500);
     budget.grow_engine_cache(caps.total());
     assert_eq!(
-        budget.available_of_charges(BudgetOwner::EngineCache),
+        budget.charged_bytes(BudgetOwner::EngineCache),
         1_500,
         "engine growth past the total budget must be rejected"
     );
     budget.set_engine_cache_source(Some(Box::new(|| OWNER_CAP + 1)));
     budget.sample_engine_cache();
     assert_eq!(
-        budget.available_of_charges(BudgetOwner::EngineCache),
+        budget.charged_bytes(BudgetOwner::EngineCache),
         OWNER_CAP,
         "engine sampling clamps at the owner cap"
     );
     budget.shrink_engine_cache(500);
     assert_eq!(
-        budget.available_of_charges(BudgetOwner::EngineCache),
+        budget.charged_bytes(BudgetOwner::EngineCache),
         OWNER_CAP - 500
     );
     assert!(budget.is_safe());
@@ -368,7 +368,7 @@ fn mdbx_reports_a_zero_engine_cache_charge() {
     let budget = NodeBudget::new(differential_caps(), 4);
     budget.set_mdbx(true);
     budget.grow_engine_cache(4_096);
-    assert_eq!(budget.available_of_charges(BudgetOwner::EngineCache), 0);
+    assert_eq!(budget.charged_bytes(BudgetOwner::EngineCache), 0);
     assert_eq!(
         budget.reserve(BudgetOwner::EngineCache, 1),
         Err(BudgetError::EngineCacheUnsupported)
@@ -444,19 +444,19 @@ fn coin_cache_fill_charges_the_coin_cache_owner_and_wipe_returns_it() {
     delta.push_final(key, Some(value));
     coins.ingest_chunk(&delta).expect("ingest succeeds");
     assert_eq!(
-        budget.available_of_charges(BudgetOwner::CoinCache),
+        budget.charged_bytes(BudgetOwner::CoinCache),
         0,
         "a durable write alone does not fill the cache"
     );
     coins.get(&key).expect("read succeeds");
     assert_eq!(
-        budget.available_of_charges(BudgetOwner::CoinCache),
+        budget.charged_bytes(BudgetOwner::CoinCache),
         1024,
         "the read fill charges the coin cache"
     );
     coins.wipe().expect("wipe succeeds");
     assert_eq!(
-        budget.available_of_charges(BudgetOwner::CoinCache),
+        budget.charged_bytes(BudgetOwner::CoinCache),
         0,
         "wipe returns the coin cache charge"
     );
@@ -522,7 +522,7 @@ fn saturated_ingress_preserves_execution_headroom_and_recovers_after_release() {
     );
     for owner in ALL_OWNERS {
         assert!(
-            budget.available_of_charges(owner) + budget.available_of_reservations(owner)
+            budget.charged_bytes(owner) + budget.available_of_reservations(owner)
                 <= caps.owner_cap(owner)
         );
     }
@@ -569,7 +569,7 @@ fn repeated_ingress_then_engine_sample_stays_within_total() {
     budget.set_engine_cache_source(Some(Box::new(move || caps.engine_cache + 1)));
     budget.sample_engine_cache();
     assert_eq!(
-        budget.available_of_charges(BudgetOwner::EngineCache),
+        budget.charged_bytes(BudgetOwner::EngineCache),
         caps.engine_cache
     );
     assert_eq!(
@@ -591,7 +591,7 @@ fn engine_sampling_leaves_room_for_outstanding_reservations() {
     budget.set_engine_cache_source(Some(Box::new(|| OWNER_CAP + 1)));
     budget.sample_engine_cache();
     assert_eq!(
-        budget.available_of_charges(BudgetOwner::EngineCache),
+        budget.charged_bytes(BudgetOwner::EngineCache),
         OWNER_CAP / 2
     );
     assert_eq!(budget.total_committed(), OWNER_CAP);

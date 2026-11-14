@@ -162,14 +162,14 @@ mod tests {
         let size = facts.size_bytes();
         assert!(queue.try_push(Arc::clone(&facts)));
         assert_eq!(
-            budget.available_of_charges(BudgetOwner::FactsQueue),
+            budget.charged_bytes(BudgetOwner::FactsQueue),
             size,
             "the queued facts must be charged to the node budget"
         );
         assert_eq!(budget.available_of_reservations(BudgetOwner::FactsQueue), 0);
         let received = queue.receiver().try_recv().expect("one queued fact");
         queue.charge_handle().release(received.size_bytes());
-        assert_eq!(budget.available_of_charges(BudgetOwner::FactsQueue), 0);
+        assert_eq!(budget.charged_bytes(BudgetOwner::FactsQueue), 0);
     }
 
     // BUD-07
@@ -196,7 +196,7 @@ mod tests {
             .ensure_available(BudgetOwner::FactsQueue, 4_096)
             .expect("reclaiming queued facts frees the reservation");
         assert_eq!(
-            budget.available_of_charges(BudgetOwner::FactsQueue),
+            budget.charged_bytes(BudgetOwner::FactsQueue),
             0,
             "the reclaimer released the queued facts"
         );

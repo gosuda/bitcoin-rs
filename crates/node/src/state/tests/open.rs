@@ -11,17 +11,17 @@ fn open_wires_peer_outbound_ledger_to_node_budget() -> Result<(), TestError> {
     let budget = state.budget();
     let shared = state.p2p().shared_outbound_budget();
     assert_eq!(
-        budget.available_of_charges(bitcoin_rs_storage::budget::BudgetOwner::PeerOutbound),
+        budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::PeerOutbound),
         0
     );
     assert!(shared.test_try_charge(4096));
     assert_eq!(
-        budget.available_of_charges(bitcoin_rs_storage::budget::BudgetOwner::PeerOutbound),
+        budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::PeerOutbound),
         4096
     );
     shared.test_release(4096);
     assert_eq!(
-        budget.available_of_charges(bitcoin_rs_storage::budget::BudgetOwner::PeerOutbound),
+        budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::PeerOutbound),
         0
     );
     Ok(())
