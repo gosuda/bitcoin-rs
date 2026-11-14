@@ -45,8 +45,7 @@ fn new_unspent_outputs_insert_one_row_each_and_delete_nothing()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, writer) = writer()?;
     let block = coinbase_block(5, 3)?;
-    let prepared =
-        writer.prepare_block_from_facts(IndexCapabilities::SCRIPT_LIVE, block.clone())?;
+    let prepared = writer.prepare_block_from_facts(IndexCapabilities::SCRIPT_LIVE, block)?;
     assert_eq!(
         prepared.row_count,
         1 + 3,
