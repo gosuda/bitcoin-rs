@@ -20,11 +20,10 @@ pub(super) fn query_error(e: TxQueryError) -> Response {
             content_type: "text/plain",
             body: e.to_string().into_bytes(),
         },
-        TxQueryError::Retry(_) => service_unavailable(e.to_string()),
+        TxQueryError::Retry(_) | TxQueryError::Unavailable(_) => service_unavailable(e.to_string()),
         TxQueryError::ExpiredView => {
             service_unavailable("transaction index changed during query; retry")
         }
-        TxQueryError::Unavailable(_) => service_unavailable(e.to_string()),
         TxQueryError::Storage(_) => internal_error(e.to_string()),
     }
 }
