@@ -187,7 +187,7 @@ impl Worker {
         };
         let seed_pass = self.dispatch_script_live_seed_pass(&mut fence, &mut watermarks)?;
         match seed_pass {
-            SeedPass::Published | SeedPass::Discarded => return Ok(ReconcileAction::Progressed),
+            SeedPass::Progressed => return Ok(ReconcileAction::Progressed),
             SeedPass::Stall => return Ok(ReconcileAction::Stalled),
             SeedPass::Idle => {}
         }
