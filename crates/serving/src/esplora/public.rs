@@ -316,7 +316,7 @@ fn confirmed_block(
     let txid = transaction.txid();
     let record = ctx
         .chain
-        .block_by_height(status.height)
+        .block_by_hash(Hash256::from(status.hash))
         .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
     let render = ctx
         .try_acquire_block_render()
