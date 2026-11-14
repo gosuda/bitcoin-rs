@@ -140,11 +140,6 @@ impl SnapshotManifest {
                 });
             }
         }
-        if self.sizes.len() != ARTIFACT_SLOTS || self.hashes.len() != ARTIFACT_SLOTS {
-            return Err(ManifestError::Artifacts(
-                "size and hash tables need 5 slots",
-            ));
-        }
         if self.sizes[UTXO_SLOT] == 0 {
             return Err(ManifestError::Artifacts("the UTXO artifact has no size"));
         }
