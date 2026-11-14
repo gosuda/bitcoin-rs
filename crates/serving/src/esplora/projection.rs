@@ -134,20 +134,12 @@ impl<'a> Projection<'a> {
     pub(super) fn required_transaction(
         &self,
         text_id: &str,
-    ) -> Result<(Tx, Option<Confirmation>, TxSource), (Response, TxSource)> {
-        let txid = Txid::from_str(text_id).map_err(|_| {
-            (
-                bad_request("txid must be 64 hex characters"),
-                TxSource::Confirmed,
-            )
-        })?;
-        match self
-            .transaction(&txid)
-            .map_err(|response| (response, TxSource::Confirmed))?
-        {
-            Some(found) => Ok(found),
-            None => Err((not_found(), TxSource::Joined)),
-        }
+    ) -> Result<(Tx, Option<Confirmation>), Response> {
+        let txid =
+            Txid::from_str(text_id).map_err(|_| bad_request("txid must be 64 hex characters"))?;
+        self.transaction(&txid)?
+            .map(|(tx, status, _)| (tx, status))
+            .ok_or_else(not_found)
     }
 
     pub(super) fn transaction(

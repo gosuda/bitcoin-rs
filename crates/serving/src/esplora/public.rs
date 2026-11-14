@@ -307,10 +307,7 @@ fn confirmed_block(
     ),
     Response,
 > {
-    let (transaction, Some(status), _) = Projection::new(ctx)
-        .required_transaction(id)
-        .map_err(|(response, _)| response)?
-    else {
+    let (transaction, Some(status)) = Projection::new(ctx).required_transaction(id)? else {
         return Err(not_found());
     };
     let txid = transaction.txid();
