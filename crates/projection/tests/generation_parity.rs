@@ -21,6 +21,21 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tempfile::tempdir;
 
 use crate::support::TestError;
+
+const SEGMENT_FAMILIES: [ColumnFamily; 6] = [
+    ColumnFamily::TxDir,
+    ColumnFamily::ScriptDict,
+    ColumnFamily::ScriptPost,
+    ColumnFamily::SpendDir,
+    ColumnFamily::ScriptStats,
+    ColumnFamily::Filters,
+];
+
+const SCAN_ALL: PrefixScanLimit = PrefixScanLimit {
+    max_rows: 100_000,
+    max_bytes: 64 << 20,
+};
+
 fn cross_block_script(height: u32) -> Bytes {
     let mut script = b"\x76\xa9\x14cross_block_spent_\x88\xac".to_vec();
     script[15] = u8::try_from(height & 0xff).unwrap_or(0);
@@ -179,56 +194,14 @@ fn compute_family_digest<S: KvStore>(
 #[test]
 fn bulk_and_live_generations_are_byte_identical() -> Result<(), TestError> {
     let blocks = create_synthetic_blocks(50);
-    let gen_id = 1u64;
-    let dir_b = tempdir()?;
-    let scratch_b = tempdir()?;
-    let store_b = RocksDbStore::open(dir_b.path())?;
-    let builder_b = BulkSegmentBuilder::new(
-        Arc::new(UnboundedBudget),
-        None,
-        scratch_b.path().to_path_buf(),
-    );
-    let coverage = builder_b
-        .build_and_ingest(&store_b, gen_id, &blocks)
-        .map_err(|e| e.to_string())?;
-
-    let dir_a = tempdir()?;
-    let scratch_a = tempdir()?;
-    let store_a = RocksDbStore::open(dir_a.path())?;
-
-    let mut tail_state = TailWriterState::new();
-    for block in &blocks {
-        let mut batch = store_a.new_batch();
-        append_tail_block(&mut batch, block, &mut tail_state, &NoSealedTxOrdinals)?;
-        store_a.write_durable(batch)?;
-    }
-
-    seal_tail_generation(
-        &store_a,
-        gen_id,
-        coverage.last_height,
-        IndexCapabilities::ALL,
-        scratch_a.path(),
-    )?;
-
-    let indexed_cfs = [
-        ColumnFamily::TxDir,
-        ColumnFamily::ScriptDict,
-        ColumnFamily::ScriptPost,
-        ColumnFamily::SpendDir,
-        ColumnFamily::ScriptStats,
-        ColumnFamily::Filters,
-    ];
-
-    for &cf in &indexed_cfs {
-        let (digest_a, rows_a) = compute_family_digest(&store_a, cf, gen_id)?;
-        let (digest_b, rows_b) = compute_family_digest(&store_b, cf, gen_id)?;
-        assert!(rows_a > 0, "{cf:?} has no sealed rows in the tail build");
+    for pair in tail_seal_and_bulk_family_digests(&blocks, 1)? {
+        assert!(pair.tail_rows > 0, "{:?} has no sealed rows", pair.family);
         assert_eq!(
-            rows_a, rows_b,
-            "{cf:?} row count differs between tail and bulk"
+            pair.tail_rows, pair.bulk_rows,
+            "{:?} row count differs between tail and bulk",
+            pair.family
         );
-        assert_eq!(digest_a, digest_b, "mismatch on {:?}", cf);
+        assert_eq!(pair.tail, pair.bulk, "mismatch on {:?}", pair.family);
     }
     Ok(())
 }
@@ -288,27 +261,24 @@ fn cross_block_spend_generation() -> Vec<CommittedBlock> {
     ]
 }
 
+fn append_tail_blocks<S: KvStore>(store: &S, blocks: &[CommittedBlock]) -> Result<(), TestError> {
+    let mut tail_state = TailWriterState::new();
+    for block in blocks {
+        let mut batch = store.new_batch();
+        append_tail_block(&mut batch, block, &mut tail_state, &NoSealedTxOrdinals)?;
+        store.write_durable(batch)?;
+    }
+    Ok(())
+}
+
 fn tail_seal_and_bulk_family_digests(
     blocks: &[CommittedBlock],
     gen_id: u64,
 ) -> Result<Vec<FamilyDigestPair>, TestError> {
-    let indexed_cfs = [
-        ColumnFamily::TxDir,
-        ColumnFamily::ScriptDict,
-        ColumnFamily::ScriptPost,
-        ColumnFamily::SpendDir,
-        ColumnFamily::ScriptStats,
-        ColumnFamily::Filters,
-    ];
     let dir_tail = tempdir()?;
     let scratch_tail = tempdir()?;
     let store_tail = RocksDbStore::open(dir_tail.path())?;
-    let mut tail_state = TailWriterState::new();
-    for block in blocks {
-        let mut batch = store_tail.new_batch();
-        append_tail_block(&mut batch, block, &mut tail_state, &NoSealedTxOrdinals)?;
-        store_tail.write_durable(batch)?;
-    }
+    append_tail_blocks(&store_tail, blocks)?;
     let coverage_tail = Coverage::new(
         blocks.first().map_or(0, |b| b.height),
         blocks.last().map_or(0, |b| b.height),
@@ -336,7 +306,7 @@ fn tail_seal_and_bulk_family_digests(
     assert_eq!(coverage_tail, coverage_bulk);
 
     let mut pairs = Vec::new();
-    for &cf in &indexed_cfs {
+    for &cf in &SEGMENT_FAMILIES {
         let (tail, tail_rows) = compute_family_digest(&store_tail, cf, gen_id)?;
         let (bulk, bulk_rows) = compute_family_digest(&store_bulk, cf, gen_id)?;
         pairs.push(FamilyDigestPair {
@@ -494,10 +464,6 @@ fn script_history_pairs(
     view: &dyn TxIndexSnapshot,
     scripthash: ScriptHash,
 ) -> Result<Vec<ScriptHistoryPair>, TestError> {
-    const SCAN_ALL: PrefixScanLimit = PrefixScanLimit {
-        max_rows: 100_000,
-        max_bytes: 64 << 20,
-    };
     let scan = view.funding_rows(scripthash, SCAN_ALL)?;
     assert!(scan.complete, "the history scan must be complete");
     let mut pairs = Vec::new();
@@ -571,12 +537,7 @@ fn empty_script_history_matches_bulk_and_live() -> Result<(), TestError> {
         let dir = tempdir()?;
         let scratch = tempdir()?;
         let store = Arc::new(RocksDbStore::open(dir.path())?);
-        let mut tail_state = TailWriterState::new();
-        for block in &blocks {
-            let mut batch = store.new_batch();
-            append_tail_block(&mut batch, block, &mut tail_state, &NoSealedTxOrdinals)?;
-            store.write_durable(batch)?;
-        }
+        append_tail_blocks(store.as_ref(), &blocks)?;
         seal_tail_generation(store.as_ref(), 1, 2, IndexCapabilities::ALL, scratch.path())?;
         let indexer = Indexer::new(Arc::clone(&store));
         let view = indexer.snapshot()?;
@@ -783,16 +744,8 @@ fn run_stream_build(
     }
     stream.finish(&store).map_err(|e| e.to_string())?;
     let spills = stream.total_runs_spilled();
-    let cfs = [
-        ColumnFamily::TxDir,
-        ColumnFamily::ScriptDict,
-        ColumnFamily::ScriptPost,
-        ColumnFamily::SpendDir,
-        ColumnFamily::ScriptStats,
-        ColumnFamily::Filters,
-    ];
     let mut digests = Vec::new();
-    for &cf in &cfs {
+    for &cf in &SEGMENT_FAMILIES {
         let digest = compute_family_digest(&store, cf, gen_id)?;
         assert!(
             digest.1 > 0,
@@ -1126,31 +1079,20 @@ fn count_rows<S: KvStore>(store: &S, cf: ColumnFamily, prefix: &[u8]) -> Result<
 
 fn family_totals<S: KvStore>(store: &S) -> Result<Vec<(ColumnFamily, u64)>, TestError> {
     let mut out = Vec::new();
-    for cf in [
-        ColumnFamily::TxDir,
-        ColumnFamily::ScriptDict,
-        ColumnFamily::ScriptPost,
-        ColumnFamily::SpendDir,
-        ColumnFamily::ScriptStats,
-        ColumnFamily::Filters,
-        ColumnFamily::IdxMeta,
-    ] {
+    for &cf in &SEGMENT_FAMILIES {
         out.push((cf, count_rows(store, cf, &[])?));
     }
+    out.push((
+        ColumnFamily::IdxMeta,
+        count_rows(store, ColumnFamily::IdxMeta, &[])?,
+    ));
     Ok(out)
 }
 
 fn gen_zero_totals<S: KvStore>(store: &S) -> Result<Vec<(ColumnFamily, u64)>, TestError> {
     let prefix = 0u64.to_be_bytes();
     let mut out = Vec::new();
-    for cf in [
-        ColumnFamily::TxDir,
-        ColumnFamily::ScriptDict,
-        ColumnFamily::ScriptPost,
-        ColumnFamily::SpendDir,
-        ColumnFamily::ScriptStats,
-        ColumnFamily::Filters,
-    ] {
+    for &cf in &SEGMENT_FAMILIES {
         out.push((cf, count_rows(store, cf, &prefix)?));
     }
     Ok(out)
@@ -1203,10 +1145,6 @@ fn scan_pairs(rows: Vec<TxIndexScanRow>) -> Vec<(u32, Vec<u8>)> {
 fn published_bulk_generation_needs_no_reindex_on_open() -> Result<(), TestError> {
     const HEIGHTS: u32 = 300;
     const GEN_ID: u64 = 1;
-    const SCAN_ALL: PrefixScanLimit = PrefixScanLimit {
-        max_rows: 100_000,
-        max_bytes: 64 << 20,
-    };
     let chain = create_spend_chain(HEIGHTS);
     let caps = IndexCapabilities::HISTORICAL.with_compact_filters(true);
 
@@ -1288,12 +1226,7 @@ fn published_bulk_generation_needs_no_reindex_on_open() -> Result<(), TestError>
     let dir_live = tempdir()?;
     let scratch_live = tempdir()?;
     let live = Arc::new(RocksDbStore::open(dir_live.path())?);
-    let mut tail_state = TailWriterState::new();
-    for block in &chain.blocks {
-        let mut batch = live.new_batch();
-        append_tail_block(&mut batch, block, &mut tail_state, &NoSealedTxOrdinals)?;
-        live.write_durable(batch)?;
-    }
+    append_tail_blocks(live.as_ref(), &chain.blocks)?;
     seal_tail_generation(
         live.as_ref(),
         GEN_ID,
@@ -1301,14 +1234,7 @@ fn published_bulk_generation_needs_no_reindex_on_open() -> Result<(), TestError>
         caps,
         scratch_live.path(),
     )?;
-    for cf in [
-        ColumnFamily::TxDir,
-        ColumnFamily::ScriptDict,
-        ColumnFamily::ScriptPost,
-        ColumnFamily::SpendDir,
-        ColumnFamily::ScriptStats,
-        ColumnFamily::Filters,
-    ] {
+    for &cf in &SEGMENT_FAMILIES {
         let (sealed_digest, sealed_rows) = compute_family_digest(store.as_ref(), cf, GEN_ID)?;
         let (live_digest, live_rows) = compute_family_digest(live.as_ref(), cf, GEN_ID)?;
         assert!(sealed_rows > 0, "{cf:?} has no sealed rows after open");
