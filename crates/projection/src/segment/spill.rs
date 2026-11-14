@@ -92,17 +92,39 @@ impl<'a> SpillSet<'a> {
     }
 
     fn push(&self, id: usize, key: Vec<u8>, value: Vec<u8>) -> std::io::Result<()> {
-        let bytes = u64::try_from(key.len().saturating_add(value.len())).unwrap_or(u64::MAX);
-        while self.budget.current_bytes().saturating_add(bytes) > self.budget.limit
-            && self.spill_largest()?
-        {}
-        {
+        let payload_bytes =
+            u64::try_from(key.capacity().saturating_add(value.capacity())).unwrap_or(u64::MAX);
+        loop {
+            let (mut replacement, slot_bytes) = {
+                let sorters = self.sorters.borrow();
+                let buffer = &sorters[id].buffer;
+                if buffer.len() == buffer.capacity() {
+                    let capacity = buffer.capacity().saturating_mul(2).max(4);
+                    let replacement = Vec::with_capacity(capacity);
+                    let slots = replacement.capacity().saturating_sub(buffer.capacity());
+                    let bytes = slots.saturating_mul(std::mem::size_of::<(Vec<u8>, Vec<u8>)>());
+                    (Some(replacement), u64::try_from(bytes).unwrap_or(u64::MAX))
+                } else {
+                    (None, 0)
+                }
+            };
+            let bytes = payload_bytes.saturating_add(slot_bytes);
+            if self.budget.current_bytes().saturating_add(bytes) > self.budget.limit
+                && self.spill_largest()?
+            {
+                continue;
+            }
             let mut sorters = self.sorters.borrow_mut();
             let state = &mut sorters[id];
+            if let Some(mut buffer) = replacement.take() {
+                buffer.append(&mut state.buffer);
+                state.buffer = buffer;
+            }
             state.buffer.push((key, value));
             state.buffered = state.buffered.saturating_add(bytes);
+            self.budget.add(bytes);
+            break;
         }
-        self.budget.add(bytes);
         Ok(())
     }
 
@@ -155,9 +177,8 @@ impl<'a> SpillSet<'a> {
         let mut sorters = self.sorters.borrow_mut();
         let state = &mut sorters[id];
         state.runs.push(RunFile { path });
-        self.budget.sub(state.buffered);
-        state.buffer.clear();
-        state.buffered = 0;
+        drop(std::mem::take(&mut state.buffer));
+        self.budget.sub(std::mem::take(&mut state.buffered));
         Ok(())
     }
 
@@ -176,6 +197,8 @@ impl Drop for SpillSet<'_> {
             return;
         };
         for state in sorters.iter_mut() {
+            drop(std::mem::take(&mut state.buffer));
+            self.budget.sub(std::mem::take(&mut state.buffered));
             for run in std::mem::take(&mut state.runs) {
                 let _unused = std::fs::remove_file(&run.path);
             }
