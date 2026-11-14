@@ -529,7 +529,12 @@ fn index_bundle_directive(
     match (&config.indexes.bundle_import, &config.indexes.bundle_export) {
         (None, None) => match config.assumeutxo_manifest.as_deref() {
             Some(path) => {
-                manifest_attach_directive(path, config.network, derived_index_capabilities(config))
+                let path = config.data_dir.join(path);
+                Ok(manifest_attach_directive(
+                    &path,
+                    config.network,
+                    derived_index_capabilities(config),
+                ))
             }
             None => Ok(IndexBundleDirective::None),
         },
@@ -542,23 +547,23 @@ fn manifest_attach_directive(
     manifest_path: &std::path::Path,
     network: bitcoin_rs_consensus::primitives::Network,
     enabled: bitcoin_rs_projection::IndexCapabilities,
-) -> Result<bitcoin_rs_projection::portable::IndexBundleDirective, ConfigError> {
+) -> bitcoin_rs_projection::portable::IndexBundleDirective {
     use bitcoin_rs_consensus::primitives::IndexArtifactCapability;
     use bitcoin_rs_execution::manifest::CapabilityTrust;
     use bitcoin_rs_projection::IndexCapability;
     use bitcoin_rs_projection::portable::{IndexBundleDirective, ManifestArtifactTarget};
-    let bytes = match read_bounded_manifest(manifest_path) {
+    let bytes = match crate::snapshot::read_bounded_manifest(manifest_path) {
         Ok(b) => b,
         Err(err) => {
             tracing::debug!(path = %manifest_path.display(), %err, "could not read manifest for index directive");
-            return Ok(IndexBundleDirective::None);
+            return IndexBundleDirective::None;
         }
     };
     let manifest = match bitcoin_rs_execution::manifest::SnapshotManifest::parse(&bytes) {
         Ok(m) => m,
         Err(err) => {
             tracing::debug!(path = %manifest_path.display(), %err, "could not parse manifest for index directive");
-            return Ok(IndexBundleDirective::None);
+            return IndexBundleDirective::None;
         }
     };
     if manifest.schema != bitcoin_rs_projection::index_format_version() {
@@ -567,14 +572,14 @@ fn manifest_attach_directive(
             manifest_schema = manifest.schema,
             "manifest schema differs from the node index format; no index artifact attach"
         );
-        return Ok(IndexBundleDirective::None);
+        return IndexBundleDirective::None;
     }
     let Some(anchor) = network.assume_utxo_for_height(manifest.base_height) else {
-        return Ok(IndexBundleDirective::None);
+        return IndexBundleDirective::None;
     };
     let genesis = network.genesis_block_hash().to_le_bytes();
     let Ok(trust) = manifest.verify_against_anchor(network, genesis, anchor) else {
-        return Ok(IndexBundleDirective::None);
+        return IndexBundleDirective::None;
     };
     let dir = manifest_path.parent().unwrap_or(manifest_path);
     let mut attachments = Vec::new();
@@ -618,24 +623,7 @@ fn manifest_attach_directive(
             attachments.push(directive);
         }
     }
-    Ok(IndexBundleDirective::Manifest(attachments))
-}
-
-fn read_bounded_manifest(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    use std::io::Read as _;
-
-    const MAX_MANIFEST_BYTES: u64 = 1 << 20;
-    let file = std::fs::File::open(path)?;
-    let mut bytes = Vec::new();
-    file.take(MAX_MANIFEST_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_MANIFEST_BYTES) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "manifest is larger than 1 MiB",
-        ));
-    }
-    Ok(bytes)
+    IndexBundleDirective::Manifest(attachments)
 }
 
 struct DerivedIndexComposer {

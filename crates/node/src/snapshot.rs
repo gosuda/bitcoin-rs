@@ -57,10 +57,8 @@ pub(crate) struct SnapshotControl {
     data_dir: PathBuf,
     network: Network,
     script_live_seed: Option<Arc<bitcoin_rs_projection::snapshot_seed::ScriptLiveSeedState>>,
-    pub(crate) derived_index_runtime:
-        Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexRuntime>>,
-    pub(crate) derived_index_status:
-        Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexCapability>>,
+    derived_index_runtime: Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexRuntime>>,
+    derived_index_status: Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexCapability>>,
     import: Mutex<()>,
     export: Mutex<()>,
 }
@@ -230,7 +228,7 @@ impl From<SnapshotImportError> for SnapshotControlError {
     }
 }
 
-fn read_bounded_manifest(path: &Path) -> Result<Vec<u8>, SnapshotImportError> {
+pub(crate) fn read_bounded_manifest(path: &Path) -> Result<Vec<u8>, SnapshotImportError> {
     const MAX_MANIFEST_BYTES: u64 = 1 << 20;
     let file = File::open(path)?;
     let mut bytes = Vec::new();
@@ -481,11 +479,7 @@ impl SnapshotControl {
 
     pub(crate) fn import(&self, input: &Path) -> Result<SnapshotImport, SnapshotImportError> {
         let _permit = self.claim_import()?;
-        let path = if input.is_absolute() {
-            input.to_path_buf()
-        } else {
-            self.data_dir.join(input)
-        };
+        let path = self.data_dir.join(input);
         let path = path.canonicalize()?;
         if !path.metadata()?.is_file() {
             return Err(SnapshotImportError::NotRegular);
@@ -629,11 +623,7 @@ impl SnapshotControl {
         path: &Path,
     ) -> Result<SnapshotImport, SnapshotImportError> {
         let _permit = self.claim_import()?;
-        let path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.data_dir.join(path)
-        };
+        let path = self.data_dir.join(path);
         let path = path.canonicalize()?;
         if !path.metadata()?.is_file() {
             return Err(SnapshotImportError::NotRegular);
@@ -788,7 +778,8 @@ impl SnapshotControl {
                 base_hash,
                 ..
             } => {
-                let bytes = read_bounded_manifest(path)?;
+                let path = self.data_dir.join(path);
+                let bytes = read_bounded_manifest(&path)?;
                 let manifest = bitcoin_rs_execution::manifest::SnapshotManifest::parse(&bytes)?;
                 if manifest.base_height == base_height
                     && manifest.base_hash == base_hash.to_le_bytes()

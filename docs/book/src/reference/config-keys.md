@@ -26,6 +26,7 @@ Environment booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `of
 | --- | --- | --- | --- |
 | `network` | `BITCOIN_RS_NETWORK` | no | `mainnet` |
 | `data_dir` | `BITCOIN_RS_DATA_DIR` | no | `.bitcoin-rs` |
+| `assumeutxo_manifest` | `BITCOIN_RS_ASSUMEUTXO_MANIFEST` | no | unset |
 | `persist_mempool` | `BITCOIN_RS_PERSIST_MEMPOOL` | no | `true` |
 | `mempool_snapshot_max_mb` | `BITCOIN_RS_MEMPOOL_SNAPSHOT_MAX_MB` | no | `64` |
 | `mempool_snapshot_restore_timeout_secs` | `BITCOIN_RS_MEMPOOL_SNAPSHOT_RESTORE_TIMEOUT_SECS` | no | `max(60, max_mb)` |
@@ -34,6 +35,8 @@ Environment booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `of
 | `prune_target_mb` | `BITCOIN_RS_PRUNE_TARGET_MB` | `prune` | `0` |
 
 `storage_backend` selects the underlying key-value engine. It accepts `rocksdb` (the default, always compiled), `surrealkv` (when compiled with cargo feature `surrealkv`), and `mdbx` (when compiled with cargo feature `mdbx`).
+
+`assumeutxo_manifest` takes a snapshot manifest file path for startup admission. Relative paths resolve under `data_dir`; absolute paths are used as given. Its CLI form is `--assumeutxo-manifest`.
 
 ### Peer-to-peer
 

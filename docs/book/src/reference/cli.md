@@ -22,6 +22,7 @@ Boolean flags come in two forms. Some require an explicit true or false value. O
 | --- | --- | --- | --- |
 | `--network` | `mainnet`, `main`, `bitcoin`, `testnet3`, `test`, `testnet`, `testnet4`, `signet`, `regtest`, `drynet4` | `mainnet` | Selects chain parameters, default ports, and magic. |
 | `--data-dir` | path | `.bitcoin-rs` | Holds chainstate, indexes, cookie, and mempool snapshot. |
+| `--assumeutxo-manifest` | manifest file path | unset | Admits an AssumeUTXO snapshot manifest at startup; relative paths resolve under `--data-dir`, and absolute paths are used as given. |
 | `--persist-mempool` | `true` or `false` | `true` | Saves the pool on clean shutdown and restores it at startup. |
 | `--mempool-snapshot-max-mb` | MiB | `64` | Caps the snapshot file and restore work. |
 | `--mempool-snapshot-restore-timeout-secs` | seconds | `max(60, max-mb)` | Deadline for restoring and revalidating the snapshot. |
