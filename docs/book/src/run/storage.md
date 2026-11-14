@@ -20,7 +20,7 @@ error: invalid value 'bogus' for '--storage-backend <STORAGE_BACKEND>': unsuppor
 ```
 Retired backends `fjall` and `redb` are rejected before startup with the same `unsupported storage backend <value>` error.
 
-If a data directory was initialized by one engine and reopened with another, the node detects the engine mismatch and refuses startup with `<namespace> was created by <found>; start with --storage-backend <found> or convert with bitcoin-rs-storage-convert` (use `tools/storage-convert --from <old> --to <new> --to-engine <engine>` to migrate between engines).
+If a data directory was initialized by one engine and reopened with another, the node detects the engine mismatch and refuses startup with `<namespace> was created by <found>; start with --storage-backend <found> or convert with bitcoin-rs-storage-convert` (use `bitcoin-rs-storage-convert --from <old> --to <new> --to-engine <engine>` to migrate between engines).
 
 In prior builds where `rocksdb` was an optional feature, running without `--features rocksdb` produced:
 

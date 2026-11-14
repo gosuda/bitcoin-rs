@@ -95,7 +95,7 @@ Loading it fails because the freshly mined base is not a compiled pin:
  2de233db...721773 is not pinned for Regtest"}}
 ```
 
-That refusal is the pin check doing its job: regtest pins describe one deterministic chain (heights 110 and 200), not whatever a local miner produced. The dump side is unrestricted: `dumptxoutset` writes whatever the applied tip holds, to an fsynced temporary sibling that is renamed into place without replacement; a destination under the `assumeutxo/` namespace is refused so an export can never overwrite recovery state. The successful full read of a genuine Core-produced regtest-200 snapshot, including the commitment and a 200-coin CoinStats reconstruction, is covered by `crates/storage/src/utxo/core_snapshot/tests.rs::genuine_core_dump_matches_compiled_anchor_and_full_state` (fixture `crates/storage/tests/fixtures/core-v2/core200.dat`, 14,439 bytes). That test ran at HEAD for this chapter.
+That refusal is the pin check doing its job: regtest pins describe one deterministic chain (heights 110 and 200), not whatever a local miner produced. The dump side is unrestricted: `dumptxoutset` writes whatever the applied tip holds, to an fsynced temporary sibling that is renamed into place without replacement; any existing destination (including named pipes) is refused atomically so an export never overwrites existing data. The successful full read of a genuine Core-produced regtest-200 snapshot, including the commitment and a 200-coin CoinStats reconstruction, is covered by `crates/storage/src/utxo/core_snapshot/tests.rs::genuine_core_dump_matches_compiled_anchor_and_full_state` (fixture `crates/storage/tests/fixtures/core-v2/core200.dat`, 14,439 bytes). That test ran at HEAD for this chapter.
 
 ## Failure modes
 
