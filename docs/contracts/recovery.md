@@ -73,12 +73,13 @@ struct DurableHead {
 - No chainstate journal exists; coins and the durable head commit together in the engine store.
 - `commit_id` is strictly monotonic on disconnect as well as on connect.
 - A reorg lowers `height`, never `commit_id`.
-- AssumeUTXO activation and historical checkpoint updates use the same transition reservation; activation publishes the snapshot-base checkpoint in the checkpoint root and writes no archive.
+- AssumeUTXO activation and historical checkpoint updates use the same transition reservation.
+- Activation publishes the snapshot-base checkpoint in the checkpoint root. It writes no immutable coin or header snapshot archive.
 - The manager holds a required persistent data directory.
 - Activation checkpoint writes, full-revalidation marker checks, and historical checkpoint maintenance always use the data directory.
 - The required path guarantees a directory was supplied, not filesystem health.
 - Missing or corrupt files fail at use.
-- Activation first syncs immutable `coins.dat` and `headers.dat` under `assumeutxo/<base_hash>/`.
+- Activation publishes the snapshot-base checkpoint directly in the checkpoint root and writes no `coins.dat` or `headers.dat` snapshot archive.
 - Activation then commits the pinned base, count, and lifecycle in the head.
 - An unreferenced import is an orphan, never a checkpoint or activation authority.
 - Interrupted activation recovery MUST sync orphan checkpoint deletions in the checkpoint root before it clears the activation marker. A sync failure MUST retain the marker for retry.
@@ -101,7 +102,7 @@ struct DurableHead {
 - Refusal includes a recheck under transition exclusion before committing its anchor.
 - The marker and pre-activation head remain intact on refusal.
 - Snapshot recovery validates the root network pin.
-- Snapshot recovery restores a compatible checkpoint or verifies the immutable snapshot archive.
+- Snapshot recovery restores a compatible engine checkpoint. Active recovery requires no immutable snapshot archive (`coins.dat`/`headers.dat`).
 - Snapshot recovery replays the root-certified foreground suffix.
 - A full-revalidation marker still overrides incremental recovery.
 - No pre-activation journal exists to extend a snapshot jump; the legacy journal marker directory is only read for a leftover full-revalidation marker.
