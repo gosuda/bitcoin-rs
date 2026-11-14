@@ -313,22 +313,7 @@ pub fn decode_undo_record_for_block(
         txids: &txids,
         max_script_size,
     };
-    let (_, mut derived) = block_outputs(&check)?;
-    let (_, same_block) = block_inputs(&check);
-    derived.retain(|outpoint| !same_block.contains(outpoint));
-    let restored: HashSet<OutPoint> = restores.iter().map(|add| add.outpoint).collect();
-    derived.retain(|outpoint| !restored.contains(outpoint));
-    let mut removes: Vec<OutPoint> = derived.into_iter().collect();
-    removes.sort_by(|a, b| {
-        let a_txid = a.txid;
-        let b_txid = b.txid;
-        let a_vout = a.vout;
-        let b_vout = b.vout;
-        a_txid
-            .as_bytes()
-            .cmp(b_txid.as_bytes())
-            .then_with(|| a_vout.cmp(&b_vout))
-    });
+    let removes = derive_removes(&check, &restores)?;
     Ok(UndoBatch::from_parts(restores, removes))
 }
 
@@ -684,11 +669,19 @@ pub fn load_block_undo_for_block(
     if height == 0 {
         return Ok(undo);
     }
-    let (_, mut derived) =
-        block_outputs(check).map_err(|source| UndoLoadError::Unreadable { hash, source })?;
+    let removes = derive_removes(check, undo.restores())
+        .map_err(|source| UndoLoadError::Unreadable { hash, source })?;
+    Ok(UndoBatch::from_parts(undo.into_restores(), removes))
+}
+
+fn derive_removes(
+    check: &BlockUndoCheck<'_>,
+    restores: &[UtxoAdd],
+) -> Result<Vec<OutPoint>, UndoCodecError> {
+    let (_, mut derived) = block_outputs(check)?;
     let (_, same_block) = block_inputs(check);
     derived.retain(|outpoint| !same_block.contains(outpoint));
-    let restored: HashSet<OutPoint> = undo.restores().iter().map(|add| add.outpoint).collect();
+    let restored: HashSet<OutPoint> = restores.iter().map(|add| add.outpoint).collect();
     derived.retain(|outpoint| !restored.contains(outpoint));
     let mut removes: Vec<OutPoint> = derived.into_iter().collect();
     removes.sort_by(|a, b| {
@@ -701,7 +694,7 @@ pub fn load_block_undo_for_block(
             .cmp(b_txid.as_bytes())
             .then_with(|| a_vout.cmp(&b_vout))
     });
-    Ok(UndoBatch::from_parts(undo.into_restores(), removes))
+    Ok(removes)
 }
 
 fn validate_undo_for_block(
