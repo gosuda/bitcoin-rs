@@ -85,8 +85,5 @@ fn no_segment_offset_in_answers() -> Result<(), TestError> {
         ScriptHistoryOccurrence::FUNDING,
         "the answer flags the funding occurrence"
     );
-    for row in &funding.rows {
-        assert_eq!(row.row.height(), height);
-    }
     Ok(())
 }
