@@ -52,15 +52,16 @@ bitcoin-rs-e2e        = { path = "e2e",               version = "0.15.0" }
 mimalloc = { version = ">=0.1.50, <0.2", default-features = false }
 
 # --- Stratum V2 transport ------------------------------------------------------
-# Pinned SRI release family (v1.12.0): these crates are semver-major-coupled
-# and their wire layouts MUST move together. noise_sv2 2.0.0 is admitted with
-# the narrow duplicate-crypto exception documented in deny.toml.
-binary_sv2          = "=7.0.0"
-framing_sv2         = "=8.0.0"
-codec_sv2           = { version = "=7.0.0" }
-noise_sv2           = "=2.0.0"
-mining_sv2          = "=12.0.0"
-common_messages_sv2 = "=9.0.0"
+# Pinned SRI release family (v1.13.0): these crates are semver-major-coupled
+# and their wire layouts MUST move together. codec_sv2 8.1.0 is the v1.13.0
+# tag plus the in-place-encoder patch release. noise_sv2 2.1.0 is admitted
+# with the narrow duplicate-crypto exception documented in deny.toml.
+binary_sv2          = "=8.0.0"
+framing_sv2         = "=9.0.0"
+codec_sv2           = { version = "=8.1.0" }
+noise_sv2           = "=2.1.0"
+mining_sv2          = "=13.0.0"
+common_messages_sv2 = "=10.0.0"
 
 # Authority-key zeroization used by the SV2 Noise boundary.
 zeroize = { version = ">=1.8.2, <2", default-features = false, features = ["alloc"] }
@@ -80,19 +81,15 @@ bitcoin = { version = ">=0.32.9, <0.33", default-features = false, features = [
 # bitcoinkernel 0.3 line (libbitcoinkernel-sys 0.4). No features exposed.
 bitcoinkernel = { version = ">=0.3, <0.4", default-features = false }
 
-# secp256k1 0.29 line — pinned to the same major bitcoin 0.32 embeds, so the
-# graph carries exactly one secp256k1/secp256k1-sys (deny.toml bans deny).
-# NOTE: 0.29 predates the 0.31 feature rename (`rand-std`, not `rand`) and has
-# no `serde` feature; nothing in-tree serializes secp256k1 types directly.
-secp256k1 = { version = ">=0.29.1, <0.30", default-features = false, features = [
-    "std", "alloc", "recovery", "rand-std", "global-context",
+secp256k1 = { version = ">=0.33.1, <0.34", default-features = false, features = [
+    "std", "alloc", "recovery", "rand", "global-context",
 ] }
 
 # sha2 0.11: default features are alloc+oid; no std/asm feature is exposed.
-base64 = "=0.22.1"
-sha3 = { version = ">=0.11, <0.12", default-features = false }
+base64 = { version = ">=0.23.1, <0.24", default-features = false, features = ["std"] }
+sha3 = { version = ">=0.12, <0.13", default-features = false }
 sha2 = { version = ">=0.11, <0.12", default-features = false }
-bitcoin_hashes = { version = ">=0.14, <0.15", default-features = false, features = [
+bitcoin_hashes = { version = ">=1.2.0, <1.3", default-features = false, features = [
     "alloc", "std",
 ] }
 
@@ -138,8 +135,10 @@ slab = { version = ">=0.4.12, <0.5", default-features = false, features = [
 # arc-swap (registry name uses hyphen, NOT underscore).
 arc-swap = { version = ">=1.9.1, <2", default-features = false }
 
-# parking_lot 0.12 line (0.13 does not exist).
-parking_lot = { version = ">=0.12.5, <0.13", default-features = false, features = [
+# parking_lot: workspace uses 0.13; transitive crates still pin the 0.12 line
+# (rust-rocksdb, signet-libmdbx, surrealkv, quick_cache, affinitypool), an
+# exact-version duplicate split approved in deny.toml.
+parking_lot = { version = ">=0.13.0, <0.14", default-features = false, features = [
     "arc_lock", "send_guard",
 ] }
 
@@ -235,8 +234,8 @@ thiserror = { version = ">=2.0.18, <3",       default-features = false, features
 zmq       = { version = ">=0.10, <0.11", default-features = false }
 
 # --- Test / bench -------------------------------------------------------------
-proptest        = { version = ">=1.11, <1.12", default-features = false, features = ["std"] }
-proptest-state-machine = "=0.8.0"
+proptest        = { version = ">=1.12, <1.13", default-features = false, features = ["std"] }
+proptest-state-machine = "=0.9.0"
 tempfile        = { version = ">=3.20.0, <4" }
 
 # ============================================================================

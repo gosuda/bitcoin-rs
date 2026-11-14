@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use bitcoin_rs_projection::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
 };
-use parking_lot::{Mutex, const_mutex};
+use parking_lot::Mutex;
 
 use super::{
     CorpusIdentity, EvidenceIdentity, MetricsServer, PROMETHEUS_HANDLE, Sha256Hex,
@@ -15,7 +15,7 @@ use super::{
     start_metrics,
 };
 
-pub(super) static SERVER_TEST_LOCK: Mutex<()> = const_mutex(());
+pub(super) static SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 impl MetricsServer {
     pub(crate) fn with_worker_for_test(worker: thread::JoinHandle<()>) -> Self {

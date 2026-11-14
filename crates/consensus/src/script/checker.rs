@@ -112,17 +112,13 @@ impl<'a> TxSignatureChecker<'a> {
             if sig_cache.contains(&key) {
                 return Ok(true);
             }
-            let verified = secp256k1::SECP256K1
-                .verify_ecdsa(&message, &ecdsa_sig, &secp_pubkey)
-                .is_ok();
+            let verified = secp256k1::ecdsa::verify(&ecdsa_sig, message, &secp_pubkey).is_ok();
             if verified {
                 sig_cache.insert(key);
             }
             return Ok(verified);
         }
-        let verified = secp256k1::SECP256K1
-            .verify_ecdsa(&message, &ecdsa_sig, &secp_pubkey)
-            .is_ok();
+        let verified = secp256k1::ecdsa::verify(&ecdsa_sig, message, &secp_pubkey).is_ok();
 
         Ok(verified)
     }
@@ -167,14 +163,15 @@ impl<'a> TxSignatureChecker<'a> {
             ));
         }
 
-        let xonly_pubkey = XOnlyPublicKey::from_slice(pubkey)
+        let xonly_pubkey = <[u8; 32]>::try_from(pubkey)
+            .map_err(|_| secp256k1::Error::InvalidPublicKey)
+            .and_then(XOnlyPublicKey::from_byte_array)
             .map_err(|e| ScriptError::Verification(format!("invalid Schnorr public key: {e}")))?;
 
-        let schnorr_sig =
-            secp256k1::schnorr::Signature::from_slice(schnorr_sig_bytes).map_err(|_| {
-                ScriptError::Invalid {
-                    code: ScriptErrCode::SchnorrSig,
-                }
+        let schnorr_sig = <[u8; 64]>::try_from(schnorr_sig_bytes)
+            .map(secp256k1::schnorr::Signature::from_byte_array)
+            .map_err(|_| ScriptError::Invalid {
+                code: ScriptErrCode::SchnorrSig,
             })?;
 
         let leaf_codesep = leaf_hash.map(|lh| (*lh, codesep_pos));
@@ -189,14 +186,16 @@ impl<'a> TxSignatureChecker<'a> {
             )
             .map_err(|e| ScriptError::Verification(e.to_string()))?;
 
-        let message = Message::from_digest(*sighash.as_byte_array());
         if let Some(sig_cache) = self.sig_cache {
             let key = SignatureCache::schnorr_key(sighash.as_byte_array(), sig, pubkey);
             if sig_cache.contains(&key) {
                 return Ok(true);
             }
-            return match secp256k1::SECP256K1.verify_schnorr(&schnorr_sig, &message, &xonly_pubkey)
-            {
+            return match secp256k1::schnorr::verify(
+                &schnorr_sig,
+                sighash.as_byte_array(),
+                &xonly_pubkey,
+            ) {
                 Ok(()) => {
                     sig_cache.insert(key);
                     Ok(true)
@@ -206,8 +205,7 @@ impl<'a> TxSignatureChecker<'a> {
                 }),
             };
         }
-        secp256k1::SECP256K1
-            .verify_schnorr(&schnorr_sig, &message, &xonly_pubkey)
+        secp256k1::schnorr::verify(&schnorr_sig, sighash.as_byte_array(), &xonly_pubkey)
             .map(|()| true)
             .map_err(|_| ScriptError::Invalid {
                 code: ScriptErrCode::SchnorrSig,

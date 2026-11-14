@@ -532,7 +532,7 @@ fn standard_job_frame(
     let msg = NewMiningJob {
         channel_id,
         job_id: job.id().get(),
-        min_ntime: Sv2Option::new(match delivery {
+        ntime_start: Sv2Option::new(match delivery {
             Delivery::Future => None,
             Delivery::Active => Some(job.ntime()),
         }),
@@ -568,7 +568,7 @@ fn extended_job_frame(
     let msg = NewExtendedMiningJob {
         channel_id,
         job_id: job.id().get(),
-        min_ntime: Sv2Option::new(match delivery {
+        ntime_start: Sv2Option::new(match delivery {
             Delivery::Future => None,
             Delivery::Active => Some(job.ntime()),
         }),
@@ -591,7 +591,7 @@ fn prev_hash_frame(channel_id: u32, job: &Job) -> Result<Frame, SessionError> {
         channel_id,
         job_id: job.id().get(),
         prev_hash: U256::from(&prev),
-        min_ntime: job.ntime(),
+        ntime_start: job.ntime(),
         nbits: job.bits().to_consensus(),
     };
     frame_of(
@@ -1296,7 +1296,7 @@ impl ProtocolSession {
             CHANNEL_BIT_SET_TARGET,
             SetTarget {
                 channel_id: id,
-                maximum_target: U256::from(&le),
+                target: U256::from(&le),
             },
         )
     }
@@ -1332,7 +1332,7 @@ impl ProtocolSession {
             (
                 msg.channel_id,
                 msg.nominal_hash_rate,
-                *msg.maximum_target.as_array(),
+                *msg.max_target.as_array(),
             )
         };
         let refusal = if !self.channels.contains_key(&channel_id) {

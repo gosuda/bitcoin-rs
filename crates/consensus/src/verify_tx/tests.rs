@@ -197,17 +197,17 @@ fn verify_transaction_routes_taproot_spends_to_interpreter() {
 #[test]
 #[cfg(not(feature = "kernel"))]
 fn verify_transaction_accepts_valid_multi_input_taproot_keypath() {
-    use secp256k1::{Keypair, Message, Scalar, Secp256k1, SecretKey, XOnlyPublicKey};
+    use secp256k1::{Keypair, Scalar, SecretKey, XOnlyPublicKey};
     use sha2::{Digest, Sha256};
 
-    let secp = Secp256k1::new();
     let seeds = [1u8, 2u8];
     let mut keypairs = Vec::new();
     let mut prevouts = Vec::new();
     let mut outpoints = Vec::new();
     for (index, seed) in seeds.into_iter().enumerate() {
-        let secret = SecretKey::from_slice(&[seed; 32]).unwrap_or_else(|_| panic!("secret key"));
-        let keypair = Keypair::from_secret_key(&secp, &secret);
+        let secret =
+            SecretKey::from_secret_bytes([seed; 32]).unwrap_or_else(|_| panic!("secret key"));
+        let keypair = Keypair::from_secret_key(&secret);
         let (xonly, _) = XOnlyPublicKey::from_keypair(&keypair);
         let tag = {
             let mut h = Sha256::new();
@@ -217,12 +217,12 @@ fn verify_transaction_accepts_valid_multi_input_taproot_keypath() {
         let mut tweak_hash = Sha256::new();
         tweak_hash.update(tag);
         tweak_hash.update(tag);
-        tweak_hash.update(xonly.serialize());
+        tweak_hash.update(xonly.to_byte_array());
         tweak_hash.update([0u8; 32]);
         let tweak_arr: [u8; 32] = tweak_hash.finalize().into();
         let tweak = Scalar::from_be_bytes(tweak_arr).unwrap_or_else(|_| panic!("tweak scalar"));
         let tweaked_keypair = keypair
-            .add_xonly_tweak(&secp, &tweak)
+            .add_xonly_tweak(&tweak)
             .unwrap_or_else(|e| panic!("tweak: {e}"));
         let (output_key, _) = XOnlyPublicKey::from_keypair(&tweaked_keypair);
         let outpoint = OutPoint {
@@ -233,7 +233,7 @@ fn verify_transaction_accepts_valid_multi_input_taproot_keypath() {
         let mut script_pubkey = Vec::with_capacity(34);
         script_pubkey.push(0x51);
         script_pubkey.push(0x20);
-        script_pubkey.extend_from_slice(&output_key.serialize());
+        script_pubkey.extend_from_slice(&output_key.to_byte_array());
         prevouts.push(TxOut {
             value: Amount::from_sat(50_000),
             script_pubkey: script_pubkey.into(),
@@ -264,9 +264,8 @@ fn verify_transaction_accepts_valid_multi_input_taproot_keypath() {
         let sighash = cache
             .taproot_signature_hash(input_idx, &prevouts, None, None, Sighash::Default)
             .unwrap_or_else(|_| panic!("taproot sighash"));
-        let message = Message::from_digest(sighash.to_le_bytes());
-        let signature = secp.sign_schnorr(&message, keypair);
-        tx.inputs[input_idx].witness = vec![signature.serialize().to_vec()].into();
+        let signature = secp256k1::schnorr::sign(sighash.as_byte_array(), keypair);
+        tx.inputs[input_idx].witness = vec![signature.to_byte_array().to_vec()].into();
     }
 
     let mut utxos = hashbrown::HashMap::new();
