@@ -44,7 +44,7 @@ Each capability stores its rows plus a watermark that pins them to an active-cha
 
 A coverage floor is a per-capability row that states the lowest height from which that capability's history is provable. `TxLookup` stores its floor under one key and `ScriptHistory` under another. A floor of zero means genesis; a positive floor means the history starts above genesis, from pruning or a seeded import. Historical prefix queries use these floors to refuse claims they cannot support.
 
-Row format has a version marker, currently row-format 8. `ScriptLive` rows have 43-byte keys: an 8-byte script-hash prefix followed by the outpoint. Each row value carries the full script hash and the coin's value, height, and coinbase flag in compact varint form, so readers exact-check the script without another store read: a prefix collision cannot return another script's output.
+Row format has a version marker, currently row-format 9. `ScriptLive` rows have 43-byte keys: an 8-byte script-hash prefix followed by the outpoint. Each row value carries the full script hash and the coin's value, height, and coinbase flag in compact varint form, so readers exact-check the script without another store read: a prefix collision cannot return another script's output.
 
 ## Strict reads and prefix reads
 
