@@ -1635,5 +1635,26 @@ fn manifest_import_resolves_a_datadir_relative_path() -> Result<(), TestError> {
         tip_identity(&state),
         Some((pinned.height, pinned.block_hash))
     );
+    state
+        .snapshots
+        .admit_startup_manifest(std::path::Path::new(relative_name))?;
+    let mismatched_name = "mismatched_snapshot_manifest.json";
+    let mismatched_path = write_manifest_bytes(
+        &data_dir,
+        pinned.height.saturating_add(1),
+        pinned.block_hash.to_le_bytes(),
+        pinned.hash_serialized.to_le_bytes(),
+        &core_bytes,
+    )?;
+    std::fs::rename(&mismatched_path, data_dir.join(mismatched_name))?;
+    let mismatched = state
+        .snapshots
+        .admit_startup_manifest(std::path::Path::new(mismatched_name));
+    assert!(matches!(
+        mismatched,
+        Err(SnapshotImportError::Activation(
+            AssumeUtxoError::AlreadyActive
+        ))
+    ));
     Ok(())
 }

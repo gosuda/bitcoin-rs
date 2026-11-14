@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Manifest import and startup attachment resolve relative paths under the data directory and use the same bounded manifest reader.
 - Streamed coin commitments reject rows whose key length or transaction ID differs from the encoded coin record.
 - Checkpoint restore copies recorded engine files into a newly claimed scratch directory. It leaves pre-existing directories and published file bytes unchanged.
 - Checkpoint manifests reject colons in engine-image path components, including drive-relative paths and alternate data-stream names.
