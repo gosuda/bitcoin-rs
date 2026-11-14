@@ -80,7 +80,10 @@ impl CompactFilterQuery for DerivedIndexQueryEngine {
                     Some((height, hash)) => read_filter(snapshot, height, hash)?.header,
                 };
                 for (height, hash) in hashes {
-                    if !emit(hash, read_filter(snapshot, height, hash)?) {
+                    self.check_view(view)?;
+                    let filter = read_filter(snapshot, height, hash)?;
+                    self.check_view(view)?;
+                    if !emit(hash, filter) {
                         return Ok(None);
                     }
                 }

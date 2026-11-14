@@ -127,6 +127,24 @@ impl QuerySnapshot {
 }
 
 impl TxIndexSnapshot for QuerySnapshot {
+    fn compact_filter(
+        &self,
+        height: u32,
+        hash: &[u8; 32],
+    ) -> Result<Option<crate::BasicFilter>, IndexError> {
+        let key = crate::segment::format::encode_filter_key(0, height);
+        let scan = self.scan_for(ColumnFamily::Filters, &key);
+        Ok(scan.rows.iter().find_map(|(_, value)| {
+            let (block_hash, filter_hash, header, filter) =
+                crate::segment::format::decode_filter_value(value)?;
+            (block_hash == *hash).then(|| crate::BasicFilter {
+                filter: filter.to_vec(),
+                hash: filter_hash,
+                header,
+            })
+        }))
+    }
+
     fn capability_watermark(
         &self,
         _capability: IndexCapability,
@@ -3768,7 +3786,7 @@ fn expired_revoked_and_replaced_views_fail_closed() -> Result<(), crate::portabl
     );
 
     let (view, snapshot) = engine.capture_view(IndexCapabilities::TX_LOOKUP)?;
-    let mut expired_view = view;
+    let expired_view = view;
     expired_view.expire_for_test();
     let expired = engine.with_view(
         IndexCapabilities::TX_LOOKUP,
@@ -3779,6 +3797,21 @@ fn expired_revoked_and_replaced_views_fail_closed() -> Result<(), crate::portabl
     assert!(
         matches!(expired, Err(TxQueryError::ExpiredView)),
         "a view past its deadline must fail closed: {expired:?}"
+    );
+
+    let (view, snapshot) = engine.capture_view(IndexCapabilities::TX_LOOKUP)?;
+    let expired_during_read = engine.with_view(
+        IndexCapabilities::TX_LOOKUP,
+        &view,
+        snapshot.as_ref(),
+        |_, view, _| {
+            view.expire_for_test();
+            Ok::<(), TxQueryError>(())
+        },
+    );
+    assert!(
+        matches!(expired_during_read, Err(TxQueryError::ExpiredView)),
+        "a view that expires during a read must not return success: {expired_during_read:?}"
     );
 
     let (view, snapshot) = engine.capture_view(IndexCapabilities::TX_LOOKUP)?;
@@ -3813,6 +3846,60 @@ fn expired_revoked_and_replaced_views_fail_closed() -> Result<(), crate::portabl
         matches!(refused, Err(TxQueryError::ExpiredView)),
         "a fresh capture on a revoked generation must refuse: {refused:?}"
     );
+    Ok(())
+}
+
+// QRY-07
+#[test]
+fn filter_stream_stops_after_callback_revokes_view() -> Result<(), crate::portable::TestError> {
+    use crate::CompactFilterQuery;
+
+    let genesis = Network::Regtest.genesis_block();
+    let child = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)
+        .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+    let stop = Hash256::from(child.block_hash());
+    let scans = [(0_u32, &genesis), (1_u32, &child)]
+        .into_iter()
+        .map(|(height, block)| {
+            let key = crate::segment::format::encode_filter_key(0, height);
+            scan_response(
+                ColumnFamily::Filters,
+                key,
+                vec![(
+                    key.to_vec(),
+                    crate::segment::format::encode_filter_value(
+                        block.block_hash().as_bytes(),
+                        &[0; 32],
+                        &[0; 32],
+                        &[0],
+                    ),
+                )],
+                true,
+            )
+        })
+        .collect();
+    let mut fixture = QueryFixture::new(FixtureConfig {
+        block: genesis,
+        retain_body: false,
+        scans,
+        watermark: None,
+        extra_blocks: vec![child],
+    })?;
+    let generation = Arc::new(Generation::new(1));
+    fixture
+        .engine
+        .set_generation_for_test(Arc::clone(&generation));
+    let mut emitted = 0;
+    let result = fixture.engine.for_each_filter(0, stop, 1, &mut |_, _| {
+        emitted += 1;
+        generation.revoke();
+        true
+    });
+    assert_eq!(
+        emitted, 1,
+        "the next filter must not be emitted after expiry"
+    );
+    assert!(matches!(result, Err(TxQueryError::ExpiredView)));
     Ok(())
 }
 
