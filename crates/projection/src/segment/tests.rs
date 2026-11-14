@@ -1426,6 +1426,110 @@ fn compact_filters_only_restart_resumes_past_the_sealed_filters() {
         "the next filter chains from the sealed header"
     );
 }
+
+// PRJ-03, PRJ-05, REO-04
+#[test]
+#[expect(clippy::expect_used)]
+fn lagging_filters_seal_full_transaction_tail_without_losing_its_owner() {
+    use super::read::SegmentSnapshot;
+    use bitcoin_rs_consensus::primitives::{Hash256, Txid};
+    use bitcoin_rs_storage::KvStore as _;
+
+    for fault in [
+        None,
+        Some(super::SealFault::AfterIngest),
+        Some(super::SealFault::AfterCommitted),
+    ] {
+        let mut blocks = shared_script_blocks(TAIL_MAX_BLOCKS);
+        blocks[0].txs[0].txid = [0xa7; 32];
+        let dir = tempfile::tempdir().expect("dir");
+        let scratch = tempfile::tempdir().expect("scratch");
+        let store =
+            std::sync::Arc::new(bitcoin_rs_storage::RocksDbStore::open(dir.path()).expect("store"));
+        let mut writer = crate::IndexWriter::open(std::sync::Arc::clone(&store), 1)
+            .expect("writer")
+            .with_seal_scratch(scratch.path().to_path_buf());
+        for block in &blocks {
+            let prepared = writer
+                .prepare_block_from_facts(crate::IndexCapabilities::TX_LOOKUP, block.clone())
+                .expect("prepare transaction");
+            let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+                max_rows: usize::MAX,
+                max_bytes: usize::MAX,
+            });
+            assert!(batch.try_push(prepared).is_ok());
+            writer.commit_forward(batch).expect("commit transaction");
+        }
+        let before = writer.watermarks().expect("watermarks");
+        assert!(before.compact_filters.is_none());
+        assert_eq!(
+            tail_state(store.as_ref()).window.len(),
+            usize::try_from(TAIL_MAX_BLOCKS).expect("block bound")
+        );
+        super::arm_seal_fault(fault);
+        let prepared = writer
+            .prepare_block_from_facts(crate::IndexCapabilities::COMPACT_FILTERS, blocks[0].clone())
+            .expect("prepare filter");
+        let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+        assert!(batch.try_push(prepared).is_ok());
+        let result = writer.commit_forward(batch);
+        super::arm_seal_fault(None);
+        if fault.is_some() {
+            assert!(matches!(
+                result,
+                Err(crate::IndexError::InjectedFault { stage: "seal" })
+            ));
+            drop(writer);
+            super::recover_segments(store.as_ref()).expect("recover seal");
+            writer = crate::IndexWriter::open(std::sync::Arc::clone(&store), 1)
+                .expect("reopen writer")
+                .with_seal_scratch(scratch.path().to_path_buf());
+            assert_eq!(writer.watermarks().expect("recovered watermarks"), before);
+            let view =
+                SegmentSnapshot::open(store.snapshot().expect("snapshot")).expect("recovered view");
+            let found = view
+                .tx_answer_for_test(&Txid(Hash256::from_le_bytes(&[0xa7; 32])))
+                .expect("transaction");
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].0, 0);
+            drop(view);
+            let prepared = writer
+                .prepare_block_from_facts(
+                    crate::IndexCapabilities::COMPACT_FILTERS,
+                    blocks[0].clone(),
+                )
+                .expect("prepare retry");
+            let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+                max_rows: usize::MAX,
+                max_bytes: usize::MAX,
+            });
+            assert!(batch.try_push(prepared).is_ok());
+            writer.commit_forward(batch).expect("retry filter");
+        } else {
+            result.expect("commit filter");
+        }
+        let after = writer.watermarks().expect("watermarks after filter");
+        assert_eq!(after.tx_lookup, before.tx_lookup);
+        assert_eq!(after.script_history, None);
+        assert_eq!(after.script_live, None);
+        assert_eq!(
+            after.compact_filters,
+            Some(crate::IndexWatermark {
+                height: 0,
+                hash: blocks[0].hash
+            })
+        );
+        let view = SegmentSnapshot::open(store.snapshot().expect("snapshot")).expect("view");
+        let found = view
+            .tx_answer_for_test(&Txid(Hash256::from_le_bytes(&[0xa7; 32])))
+            .expect("transaction");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, 0);
+    }
+}
 // PRJ-05
 #[test]
 #[expect(clippy::expect_used)]

@@ -560,7 +560,7 @@ fn sealed_rows(plan: &tail::PrefixCut, gen_id: u64) -> SealedRows {
     out
 }
 
-// PRJ-05, PRJ-09
+// PRJ-03, PRJ-05, PRJ-09, REO-04
 pub fn seal_tail_generation<S: bitcoin_rs_storage::KvStore>(
     store: &S,
     gen_id: u64,
@@ -570,6 +570,33 @@ pub fn seal_tail_generation<S: bitcoin_rs_storage::KvStore>(
 ) -> Result<(), crate::IndexError> {
     let snapshot = store.snapshot().map_err(crate::IndexError::Storage)?;
     let plan = tail::plan_prefix_cut(snapshot.as_ref(), cut)?;
+    let mut capabilities = capabilities;
+    for capability in IndexCapability::ALL {
+        if capability == IndexCapability::ScriptLive
+            || snapshot
+                .get(
+                    bitcoin_rs_storage::ColumnFamily::IdxMeta,
+                    &meta_gen_key(capability),
+                )?
+                .is_none()
+        {
+            continue;
+        }
+        if plan.rows.iter().any(|(family, _, _)| match capability {
+            IndexCapability::TxLookup => *family == tail::Family::TxDir,
+            IndexCapability::ScriptHistory => matches!(
+                family,
+                tail::Family::TxDir
+                    | tail::Family::ScriptDict
+                    | tail::Family::ScriptPost
+                    | tail::Family::SpendDir
+            ),
+            IndexCapability::CompactFilters => *family == tail::Family::Filters,
+            IndexCapability::ScriptLive => false,
+        }) {
+            capabilities = capabilities.insert(capability);
+        }
+    }
     drop(snapshot);
     let coverage = Coverage::new(plan.first, plan.cut, plan.cut_hash);
     let mut rows = sealed_rows(&plan, gen_id);
