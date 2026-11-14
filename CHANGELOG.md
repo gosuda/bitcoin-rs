@@ -3,6 +3,7 @@
 ## Unreleased
 
 - BREAKING CHANGE: `DerivedIndexQuery::transaction_height` is replaced by `transaction_block`, which returns the transaction body with its captured occurrence height and block hash. Esplora confirmation metadata uses that block identity across reorgs, including ABA publication changes.
+- Projection enforces serving-view expiry at read completion and between emitted compact-filter records.
 - Network ingress leaves the existing foreground reserve available within the staged-image allowance. Its capacity and atomic admission check use the reduced ceiling; execution retains the full owner cap. The node-wide total, cache shares, and resource-refusal classification are unchanged.
 - Epoch-5 conversion converts retained ordinary and historical checkpoint engine images to the requested backend and schema-6 undo format. Epoch-5 and current-epoch backend copies preserve the root `full-revalidation` marker.
 - Projection preserves blockwise ScriptLive rollback when sealed historical generations retire. Compact-filter attachment and restart preserve transaction ordinals. Same-height capability backfill merges undo logs and retains the original rollback frontier.

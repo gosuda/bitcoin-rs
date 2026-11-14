@@ -275,17 +275,23 @@ pub(crate) struct ServingView {
     pub historical_verified: Option<(u32, Hash256)>,
     pub(super) tip_id: NodeId,
     deadline: Instant,
+    #[cfg(test)]
+    expired_for_test: std::sync::atomic::AtomicBool,
     _view_charge: Option<ViewCharge>,
 }
 
 impl ServingView {
     fn expired(&self) -> bool {
+        #[cfg(test)]
+        if self.expired_for_test.load(Ordering::SeqCst) {
+            return true;
+        }
         Instant::now() >= self.deadline
     }
 
     #[cfg(test)]
-    pub(crate) fn expire_for_test(&mut self) {
-        self.deadline = Instant::now();
+    pub(crate) fn expire_for_test(&self) {
+        self.expired_for_test.store(true, Ordering::SeqCst);
     }
 
     fn coverage_for(&self, capability: IndexCapability) -> Option<CapabilityCoverage> {
@@ -511,6 +517,8 @@ impl DerivedIndexQueryEngine {
                 historical_verified,
                 tip_id: tip.tip_id,
                 deadline: Instant::now() + VIEW_DEADLINE,
+                #[cfg(test)]
+                expired_for_test: std::sync::atomic::AtomicBool::new(false),
                 _view_charge: view_charge,
             },
             snapshot,
@@ -565,6 +573,7 @@ impl DerivedIndexQueryEngine {
 
         self.query_health()?;
         self.check_capability_failures(required)?;
+        self.check_view(view)?;
         result
     }
 
@@ -1207,6 +1216,7 @@ mod tests {
             historical_verified: None,
             tip_id: NodeId::new(0),
             deadline: Instant::now() + VIEW_DEADLINE,
+            expired_for_test: std::sync::atomic::AtomicBool::new(false),
             _view_charge: None,
         };
         let refused = DerivedIndexQueryEngine::require_tip_coverage_on_view(
