@@ -159,15 +159,81 @@ fn tx_view_has_bip68_sequence_locks(
         })
 }
 
+fn prevout_slot_and_script_bytes(script_len: usize) -> u64 {
+    let slot = std::mem::size_of::<Option<TxOut>>();
+    u64::try_from(slot.saturating_add(script_len)).unwrap_or(u64::MAX)
+}
+
+fn preflight_block_prevouts_bytes(
+    resolved: &Arc<ResolvedUtxoView>,
+    image: &BlockImage,
+    tx_plan: &BlockTxPlan,
+    height: u32,
+    txids: &[Txid],
+) -> core::result::Result<u64, ApplyError> {
+    let mut total: u64 = 0;
+    if tx_plan.needs_local_utxo_overlay {
+        let mut view = BlockLocalUtxoView::new(
+            Arc::clone(resolved),
+            image,
+            height,
+            tx_plan.overlay_capacity,
+        );
+        for (tx_index, &txid) in txids.iter().enumerate() {
+            let tx = image.tx(tx_index);
+            let tx_index_u32 =
+                u32::try_from(tx_index).map_err(|_| ApplyError::VoutOverflow { txid })?;
+            if tx.is_coinbase() {
+                view.add_outputs(tx_index_u32, txid, tx.output_count())?;
+                continue;
+            }
+            for i in 0..tx.input_count() {
+                let outpoint = tx.input_outpoint(i);
+                let script_len = view.script_len(&outpoint).unwrap_or(0);
+                total = total.saturating_add(prevout_slot_and_script_bytes(script_len));
+            }
+            view.spend_inputs(&tx);
+            view.add_outputs(tx_index_u32, txid, tx.output_count())?;
+        }
+    } else {
+        let tx_count = image.tx_count();
+        for tx_index in 0..tx_count {
+            let tx = image.tx(tx_index);
+            if tx.is_coinbase() {
+                continue;
+            }
+            for i in 0..tx.input_count() {
+                let outpoint = tx.input_outpoint(i);
+                let script_len = resolved
+                    .entry(&outpoint)
+                    .map_or(0, |coin| coin.txout.script_pubkey.len());
+                total = total.saturating_add(prevout_slot_and_script_bytes(script_len));
+            }
+        }
+    }
+    Ok(total)
+}
+
 pub(super) fn resolve_block_prevouts(
     resolved: Arc<ResolvedUtxoView>,
     image: &BlockImage,
     tx_plan: &BlockTxPlan,
     height: u32,
     txids: &[Txid],
+    mut prevouts: Option<&mut super::window::WindowPrevouts>,
 ) -> core::result::Result<Vec<Vec<Option<TxOut>>>, ApplyError> {
+    let admitted_bytes = if let Some(p) = prevouts.as_deref_mut() {
+        let needed = preflight_block_prevouts_bytes(&resolved, image, tx_plan, height, txids)?;
+        if !p.admit(needed) {
+            return Err(ApplyError::StagedBudgetExhausted);
+        }
+        Some(needed)
+    } else {
+        None
+    };
+
     let tx_count = image.tx_count();
-    if tx_plan.needs_local_utxo_overlay {
+    let res = if tx_plan.needs_local_utxo_overlay {
         let mut view = BlockLocalUtxoView::new(resolved, image, height, tx_plan.overlay_capacity);
         let mut resolved = Vec::with_capacity(tx_count);
         for (tx_index, &txid) in txids.iter().enumerate() {
@@ -199,6 +265,16 @@ pub(super) fn resolve_block_prevouts(
                     .collect()
             })
             .collect())
+    };
+
+    match res {
+        Ok(vec) => Ok(vec),
+        Err(err) => {
+            if let (Some(p), Some(needed)) = (prevouts, admitted_bytes) {
+                p.release(needed);
+            }
+            Err(err)
+        }
     }
 }
 
@@ -292,7 +368,7 @@ pub(super) fn verify_block_transactions(
     }
     let resolution_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let resolution_result = if let Some(image) = view.image() {
-        resolve_block_prevouts(resolved, image, tx_plan, context.height, view.txids())
+        resolve_block_prevouts(resolved, image, tx_plan, context.height, view.txids(), None)
     } else {
         Ok(Vec::new())
     };
