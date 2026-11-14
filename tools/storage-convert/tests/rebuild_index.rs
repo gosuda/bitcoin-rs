@@ -310,11 +310,7 @@ fn spending_tx(prev: ([u8; 32], u32), witness: Witness, outputs: &[(u64, Vec<u8>
     }
 }
 
-fn encode_undo(
-    block_hash: [u8; 32],
-    restores: &[RestoreSpec],
-    _removes: &[([u8; 32], u32)],
-) -> Vec<u8> {
+fn encode_undo(block_hash: [u8; 32], restores: &[RestoreSpec]) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(2);
     out.extend_from_slice(&block_hash);
@@ -386,7 +382,6 @@ fn assemble_block(spec: BlockSpec, ledger: &mut CoinLedger) -> FixtureBlock {
 
     let mut created: HashMap<([u8; 32], u32), CreatedCoin> = HashMap::new();
     let mut restores: Vec<RestoreSpec> = Vec::new();
-    let mut removes: Vec<([u8; 32], u32)> = Vec::new();
     let mut facts_txs = Vec::with_capacity(txs.len());
     for (tx, (start, len)) in txs.iter().zip(spans.iter()) {
         let txid = tx.compute_txid().to_byte_array();
@@ -400,7 +395,6 @@ fn assemble_block(spec: BlockSpec, ledger: &mut CoinLedger) -> FixtureBlock {
                     if let Some((value, script, coin_height, coinbase)) =
                         created.get(&(prev_txid, prev_vout))
                     {
-                        removes.push((prev_txid, prev_vout));
                         (*value, script.clone(), *coin_height, *coinbase)
                     } else {
                         let (value, script, coin_height, coinbase) = ledger
@@ -450,7 +444,7 @@ fn assemble_block(spec: BlockSpec, ledger: &mut CoinLedger) -> FixtureBlock {
         });
     }
 
-    let undo = encode_undo(hash, &restores, &removes);
+    let undo = encode_undo(hash, &restores);
     let decoded = decode_undo_record(&undo, Hash256::from_le_bytes(&hash))
         .expect("fixture undo record decodes");
     assert_eq!(decoded.restores().len(), restores.len());
