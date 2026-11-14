@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
+use bitcoin::hashes::Hash as _;
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
@@ -12,6 +13,7 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_execution::chain::{NodeStatus, regtest_fixture::merkle_root};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, MempoolObserver, MutationEnvelope};
+use bitcoin_rs_projection::block_log::BlockRecord;
 use bitcoin_rs_projection::{ScriptHash, TransactionBlock};
 use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
@@ -1450,6 +1452,240 @@ fn transaction_status_keeps_occurrence_identity_across_reorg_and_aba() -> Result
         assert_eq!(status["block_height"], 1);
         assert_eq!(status["block_time"], original.header.time);
     }
+    Ok(())
+}
+
+// QRY-01, QRY-02
+#[test]
+fn merkle_proofs_keep_occurrence_identity_across_a_same_height_reorg() -> Result<(), TestError> {
+    use core::str::FromStr as _;
+
+    use bitcoin::merkle_tree::MerkleBlock;
+
+    use bitcoin_rs_consensus::primitives::encode::double_sha256;
+
+    struct ReorgTxIndex {
+        source: StaticTxIndex,
+        applied_tip: bitcoin_rs_execution::chain::TipReader,
+        replacement: Arc<bitcoin_rs_execution::chain::TipSnapshot>,
+        transitioned: Arc<AtomicBool>,
+    }
+
+    impl crate::context::DerivedIndexQuery for ReorgTxIndex {
+        fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
+            crate::context::DerivedIndexQuery::transaction(&self.source, txid)
+        }
+
+        fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
+            crate::context::DerivedIndexQuery::outpoint_value(&self.source, outpoint)
+        }
+
+        fn transaction_block(
+            &self,
+            txid: &Txid,
+        ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
+            let found = crate::context::DerivedIndexQuery::transaction_block(&self.source, txid)?;
+            self.applied_tip.store(Some(Arc::clone(&self.replacement)));
+            self.transitioned.store(true, Ordering::SeqCst);
+            Ok(found)
+        }
+
+        fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+            crate::context::DerivedIndexQuery::index_info(&self.source)
+        }
+    }
+
+    let genesis = fixture_genesis();
+    let mut original = genesis.clone();
+    original.header.prev_blockhash = genesis.block_hash();
+    original.header.time += 1;
+    let occurrence = paying_transaction(
+        &[OutPoint::new(original.txs[0].txid(), 0)],
+        &[(1, vec![0x51])],
+    );
+    original.txs.push(occurrence.clone());
+    original.header.merkle_root = merkle_root(&original.txs).expect("original transactions");
+    let mut replacement = original.clone();
+    replacement.header.time += 1;
+    replacement.txs[1] = paying_transaction(
+        &[OutPoint::new(replacement.txs[0].txid(), 0)],
+        &[(2, vec![0x51])],
+    );
+    replacement.header.merkle_root =
+        merkle_root(&replacement.txs).expect("replacement transactions");
+    let extension = Block {
+        header: Header {
+            prev_blockhash: replacement.block_hash(),
+            time: replacement.header.time + 1,
+            ..replacement.header
+        },
+        txs: replacement.txs.clone(),
+    };
+    let txid = occurrence.txid();
+    let txid_text = txid.to_string();
+    assert!(replacement.txs.iter().all(|tx| tx.txid() != txid));
+    assert_ne!(original.block_hash(), replacement.block_hash());
+
+    let genesis_record = BlockRecord::from_block(0, &genesis);
+    let original_record = BlockRecord::from_block(1, &original);
+    let replacement_record = BlockRecord::from_block(1, &replacement);
+    let extension_record = BlockRecord::from_block(2, &extension);
+    let mut context = Context::new();
+    for record in [
+        &genesis_record,
+        &original_record,
+        &replacement_record,
+        &extension_record,
+    ] {
+        context.chain.add_block(record.clone());
+    }
+    let (original_tip, replacement_tip) = {
+        let mut tree = context.chain.block_tree.write();
+        let root = tree.insert_node(None, genesis.header, NodeStatus::Active)?;
+        tree.insert_node(Some(root), original.header, NodeStatus::Active)?;
+        let original_tip = tree
+            .tip()
+            .ok_or_else(|| std::io::Error::other("original tip missing"))?;
+        let replacement_node =
+            tree.insert_node(Some(root), replacement.header, NodeStatus::Active)?;
+        tree.insert_node(Some(replacement_node), extension.header, NodeStatus::Active)?;
+        let replacement_tip = tree
+            .tip()
+            .ok_or_else(|| std::io::Error::other("replacement tip missing"))?;
+        (original_tip, replacement_tip)
+    };
+    assert_eq!(original_tip.hash, Hash256::from(original.block_hash()));
+    assert_eq!(replacement_tip.hash, Hash256::from(extension.block_hash()));
+    context.chain.applied_tip.store(Some(original_tip));
+    context.chain.block_body_source = Some(Arc::new(BlockBodies {
+        bodies: vec![
+            (0, genesis_record.hash, consensus_bytes(&genesis)),
+            (1, original_record.hash, consensus_bytes(&original)),
+            (1, replacement_record.hash, consensus_bytes(&replacement)),
+            (2, extension_record.hash, consensus_bytes(&extension)),
+        ],
+    }));
+    let transitioned = Arc::new(AtomicBool::new(false));
+    context.indexes.esplora_tx_index = Some(Arc::new(ReorgTxIndex {
+        source: StaticTxIndex {
+            transaction: occurrence.clone(),
+            block: Some(TransactionBlock {
+                height: 1,
+                hash: Hash256::from(original.block_hash()),
+            }),
+        },
+        applied_tip: context.chain.applied_tip.clone(),
+        replacement: Arc::clone(&replacement_tip),
+        transitioned: Arc::clone(&transitioned),
+    }));
+    assert_eq!(
+        context
+            .chain
+            .block_by_height(1)
+            .expect("the fixture branch answers height 1")
+            .hash,
+        original.block_hash(),
+        "the fixture must start on the original branch"
+    );
+    let handler = Handler::new(Arc::new(context));
+
+    let merkleblock = route(&handler, &format!("/tx/{txid_text}/merkleblock-proof"), "");
+    assert!(
+        transitioned.load(Ordering::SeqCst),
+        "the same-height reorg must land during the occurrence lookup"
+    );
+    assert_eq!(
+        merkleblock.status,
+        200,
+        "merkleblock-proof body: {}",
+        String::from_utf8_lossy(&merkleblock.body)
+    );
+    let proof_bytes: Vec<u8> =
+        bitcoin::hex::FromHex::from_hex(&String::from_utf8_lossy(&merkleblock.body))
+            .map_err(|_| "merkleblock proof must be lowercase hex".to_owned())?;
+    let merkle_block = bitcoin::consensus::encode::deserialize::<MerkleBlock>(&proof_bytes)
+        .map_err(|_| "merkleblock proof must decode".to_owned())?;
+    let mut matched = Vec::new();
+    let mut indexes = Vec::new();
+    merkle_block
+        .extract_matches(&mut matched, &mut indexes)
+        .map_err(|_| "merkleblock proof must verify".to_owned())?;
+    assert_eq!(
+        matched.len(),
+        1,
+        "exactly the requested occurrence must match, got {matched:?}"
+    );
+    assert_eq!(matched[0].to_string(), txid_text);
+    let fixture_block =
+        bitcoin::consensus::encode::deserialize::<bitcoin::Block>(&consensus_bytes(&original))
+            .map_err(|_| "fixture block must decode with the reference decoder".to_owned())?;
+    let expected = MerkleBlock::from_block_with_predicate(&fixture_block, |candidate| {
+        candidate.as_byte_array() == txid.as_bytes()
+    });
+    assert_eq!(
+        merkleblock.body,
+        bitcoin::consensus::encode::serialize(&expected)
+            .to_lower_hex_string()
+            .into_bytes(),
+        "the served proof must byte-match the reference proof for the captured occurrence block"
+    );
+    let header_bytes = bitcoin::consensus::encode::serialize(&merkle_block.header);
+    let header = bitcoin_rs_consensus::primitives::deserialize::<Header>(&header_bytes)
+        .map_err(|_| "proof header must decode natively".to_owned())?;
+    assert_eq!(
+        header.compute_hash(),
+        original.block_hash(),
+        "the proof header must name the captured occurrence block, not the reorged branch"
+    );
+    assert_eq!(
+        header.merkle_root, original.header.merkle_root,
+        "the proof must commit to the captured block merkle root"
+    );
+
+    let merkle = route(&handler, &format!("/tx/{txid_text}/merkle-proof"), "");
+    assert_eq!(
+        merkle.status,
+        200,
+        "merkle-proof body: {}",
+        String::from_utf8_lossy(&merkle.body)
+    );
+    let proof: Value = sonic_rs::from_slice(&merkle.body)?;
+    assert_eq!(proof["block_height"], json!(original_record.height));
+    let Some(position) = proof["pos"].as_u64() else {
+        return Err("merkle proof position missing".into());
+    };
+    let position = usize::try_from(position).map_err(|_| "position must fit usize".to_owned())?;
+    assert_eq!(
+        position,
+        original
+            .txs
+            .iter()
+            .position(|tx| tx.txid() == txid)
+            .expect("captured occurrence"),
+    );
+    let Some(branch) = proof["merkle"].as_array() else {
+        return Err("merkle branch missing".into());
+    };
+    let mut node = *txid.as_bytes();
+    let mut walk = position;
+    for step in branch {
+        let Some(text) = step.as_str() else {
+            return Err("merkle sibling must be a hex string".into());
+        };
+        let sibling = Txid::from_str(text).map_err(|_| "merkle sibling must parse".to_owned())?;
+        let (left, right) = if walk % 2 == 0 {
+            (node, *sibling.as_bytes())
+        } else {
+            (*sibling.as_bytes(), node)
+        };
+        node = double_sha256(&[left.as_slice(), right.as_slice()].concat()).to_le_bytes();
+        walk /= 2;
+    }
+    assert_eq!(
+        Hash256::from_le_bytes(&node),
+        original.header.merkle_root,
+        "the branch must rebuild the captured block merkle root from the requested txid"
+    );
     Ok(())
 }
 
