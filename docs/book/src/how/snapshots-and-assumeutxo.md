@@ -41,7 +41,7 @@ The node now serves the chain from the snapshot while the historical chainstate 
 
 Activation publishes a checkpoint at the snapshot base before the durable head commits the base. The checkpoint holds the engine coin image, the header tree up to the base, and the coin statistics scanned from the installed coins. Activation refuses before publishing if that scan does not reproduce the pinned `hash_serialized`. The checkpoint `CURRENT` file is written last, so a crash before it leaves no checkpoint the head names.
 
-At boot the node resumes from that checkpoint. A base without its checkpoint refuses to open. The retired `assumeutxo/` coin and header archive is not written, read, or copied; datadirs that still hold it convert with `bitcoin-rs-storage-convert` (`4 -> 5`), which verifies the archive before publishing the checkpoint.
+At boot the node resumes from that checkpoint. A base without its checkpoint refuses to open. The retired `assumeutxo/` coin and header archive is not written, read, or copied; datadirs that still hold it convert with `bitcoin-rs-storage-convert` (`4 -> 6`), which verifies the archive before publishing the checkpoint.
 
 Readers of the checkpoint open files with `O_NOFOLLOW` on Unix and require a regular file.
 
