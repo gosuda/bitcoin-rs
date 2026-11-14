@@ -186,15 +186,9 @@ A bundle has no signature. SHA-256 detects a changed artifact, and the locator c
 
 ### Partial rows never become queryable
 
-Import attaches sorted rows through `KvStore::ingest_sorted` into `TxConfirmed`. The `TxLookup` watermark and floor appear only in the final commit. The apply pass re-hashes the artifact and aborts before that commit if the bytes changed.
+Import decodes the artifact into spill runs, verifies the SHA-256 digest against the manifest before attachment, performs an ordered merge, and attaches the sorted rows through streamed segment attachment into generation rows (`crates/projection/src/portable/restore.rs:99-187`). The `TxLookup` watermark and floor appear only in the final commit.
 
-On failure, `discard_partial_rows` clears the written rows immediately when the capability still has no watermark (`crates/projection/src/portable/restore.rs`). If the process dies before cleanup, the next start with `TxLookup` enabled runs `reset_interrupted_import` before any bundle or derivation work and logs:
-
-```text
-cleared rows left by an interrupted portable index import
-```
-
-(`crates/projection/src/runtime/startup.rs`). That is why a crash mid-import costs the import, not the index.
+On failure, `discard_partial_rows` clears written rows immediately when the capability still has no watermark (`crates/projection/src/portable/restore.rs:2113`). If the process dies before cleanup, the next start with `TxLookup` enabled runs `reset_interrupted_import` before any bundle or derivation work (`crates/projection/src/runtime/startup.rs:275`, `crates/projection/src/portable/restore.rs:1589`). That is why a crash mid-import costs the import, not the index.
 
 ## Worked trace: export, restore, refuse
 
@@ -312,7 +306,7 @@ Tests that pin the behavior, all verified in the tree:
 | history is never a bundle capability | `script_live_is_never_a_capability_and_script_history_is_refused` | `crates/projection/src/portable/manifest.rs` |
 | artifact framing refuses each violation | `framing_refuses_each_violation` | `crates/projection/src/portable/artifact.rs` |
 
-The direct query surface, including the covered prefix carried by `AtPrefix` and the historical-prefix error set, is in [use/indexes.md](../use/indexes.md). `CoveredPrefix`, `AtPrefix`, and `HistoricalQueryError` are defined in `crates/projection/src/query_api.rs`. Server-side history paging semantics are owned by `IDX-03` and `IDX-12` and are not restated here.
+The direct query surface, including the covered prefix carried by `Answer<T>.coverage` (`CoveredPrefix`) and historical query errors (`TxQueryError`), is in [use/indexes.md](../use/indexes.md). `CoveredPrefix`, `Answer`, and `TxQueryError` are defined in `crates/projection/src/query_api.rs`. Server-side history paging semantics are owned by `IDX-03` and `IDX-12` and are not restated here.
 
 ## What is stricter than Core
 

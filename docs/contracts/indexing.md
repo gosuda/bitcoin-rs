@@ -137,8 +137,8 @@ Owners:
 - The engine MUST never return stale, unconfirmed, or torn rows.
 - A body-store read failure is `TxQueryError::Storage`, not a missing body.
 - `unspent_outputs` consumes the `ScriptLive` watermark only.
-- The query holds chain-transition authority across watermark validation, live locator scan, and authoritative UTXO resolution.
-- History and tx-lookup queries take no lock.
+- The captured `ScriptLive` snapshot carries the coin payload directly and takes no live chain-transition lock or live UTXO read (`crates/projection/src/runtime/query_tests.rs`: `script_live_takes_no_transition_lock`).
+- History, script-live, and tx-lookup queries take no chain-transition lock.
 - A missing locator under a ready matching watermark is unavailable.
 - Exact script checks filter compact-prefix collisions.
 - A required capability missing from configuration is `Unavailable` with a distinct disabled reason.
@@ -153,6 +153,7 @@ Owners:
     - `history_limit_counts_occurrences_not_heights`
     - `confirmed_history_serves_stored_occurrences_without_block_bodies`
     - `history_summary_never_consults_spender_rows`
+    - `script_live_takes_no_transition_lock`
   - `crates/projection/src/runtime/query/scripts.rs`:
     - `first_page_scan_work_is_constant_at_100_1000_and_10000_entries`
     - `cursor_page_continues_without_skipping_or_repeating`
@@ -388,7 +389,7 @@ Owners:
 - Each record is `txid (32 bytes) || height (4 bytes, big-endian) || count (1 byte) || count x 6-byte TxPosition`.
 - Records carry full transaction ids in strictly ascending `(txid[..8], height, txid[8..])` order, never raw key-value rows.
 - Transaction ids sharing an 8-byte prefix inside one block fold into one stored row on restore.
-- Coverage: a bundle carries the `TxLookup` family only, as the `TxConfirmed` rows of one snapshot at the applied tip.
+- Coverage: a bundle carries the `TxLookup` family only, as the `TxConfirmed` rows of one snapshot at the applied tip. The bundle manifest refuses `ScriptHistory` (`UnsupportedCapability`, `portable/manifest.rs`), distinct from supported standalone `ScriptHistory` artifact writing (`write_script_history_artifact`) and attachment (`attach_script_history_artifact`).
 - Export is a cursor-resumable page stream. Concatenated pages equal one full export.
 - `ScriptLive` is never a bundle capability and is never reseeded from the live UTXO set.
 - After restore or reset, `ScriptLive` accepts a verified immutable snapshot artifact, or replays complete retained history, or reports `Unavailable` (`IDX-07`).
@@ -482,8 +483,8 @@ Owners:
   - Shutdown during the request stops the worker (`Cancelled`).
   - The request polls for cancellation every 4,096 records or heights.
 - Non-claims:
-  - No bundle carries `ScriptHistory`, `ScriptLive`, or `CompactFilters` rows.
-  - An operator needing those indexes builds them through `IDX-01`.
+  - No bundle carries `ScriptHistory`, `ScriptLive`, or `CompactFilters` rows; bundle manifest validation refuses `ScriptHistory` (`UnsupportedCapability`, `portable/manifest.rs`), while standalone `ScriptHistory` artifact export (`write_script_history_artifact`) and attachment (`attach_script_history_artifact`) remain supported.
+  - An operator who needs those indexes builds them through `IDX-01` or attaches a standalone artifact.
   - The bundle carries no signature.
   - The SHA-256 checksum detects changes between artifact and manifest, and is not authentication.
   - Restore binds each record to the chain of the receiver by locator check, not exporter identity.
@@ -514,13 +515,15 @@ That document gives consumer usage and defers to this clause for every consisten
 - `Hash256` is `bitcoin_rs_consensus::primitives::Hash256`.
 - `CompactString` is `compact_str::CompactString`.
 - `ScriptHash`, `IndexCapability`, `ScriptIndexSnapshot`, and `SpendingRecord` keep their existing paths.
-- `TxQueryError` and `TxUnavailableCause` change additively:
-  - `TxQueryError` gains `Retry(RetryReason)` and `ExpiredView`.
-  - `Retry` carries the tip-move reason with the capture-time commit ids.
+- `TxQueryError` changes shape rather than adding a separate retry API, while `TxUnavailableCause` changes additively:
+  - `TxQueryError::Retry` changes from a unit variant to `Retry(RetryReason)`. `TxQueryError` also gains `ExpiredView`.
+  - `RetryReason::MissingAppliedTip` means that no applied tip was available at capture.
+  - `RetryReason::PendingCapabilityCoverage(IndexCapability)` identifies the required capability whose coverage is not ready.
+  - `RetryReason::TipMoved { expected_commit, current_commit }` reports a runtime revision or applied-tip change during an index-progress read.
+  - Despite their names, `expected_commit` and `current_commit` contain projection runtime revisions, not durable chain commit IDs.
   - `ExpiredView` marks a view whose generation was replaced or revoked or whose lifetime ended.
   - `TxUnavailableCause` gains `OutsideCoverage { declared_floor_or_tip }`.
-  - The Display strings of the pre-existing variants are unchanged.
-  - The new variants render the retry and coverage texts that the JSON-RPC and REST adapters already emit.
+  - `Retry` displays its reason. `Unavailable` and `Storage` keep their display formats.
 - Matchers match the variant, never the rendered string.
 - Per-call capabilities: each call consumes only the capabilities its answer depends on.
 - `transaction_at_prefix` needs `TxLookup` only.
@@ -528,8 +531,11 @@ That document gives consumer usage and defers to this clause for every consisten
 - `script_history_at_prefix` and `spender_at_prefix` need `ScriptHistory`.
 - A disabled required capability returns `Unavailable(CapabilityDisabled)`, preserving typed visibility.
 - One serving view, server-selected anchor:
-  - Each call captures one serving view holding the applied epoch, the generation id, and the watermark and floor of every required capability.
-  - The capture reads them from one DB snapshot, and the call keeps that snapshot for the whole answer.
+  - Each call captures one serving view with an applied epoch (`AppliedEpoch { hash, height, runtime_revision }`), a generation id, and required capability coverage.
+  - In `AppliedEpoch`, `hash` and `height` identify the captured applied tip.
+  - `runtime_revision` is the projection wake generation, not a durable chain commit.
+  - The capture reads the revision and applied tip before opening the DB snapshot.
+  - It reads the required watermarks and floors from that snapshot and keeps the snapshot for the whole answer.
   - Every row the answer reads comes from that captured snapshot, so a shallow tail rewrite inside one answer is never observed.
   - The call checks worker health before and after the read.
   - The three prefix calls take no client anchor parameter and no cursor.
@@ -537,8 +543,10 @@ That document gives consumer usage and defers to this clause for every consisten
   - Its cursor is `(height, transaction position)` and is bound to the view that issued it.
   - `history_cursor` resolves an `API-09` transaction id to that cursor.
   - Each page reads the captured snapshot.
-  - Endpoints that promise current-tip data verify at capture that every required watermark equals the applied-tip height and return `Retry` otherwise.
-  - The embedded prefix reads keep watermark-pinned coverage. They return `Retry(TipMoved)` if a required watermark hash does not match the block at its height on the captured applied chain.
+  - Current-tip endpoints MUST require each capability watermark to match both the captured applied-tip height and hash.
+  - If a required watermark does not match, these endpoints return `Retry(PendingCapabilityCoverage(capability))`.
+  - Embedded prefix reads keep watermark-pinned coverage.
+  - If a watermark hash differs from the captured applied chain at its height, capture returns `Retry(PendingCapabilityCoverage(capability))`.
   - Independent calls never share an anchor automatically: each returns its own prefix.
   - Callers composing answers compare the returned `floor`/`height`/`hash` metadata themselves.
 - Floor and range:
@@ -552,7 +560,8 @@ That document gives consumer usage and defers to this clause for every consisten
   - After the read, the call checks health again.
   - The answer keeps its captured epoch; there is no post-read anchor recheck.
   - The serving view stops serving when its generation is replaced or revoked, or when its 60 second lifetime ends; the call then returns `ExpiredView`.
-  - A required watermark absent in the captured snapshot returns `Retry`.
+  - If the applied tip is absent at capture, the call returns `Retry(MissingAppliedTip)`.
+  - If a required published capability has no watermark in the captured snapshot, the call returns `Retry(PendingCapabilityCoverage(capability))`.
   - Rebuilds do not spin on `Retry`.
 - Scoped absence, no mempool:
   - Absence without rows below `floor` means "not present in `[floor, anchor]` on `chain(anchor)`", never a global claim.
@@ -581,8 +590,11 @@ That document gives consumer usage and defers to this clause for every consisten
 - Error shape:
   | Case | Result |
   |---|---|
-  | Absent tip, or a required watermark absent in the captured snapshot | `Retry(TipMoved)` |
-  | Required watermark below the applied tip on a current-tip endpoint | `Retry(TipMoved)` |
+  | No applied tip at capture | `Retry(MissingAppliedTip)` |
+  | Required published capability has no watermark in the captured snapshot | `Retry(PendingCapabilityCoverage(capability))` |
+  | Required watermark hash differs from the captured applied chain at its height | `Retry(PendingCapabilityCoverage(capability))` |
+  | Required watermark differs from the applied tip on a current-tip endpoint | `Retry(PendingCapabilityCoverage(capability))` |
+  | Runtime revision or applied-tip identity changes during an index-progress read | `Retry(TipMoved { expected_commit, current_commit })` |
   | View whose generation was replaced or revoked, or whose lifetime ended | `ExpiredView` |
   | Point lookup with rows only below `floor` | `Unavailable(OutsideCoverage { declared_floor_or_tip: floor })` |
   | Coverage starting above the applied tip | `Unavailable(OutsideCoverage { declared_floor_or_tip: floor })` |

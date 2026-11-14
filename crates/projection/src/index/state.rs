@@ -13,7 +13,7 @@ use tracing::debug;
 /// data row keys begin with ASCII letters and can never collide.
 pub(super) const FORMAT_VERSION_KEY: &[u8] = crate::types::INDEX_FORMAT_VERSION_KEY;
 
-/// On-disk format 8: newest-first exact `ScriptHistory` occurrences, 43-byte
+/// On-disk format 9: newest-first exact `ScriptHistory` occurrences, 43-byte
 /// `ScriptLive` keys with u24 `vout`, 6-byte `TxPosition` locators, and
 /// self-contained `ScriptLive` rows whose column value carries the full
 /// script hash followed by the compact varint payload
