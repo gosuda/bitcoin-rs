@@ -18,6 +18,44 @@ pub struct CoinCommitment {
     pub stats: CoinStats,
 }
 
+impl CoinCommitment {
+    pub fn from_rows(
+        rows: impl IntoIterator<Item = Result<crate::KvPair, crate::StorageError>>,
+        height: u32,
+        snapshot_height: Option<u32>,
+    ) -> Result<Self, UtxoError> {
+        let mut hasher = SerializedUtxoHasher::new();
+        let mut accumulator = CoinStatsAccumulator::with_muhash(height);
+        for item in rows {
+            let (key_bytes, value) = item.map_err(UtxoError::Storage)?;
+            let key = CoinKey::from_slice(&key_bytes)?;
+            let record = UtxoRecord::from_encoded(value.into_boxed_slice())?;
+            let txid = record.txid();
+            let txid_le = txid.to_le_bytes();
+            if key.as_bytes() != &txid_le {
+                return Err(UtxoError::CorruptRecord);
+            }
+            let mut outputs: Vec<_> = record.outputs().collect();
+            outputs.sort_unstable_by_key(|output| output.vout);
+            for output in outputs {
+                accumulator.observe_coin(SnapshotCoin {
+                    txid,
+                    vout: output.vout,
+                    value: output.value,
+                    script_pubkey: output.script_pubkey,
+                    height: output.height,
+                    coinbase: output.coinbase,
+                });
+                hasher.add(txid_le, output, snapshot_height)?;
+            }
+        }
+        Ok(Self {
+            hash_serialized: hasher.finish(),
+            stats: accumulator.into_stats(),
+        })
+    }
+}
+
 mod cache;
 pub use cache::CoinCache;
 
@@ -424,35 +462,11 @@ impl CoinStore {
         height: u32,
         snapshot_height: Option<u32>,
     ) -> Result<CoinCommitment, UtxoError> {
-        let mut hasher = SerializedUtxoHasher::new();
-        let mut accumulator = CoinStatsAccumulator::with_muhash(height);
-        for item in self
+        let rows = self
             .store
             .iter_prefix(ColumnFamily::Coins, &[])
-            .map_err(UtxoError::Storage)?
-        {
-            let (_, value) = item.map_err(UtxoError::Storage)?;
-            let record = UtxoRecord::from_encoded(value.into_boxed_slice())?;
-            let txid = record.txid();
-            let txid_le = txid.to_le_bytes();
-            let mut outputs: Vec<_> = record.outputs().collect();
-            outputs.sort_unstable_by_key(|output| output.vout);
-            for output in outputs {
-                accumulator.observe_coin(SnapshotCoin {
-                    txid,
-                    vout: output.vout,
-                    value: output.value,
-                    script_pubkey: output.script_pubkey,
-                    height: output.height,
-                    coinbase: output.coinbase,
-                });
-                hasher.add(txid_le, output, snapshot_height)?;
-            }
-        }
-        Ok(CoinCommitment {
-            hash_serialized: hasher.finish(),
-            stats: accumulator.into_stats(),
-        })
+            .map_err(UtxoError::Storage)?;
+        CoinCommitment::from_rows(rows, height, snapshot_height)
     }
 
     #[cfg(any(test, feature = "test-seam"))]
@@ -574,5 +588,43 @@ mod commitment_tests {
         assert_eq!(commitment.hash_serialized, hasher.finish());
         assert_eq!(commitment.stats, accumulator.into_stats());
         assert_eq!(commitment.stats.utxo_count, 6);
+    }
+
+    #[test]
+    fn commitment_validates_key_record_integrity_and_length() {
+        let txid = Hash256::from_le_bytes(&[5_u8; 32]);
+        let valid_record = UtxoRecord::from_owned_outputs(txid, &[output(0)]).expect("record");
+        let valid_key = txid.to_le_bytes().to_vec();
+        let valid_val = valid_record.bytes().to_vec();
+
+        let control_rows = vec![Ok((valid_key.clone(), valid_val.clone()))];
+        assert!(CoinCommitment::from_rows(control_rows, 10, None).is_ok());
+
+        let mut miskeyed = valid_key.clone();
+        miskeyed[0] ^= 0xff;
+        let miskeyed_rows = vec![Ok((miskeyed, valid_val.clone()))];
+        assert!(matches!(
+            CoinCommitment::from_rows(miskeyed_rows, 10, None),
+            Err(UtxoError::CorruptRecord)
+        ));
+
+        let short_key = vec![5_u8; 31];
+        let invalid_len_rows = vec![Ok((short_key, valid_val.clone()))];
+        assert!(matches!(
+            CoinCommitment::from_rows(invalid_len_rows, 10, None),
+            Err(UtxoError::Storage(StorageError::InvalidOperation(_)))
+        ));
+
+        let store = Arc::new(MemoryKvStore::new());
+        let mut bad_key = txid.to_le_bytes().to_vec();
+        bad_key[0] ^= 0xaa;
+        store
+            .put(ColumnFamily::Coins, &bad_key, &valid_val)
+            .expect("put");
+        let coin_store = CoinStore::open(store, 1 << 20);
+        assert!(matches!(
+            coin_store.commitment(10, None),
+            Err(UtxoError::CorruptRecord)
+        ));
     }
 }
