@@ -104,48 +104,102 @@ impl CoinStatsFeed {
     }
 }
 
-fn push_insert_ops(bytes: &Bytes, ops: &mut Vec<CoinStatsFeedOp>) -> Result<(), StorageError> {
-    push_record_ops(bytes, true, ops)
-}
-
-fn push_remove_ops(bytes: &Bytes, ops: &mut Vec<CoinStatsFeedOp>) -> Result<(), StorageError> {
-    push_record_ops(bytes, false, ops)
-}
-
-fn push_record_ops(
-    bytes: &Bytes,
-    insert: bool,
-    ops: &mut Vec<CoinStatsFeedOp>,
-) -> Result<(), StorageError> {
-    let record = UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice()).map_err(|error| {
+fn decode_stats_record(bytes: &Bytes) -> Result<UtxoRecord, StorageError> {
+    UtxoRecord::from_encoded(bytes.to_vec().into_boxed_slice()).map_err(|error| {
         StorageError::IncompatibleData(format!(
             "coin row for stats feed is not a valid UTXO record: {error:?}"
         ))
-    })?;
-    let txid = record.txid();
-    for out in record.outputs() {
-        let op = OutPoint::new(txid.into(), out.vout);
-        let txout = TxOut {
-            value: Amount::from_sat(out.value),
-            script_pubkey: Script::from_bytes(out.script_pubkey.to_vec()),
-        };
-        if insert {
-            ops.push(CoinStatsFeedOp::Insert {
-                op,
-                txout,
-                height: out.height,
-                coinbase: out.coinbase,
-            });
-        } else {
-            ops.push(CoinStatsFeedOp::Remove {
-                op,
-                txout,
-                height: out.height,
-                coinbase: out.coinbase,
-            });
+    })
+}
+
+fn stats_txout(out: crate::utxo::record::OneUtxoOut<'_>) -> TxOut {
+    TxOut {
+        value: Amount::from_sat(out.value),
+        script_pubkey: Script::from_bytes(out.script_pubkey.to_vec()),
+    }
+}
+
+fn push_insert_output(
+    record: &UtxoRecord,
+    out: crate::utxo::record::OneUtxoOut<'_>,
+    ops: &mut Vec<CoinStatsFeedOp>,
+) {
+    ops.push(CoinStatsFeedOp::Insert {
+        op: OutPoint::new(record.txid().into(), out.vout),
+        txout: stats_txout(out),
+        height: out.height,
+        coinbase: out.coinbase,
+    });
+}
+
+fn push_remove_output(
+    record: &UtxoRecord,
+    out: crate::utxo::record::OneUtxoOut<'_>,
+    ops: &mut Vec<CoinStatsFeedOp>,
+) {
+    ops.push(CoinStatsFeedOp::Remove {
+        op: OutPoint::new(record.txid().into(), out.vout),
+        txout: stats_txout(out),
+        height: out.height,
+        coinbase: out.coinbase,
+    });
+}
+
+fn push_changed_record_ops(
+    old: Option<&UtxoRecord>,
+    new: Option<&UtxoRecord>,
+    ops: &mut Vec<CoinStatsFeedOp>,
+) {
+    let (Some(old), Some(new)) = (old, new) else {
+        if let Some(record) = old {
+            for out in record.outputs() {
+                push_remove_output(record, out, ops);
+            }
+        }
+        if let Some(record) = new {
+            for out in record.outputs() {
+                push_insert_output(record, out, ops);
+            }
+        }
+        return;
+    };
+    push_record_difference(old, new, ops);
+}
+
+fn push_record_difference(old: &UtxoRecord, new: &UtxoRecord, ops: &mut Vec<CoinStatsFeedOp>) {
+    if old.txid() != new.txid() {
+        push_changed_record_ops(Some(old), None, ops);
+        push_changed_record_ops(None, Some(new), ops);
+        return;
+    }
+    let mut old_outputs = old.outputs().peekable();
+    let mut new_outputs = new.outputs().peekable();
+    while let (Some(before), Some(after)) = (old_outputs.peek(), new_outputs.peek()) {
+        match before.vout.cmp(&after.vout) {
+            std::cmp::Ordering::Less => {
+                push_remove_output(old, *before, ops);
+                old_outputs.next();
+            }
+            std::cmp::Ordering::Greater => {
+                push_insert_output(new, *after, ops);
+                new_outputs.next();
+            }
+            std::cmp::Ordering::Equal => {
+                if before != after {
+                    push_remove_output(old, *before, ops);
+                    push_insert_output(new, *after, ops);
+                }
+                old_outputs.next();
+                new_outputs.next();
+            }
         }
     }
-    Ok(())
+    for out in old_outputs {
+        push_remove_output(old, out, ops);
+    }
+    for out in new_outputs {
+        push_insert_output(new, out, ops);
+    }
 }
 
 pub struct CoinStore {
@@ -185,12 +239,13 @@ impl CoinStore {
             if !seen.insert(*key) {
                 continue;
             }
-            if let Some(old) = self.get(key)? {
-                push_remove_ops(&old, &mut ops)?;
-            }
-            if let Some(new) = record {
-                push_insert_ops(new, &mut ops)?;
-            }
+            let old = self
+                .get(key)?
+                .as_ref()
+                .map(decode_stats_record)
+                .transpose()?;
+            let new = record.as_ref().map(decode_stats_record).transpose()?;
+            push_changed_record_ops(old.as_ref(), new.as_ref(), &mut ops);
         }
         Ok(CoinStatsFeed { ops })
     }
