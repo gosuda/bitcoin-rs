@@ -89,15 +89,8 @@ fn bulk_digests(blocks: &[CommittedBlock]) -> Result<Vec<(ColumnFamily, [u8; 32]
     builder
         .build_and_ingest(&store, 1, blocks)
         .map_err(|e| e.to_string())?;
-    let cfs = [
-        ColumnFamily::TxDir,
-        ColumnFamily::ScriptDict,
-        ColumnFamily::ScriptPost,
-        ColumnFamily::SpendDir,
-        ColumnFamily::ScriptStats,
-        ColumnFamily::Filters,
-    ];
-    cfs.iter()
+    SEGMENT_CFS
+        .iter()
         .map(|&cf| hash_family(&store, cf, 1).map(|digest| (cf, digest)))
         .collect()
 }
