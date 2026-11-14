@@ -546,6 +546,22 @@ fn tip_identity(
         .map(|tip| (tip.height, tip.hash))
 }
 
+fn reconstruct_utxo_set(
+    state: &crate::state::NodeState,
+) -> Result<bitcoin_rs_storage::utxo::UtxoSet, TestError> {
+    let coin_store = state.coins();
+    let snapshot = coin_store.store().snapshot()?;
+    let coins = bitcoin_rs_storage::utxo::UtxoSet::new();
+    for row in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
+        let (_key, value) = row?;
+        coins.insert_parsed_record(
+            bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
+                .map_err(TestError::Utxo)?,
+        );
+    }
+    Ok(coins)
+}
+
 #[test]
 fn sealed_activation_installs_state_and_survives_restart() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
@@ -553,24 +569,13 @@ fn sealed_activation_installs_state_and_survives_restart() -> Result<(), TestErr
     let (state, core_path) = snapshot_inputs(dir.path())?;
     state.snapshots.import(&core_path)?;
     let stats = state.chainstate().coin_stats_handle().snapshot();
-    let (commitment, mut scanned) = {
-        let coin_store = state.coins();
-        let snapshot = coin_store.store().snapshot()?;
-        let coins = bitcoin_rs_storage::utxo::UtxoSet::new();
-        for row in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
-            let (_key, value) = row?;
-            coins.insert_parsed_record(
-                bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
-                    .map_err(TestError::Utxo)?,
-            );
-        }
-        coins.with_stable_view(|view| {
-            Ok::<_, TestError>((
-                view.hash_serialized_3_at_height(pinned.height)?,
-                bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)?,
-            ))
-        })?
-    };
+    let coins = reconstruct_utxo_set(&state)?;
+    let (commitment, mut scanned) = coins.with_stable_view(|view| {
+        Ok::<_, TestError>((
+            view.hash_serialized_3_at_height(pinned.height)?,
+            bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, pinned.height, true)?,
+        ))
+    })?;
     assert_eq!(commitment, pinned.hash_serialized);
     scanned.tx_count = pinned.chain_tx_count;
     assert_eq!(
@@ -794,21 +799,9 @@ fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> Result<(
     let current = dir.path().join("node/chainstate-checkpoints/CURRENT");
     assert!(current.is_file(), "activation publishes the checkpoint");
     let stats = resumed.chainstate().coin_stats_handle().snapshot();
-    let commitment = {
-        let coin_store = resumed.coins();
-        let snapshot = coin_store.store().snapshot()?;
-        let coins = bitcoin_rs_storage::utxo::UtxoSet::new();
-        for row in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
-            let (_key, value) = row?;
-            coins.insert_parsed_record(
-                bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
-                    .map_err(TestError::Utxo)?,
-            );
-        }
-        coins.with_stable_view(|view| {
-            Ok::<_, TestError>(view.hash_serialized_3_at_height(pinned.height)?)
-        })?
-    };
+    let coins = reconstruct_utxo_set(&resumed)?;
+    let commitment =
+        coins.with_stable_view(|view| view.hash_serialized_3_at_height(pinned.height))?;
     assert_eq!(commitment, pinned.hash_serialized);
     assert_eq!(stats.tx_count, pinned.chain_tx_count);
     drop(resumed);
@@ -960,21 +953,9 @@ fn process_kill_between_checkpoint_publish_and_head_commit_restarts_cold() -> Re
     let current = dir.path().join("node/chainstate-checkpoints/CURRENT");
     assert!(current.is_file(), "activation publishes the checkpoint");
     let stats = resumed.chainstate().coin_stats_handle().snapshot();
-    let commitment = {
-        let coin_store = resumed.coins();
-        let snapshot = coin_store.store().snapshot()?;
-        let coins = bitcoin_rs_storage::utxo::UtxoSet::new();
-        for row in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
-            let (_key, value) = row?;
-            coins.insert_parsed_record(
-                bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
-                    .map_err(TestError::Utxo)?,
-            );
-        }
-        coins.with_stable_view(|view| {
-            Ok::<_, TestError>(view.hash_serialized_3_at_height(pinned.height)?)
-        })?
-    };
+    let coins = reconstruct_utxo_set(&resumed)?;
+    let commitment =
+        coins.with_stable_view(|view| view.hash_serialized_3_at_height(pinned.height))?;
     assert_eq!(commitment, pinned.hash_serialized);
     assert_eq!(stats.tx_count, pinned.chain_tx_count);
     drop(resumed);
