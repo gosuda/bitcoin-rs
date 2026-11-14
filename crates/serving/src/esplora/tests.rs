@@ -11,7 +11,7 @@ use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
-use bitcoin_rs_execution::chain::{NodeStatus, regtest_fixture::merkle_root};
+use bitcoin_rs_execution::chain::{NodeStatus, TipSnapshot, regtest_fixture::merkle_root};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, MempoolObserver, MutationEnvelope};
 use bitcoin_rs_projection::block_log::BlockRecord;
 use bitcoin_rs_projection::{ScriptHash, TransactionBlock};
@@ -110,6 +110,27 @@ fn fixture_genesis() -> Block {
     };
     block.header.merkle_root = merkle_root(&block.txs).expect("fixture block has transactions");
     block
+}
+
+fn extend_tip(
+    context: &Context,
+    block: &Block,
+) -> Result<(Arc<TipSnapshot>, Arc<TipSnapshot>, Header), TestError> {
+    let mut tree = context.chain.block_tree.write();
+    let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
+    let tip = tree
+        .tip()
+        .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
+    let child = Header {
+        prev_blockhash: block.header.compute_hash(),
+        nonce: block.header.nonce.wrapping_add(1),
+        ..block.header
+    };
+    tree.insert_node(Some(genesis), child, NodeStatus::Active)?;
+    let extended = tree
+        .tip()
+        .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
+    Ok((tip, extended, child))
 }
 
 fn p2sh_true_script() -> Script {
@@ -1086,8 +1107,6 @@ fn composed_response_stays_valid_when_the_applied_tip_identity_changes() {
 // WF-02
 #[test]
 fn composed_response_refuses_when_the_applied_tip_moves_between_reads() -> Result<(), TestError> {
-    use bitcoin_rs_consensus::primitives::Header;
-
     let block = fixture_genesis();
     let mut context = Context::new();
     context
@@ -1095,23 +1114,7 @@ fn composed_response_refuses_when_the_applied_tip_moves_between_reads() -> Resul
         .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
             0, &block,
         ));
-    let (tip, moved) = {
-        let mut tree = context.chain.block_tree.write();
-        let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
-        let Some(tip) = tree.tip() else {
-            return Err("fixture tip missing".into());
-        };
-        let child = Header {
-            prev_blockhash: block.header.compute_hash(),
-            nonce: block.header.nonce.wrapping_add(1),
-            ..block.header
-        };
-        tree.insert_node(Some(genesis), child, NodeStatus::Active)?;
-        let Some(moved) = tree.tip() else {
-            return Err("fixture tip missing".into());
-        };
-        (tip, moved)
-    };
+    let (tip, moved, _) = extend_tip(&context, &block)?;
     assert_ne!(
         tip.hash, moved.hash,
         "the second read must observe a different tip"
@@ -1132,7 +1135,6 @@ fn composed_response_refuses_when_the_applied_tip_moves_between_reads() -> Resul
 #[test]
 fn chain_only_history_survives_an_ordinary_extension() -> Result<(), TestError> {
     use bitcoin_rs_consensus::primitives::Header;
-    use bitcoin_rs_execution::chain::NodeStatus;
 
     let block = fixture_genesis();
     let txid = block.txs[0].txid();
@@ -1157,18 +1159,7 @@ fn chain_only_history_survives_an_ordinary_extension() -> Result<(), TestError> 
                 txs: block.txs.clone(),
             },
         ));
-    let (tip, extended) = {
-        let mut tree = context.chain.block_tree.write();
-        let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
-        let tip = tree
-            .tip()
-            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
-        tree.insert_node(Some(genesis), child, NodeStatus::Active)?;
-        let extended = tree
-            .tip()
-            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
-        (tip, extended)
-    };
+    let (tip, extended, _) = extend_tip(&context, &block)?;
     assert_ne!(
         tip.hash, extended.hash,
         "the extending read must observe a different tip"
@@ -1239,18 +1230,7 @@ fn confirmed_transaction_survives_an_ordinary_extension() -> Result<(), TestErro
                 txs: block.txs.clone(),
             },
         ));
-    let (tip, extended) = {
-        let mut tree = context.chain.block_tree.write();
-        let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
-        let tip = tree
-            .tip()
-            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
-        tree.insert_node(Some(genesis), child, NodeStatus::Active)?;
-        let extended = tree
-            .tip()
-            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
-        (tip, extended)
-    };
+    let (tip, extended, _) = extend_tip(&context, &block)?;
     assert_ne!(
         tip.hash, extended.hash,
         "the extending read must observe a different tip"
@@ -1673,8 +1653,6 @@ fn merkle_proofs_keep_occurrence_identity_across_a_same_height_reorg() -> Result
 // WF-02
 #[test]
 fn mempool_transaction_refuses_when_the_applied_tip_moves_between_reads() -> Result<(), TestError> {
-    use bitcoin_rs_consensus::primitives::Header;
-
     let parent = transaction(
         None,
         TxOut {
@@ -1692,23 +1670,7 @@ fn mempool_transaction_refuses_when_the_applied_tip_moves_between_reads() -> Res
     let unconfirmed_txid = unconfirmed.txid().to_string();
     let block = fixture_genesis();
     let mut context = Context::new();
-    let (tip, extended) = {
-        let mut tree = context.chain.block_tree.write();
-        let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
-        let tip = tree
-            .tip()
-            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
-        let child = Header {
-            prev_blockhash: block.header.compute_hash(),
-            nonce: block.header.nonce.wrapping_add(1),
-            ..block.header
-        };
-        tree.insert_node(Some(genesis), child, NodeStatus::Active)?;
-        let extended = tree
-            .tip()
-            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
-        (tip, extended)
-    };
+    let (tip, extended, _) = extend_tip(&context, &block)?;
     assert_ne!(
         tip.hash, extended.hash,
         "the second read must observe a different tip"
@@ -1763,7 +1725,6 @@ fn mempool_transaction_refuses_when_the_applied_tip_moves_between_reads() -> Res
 // WF-02
 #[test]
 fn internal_block_txs_refuses_when_a_mempool_parent_meets_a_moved_tip() -> Result<(), TestError> {
-    use bitcoin_rs_consensus::primitives::Header;
     let parent = paying_transaction(&[OutPoint::null()], &[(125, vec![0x51])]);
     let mut block = fixture_genesis();
     let child = paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(100, vec![0x52])]);
@@ -1775,23 +1736,7 @@ fn internal_block_txs_refuses_when_a_mempool_parent_meets_a_moved_tip() -> Resul
     let record = bitcoin_rs_projection::block_log::BlockRecord::from_block(0, &block);
     let mut context = Context::new();
     context.chain.add_block(record.clone());
-    let (tip, extended) = {
-        let mut tree = context.chain.block_tree.write();
-        let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
-        let tip = tree
-            .tip()
-            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
-        let child_header = Header {
-            prev_blockhash: block.header.compute_hash(),
-            nonce: block.header.nonce.wrapping_add(1),
-            ..block.header
-        };
-        tree.insert_node(Some(genesis), child_header, NodeStatus::Active)?;
-        let extended = tree
-            .tip()
-            .ok_or_else(|| std::io::Error::other("fixture tip missing"))?;
-        (tip, extended)
-    };
+    let (tip, extended, _) = extend_tip(&context, &block)?;
     assert_ne!(
         tip.hash, extended.hash,
         "the second read must observe a different tip"
@@ -1857,7 +1802,6 @@ fn internal_block_txs_refuses_when_a_mempool_parent_meets_a_moved_tip() -> Resul
 }
 #[test]
 fn malformed_txid_keeps_bad_request_when_the_tip_moves() -> Result<(), TestError> {
-    use bitcoin_rs_consensus::primitives::Header;
     let block = fixture_genesis();
     let context = Context::new();
     context
@@ -1865,23 +1809,7 @@ fn malformed_txid_keeps_bad_request_when_the_tip_moves() -> Result<(), TestError
         .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
             0, &block,
         ));
-    let (tip, extended) = {
-        let mut tree = context.chain.block_tree.write();
-        let genesis = tree.insert_node(None, block.header, NodeStatus::Active)?;
-        let Some(tip) = tree.tip() else {
-            return Err("fixture tip missing".into());
-        };
-        let child = Header {
-            prev_blockhash: block.header.compute_hash(),
-            nonce: block.header.nonce.wrapping_add(1),
-            ..block.header
-        };
-        tree.insert_node(Some(genesis), child, NodeStatus::Active)?;
-        let Some(extended) = tree.tip() else {
-            return Err("fixture tip missing".into());
-        };
-        (tip, extended)
-    };
+    let (tip, extended, _) = extend_tip(&context, &block)?;
     context.chain.applied_tip.store(Some(tip));
     let body = sonic_rs::to_vec(&vec!["zz".to_string()])?;
     let ctx = Arc::new(context);
