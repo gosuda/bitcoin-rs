@@ -61,6 +61,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
             self.cache_allocation.coin_bytes,
             Some(coin_charge),
         ));
+        let engine_weak = Arc::downgrade(&dyn_store);
         let commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(
             dyn_store,
             Arc::clone(&coins),
@@ -79,9 +80,6 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
             }
             .guarded_by(Arc::clone(self.guard)),
         );
-        let engine_store: Arc<dyn KvStore> = store.clone();
-        let engine_weak = Arc::downgrade(&engine_store);
-        drop(engine_store);
         let engine_cache_probe: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(move || {
             engine_weak
                 .upgrade()

@@ -276,8 +276,9 @@ impl NodeState {
                 in_flight.as_ref(),
             )?
         };
-        let engine = restored.engine.clone();
-        let bitcoin_rs_execution::recovery::RestoredState { initial, .. } = restored;
+        let bitcoin_rs_execution::recovery::RestoredState {
+            engine, initial, ..
+        } = restored;
         let InitialChainstate {
             utxo: mut utxo_set,
             coin_stats: initial_coin_stats,
