@@ -1,6 +1,15 @@
 use super::{SpillBudget, SpillSet, cursor_peak, merge, reset_cursor_peak};
 use std::io::Result as IoResult;
 
+fn retained_capacity(buffer: &Vec<(Vec<u8>, Vec<u8>)>) -> IoResult<u64> {
+    let retained = buffer.capacity() * std::mem::size_of::<(Vec<u8>, Vec<u8>)>()
+        + buffer
+            .iter()
+            .map(|(key, value)| key.capacity() + value.capacity())
+            .sum::<usize>();
+    u64::try_from(retained).map_err(std::io::Error::other)
+}
+
 // SNP-05, PRJ-09
 #[test]
 fn retained_row_capacity_is_charged_and_released() -> IoResult<()> {
@@ -19,13 +28,7 @@ fn retained_row_capacity_is_charged_and_released() -> IoResult<()> {
     {
         let sorters = set.sorters.borrow();
         let state = &sorters[0];
-        let retained = state.buffer.capacity() * std::mem::size_of::<(Vec<u8>, Vec<u8>)>()
-            + state
-                .buffer
-                .iter()
-                .map(|(key, value)| key.capacity() + value.capacity())
-                .sum::<usize>();
-        let retained = u64::try_from(retained).map_err(std::io::Error::other)?;
+        let retained = retained_capacity(&state.buffer)?;
         assert_eq!(budget.current_bytes(), retained);
         assert_eq!(state.buffered, retained);
         assert!(budget.current_bytes() <= budget.limit);
@@ -62,15 +65,9 @@ fn backing_slots_force_spill_before_another_sorter_is_admitted() -> IoResult<()>
     assert_eq!(sorters[0].buffer.capacity(), 0);
     assert_eq!(sorters[0].buffered, 0);
     assert_eq!(sorters[0].runs.len(), 1);
-    let retained = sorters[1].buffer.capacity() * slot
-        + sorters[1]
-            .buffer
-            .iter()
-            .map(|(key, value)| key.capacity() + value.capacity())
-            .sum::<usize>();
     assert_eq!(
         budget.current_bytes(),
-        u64::try_from(retained).map_err(std::io::Error::other)?
+        retained_capacity(&sorters[1].buffer)?
     );
     assert!(budget.peak_bytes() <= budget.limit);
     drop(sorters);
@@ -92,17 +89,8 @@ fn refused_spill_keeps_existing_capacity_charged_until_drop() -> IoResult<()> {
     {
         let sorters = set.sorters.borrow();
         let state = &sorters[0];
-        let retained = state.buffer.capacity() * slot
-            + state
-                .buffer
-                .iter()
-                .map(|(key, value)| key.capacity() + value.capacity())
-                .sum::<usize>();
         assert_eq!(state.buffer.len(), 1);
-        assert_eq!(
-            budget.current_bytes(),
-            u64::try_from(retained).map_err(std::io::Error::other)?
-        );
+        assert_eq!(budget.current_bytes(), retained_capacity(&state.buffer)?);
         assert!(state.runs.is_empty());
     }
     drop(set);
