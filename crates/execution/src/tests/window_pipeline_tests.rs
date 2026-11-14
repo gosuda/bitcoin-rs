@@ -14,11 +14,13 @@ use bitcoin_rs_consensus::primitives::{
     Tx, TxIn, TxOut, Txid, Witness,
 };
 use bitcoin_rs_consensus::script::opcode::OP_PUSHNUM_1;
+use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::utxo::UtxoSet;
-use bitcoin_rs_storage::{DurableHead, StorageError};
 
 use super::{ApplyError, Chainstate, WindowApplyDisposition};
-use crate::test_fixtures::{TestError, TestResult, handles, seed_durable_head, seed_genesis};
+use crate::test_fixtures::{
+    TestError, TestResult, apply_headers, commit_genesis_head, handles, seed_genesis,
+};
 
 /// The group cap `RCV-02` states: 64 blocks or 8 MiB of block data, whichever first.
 const GROUP_BLOCKS: usize = 64;
@@ -83,34 +85,11 @@ fn coinbase_less_block(prev: BlockHash, height: u32, script_len: usize) -> TestR
     Ok(block)
 }
 
-fn commit_genesis_head(chain: &Chainstate) -> TestResult {
-    let genesis = Network::Regtest.genesis_block();
-    seed_durable_head(
-        chain,
-        DurableHead {
-            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
-            commit_id: 1,
-            height: 0,
-            tip: Hash256::from(genesis.block_hash()),
-            chain_tx_count: 1,
-            body_extent: None,
-            undo_extent: None,
-        },
-    )?;
-    Ok(())
-}
-
 fn dump_payloads(blocks: &[Block]) -> Vec<BlockImage> {
     blocks
         .iter()
         .map(|block| BlockImage::from_local(block.clone()))
         .collect()
-}
-
-fn apply_headers(chain: &Chainstate, blocks: &[&Block]) -> TestResult {
-    let headers: Vec<_> = blocks.iter().map(|block| block.header).collect();
-    chain.admit_headers(&headers)?;
-    Ok(())
 }
 
 struct CrashOnCommitFault {
