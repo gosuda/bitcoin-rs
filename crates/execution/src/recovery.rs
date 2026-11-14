@@ -444,6 +444,13 @@ pub fn prepare_initial_state_with_engine(
     durable_head: Option<&bitcoin_rs_storage::DurableHead>,
     in_flight: Option<&bitcoin_rs_storage::SnapshotActivationMarker>,
 ) -> Result<RestoredState, RecoveryError> {
+    if in_flight.is_some() {
+        return Ok(RestoredState {
+            initial: no_checkpoint_cold_start(data_dir, network)?,
+            engine: None,
+            _scratch: None,
+        });
+    }
     let checkpoint_data_dir = open_checkpoint_data_dir(data_dir)?;
     let anchor = durable_head
         .map(|head| crate::assumeutxo_snapshot::trusted_anchor(network, &head.assumeutxo))
@@ -473,13 +480,6 @@ pub fn prepare_initial_state_with_engine(
             _scratch: None,
         });
     };
-    if in_flight_activation_base(in_flight, &restored.applied_tip) {
-        return Ok(RestoredState {
-            initial: no_checkpoint_cold_start(data_dir, network)?,
-            engine: None,
-            _scratch: None,
-        });
-    }
     if restored.engine.is_none() {
         return Err(RecoveryError::CheckpointEngineImageMissing);
     }
@@ -490,18 +490,6 @@ pub fn prepare_initial_state_with_engine(
         engine,
         _scratch: scratch,
     })
-}
-
-/// A checkpoint at the base of an activation that has begun and not committed
-/// is the residue of a crash between the checkpoint publish and the head
-/// commit. Restart must not adopt it. The activation rollback removes it.
-/// Checkpoints at a compiled base that no activation is in flight for are
-/// ordinary validation output and are adopted.
-fn in_flight_activation_base(
-    in_flight: Option<&bitcoin_rs_storage::SnapshotActivationMarker>,
-    tip: &TipSnapshot,
-) -> bool {
-    in_flight.is_some_and(|marker| marker.base_hash == tip.hash)
 }
 
 pub struct ConvertedCheckpoint<'a> {
