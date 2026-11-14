@@ -688,29 +688,35 @@ fn scratch_copy(
     files: &[bitcoin_rs_storage::checkpoint::EngineFileV1],
 ) -> Result<EngineScratch, CheckpointError> {
     static SCRATCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = SCRATCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let Some(parent) = chainstate_path.parent() else {
         return Err(CheckpointError::Store(StoreError::Invalid(
             "checkpoint engine image path has no parent".to_owned(),
         )));
     };
-    let scratch = EngineScratch {
-        path: parent.join(format!(".scratch-{}-{seq}", std::process::id())),
+    std::fs::create_dir_all(parent).map_err(CheckpointError::from)?;
+    let pid = std::process::id();
+    let scratch_path = loop {
+        let seq = SCRATCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let candidate = parent.join(format!(".scratch-{pid}-{seq}"));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(CheckpointError::from(e)),
+        }
     };
+    let scratch = EngineScratch { path: scratch_path };
     for file in files {
         let source = chainstate_path.join(&file.file);
         let dest = scratch.path.join(&file.file);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(CheckpointError::from)?;
+        if let Some(dest_parent) = dest.parent() {
+            std::fs::create_dir_all(dest_parent).map_err(CheckpointError::from)?;
         }
-        if std::fs::hard_link(&source, &dest).is_err() {
-            std::fs::copy(&source, &dest).map_err(|error| {
-                CheckpointError::Store(StoreError::Invalid(format!(
-                    "checkpoint engine image file {:?} failed: {error}",
-                    file.file
-                )))
-            })?;
-        }
+        std::fs::copy(&source, &dest).map_err(|error| {
+            CheckpointError::Store(StoreError::Invalid(format!(
+                "checkpoint engine image file {:?} failed: {error}",
+                file.file
+            )))
+        })?;
     }
     Ok(scratch)
 }

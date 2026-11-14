@@ -208,3 +208,46 @@ mod headers_validation;
 
 #[cfg(test)]
 mod side_branches;
+
+#[test]
+fn scratch_copy_isolates_owned_byte_copies_and_skips_stale_directories() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let chainstate = dir.path().join("chainstate");
+    fs::create_dir_all(&chainstate)?;
+    let original_bytes = b"authoritative-checkpoint-engine-bytes";
+    fs::write(chainstate.join("CURRENT"), original_bytes)?;
+
+    let files = vec![bitcoin_rs_storage::checkpoint::EngineFileV1 {
+        file: "CURRENT".to_owned(),
+        bytes: u64::try_from(original_bytes.len())?,
+        sha256: super::hex_encode(&Sha256::digest(original_bytes)),
+    }];
+
+    let stale = dir
+        .path()
+        .join(format!(".scratch-{}-0", std::process::id()));
+    fs::create_dir_all(&stale)?;
+    fs::write(stale.join("stale.dat"), b"stale-residue")?;
+
+    let scratch = super::scratch_copy(&chainstate, &files)?;
+    assert_ne!(scratch.path, stale);
+    assert!(stale.exists());
+    assert_eq!(fs::read(stale.join("stale.dat"))?, b"stale-residue");
+
+    let scratch_file = scratch.path.join("CURRENT");
+    assert_eq!(fs::read(&scratch_file)?, original_bytes);
+
+    fs::write(&scratch_file, b"corrupted-scratch-mutation-payload")?;
+    assert_eq!(
+        fs::read(chainstate.join("CURRENT"))?,
+        original_bytes,
+        "overwriting scratch bytes must not mutate the published checkpoint bytes"
+    );
+
+    let scratch_path = scratch.path.clone();
+    drop(scratch);
+    assert!(!scratch_path.exists());
+    assert!(stale.exists());
+
+    Ok(())
+}
