@@ -24,8 +24,7 @@ pub(super) fn index_ahead_capability_label(capabilities: IndexCapabilities) -> O
 pub(super) enum SeedPass {
     Idle,
     Stall,
-    Published,
-    Discarded,
+    Progressed,
 }
 
 pub(super) enum SeedBatch {
@@ -126,8 +125,7 @@ impl Worker {
         loop {
             match self.collect_seed_batch()? {
                 SeedBatch::Rows(rows) => self.stage_seed_rows(rows)?,
-                SeedBatch::Empty => return Ok(SeedPass::Stall),
-                SeedBatch::Disconnected => return Ok(SeedPass::Stall),
+                SeedBatch::Empty | SeedBatch::Disconnected => return Ok(SeedPass::Stall),
             }
         }
     }
@@ -192,7 +190,7 @@ impl Worker {
             .map_err(DerivedIndexWorkerError::Index)?;
         *fence = next_fence;
         *watermarks = next_watermarks;
-        Ok(SeedPass::Published)
+        Ok(SeedPass::Progressed)
     }
 
     fn seed_pass_discard(
@@ -214,7 +212,7 @@ impl Worker {
             tracing::warn!("cleared ScriptLive rows left by an aborted seed");
         }
         seed.complete_abort();
-        Ok(SeedPass::Discarded)
+        Ok(SeedPass::Progressed)
     }
 
     fn stage_seed_rows(&self, rows: Vec<Vec<u8>>) -> Result<(), DerivedIndexWorkerError> {
