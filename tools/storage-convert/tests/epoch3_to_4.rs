@@ -155,13 +155,13 @@ fn promote_durable_head(
     height: u32,
     tip: Hash256,
     chain_tx_count: u64,
-) -> TestResult<DurableHead> {
+) -> TestResult<()> {
     let mut head = *base;
     head.height = height;
     head.tip = tip;
     head.chain_tx_count = chain_tx_count;
     store.put(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY, &head.encode())?;
-    Ok(head)
+    Ok(())
 }
 
 fn append_block_and_undo(
