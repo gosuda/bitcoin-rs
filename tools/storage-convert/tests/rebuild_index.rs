@@ -114,11 +114,7 @@ fn rebuild_index_resets_derived_rows_and_stamps_the_current_format() -> TestResu
     let root = tempfile::tempdir()?;
     let datadir = seeded_datadir(root.path())?;
 
-    let output = run_converter(&[
-        "rebuild-index",
-        "--datadir",
-        datadir.to_string_lossy().as_ref(),
-    ])?;
+    let output = rebuild(&datadir)?;
     let report = parse_rebuild_report(&output)?;
     assert_eq!(report.engine, "rocksdb");
     assert_eq!(report.format_version, 9);
@@ -147,11 +143,7 @@ fn rebuild_index_is_idempotent_on_a_reset_datadir() -> TestResult {
     let root = tempfile::tempdir()?;
     let datadir = seeded_datadir(root.path())?;
     for _ in 0..2 {
-        let output = run_converter(&[
-            "rebuild-index",
-            "--datadir",
-            datadir.to_string_lossy().as_ref(),
-        ])?;
+        let output = rebuild(&datadir)?;
         parse_rebuild_report(&output)?;
     }
     let store = RocksDbStore::open(datadir.join("txindex"))?;
@@ -164,11 +156,7 @@ fn rebuild_index_refuses_an_unknown_epoch() -> TestResult {
     let root = tempfile::tempdir()?;
     let datadir = seeded_datadir(root.path())?;
     fs::write(datadir.join("CURRENT_SCHEMA"), "9\n")?;
-    let output = run_converter(&[
-        "rebuild-index",
-        "--datadir",
-        datadir.to_string_lossy().as_ref(),
-    ])?;
+    let output = rebuild(&datadir)?;
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -184,11 +172,7 @@ fn rebuild_index_refuses_a_datadir_without_txindex() -> TestResult {
     let datadir = root.path().join("datadir");
     fs::create_dir_all(&datadir)?;
     fs::write(datadir.join("CURRENT_SCHEMA"), "6\n")?;
-    let output = run_converter(&[
-        "rebuild-index",
-        "--datadir",
-        datadir.to_string_lossy().as_ref(),
-    ])?;
+    let output = rebuild(&datadir)?;
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -203,11 +187,7 @@ fn rebuild_index_refuses_missing_current_schema() -> TestResult {
     let root = tempfile::tempdir()?;
     let datadir = seeded_datadir(root.path())?;
     fs::remove_file(datadir.join("CURRENT_SCHEMA"))?;
-    let output = run_converter(&[
-        "rebuild-index",
-        "--datadir",
-        datadir.to_string_lossy().as_ref(),
-    ])?;
+    let output = rebuild(&datadir)?;
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -223,11 +203,7 @@ fn rebuild_index_refuses_empty_txindex_when_chainstate_engine_undetectable() -> 
     let datadir = root.path().join("datadir");
     fs::create_dir_all(datadir.join("txindex"))?;
     fs::write(datadir.join("CURRENT_SCHEMA"), "6\n")?;
-    let output = run_converter(&[
-        "rebuild-index",
-        "--datadir",
-        datadir.to_string_lossy().as_ref(),
-    ])?;
+    let output = rebuild(&datadir)?;
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -247,11 +223,7 @@ fn rebuild_index_empty_txindex_follows_detected_chainstate_engine() -> TestResul
     let cs_store = RocksDbStore::open(datadir.join("chainstate"))?;
     drop(cs_store);
 
-    let output = run_converter(&[
-        "rebuild-index",
-        "--datadir",
-        datadir.to_string_lossy().as_ref(),
-    ])?;
+    let output = rebuild(&datadir)?;
     let report = parse_rebuild_report(&output)?;
     assert_eq!(report.engine, "rocksdb");
     assert_eq!(report.format_version, 9);
@@ -1279,11 +1251,7 @@ fn rebuild_index_refuses_symlinked_txindex_before_any_wipe() -> TestResult {
     fs::create_dir_all(&datadir)?;
     fs::write(datadir.join("CURRENT_SCHEMA"), "6\n")?;
     symlink(&victim, datadir.join("txindex"))?;
-    let output = run_converter(&[
-        "rebuild-index",
-        "--datadir",
-        datadir.to_string_lossy().as_ref(),
-    ])?;
+    let output = rebuild(&datadir)?;
     assert!(
         !output.status.success(),
         "a symlinked txindex namespace must abort the rebuild"
