@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Coin statistics retain unchanged outputs during partial spends. The committed feed emits only removed, inserted, or changed coins, including height and coinbase changes; final-record precedence and the existing point-read path are unchanged.
 - Snapshot serialization derives a reader-owned view's MuHash trailer from the captured coins, not from a later live listener or a zero fallback.
 - Production chainstate readers no longer expose writable coin-store or commit-authority handles. The retained fixture accessors require the existing test seam.
 - Production UTXO readers no longer expose writable coin stores or mutable backing sets. Whole-set query images belong to their captured views and are released when those views drop. Transaction confirmation-height lookup uses the typed reader query.
