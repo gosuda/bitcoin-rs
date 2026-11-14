@@ -236,14 +236,16 @@ fn epoch3_archive_source_retires_archive_and_reopens_published_checkpoint() -> T
     let rows = engine
         .iter_prefix(ColumnFamily::Coins, &[])?
         .collect::<Result<Vec<_>, _>>()?;
+    let row_count =
+        u64::try_from(rows.len()).map_err(|error| TestError::Assertion(error.to_string()))?;
     let mut outputs = 0_u64;
-    for (key, value) in &rows {
+    for (key, value) in rows {
         let txid_bytes: [u8; 32] = key
             .as_slice()
             .try_into()
             .map_err(|_| TestError::Assertion("coin key must be a 32-byte txid".into()))?;
         let txid = Txid(Hash256::from_le_bytes(&txid_bytes));
-        let record = UtxoRecord::from_encoded(value.clone().into_boxed_slice())
+        let record = UtxoRecord::from_encoded(value.into_boxed_slice())
             .map_err(|error| TestError::Assertion(format!("coin record: {error}")))?;
         for out in record.outputs() {
             outputs += 1;
@@ -264,13 +266,10 @@ fn epoch3_archive_source_retires_archive_and_reopens_published_checkpoint() -> T
             }
         }
     }
-    let record_count =
-        u64::try_from(rows.len()).map_err(|error| TestError::Assertion(error.to_string()))?;
-    if record_count != source_utxo.record_count {
+    if row_count != source_utxo.record_count {
         return Err(TestError::Assertion(format!(
             "engine holds {} coin records, epoch-3 utxo-v4.dat holds {}",
-            rows.len(),
-            source_utxo.record_count
+            row_count, source_utxo.record_count
         )));
     }
     if outputs != source_utxo.output_count {
