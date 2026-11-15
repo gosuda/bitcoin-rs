@@ -43,6 +43,7 @@ struct SeedQueue {
     pending: VecDeque<Vec<u8>>,
     memory_bytes: u64,
     spill: Option<File>,
+    spill_path: Option<std::path::PathBuf>,
     spill_read: u64,
     spill_write: u64,
 }
@@ -63,12 +64,25 @@ impl SeedQueue {
     fn append_spilled(&mut self, row: &[u8], len: u64) -> Result<(), IndexError> {
         let frame_bytes =
             u64::try_from(SEED_SPILL_FRAME_BYTES).map_err(|_| IndexError::SeedBacklogStalled)?;
+        if self.spill.is_none()
+            && let Some(path) = self.spill_path.as_ref()
+        {
+            self.spill = Some(
+                File::options()
+                    .create(true)
+                    .truncate(true)
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                    .map_err(bitcoin_rs_storage::StorageError::from)?,
+            );
+        }
         let spill = self.spill.as_mut().ok_or(IndexError::SeedBacklogStalled)?;
         spill
             .seek(SeekFrom::Start(self.spill_write))
             .and_then(|_| spill.write_all(&len.to_le_bytes()))
             .and_then(|_| spill.write_all(row))
-            .map_err(|_| IndexError::SeedBacklogStalled)?;
+            .map_err(bitcoin_rs_storage::StorageError::from)?;
         self.spill_write = self
             .spill_write
             .saturating_add(frame_bytes)
@@ -102,7 +116,7 @@ impl SeedQueue {
         spill
             .seek(SeekFrom::Start(self.spill_read))
             .and_then(|_| spill.read_exact(&mut frame))
-            .map_err(|_| IndexError::SeedBacklogStalled)?;
+            .map_err(bitcoin_rs_storage::StorageError::from)?;
         let frame_len = u64::from_le_bytes(frame);
         let remaining = self
             .spill_write
@@ -115,7 +129,7 @@ impl SeedQueue {
         let mut row = vec![0_u8; row_len];
         spill
             .read_exact(&mut row)
-            .map_err(|_| IndexError::SeedBacklogStalled)?;
+            .map_err(bitcoin_rs_storage::StorageError::from)?;
         self.spill_read = self
             .spill_read
             .saturating_add(frame_bytes)
@@ -156,17 +170,12 @@ impl ScriptLiveSeedState {
         }
     }
 
-    /// SNP-06: staging spills into this directory once its memory budget is
-    /// spent, so a mainnet coin set stages without holding it resident.
+    /// SNP-06: staging opens a spill file in this directory only once its
+    /// memory budget is spent; opening failures fail that staging operation.
     pub fn set_spill_dir(&self, dir: &std::path::Path) {
         let mut queue = self.queue.lock();
-        queue.spill = File::options()
-            .create(true)
-            .truncate(true)
-            .read(true)
-            .write(true)
-            .open(dir.join(SEED_SPILL_NAME))
-            .ok();
+        queue.spill = None;
+        queue.spill_path = Some(dir.join(SEED_SPILL_NAME));
     }
 
     /// The runtime installs its wake hook so staged rows reach the worker
@@ -418,6 +427,36 @@ mod tests {
             session.staged_rows(),
             u64::try_from(SEED_CHANNEL_ROWS).expect("rows fit") + 1
         );
+    }
+
+    #[test]
+    fn spill_open_failure_preserves_io_source_and_queued_rows() {
+        let dir = tempfile::tempdir().expect("spill dir");
+        let blocked = dir.path().join("not-a-directory");
+        File::create(&blocked).expect("blocking regular file");
+        let seed = ScriptLiveSeedState::new();
+        seed.set_spill_dir(&blocked);
+        let mut queue = seed.queue.lock();
+        let row = vec![0x51; usize::try_from(SEED_BACKLOG_BYTES).expect("budget fits")];
+        queue
+            .push(row.clone())
+            .expect("memory staging needs no spill");
+        let error = queue.push(vec![0x52]).expect_err("spill path is blocked");
+        let IndexError::Storage(bitcoin_rs_storage::StorageError::Io(source)) = &error else {
+            panic!("expected typed spill I/O error, got {error:?}");
+        };
+        assert_eq!(source.kind(), std::io::ErrorKind::NotADirectory);
+        assert!(
+            std::error::Error::source(&error)
+                .and_then(std::error::Error::source)
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .is_some()
+        );
+        assert_eq!(queue.memory_bytes, SEED_BACKLOG_BYTES);
+        assert_eq!(queue.spill_read, 0);
+        assert_eq!(queue.spill_write, 0);
+        assert_eq!(queue.pop_batch(2).expect("retained memory rows"), vec![row]);
+        assert_eq!(queue.memory_bytes, 0);
     }
 
     // SNP-06

@@ -63,7 +63,7 @@ pub enum IndexError {
     CompactFiltersIncomplete { expected: u64, actual: u64 },
     #[error("a ScriptLive snapshot seed session is already active")]
     SeedAlreadyActive,
-    #[error("ScriptLive snapshot seed staging stalled; the store writer is not draining")]
+    #[error("ScriptLive snapshot seed queue operation failed")]
     SeedBacklogStalled,
     #[error("ScriptLive snapshot seed channel closed before publication")]
     SeedChannelClosed,
