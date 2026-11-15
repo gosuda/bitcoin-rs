@@ -327,6 +327,35 @@ fn clearing_checkpoint_namespace_preserves_unknown_entries_and_other_namespaces(
 }
 
 #[test]
+fn generation_cleanup_recurses_only_inside_engine_image() -> TestResult {
+    let dir = tempdir()?;
+    let data = open_root(dir.path())?;
+    let generation = publish_fixture(&data, None)?;
+    let root = dir.path().join(CHECKPOINT_ROOT);
+    let old = root.join(generation_name(generation));
+    fs::create_dir_all(old.join("chainstate/segments/nested"))?;
+    fs::write(old.join("chainstate/segments/nested/data"), b"engine")?;
+    fs::create_dir(old.join("operator-backup"))?;
+    fs::write(old.join("operator-backup/notes"), b"keep")?;
+    #[cfg(unix)]
+    {
+        let external = dir.path().join("external");
+        fs::create_dir(&external)?;
+        fs::write(external.join("sentinel"), b"keep")?;
+        std::os::unix::fs::symlink(&external, old.join("chainstate/link"))?;
+    }
+    publish_fixture(&data, None)?;
+    assert!(!old.join("chainstate").exists());
+    assert_eq!(fs::read(old.join("operator-backup/notes"))?, b"keep");
+    #[cfg(unix)]
+    assert_eq!(fs::read(dir.path().join("external/sentinel"))?, b"keep");
+    fs::remove_dir_all(old.join("operator-backup"))?;
+    publish_fixture(&data, None)?;
+    assert!(!old.exists());
+    Ok(())
+}
+
+#[test]
 fn direct_and_current_selection_share_publication_digest_validation() -> TestResult {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
