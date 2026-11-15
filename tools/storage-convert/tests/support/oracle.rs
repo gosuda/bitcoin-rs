@@ -48,6 +48,45 @@ pub(crate) fn write_fjall_namespace(dir: &Path, data: &[FamilyRows]) -> TestResu
     Ok(())
 }
 
+pub(crate) fn write_legacy_redb_namespace(
+    dir: &Path,
+    data: &[FamilyRows],
+    legacy_rows: &[KvRow],
+) -> TestResult<()> {
+    fs::create_dir_all(dir)?;
+    let db = Database::create(dir.join("redb.db"))?;
+    let txn = db.begin_write()?;
+    for name in [
+        "tx_confirmed",
+        "tx_mempool",
+        "block_headers",
+        "funding",
+        "spending",
+        "coinstats",
+        "block_tree",
+        "utxo_meta",
+        "block_bodies",
+        "undo_data",
+        "script_live",
+        "coin_records",
+        "pool_ledger",
+    ] {
+        let mut table = txn.open_table(TableDefinition::<&[u8], &[u8]>::new(name))?;
+        let rows = if name == "coin_records" {
+            legacy_rows
+        } else {
+            data.iter()
+                .find(|(cf, _)| cf.name() == name)
+                .map_or(&[][..], |(_, rows)| rows.as_slice())
+        };
+        for (key, value) in rows {
+            table.insert(key.as_slice(), value.as_slice())?;
+        }
+    }
+    txn.commit()?;
+    Ok(())
+}
+
 #[derive(Default)]
 pub(crate) struct RedbTxIndexFixture {
     pub(crate) confirmed: Vec<([u8; 12], Option<Vec<u8>>)>,

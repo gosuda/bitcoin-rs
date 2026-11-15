@@ -281,6 +281,23 @@ impl SourceNamespace {
                     let name = handle.name();
                     if supported_txindex_tables.contains(&name) {
                         has_specialized = true;
+                    } else if name == "coin_records" {
+                        has_generic = true;
+                        let table = read_txn
+                            .open_table(TableDefinition::<&[u8], &[u8]>::new("coin_records"))
+                            .map_err(|e| ConvertError::EngineOpen(EngineOpenError::RedbTable(e)))?;
+                        if table
+                            .iter()
+                            .map_err(|e| ConvertError::EngineOpen(EngineOpenError::RedbStorage(e)))?
+                            .next()
+                            .transpose()
+                            .map_err(|e| ConvertError::EngineOpen(EngineOpenError::RedbStorage(e)))?
+                            .is_some()
+                        {
+                            return Err(ConvertError::IncompatibleData(
+                                "nonempty legacy coin_records requires a semantic migration".into(),
+                            ));
+                        }
                     } else if ColumnFamily::ALL.iter().any(|cf| cf.name() == name) {
                         has_generic = true;
                     } else {
