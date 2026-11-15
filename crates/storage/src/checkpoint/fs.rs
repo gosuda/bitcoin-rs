@@ -314,17 +314,14 @@ fn check_confined_endpoint(name: &str) -> io::Result<()> {
 /// writes under itself (`CheckpointStage::checkpoint_store`).
 pub(crate) const STAGED_STORE_DIR: &str = "chainstate";
 
-fn remove_known_dir_content(dir: &Dir) -> io::Result<()> {
+fn remove_engine_dir_content(dir: &Dir) -> io::Result<()> {
     for entry in dir.entries()? {
         let entry = entry?;
         let file_name = entry.file_name();
         let file_type = entry.file_type()?;
-        if file_type.is_dir() && file_name != std::ffi::OsStr::new(STAGED_STORE_DIR) {
-            continue;
-        }
         if file_type.is_dir() {
             let child = dir.open_dir_nofollow(&file_name)?;
-            remove_known_dir_content(&child)?;
+            remove_engine_dir_content(&child)?;
             dir.remove_dir(&file_name)?;
         } else {
             dir.remove_file(&file_name)?;
@@ -335,7 +332,20 @@ fn remove_known_dir_content(dir: &Dir) -> io::Result<()> {
 
 pub(crate) fn remove_known_dir(root: &CheckpointRoot, name: &str) -> io::Result<()> {
     let dir = root.open_dir(name)?;
-    remove_known_dir_content(&dir)?;
+    for entry in dir.entries()? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        if entry.file_type()?.is_dir() {
+            if file_name != std::ffi::OsStr::new(STAGED_STORE_DIR) {
+                continue;
+            }
+            let child = dir.open_dir_nofollow(&file_name)?;
+            remove_engine_dir_content(&child)?;
+            dir.remove_dir(&file_name)?;
+        } else {
+            dir.remove_file(&file_name)?;
+        }
+    }
     drop(dir);
     root.remove_dir(name)
 }
