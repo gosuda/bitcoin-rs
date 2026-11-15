@@ -12,6 +12,26 @@ use bitcoin_rs_storage::committed_facts::SpentPrevout;
 use bitcoin_rs_storage::committed_facts::TxFacts;
 use std::sync::Arc;
 
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Index(#[from] crate::IndexError),
+    #[error(transparent)]
+    Storage(#[from] bitcoin_rs_storage::StorageError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Bulk(#[from] crate::segment::bulk_builder::BulkBuilderError),
+    #[error("missing {0}")]
+    Missing(&'static str),
+}
+
+impl From<&'static str> for TestError {
+    fn from(value: &'static str) -> Self {
+        Self::Missing(value)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct TxDirEntry {
     txid: [u8; 32],
@@ -54,8 +74,7 @@ fn block_with_spends() -> CommittedBlock {
     block_with_spends_at(1, 3, [4; 32])
 }
 
-fn open_writer()
--> Result<(tempfile::TempDir, IndexWriter<RocksDbStore>), Box<dyn std::error::Error>> {
+fn open_writer() -> Result<(tempfile::TempDir, IndexWriter<RocksDbStore>), TestError> {
     let dir = tempfile::tempdir()?;
     let store = Arc::new(RocksDbStore::open(dir.path())?);
     Ok((dir, IndexWriter::open(store, 1)?))
@@ -68,7 +87,7 @@ fn reset_counts() {
 
 // PRJ-03
 #[test]
-fn disabled_compact_filters_skip_filter_build() -> Result<(), Box<dyn std::error::Error>> {
+fn disabled_compact_filters_skip_filter_build() -> Result<(), TestError> {
     let (_dir, writer) = open_writer()?;
     let block = block_with_spends();
     reset_counts();
@@ -87,7 +106,7 @@ fn disabled_compact_filters_skip_filter_build() -> Result<(), Box<dyn std::error
 
 // PRJ-03
 #[test]
-fn disabled_script_history_skips_script_hashes() -> Result<(), Box<dyn std::error::Error>> {
+fn disabled_script_history_skips_script_hashes() -> Result<(), TestError> {
     let (_dir, writer) = open_writer()?;
     let block = block_with_spends();
     reset_counts();
@@ -114,7 +133,7 @@ fn disabled_script_history_skips_script_hashes() -> Result<(), Box<dyn std::erro
 
 // PRJ-03
 #[test]
-fn lookup_and_history_disabled_skip_script_hashes() -> Result<(), Box<dyn std::error::Error>> {
+fn lookup_and_history_disabled_skip_script_hashes() -> Result<(), TestError> {
     let (_dir, writer) = open_writer()?;
     let block = block_with_spends();
     reset_counts();
@@ -134,7 +153,7 @@ fn lookup_and_history_disabled_skip_script_hashes() -> Result<(), Box<dyn std::e
 
 // PRJ-09
 #[test]
-fn all_enabled_matches_bulk_builder_rows() -> Result<(), Box<dyn std::error::Error>> {
+fn all_enabled_matches_bulk_builder_rows() -> Result<(), TestError> {
     let (_dir, writer) = open_writer()?;
     let block = block_with_spends();
     reset_counts();
@@ -178,7 +197,7 @@ fn all_enabled_matches_bulk_builder_rows() -> Result<(), Box<dyn std::error::Err
 
 // PRJ-03
 #[test]
-fn disabled_compact_filters_seal_writes_no_filter_rows() -> Result<(), Box<dyn std::error::Error>> {
+fn disabled_compact_filters_seal_writes_no_filter_rows() -> Result<(), TestError> {
     let (_dir, mut writer) = open_writer()?;
     let blocks = [
         block_with_spends_at(0, 3, [0; 32]),
@@ -221,7 +240,7 @@ fn disabled_compact_filters_seal_writes_no_filter_rows() -> Result<(), Box<dyn s
 
 // PRJ-05
 #[test]
-fn compact_filters_only_seal_and_reopen_keep_coverage() -> Result<(), Box<dyn std::error::Error>> {
+fn compact_filters_only_seal_and_reopen_keep_coverage() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let store = std::sync::Arc::new(RocksDbStore::open(dir.path())?);
     let caps = IndexCapabilities::COMPACT_FILTERS;
@@ -272,7 +291,7 @@ fn compact_filters_only_seal_and_reopen_keep_coverage() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn seal_and_open_skip_scans_when_hashes_known() -> Result<(), Box<dyn std::error::Error>> {
+fn seal_and_open_skip_scans_when_hashes_known() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let store = std::sync::Arc::new(RocksDbStore::open(dir.path())?);
     let caps = IndexCapabilities::HISTORICAL;
@@ -649,6 +668,87 @@ fn script_live_reset_keeps_the_shared_tail_logs() -> Result<(), crate::portable:
     assert_eq!(
         remaining_logs, 0,
         "a reset of every tail-bound capability clears the shared tail undo logs"
+    );
+    Ok(())
+}
+
+#[test]
+fn oldest_positive_floor_import_retires_to_uncovered_on_rollback()
+-> Result<(), crate::portable::TestError> {
+    use crate::segment::Coverage;
+    use crate::segment::import::{TxOccurrence, tx_lookup_segment};
+    use crate::types::TxPosition;
+    use bitcoin_rs_consensus::primitives::{Network, consensus_bytes};
+
+    struct NoSpends;
+    impl crate::SpentCoins for NoSpends {
+        fn spent_coin(&self, _: &[u8; 32], _: u32) -> Option<crate::SpentCoin<'_>> {
+            None
+        }
+    }
+    let genesis = Network::Regtest.genesis_block();
+    let child = bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(
+        genesis.block_hash(),
+        1,
+    )
+    .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+    let body = consensus_bytes(&child);
+    let tx = &child.txs[0];
+    let tx_bytes = consensus_bytes(tx);
+    let offset = body
+        .windows(tx_bytes.len())
+        .position(|bytes| bytes == tx_bytes)
+        .ok_or("transaction position")?;
+    let base = crate::IndexWatermark {
+        height: 1,
+        hash: child.block_hash().0.to_le_bytes(),
+    };
+    let imported = tx_lookup_segment(
+        vec![TxOccurrence {
+            txid: tx.txid().0.to_le_bytes(),
+            height: 1,
+            block_hash: base.hash,
+            position: TxPosition::new(u32::try_from(offset)?, u32::try_from(tx_bytes.len())?),
+        }],
+        Coverage::new(1, 1, base.hash),
+        1,
+    )?;
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(RocksDbStore::open(dir.path())?);
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let genesis_header: [u8; 80] = consensus_bytes(&genesis.header)
+        .try_into()
+        .map_err(|_| "genesis header")?;
+    let child_header: [u8; 80] = consensus_bytes(&child.header)
+        .try_into()
+        .map_err(|_| "child header")?;
+    writer.attach_tx_lookup_segment(
+        &imported,
+        &crate::writer::TxLookupAttachment {
+            headers: &[&genesis_header, &child_header],
+            base,
+            floor: 1,
+            scratch: dir.path(),
+        },
+    )?;
+    assert_eq!(writer.watermarks()?.tx_lookup, Some(base));
+    let fence = writer.fenced_watermarks()?.0;
+    writer.commit_rollback_one_for_with_cursor_with_spent_scripts(
+        fence,
+        IndexCapabilities::TX_LOOKUP,
+        Some(crate::IndexWatermark {
+            height: 0,
+            hash: genesis.block_hash().0.to_le_bytes(),
+        }),
+        &body,
+        crate::ConsumerCursorUpdate::Keep,
+        &NoSpends,
+    )?;
+    assert_eq!(writer.watermarks()?.tx_lookup, None);
+    let snapshot = store.snapshot()?;
+    assert!(
+        crate::segment::sealed_generations(snapshot.as_ref(), IndexCapability::TxLookup)?
+            .is_empty()
     );
     Ok(())
 }

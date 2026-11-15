@@ -74,9 +74,9 @@ impl RollbackTail {
         if newest.coverage.first_height == 0 {
             return Ok(None);
         }
-        let older = older.ok_or(IndexError::CorruptTailLog {
-            height: newest.coverage.first_height,
-        })?;
+        let Some(older) = older else {
+            return Ok(None);
+        };
         if older.coverage.last_height.checked_add(1) != Some(newest.coverage.first_height) {
             return Err(IndexError::CorruptTailLog {
                 height: newest.coverage.first_height,
