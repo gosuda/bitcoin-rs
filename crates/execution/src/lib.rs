@@ -1583,17 +1583,22 @@ fn resolved_view_bytes(view: &ResolvedUtxoView) -> u64 {
         .fold(0_u64, u64::saturating_add)
 }
 
-pub(crate) fn prevout_vec_bytes(resolved: &[Vec<Option<TxOut>>]) -> u64 {
+pub(crate) fn prevout_slot_and_script_bytes(script_len: usize) -> u64 {
     let slot = u64::try_from(core::mem::size_of::<Option<TxOut>>()).unwrap_or(u64::MAX);
+    let script = u64::try_from(script_len).unwrap_or(u64::MAX);
+    slot.saturating_add(script)
+}
+
+pub(crate) fn prevout_vec_bytes(resolved: &[Vec<Option<TxOut>>]) -> u64 {
     resolved
         .iter()
         .flatten()
         .map(|prevout| {
-            let script = prevout
-                .as_ref()
-                .map_or(0, |txout| txout.script_pubkey.len());
-            let script = u64::try_from(script).unwrap_or(u64::MAX);
-            slot.saturating_add(script)
+            prevout_slot_and_script_bytes(
+                prevout
+                    .as_ref()
+                    .map_or(0, |txout| txout.script_pubkey.len()),
+            )
         })
         .fold(0_u64, u64::saturating_add)
 }
