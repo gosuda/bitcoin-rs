@@ -109,10 +109,23 @@ fn receiver_retains_only_received_bytes_for_a_stalled_frame() -> Result<(), Peer
     let dribble = [7u8; 100];
     let mut stream = StallingStream::new([
         Inbound::Bytes(header_declaring(MAX_MESSAGE_PAYLOAD)?),
+        Inbound::Stall(ErrorKind::TimedOut),
         Inbound::Bytes(dribble.to_vec()),
         Inbound::Stall(ErrorKind::TimedOut),
     ]);
     let mut receiver = super::V1Receiver::default();
+    let empty = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
+    assert!(matches!(
+        empty,
+        Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut
+    ));
+    assert_eq!(
+        receiver
+            .body
+            .as_ref()
+            .map_or(0, |body| body.payload.capacity()),
+        0
+    );
     let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
     assert!(
         matches!(&result, Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut),
@@ -124,8 +137,34 @@ fn receiver_retains_only_received_bytes_for_a_stalled_frame() -> Result<(), Peer
         .or_fail("the partial frame is retained across the timeout");
     assert_eq!(body.payload.len(), dribble.len());
     assert!(
-        body.payload.capacity() <= crate::recv::RECEIVE_CHUNK,
+        body.payload.capacity() <= 2 * dribble.len(),
         "no full-size allocation is retained for a stalled declared payload"
+    );
+    Ok(())
+}
+
+#[test]
+fn cancellation_stops_a_partial_legacy_frame_without_retaining_a_read_chunk()
+-> Result<(), PeerError> {
+    use crate::test_support::{Inbound, StallingStream};
+    use std::io::ErrorKind;
+    let mut frame = Vec::new();
+    write_message(&mut frame, Magic::REGTEST, &super::Message::Ping(42))?;
+    let mut stream = StallingStream::new([
+        Inbound::Bytes(frame[..HEADER_LEN + 3].to_vec()),
+        Inbound::Stall(ErrorKind::ConnectionAborted),
+    ]);
+    let mut receiver = super::V1Receiver::default();
+    let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
+    assert!(matches!(
+        result,
+        Err(PeerError::Io(error)) if error.kind() == ErrorKind::ConnectionAborted
+    ));
+    assert!(
+        receiver
+            .body
+            .as_ref()
+            .is_none_or(|body| body.payload.capacity() <= 8)
     );
     Ok(())
 }
