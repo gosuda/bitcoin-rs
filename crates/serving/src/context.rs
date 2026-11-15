@@ -1194,11 +1194,6 @@ impl ChainHandles {
         Some(tree.node(node_id).ok()?.hash)
     }
 
-    #[must_use]
-    pub(crate) fn active_hash_at_height(&self, height: u32) -> Option<Hash256> {
-        self.active_hash_in_view(&self.applied_view(), height)
-    }
-
     pub(crate) fn header_record(&self, hash: Hash256) -> Option<BlockRecord> {
         let tree = self.block_tree.read();
         let node = tree.node_by_hash(hash)?;

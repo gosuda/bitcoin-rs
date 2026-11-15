@@ -70,7 +70,7 @@ fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
     let response = json_ok(values);
     match source {
         TxSource::Confirmed => response,
-        TxSource::Joined => match projection.ensure_chain_view(view.as_ref()) {
+        TxSource::Joined => match projection.ensure_chain_view(&view) {
             Ok(()) => response,
             Err(unavailable) => unavailable,
         },
