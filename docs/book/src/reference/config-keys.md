@@ -34,7 +34,7 @@ Environment booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `of
 | `dbcache_mb` | `BITCOIN_RS_DBCACHE_MB` | `dbcache` | `450` |
 | `prune_target_mb` | `BITCOIN_RS_PRUNE_TARGET_MB` | `prune` | `0` |
 
-`storage_backend` selects the underlying key-value engine. It accepts `rocksdb` (the default, always compiled), `surrealkv` (when compiled with cargo feature `surrealkv`), and `mdbx` (when compiled with cargo feature `mdbx`).
+`storage_backend` selects the underlying key-value engine. It accepts `rocksdb` (the default, always compiled), `surrealkv`, and `mdbx`. Build the binary with dependency-qualified Cargo feature `bitcoin-rs-node/surrealkv` or `bitcoin-rs-node/mdbx` to enable the corresponding optional engine; the binary does not expose bare `surrealkv` or `mdbx` forwarding features.
 
 `assumeutxo_manifest` takes a snapshot manifest file path for startup admission. Relative paths resolve under `data_dir`; absolute paths are used as given. Its CLI form is `--assumeutxo-manifest`.
 
