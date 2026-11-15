@@ -307,6 +307,7 @@ proofs_stage() {
   local -A kani_features=([crates/storage]=mdbx)
   local crate
   for crate in "${kani_crates[@]}"; do
+    crate="$(python3 -c 'import os, sys; root = os.path.realpath(os.getcwd()); print(os.path.relpath(os.path.realpath(sys.argv[1]), root))' "$crate")"
     local crate_name
     crate_name="${crate##*/}"
     local kani_target_dir
