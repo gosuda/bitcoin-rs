@@ -865,10 +865,17 @@ fn a_backend_failure_that_names_corruption_is_a_read_failure_not_damage() -> Res
         "an index backend failure keeps its read-failure class: {error}"
     );
     let f = fixture(1)?;
-    f.corrupt_body(1)?;
+    f.fail_next_verification_read(BoundedReadError::CorruptFrame("frame checksum mismatch"));
     let error = f.damage(CheckLevel::ReadBodies, None)?;
     assert!(
-        matches!(error, VerifyError::BodyCorrupt { height: 1, .. }),
+        matches!(
+            error,
+            VerifyError::BodyCorrupt {
+                height: 1,
+                evidence: "frame checksum mismatch",
+                ..
+            }
+        ),
         "a typed corrupt frame stays damage: {error}"
     );
     Ok(())
