@@ -325,11 +325,11 @@ impl Walk<'_> {
         ) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Err(self.absent(height, VerifyError::BodyMissing { height, hash })),
-            Err(BoundedReadError::CorruptFrame(_)) => {
+            Err(BoundedReadError::CorruptFrame(evidence)) => {
                 return Err(Stop::Failed(VerifyError::BodyCorrupt {
                     height,
                     hash,
-                    evidence: "corrupt block frame",
+                    evidence,
                 }));
             }
             Err(source) => {
