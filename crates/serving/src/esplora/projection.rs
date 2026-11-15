@@ -228,15 +228,7 @@ impl<'a> Projection<'a> {
     }
 
     pub(super) fn ensure_chain_view(&self, expected: &AppliedView) -> Result<(), Response> {
-        let current = self.ctx.chain.applied_view();
-        let unchanged = match (expected.tip(), current.tip()) {
-            (Some(expected), Some(current)) => {
-                expected.hash == current.hash && expected.height == current.height
-            }
-            (None, None) => true,
-            _ => false,
-        };
-        if unchanged {
+        if expected.is_same_publication(&self.ctx.chain.applied_view()) {
             Ok(())
         } else {
             Err(query_error(TxQueryError::ExpiredView))
