@@ -304,6 +304,7 @@ proofs_stage() {
   fi
 
   local -a running_kani=()
+  local -A kani_features=([crates/storage]=mdbx)
   local crate
   for crate in "${kani_crates[@]}"; do
     local crate_name
@@ -322,6 +323,9 @@ proofs_stage() {
     (
       set -euo pipefail
       local -a cmd=(cargo kani --tests -Z stubbing)
+      if [[ -n "${kani_features[$crate]:-}" ]]; then
+        cmd+=(--features "${kani_features[$crate]}")
+      fi
       if [[ -n "${PROOFS_KANI_CMD:-}" ]]; then
         read -r -a cmd <<< "${PROOFS_KANI_CMD}"
       fi
