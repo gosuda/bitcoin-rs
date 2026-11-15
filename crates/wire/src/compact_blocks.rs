@@ -38,6 +38,7 @@ pub enum Outcome {
 pub struct Reconstruction {
     pending: HashMap<BlockHash, Pending>,
     recent: Vec<(BlockHash, Instant)>,
+    pub(crate) memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
 }
 
 #[derive(Debug)]
@@ -55,6 +56,7 @@ impl Reconstruction {
         Self {
             pending: HashMap::new(),
             recent: Vec::new(),
+            memory_credit: None,
         }
     }
 
@@ -320,6 +322,9 @@ fn fill_from_hints(
             continue;
         };
         *retained_bytes = retained_bytes.saturating_add(retained_tx_bytes(&body));
+        if *retained_bytes > MAX_PENDING_RETAINED_BYTES {
+            return Err(());
+        }
         filled[slot] = Some(body);
     }
     Ok(())

@@ -85,6 +85,29 @@ impl BlockMemory {
         &self.ledger
     }
 
+    pub(crate) fn try_reserve(
+        self: &Arc<Self>,
+        bytes: usize,
+    ) -> Result<BlockMemoryCredit, PeerError> {
+        if bytes > self.ledger.capacity() {
+            return Err(std::io::Error::other(
+                "compact reconstruction reservation exceeds ingress budget",
+            )
+            .into());
+        }
+        if !self.ledger.try_take(bytes) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "compact reconstruction ingress budget unavailable",
+            )
+            .into());
+        }
+        Ok(BlockMemoryCredit {
+            owner: Arc::clone(self),
+            bytes,
+        })
+    }
+
     pub fn reserve(
         self: &Arc<Self>,
         bytes: usize,
