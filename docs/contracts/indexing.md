@@ -137,7 +137,7 @@ Owners:
 - The engine MUST never return stale, unconfirmed, or torn rows.
 - A body-store read failure is `TxQueryError::Storage`, not a missing body.
 - `unspent_outputs` consumes the `ScriptLive` watermark only.
-- The captured `ScriptLive` snapshot carries the coin payload directly and takes no live chain-transition lock or live UTXO read (`crates/projection/src/runtime/query_tests.rs`: `script_live_takes_no_transition_lock`).
+- The captured `ScriptLive` snapshot carries the coin payload directly and takes no live chain-transition lock or live UTXO read. The `script_live_takes_no_transition_lock` test proves that the listed coin value comes from the captured snapshot row payload and that no transition lock is acquired (`crates/projection/src/runtime/query_tests.rs`).
 - History, script-live, and tx-lookup queries take no chain-transition lock.
 - A missing locator under a ready matching watermark is unavailable.
 - Exact script checks filter compact-prefix collisions.
