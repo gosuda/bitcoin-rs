@@ -7,11 +7,11 @@ use bitcoin_rs_consensus::primitives::{
 };
 use bitcoin_rs_consensus::script::{instructions, is_p2sh, is_p2wsh};
 use bitcoin_rs_consensus::{BlockRuleContext, check_block_body_binding};
-use bitcoin_rs_execution::chain::{TipSnapshot, softfork_state};
+use bitcoin_rs_execution::chain::softfork_state;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
 use bitcoin_rs_projection::{ScriptHash, TransactionBlock};
 
-use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
+use crate::context::{AppliedView, Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
 use crate::convert::{self};
 use crate::rest::{Response, bad_request, internal_error, not_found, service_unavailable};
 
@@ -223,16 +223,13 @@ impl<'a> Projection<'a> {
         })
     }
 
-    pub(super) fn capture_chain_view(&self) -> Option<Arc<TipSnapshot>> {
-        self.ctx.chain.applied_tip.load_full()
+    pub(super) fn capture_chain_view(&self) -> AppliedView {
+        self.ctx.chain.applied_view()
     }
 
-    pub(super) fn ensure_chain_view(
-        &self,
-        expected: Option<&Arc<TipSnapshot>>,
-    ) -> Result<(), Response> {
-        let current = self.ctx.chain.applied_tip.load_full();
-        let unchanged = match (expected, current.as_ref()) {
+    pub(super) fn ensure_chain_view(&self, expected: &AppliedView) -> Result<(), Response> {
+        let current = self.ctx.chain.applied_view();
+        let unchanged = match (expected.tip(), current.tip()) {
             (Some(expected), Some(current)) => {
                 expected.hash == current.hash && expected.height == current.height
             }

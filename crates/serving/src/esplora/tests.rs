@@ -2049,77 +2049,15 @@ fn block_status_and_block_list_never_straddle_two_applied_branches() -> Result<(
     Ok(())
 }
 
-// WF-02
-#[test]
-fn block_page_never_mixes_confirmations_from_two_branches() -> Result<(), TestError> {
-    use bitcoin_rs_consensus::primitives::Header;
-    use bitcoin_rs_execution::chain::{NodeStatus, TipSnapshot};
+struct OrphanedPageFixture {
+    context: Context,
+    orphan_hash: BlockHash,
+    transactions: Vec<Tx>,
+    first_mined: (u32, BlockHash),
+    second_mined: (u32, BlockHash),
+}
 
-    struct MidPageReorgTxIndex {
-        transactions: Vec<Tx>,
-        before: TransactionBlock,
-        after: TransactionBlock,
-        reads: AtomicUsize,
-        reorged: Arc<AtomicBool>,
-    }
-
-    impl crate::context::DerivedIndexQuery for MidPageReorgTxIndex {
-        fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
-            Ok(self
-                .transactions
-                .iter()
-                .find(|transaction| transaction.txid() == *txid)
-                .cloned())
-        }
-
-        fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
-            let (out_txid, out_vout) = (outpoint.txid, outpoint.vout);
-            Ok(self
-                .transactions
-                .iter()
-                .find(|transaction| transaction.txid() == out_txid)
-                .and_then(|transaction| {
-                    transaction
-                        .outputs
-                        .get(usize::try_from(out_vout).unwrap_or(usize::MAX))
-                })
-                .map(|output| output.value.to_sat()))
-        }
-
-        fn transaction_block(
-            &self,
-            txid: &Txid,
-        ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
-            let Some(transaction) = self
-                .transactions
-                .iter()
-                .find(|transaction| transaction.txid() == *txid)
-            else {
-                return Ok(None);
-            };
-            let read = self.reads.fetch_add(1, Ordering::SeqCst);
-            let before = read.is_multiple_of(self.transactions.len());
-            let block = if before {
-                self.before
-            } else {
-                self.reorged.store(true, Ordering::SeqCst);
-                self.after
-            };
-            Ok(Some((transaction.clone(), block)))
-        }
-
-        fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
-            Ok(crate::context::DerivedIndexInfo {
-                synced: true,
-                best_block_height: 1,
-                applied_height: 1,
-                historical_height: 1,
-                verified_height: 1,
-                coverage_height: 1,
-            })
-        }
-    }
-
+fn orphaned_page_fixture() -> Result<OrphanedPageFixture, TestError> {
     let header = |prev: BlockHash, nonce: u32, time: u32| Header {
         version: 1,
         prev_blockhash: prev,
@@ -2150,92 +2088,253 @@ fn block_page_never_mixes_confirmations_from_two_branches() -> Result<(), TestEr
         vec![coinbase.clone()],
     );
     let genesis_hash = genesis.block_hash();
-    let a1 = block_at(
+    let orphan = block_at(
         header(genesis_hash, 1, 1_000_900),
         vec![coinbase.clone(), first.clone(), second.clone()],
     );
-    let a1_hash = a1.block_hash();
     let b1 = block_at(header(genesis_hash, 2, 1_000_901), vec![coinbase.clone()]);
     let b1_hash = b1.block_hash();
-    let b2 = block_at(header(b1_hash, 3, 1_001_800), vec![coinbase.clone()]);
+    let b2 = block_at(
+        header(b1_hash, 3, 1_001_800),
+        vec![coinbase.clone(), first.clone()],
+    );
     let b2_hash = b2.block_hash();
+    let b3 = block_at(
+        header(b2_hash, 4, 1_002_700),
+        vec![coinbase.clone(), second.clone()],
+    );
+    let b3_hash = b3.block_hash();
+    let orphan_hash = orphan.block_hash();
     assert_ne!(
-        a1_hash, b1_hash,
-        "the two branches must publish different blocks at height 1"
+        orphan_hash, b1_hash,
+        "the orphaned block must differ from the applied block at height 1"
     );
 
-    let mut context = Context::new();
-    context.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
-    let b_tip = {
+    let context = Context::new();
+    let tip = {
         let mut tree = context.chain.block_tree.write();
         let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::Active)?;
-        tree.insert_node(Some(genesis_id), a1.header, NodeStatus::Active)?;
+        tree.insert_node(Some(genesis_id), orphan.header, NodeStatus::Active)?;
         let b1_id = tree.insert_node(Some(genesis_id), b1.header, NodeStatus::Active)?;
         let b2_id = tree.insert_node(Some(b1_id), b2.header, NodeStatus::Active)?;
+        let b3_id = tree.insert_node(Some(b2_id), b3.header, NodeStatus::Active)?;
         Arc::new(TipSnapshot {
-            tip_id: b2_id,
-            height: 2,
+            tip_id: b3_id,
+            height: 3,
             chainwork: bitcoin_rs_consensus::header_rules::ChainWork::ZERO,
-            hash: b2_hash.0,
+            hash: b3_hash.0,
             chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
         })
     };
     let mut bodies = Vec::new();
-    for (height, block) in [(0u32, &genesis), (1, &a1), (1, &b1), (2, &b2)] {
+    for (height, block) in [(0u32, &genesis), (1, &orphan), (1, &b1), (2, &b2), (3, &b3)] {
         let record = BlockRecord::from_block(height, block);
         bodies.push((record.height, record.hash, consensus_bytes(block)));
         context.chain.add_block(record);
     }
+    let mut context = context;
     context.chain.block_body_source = Some(Arc::new(BlockBodies { bodies }));
-    context.chain.applied_tip.store(Some(b_tip));
-    let reorged = Arc::new(AtomicBool::new(false));
-    context.indexes.esplora_tx_index = Some(Arc::new(MidPageReorgTxIndex {
-        transactions: vec![coinbase, first, second],
-        before: TransactionBlock {
-            height: 1,
-            hash: Hash256::from(a1_hash),
-        },
-        after: TransactionBlock {
-            height: 1,
-            hash: Hash256::from(b1_hash),
-        },
-        reads: AtomicUsize::new(0),
-        reorged: Arc::clone(&reorged),
-    }));
+    context.chain.applied_tip.store(Some(tip));
     assert_eq!(
-        context.chain.active_hash_at_height(1),
+        context
+            .chain
+            .active_hash_in_view(&context.chain.applied_view(), 1),
         Some(Hash256::from(b1_hash)),
-        "the fixture must resolve height 1 to the applied b branch"
+        "the fixture must resolve height 1 to the applied branch"
     );
+    Ok(OrphanedPageFixture {
+        context,
+        orphan_hash,
+        transactions: vec![coinbase, first, second],
+        first_mined: (2, b2_hash),
+        second_mined: (3, b3_hash),
+    })
+}
 
+struct PageTxIndex {
+    transactions: Vec<Tx>,
+    confirmed: Vec<(Txid, TransactionBlock)>,
+    republish: Option<(bitcoin_rs_execution::chain::TipReader, Arc<TipSnapshot>)>,
+    reads: AtomicUsize,
+}
+
+impl crate::context::DerivedIndexQuery for PageTxIndex {
+    fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
+        Ok(self
+            .transactions
+            .iter()
+            .find(|transaction| transaction.txid() == *txid)
+            .cloned())
+    }
+
+    fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
+        let (out_txid, out_vout) = (outpoint.txid, outpoint.vout);
+        Ok(self
+            .transactions
+            .iter()
+            .find(|transaction| transaction.txid() == out_txid)
+            .and_then(|transaction| {
+                transaction
+                    .outputs
+                    .get(usize::try_from(out_vout).unwrap_or(usize::MAX))
+            })
+            .map(|output| output.value.to_sat()))
+    }
+
+    fn transaction_block(
+        &self,
+        txid: &Txid,
+    ) -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
+        let Some(transaction) = self
+            .transactions
+            .iter()
+            .find(|transaction| transaction.txid() == *txid)
+        else {
+            return Ok(None);
+        };
+        if self.reads.fetch_add(1, Ordering::SeqCst) > 0
+            && let Some((applied_tip, replacement)) = &self.republish
+        {
+            applied_tip.store(Some(Arc::clone(replacement)));
+        }
+        Ok(self
+            .confirmed
+            .iter()
+            .find(|(confirmed, _)| confirmed == txid)
+            .map(|(_, block)| (transaction.clone(), *block)))
+    }
+
+    fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+        Ok(crate::context::DerivedIndexInfo {
+            synced: true,
+            best_block_height: 3,
+            applied_height: 3,
+            historical_height: 3,
+            verified_height: 3,
+            coverage_height: 3,
+        })
+    }
+}
+
+fn mined(height: u32, hash: BlockHash) -> TransactionBlock {
+    TransactionBlock {
+        height,
+        hash: Hash256::from(hash),
+    }
+}
+
+// WF-02
+#[test]
+fn block_page_never_mixes_confirmations_from_two_branches() -> Result<(), TestError> {
+    for backend in [false, true] {
+        let OrphanedPageFixture {
+            mut context,
+            orphan_hash,
+            transactions,
+            second_mined,
+            ..
+        } = orphaned_page_fixture()?;
+        let Some(tip) = context.chain.applied_tip.load_full() else {
+            return Err("fixture tip missing".into());
+        };
+        let mut moved = (*tip).clone();
+        moved.hash = Hash256::from_le_bytes(&[9; 32]);
+        assert_ne!(
+            tip.hash, moved.hash,
+            "the page must observe a different tip"
+        );
+        let moved = Arc::new(moved);
+        let moved_hash = moved.hash;
+        let second_txid = transactions[2].txid();
+        context.indexes.esplora_tx_index = Some(Arc::new(PageTxIndex {
+            transactions,
+            confirmed: vec![(second_txid, mined(second_mined.0, second_mined.1))],
+            republish: Some((context.chain.applied_tip.clone(), moved)),
+            reads: AtomicUsize::new(0),
+        }));
+        let ctx = Arc::new(context);
+        let handler = Handler::new(Arc::clone(&ctx));
+
+        let response = if backend {
+            backend_route(&handler, &format!("/internal/block/{orphan_hash}/txs"), "")
+        } else {
+            route(&handler, &format!("/block/{orphan_hash}/txs"), "")
+        };
+        assert_eq!(
+            response.status,
+            503,
+            "backend={backend} page body: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&response.body),
+            "transaction index changed during query; retry"
+        );
+        assert_eq!(
+            ctx.chain
+                .applied_tip
+                .load_full()
+                .as_ref()
+                .map(|tip| tip.hash),
+            Some(moved_hash),
+            "the page must have read confirmations across the tip move"
+        );
+    }
+    Ok(())
+}
+
+// WF-02
+#[test]
+fn block_page_keeps_each_confirmation_of_transactions_mined_again_at_other_heights()
+-> Result<(), TestError> {
+    let OrphanedPageFixture {
+        mut context,
+        orphan_hash,
+        transactions,
+        first_mined,
+        second_mined,
+    } = orphaned_page_fixture()?;
+    let (first_txid, second_txid) = (transactions[1].txid(), transactions[2].txid());
+    context.indexes.esplora_tx_index = Some(Arc::new(PageTxIndex {
+        transactions,
+        confirmed: vec![
+            (first_txid, mined(first_mined.0, first_mined.1)),
+            (second_txid, mined(second_mined.0, second_mined.1)),
+        ],
+        republish: None,
+        reads: AtomicUsize::new(0),
+    }));
     let handler = Handler::new(Arc::new(context));
-    let a1_text = a1_hash.to_string();
-    let public_response = route(&handler, &format!("/block/{a1_text}/txs"), "");
-    assert_eq!(
-        public_response.status,
-        503,
-        "public block page body: {}",
-        String::from_utf8_lossy(&public_response.body)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&public_response.body),
-        "transaction index changed during query; retry"
-    );
-    let backend_response = backend_route(&handler, &format!("/internal/block/{a1_text}/txs"), "");
-    assert_eq!(
-        backend_response.status,
-        503,
-        "backend block page body: {}",
-        String::from_utf8_lossy(&backend_response.body)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&backend_response.body),
-        "transaction index changed during query; retry"
-    );
-    assert!(
-        reorged.load(Ordering::SeqCst),
-        "each page must read confirmations from both applied branches for the refusal to prove coherence"
-    );
+
+    for (surface, response) in [
+        (
+            "public",
+            route(&handler, &format!("/block/{orphan_hash}/txs"), ""),
+        ),
+        (
+            "backend",
+            backend_route(&handler, &format!("/internal/block/{orphan_hash}/txs"), ""),
+        ),
+    ] {
+        assert_eq!(
+            response.status,
+            200,
+            "{surface} page body: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let page: Value = sonic_rs::from_slice(&response.body)?;
+        assert_eq!(page[0]["status"]["confirmed"], json!(false), "{surface}");
+        assert_eq!(page[1]["status"]["block_height"], json!(first_mined.0));
+        assert_eq!(
+            page[1]["status"]["block_hash"],
+            json!(first_mined.1.to_string())
+        );
+        assert_eq!(page[2]["status"]["block_height"], json!(second_mined.0));
+        assert_eq!(
+            page[2]["status"]["block_hash"],
+            json!(second_mined.1.to_string())
+        );
+    }
     Ok(())
 }
 
