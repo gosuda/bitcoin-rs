@@ -136,8 +136,8 @@ pub(crate) enum TxQueryError {
 #[expect(dead_code, reason = "model error variant")]
 pub(crate) enum RetryReason {
     TipMoved {
-        expected_commit: u64,
-        current_commit: u64,
+        expected_revision: u64,
+        current_revision: u64,
     },
 }
 

@@ -57,8 +57,8 @@ fn compact_filter_rpc_exposes_only_enabled_ready_data() -> Result<(), TestError>
             if !self.0.load(Ordering::Acquire) {
                 return Err(TxQueryError::Retry(
                     bitcoin_rs_projection::RetryReason::TipMoved {
-                        expected_commit: 0,
-                        current_commit: 1,
+                        expected_revision: 0,
+                        current_revision: 1,
                     },
                 ));
             }

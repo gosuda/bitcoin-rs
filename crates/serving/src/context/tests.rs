@@ -685,7 +685,7 @@ fn height_lookups_follow_applied_tip_when_header_fork_leads()
         .add_block(BlockRecord::synthetic(2, BlockHash::from(header_tip.hash)));
 
     assert_eq!(
-        ctx.chain.active_hash_at_height(1),
+        ctx.chain.active_hash_in_view(&ctx.chain.applied_view(), 1),
         Some(applied_tip.hash),
         "height lookup must stay on the applied branch"
     );

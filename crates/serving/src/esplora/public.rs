@@ -184,7 +184,7 @@ fn fenced_tx(
     };
     match source {
         TxSource::Confirmed => response,
-        TxSource::Joined => match projection.ensure_chain_view(view.as_ref()) {
+        TxSource::Joined => match projection.ensure_chain_view(&view) {
             Ok(()) => response,
             Err(unavailable) => unavailable,
         },
@@ -494,14 +494,15 @@ pub(super) fn block_transaction_values(
     start: usize,
     limit: usize,
 ) -> Result<(Vec<TransactionValue>, TxSource), Response> {
-    let block_status = (ctx.chain.active_hash_at_height(record.height)
+    let projection = Projection::new(ctx);
+    let view = projection.capture_chain_view();
+    let block_status = (ctx.chain.active_hash_in_view(&view, record.height)
         == Some(Hash256::from(record.hash)))
     .then_some(Confirmation {
         height: record.height,
         hash: record.hash,
         time: record.time,
     });
-    let projection = Projection::new(ctx);
     let transactions = block
         .txs
         .iter()
@@ -515,14 +516,18 @@ pub(super) fn block_transaction_values(
             Ok((tx, state))
         })
         .collect::<Result<Vec<_>, Response>>()?;
-    projection.transaction_values(
+    let values = projection.transaction_values(
         transactions,
         Some(ParentSource::Block(if block_status.is_some() {
             block.txs.as_slice()
         } else {
             &[]
         })),
-    )
+    )?;
+    if block_status.is_none() {
+        projection.ensure_chain_view(&view)?;
+    }
+    Ok(values)
 }
 fn block_txids(ctx: &Context, h: &str) -> Response {
     let projection = Projection::new(ctx);

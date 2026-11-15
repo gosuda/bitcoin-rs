@@ -137,7 +137,7 @@ Owners:
 - The engine MUST never return stale, unconfirmed, or torn rows.
 - A body-store read failure is `TxQueryError::Storage`, not a missing body.
 - `unspent_outputs` consumes the `ScriptLive` watermark only.
-- The captured `ScriptLive` snapshot carries the coin payload directly and takes no live chain-transition lock or live UTXO read (`crates/projection/src/runtime/query_tests.rs`: `script_live_takes_no_transition_lock`).
+- The captured `ScriptLive` snapshot carries the coin payload directly and takes no live chain-transition lock or live UTXO read. The `script_live_takes_no_transition_lock` test proves that the listed coin value comes from the captured snapshot row payload and that no transition lock is acquired (`crates/projection/src/runtime/query_tests.rs`).
 - History, script-live, and tx-lookup queries take no chain-transition lock.
 - A missing locator under a ready matching watermark is unavailable.
 - Exact script checks filter compact-prefix collisions.
@@ -519,8 +519,8 @@ That document gives consumer usage and defers to this clause for every consisten
   - `TxQueryError::Retry` changes from a unit variant to `Retry(RetryReason)`. `TxQueryError` also gains `ExpiredView`.
   - `RetryReason::MissingAppliedTip` means that no applied tip was available at capture.
   - `RetryReason::PendingCapabilityCoverage(IndexCapability)` identifies the required capability whose coverage is not ready.
-  - `RetryReason::TipMoved { expected_commit, current_commit }` reports a runtime revision or applied-tip change during an index-progress read.
-  - Despite their names, `expected_commit` and `current_commit` contain projection runtime revisions, not durable chain commit IDs.
+  - `RetryReason::TipMoved { expected_revision, current_revision }` reports a runtime revision or applied-tip change during an index-progress read.
+  - `expected_revision` and `current_revision` carry projection runtime revisions, or mempool sequences on the mempool-backed route.
   - `ExpiredView` marks a view whose generation was replaced or revoked or whose lifetime ended.
   - `TxUnavailableCause` gains `OutsideCoverage { declared_floor_or_tip }`.
   - `Retry` displays its reason. `Unavailable` and `Storage` keep their display formats.
@@ -594,7 +594,7 @@ That document gives consumer usage and defers to this clause for every consisten
   | Required published capability has no watermark in the captured snapshot | `Retry(PendingCapabilityCoverage(capability))` |
   | Required watermark hash differs from the captured applied chain at its height | `Retry(PendingCapabilityCoverage(capability))` |
   | Required watermark differs from the applied tip on a current-tip endpoint | `Retry(PendingCapabilityCoverage(capability))` |
-  | Runtime revision or applied-tip identity changes during an index-progress read | `Retry(TipMoved { expected_commit, current_commit })` |
+  | Runtime revision or applied-tip identity changes during an index-progress read | `Retry(TipMoved { expected_revision, current_revision })` |
   | View whose generation was replaced or revoked, or whose lifetime ended | `ExpiredView` |
   | Point lookup with rows only below `floor` | `Unavailable(OutsideCoverage { declared_floor_or_tip: floor })` |
   | Coverage starting above the applied tip | `Unavailable(OutsideCoverage { declared_floor_or_tip: floor })` |

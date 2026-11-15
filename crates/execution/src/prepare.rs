@@ -2,6 +2,7 @@ use super::SameBlockSpentSet;
 use super::{
     BlockLocalUtxoView, BlockProvenance, BlockTxPlan, BlockValidationContext, ByteEquality,
     Chainstate, LOCAL_OVERLAY_TXID_SET_THRESHOLD, PreparedApply, ResolvedUtxoView,
+    prevout_slot_and_script_bytes,
 };
 use crate::error::ApplyError;
 use bitcoin_rs_consensus::UtxoView;
@@ -157,11 +158,6 @@ fn tx_view_has_bip68_sequence_locks(
                 & bitcoin_rs_consensus::primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG
                 == 0
         })
-}
-
-fn prevout_slot_and_script_bytes(script_len: usize) -> u64 {
-    let slot = std::mem::size_of::<Option<TxOut>>();
-    u64::try_from(slot.saturating_add(script_len)).unwrap_or(u64::MAX)
 }
 
 fn preflight_block_prevouts_bytes(

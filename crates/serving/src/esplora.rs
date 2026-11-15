@@ -48,7 +48,7 @@ pub fn route(handler: &Handler, surface: Surface, path: &str, query: &str) -> Re
         if response.status == 400 || response.status == 404 {
             return response;
         }
-        match projection.ensure_chain_view(chain_view.as_ref()) {
+        match projection.ensure_chain_view(&chain_view) {
             Ok(()) => response,
             Err(response) => response,
         }
@@ -93,7 +93,7 @@ fn backend_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> 
     if response.status == 400 || response.status == 404 {
         return Some(response);
     }
-    match projection.ensure_chain_view(chain_view.as_ref()) {
+    match projection.ensure_chain_view(&chain_view) {
         Ok(()) => Some(response),
         Err(unavailable) => Some(unavailable),
     }

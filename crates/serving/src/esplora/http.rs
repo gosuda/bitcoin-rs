@@ -81,8 +81,8 @@ mod tests {
         assert_eq!(
             super::query_error(TxQueryError::Retry(
                 bitcoin_rs_projection::RetryReason::TipMoved {
-                    expected_commit: 0,
-                    current_commit: 1,
+                    expected_revision: 0,
+                    current_revision: 1,
                 }
             ))
             .status,

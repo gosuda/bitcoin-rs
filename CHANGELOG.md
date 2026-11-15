@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Query retries distinguish a missing applied tip and pending capability coverage from an actual runtime revision change.
+- BREAKING CHANGE: `RetryReason` gains `MissingAppliedTip` and `PendingCapabilityCoverage(IndexCapability)`, and `TipMoved` renames its fields to `expected_revision` and `current_revision`. A downstream exhaustive match must change.
 - BREAKING CHANGE: `AppliedEpoch::commit_id` is renamed to `runtime_revision`. It counts runtime wake changes, not durable chain commits.
 - BREAKING CHANGE: `NodeBudget::available_of_charges` is renamed to `charged_bytes`. It returns the bytes charged to an owner, not the bytes still available.
 - A rejected snapshot ingest on a fresh node clears the activation marker it wrote. If the marker cannot be cleared, the chain closes for recovery and the call reports `PartialIngestNotDiscarded`.
@@ -23,6 +23,7 @@
 - A filter catch-up that seals a shared transaction tail preserves publication for every existing capability whose rows move. Seal recovery uses the same owners, and unrelated capability watermarks do not advance.
 - BREAKING CHANGE: `DerivedIndexQuery::transaction_height` is replaced by `transaction_block`, which returns the transaction body with its captured occurrence height and block hash. Esplora confirmation metadata uses that block identity across reorgs, including ABA publication changes.
 - Confirmed transaction Merkle proofs load the block body by the occurrence block hash captured with the transaction metadata, not by a later active block at the same height.
+- Esplora transaction pages for a block that is no longer on the applied chain capture one applied view, resolve every confirmation, and return the retry refusal when any applied tip was published meanwhile, including a tip that returned to the starting block. They no longer mix confirmations from two applied branches in one page. Transactions of that block that were mined again at different heights keep their own confirmations.
 - Projection enforces serving-view expiry at read completion and between emitted compact-filter records.
 - Network ingress leaves the existing foreground reserve available within the staged-image allowance. Its capacity and atomic admission check use the reduced ceiling; execution retains the full owner cap. The node-wide total, cache shares, and resource-refusal classification are unchanged.
 - Epoch-5 conversion converts retained ordinary and historical checkpoint engine images to the requested backend and schema-6 undo format. Epoch-5 and current-epoch backend copies preserve the root `full-revalidation` marker.
