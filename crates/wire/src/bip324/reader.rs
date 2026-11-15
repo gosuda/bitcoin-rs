@@ -114,7 +114,6 @@ mod tests {
 
     use super::{MAX_RECV_CONTENTS_LEN, PacketReader, is_poll_timeout};
     use crate::bip324::packet::{RecvCipher, SendCipher};
-    use crate::recv::RECEIVE_CHUNK;
 
     #[derive(Debug, thiserror::Error)]
     enum TestError {
@@ -215,12 +214,19 @@ mod tests {
     fn a_stalled_packet_retains_only_what_arrived() -> TestResult {
         let (mut sender, mut reader) = pair();
         let packet = sender.seal(&vec![9; MAX_RECV_CONTENTS_LEN], &[], false)?;
-        let mut stream = Dribble(packet[..103].iter().copied().collect());
+        let mut stream = Dribble(packet[..3].iter().copied().collect());
+        let empty = reader.read_contents(&mut stream);
+        assert!(empty.as_ref().is_err_and(is_poll_timeout), "{empty:?}");
+        assert_eq!(
+            reader.body.as_ref().map_or(0, |body| body.bytes.capacity()),
+            0
+        );
+        stream.0.extend(&packet[3..103]);
         let stalled = reader.read_contents(&mut stream);
         assert!(stalled.as_ref().is_err_and(is_poll_timeout), "{stalled:?}");
         let retained = reader.body.as_ref().map_or(0, |body| body.bytes.capacity());
         assert!(
-            retained <= RECEIVE_CHUNK,
+            retained <= 2 * 103,
             "a stalled packet retained {retained} bytes"
         );
 
@@ -231,6 +237,34 @@ mod tests {
                 .ok_or_else(|| io::Error::other("a real packet"))?
                 .len(),
             MAX_RECV_CONTENTS_LEN
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_stops_a_partial_packet_without_retaining_a_read_chunk() -> TestResult {
+        struct Cancelled;
+        impl Read for Cancelled {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::ConnectionAborted.into())
+            }
+        }
+        let (mut sender, mut reader) = pair();
+        let packet = sender.seal(&vec![9; 1024], &[], false)?;
+        let mut stream = Dribble(packet[..103].iter().copied().collect());
+        let stalled = reader.read_contents(&mut stream);
+        assert!(stalled.as_ref().is_err_and(is_poll_timeout));
+        let cancelled = reader.read_contents(&mut Cancelled);
+        assert!(matches!(
+            cancelled,
+            Err(super::TransportError::Io(error))
+                if error.kind() == io::ErrorKind::ConnectionAborted
+        ));
+        assert!(
+            reader
+                .body
+                .as_ref()
+                .is_none_or(|body| body.bytes.capacity() <= 206)
         );
         Ok(())
     }

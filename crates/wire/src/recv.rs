@@ -1,6 +1,6 @@
 use std::io::{self, Read};
 
-pub(crate) const RECEIVE_CHUNK: usize = 256 * 1024;
+pub(crate) const RECEIVE_CHUNK: usize = 16 * 1024;
 
 pub(crate) fn is_poll_timeout(error: &io::Error) -> bool {
     matches!(
@@ -30,26 +30,16 @@ pub(crate) fn fill_growing<R: Read>(
     buffer: &mut Vec<u8>,
     len: usize,
 ) -> io::Result<()> {
+    let mut scratch = [0_u8; RECEIVE_CHUNK];
     while buffer.len() < len {
-        let remaining = len - buffer.len();
-        let step = remaining.min(RECEIVE_CHUNK);
-        let start = buffer.len();
-        buffer.reserve_exact(step);
-        buffer.resize(start + step, 0);
-        let mut filled = start;
-        while filled < start + step {
-            match reader.read(&mut buffer[filled..start + step]) {
-                Ok(0) => {
-                    buffer.truncate(filled);
-                    return Err(io::ErrorKind::UnexpectedEof.into());
-                }
-                Ok(read) => filled += read,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => {
-                    buffer.truncate(filled);
-                    return Err(error);
-                }
+        let step = (len - buffer.len()).min(scratch.len());
+        match reader.read(&mut scratch[..step]) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(read) => {
+                buffer.extend_from_slice(&scratch[..read]);
             }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
         }
     }
     Ok(())
