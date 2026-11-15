@@ -166,6 +166,7 @@ fn is_relative_image_path(path: &str) -> bool {
             && component != ".."
             && !component.contains('\\')
             && !component.contains(':')
+            && !component.ends_with(['.', ' '])
     })
 }
 
@@ -339,5 +340,9 @@ mod tests {
         assert!(!is_relative_image_path("a:b"));
         assert!(!is_relative_image_path("dir/C:foo"));
         assert!(!is_relative_image_path("dir/file:stream"));
+        for path in ["file.", "file ", "dir./file", "dir /file", "a/b. ", "a/.. "] {
+            assert!(!is_relative_image_path(path));
+        }
+        assert!(is_relative_image_path("dir.name/file name"));
     }
 }
