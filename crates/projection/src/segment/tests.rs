@@ -1214,9 +1214,23 @@ impl bitcoin_rs_storage::KvSnapshot for ChunkCounter<'_> {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum PageTestError {
+    #[error(transparent)]
+    Index(#[from] crate::IndexError),
+    #[error(transparent)]
+    Storage(#[from] bitcoin_rs_storage::StorageError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Integer(#[from] std::num::TryFromIntError),
+    #[error("a truncated page holds rows")]
+    EmptyTruncatedPage,
+}
+
 // PRJ-08, IDX-12
 #[test]
-fn history_pages_seek_from_cursor_across_segments() -> Result<(), Box<dyn std::error::Error>> {
+fn history_pages_seek_from_cursor_across_segments() -> Result<(), PageTestError> {
     use crate::segment::import::{TxOccurrence, tx_lookup_segment};
     use crate::segment::{Coverage, SegmentSnapshot};
     use crate::types::{ScriptHash, TxPosition};
@@ -1277,7 +1291,7 @@ fn history_pages_seek_from_cursor_across_segments() -> Result<(), Box<dyn std::e
         max_bytes: usize::MAX,
     };
     type Page = (Vec<u32>, usize);
-    let read_page = |start: u32, max_rows: usize| -> Result<Page, Box<dyn std::error::Error>> {
+    let read_page = |start: u32, max_rows: usize| -> Result<Page, PageTestError> {
         chunks.store(0, Ordering::SeqCst);
         let scan = snapshot.funding_rows_from(script, start, limit(max_rows))?;
         let heights = scan.rows.iter().map(|row| row.row.height()).collect();
@@ -1326,7 +1340,7 @@ fn history_pages_seek_from_cursor_across_segments() -> Result<(), Box<dyn std::e
             break;
         }
         let Some(last) = scan.rows.last() else {
-            return Err("a truncated page holds rows".into());
+            return Err(PageTestError::EmptyTruncatedPage);
         };
         start = last.row.height().saturating_sub(1);
     }
