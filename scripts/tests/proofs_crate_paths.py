@@ -93,6 +93,10 @@ class ProofsCratePathsTest(unittest.TestCase):
             (root / "scripts").mkdir()
             for name in ("ci-pr.sh", "extract_lean.sh"):
                 shutil.copy2(SCRIPTS / name, root / "scripts" / name)
+            shutil.copy2(
+                SCRIPTS.parent / "docs/lean/lean-toolchain",
+                root / "docs/lean/lean-toolchain",
+            )
             storage = root / "crates/storage"
             (root / "storage-link").symlink_to(storage, target_is_directory=True)
             spellings = (
@@ -126,6 +130,23 @@ class ProofsCratePathsTest(unittest.TestCase):
                         "Both library and feature-required integration harnesses must verify\n"
                         + diagnostics,
                     )
+
+            environment["PROOFS_CRATES"] = "crates/storage crates/nested/gone"
+            shutil.rmtree(root / "target/proofs-logs", ignore_errors=True)
+            status, output = run_proofs(root, environment)
+            logs = "\n".join(
+                f"--- {path.name} ---\n{path.read_text(encoding='utf-8')}"
+                for path in sorted((root / "target/proofs-logs").glob("*.log"))
+            )
+            diagnostics = (
+                f"PROOFS_CRATES={environment['PROOFS_CRATES']!r}; exit={status}\n"
+                f"{output}\n{logs}"
+            )
+            print(f"\n=== {diagnostics}", flush=True)
+            self.assertNotEqual(status, 0, diagnostics)
+            self.assertIn("==> FAILED: kani: crates/nested/gone", output)
+            self.assertIn("==> ok: kani: crates/storage", output)
+            self.assertIn("==> ok: lean: pipeline", output)
 
 
 if __name__ == "__main__":
