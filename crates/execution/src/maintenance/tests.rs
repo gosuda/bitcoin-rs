@@ -277,3 +277,49 @@ fn maintenance_worker_publishes_the_frontier_and_advances_the_prune_line() -> Te
         .map_err(|_| TestError::WorkerPanicked("maintenance worker panicked"))?;
     Ok(())
 }
+
+// RCV-15
+#[test]
+fn maintenance_retires_completed_disconnect_debt_at_same_or_lower_height() -> TestResult {
+    for publish_child in [false, true] {
+        let dir = tempfile::tempdir()?;
+        let network = Network::Regtest;
+        let mut chain = crate::test_fixtures::handles(network, Arc::new(UtxoSet::new()));
+        chain.block_body_store = Some(Arc::new(crate::test_support::MemoryBodies::default()));
+        let genesis = network.genesis_block();
+        chain.apply_block(&BlockImage::from_local(genesis.clone()))?;
+        chain.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)))?;
+        chain.publish_checkpoint()?;
+        let child = mined_regtest_child_at(genesis.block_hash(), 1)?;
+        chain.apply_block(&BlockImage::from_local(child.clone()))?;
+        if publish_child {
+            chain.publish_checkpoint()?;
+        }
+        chain.disconnect_block(&child)?;
+        let hash = Hash256::from(child.block_hash());
+        chain.undo_store.arm_disconnect(1, hash)?;
+        chain.undo_store.complete_disconnect(1, hash)?;
+        let publisher = chain
+            .checkpoint_publisher
+            .as_ref()
+            .ok_or(TestError::Missing("checkpoint publisher"))?;
+        let root = dir.path().join(CHECKPOINT_ROOT);
+        let current = std::fs::read(root.join("CURRENT"))?;
+        assert!(!super::maintenance_step(publisher, Duration::ZERO));
+        assert!(chain.undo_store.load_disconnect_marker()?.is_some());
+        assert_eq!(std::fs::read(root.join("CURRENT"))?, current);
+        assert!(super::maintenance_step(
+            publisher,
+            CHECKPOINT_PUBLICATION_CADENCE
+        ));
+        assert!(chain.undo_store.load_disconnect_marker()?.is_none());
+        assert_ne!(std::fs::read(root.join("CURRENT"))?, current);
+        assert_eq!(publisher.durable_tip_height.load(Ordering::Acquire), 0);
+        assert!(!super::maintenance_step(publisher, Duration::ZERO));
+        assert!(!super::maintenance_step(
+            publisher,
+            CHECKPOINT_PUBLICATION_CADENCE
+        ));
+    }
+    Ok(())
+}
