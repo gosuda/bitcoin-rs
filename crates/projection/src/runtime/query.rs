@@ -696,6 +696,25 @@ impl DerivedIndexQueryEngine {
         &self,
         required: IndexCapabilities,
     ) -> Result<IndexProgress, TxQueryError> {
+        self.progress_and_coverage(required)
+            .map(|(progress, _)| progress)
+    }
+
+    pub(super) fn index_coverage_for(
+        &self,
+        capability: IndexCapability,
+    ) -> Result<Option<u32>, TxQueryError> {
+        let required = IndexCapabilities::NONE.insert(capability);
+        self.check_capability_failures(required)?;
+        let (_, marks) = self.progress_and_coverage(required)?;
+        self.check_capability_failures(required)?;
+        Ok(marks[capability.index()].map(|mark| mark.height))
+    }
+
+    fn progress_and_coverage(
+        &self,
+        required: IndexCapabilities,
+    ) -> Result<(IndexProgress, [Option<IndexWatermark>; 4]), TxQueryError> {
         self.query_health()?;
 
         let revision_before = self.runtime.revision();
@@ -747,11 +766,14 @@ impl DerivedIndexQueryEngine {
             }));
         }
 
-        Ok(IndexProgress {
-            synced,
-            processed_height: best_block_height,
-            target_height: tip_before.height,
-        })
+        Ok((
+            IndexProgress {
+                synced,
+                processed_height: best_block_height,
+                target_height: tip_before.height,
+            },
+            marks,
+        ))
     }
 }
 
