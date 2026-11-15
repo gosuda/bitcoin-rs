@@ -73,18 +73,19 @@ pub struct StableRead {
 
 impl StableRead {
     pub fn try_lock_for(&self, timeout: std::time::Duration) -> Option<StableReadGuard<'_>> {
-        self.inner
-            .try_lock_for(timeout)
-            .map(|guard| StableReadGuard { _guard: guard })
-    }
-
-    pub fn lock(&self) -> StableReadGuard<'_> {
+        let guard = self.inner.try_lock_for(timeout)?;
         #[cfg(any(test, feature = "test-seam"))]
         self.acquisitions
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        StableReadGuard {
-            _guard: self.inner.lock(),
-        }
+        Some(StableReadGuard { _guard: guard })
+    }
+
+    pub fn lock(&self) -> StableReadGuard<'_> {
+        let guard = self.inner.lock();
+        #[cfg(any(test, feature = "test-seam"))]
+        self.acquisitions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        StableReadGuard { _guard: guard }
     }
 
     #[cfg(any(test, feature = "test-seam"))]
@@ -95,9 +96,10 @@ impl StableRead {
 
     #[cfg(any(test, feature = "test-seam"))]
     pub fn try_lock(&self) -> Option<StableReadGuard<'_>> {
-        self.inner
-            .try_lock()
-            .map(|guard| StableReadGuard { _guard: guard })
+        let guard = self.inner.try_lock()?;
+        self.acquisitions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(StableReadGuard { _guard: guard })
     }
 }
 
@@ -107,4 +109,32 @@ pub struct TransitionAuthorityGuard<'a> {
 
 pub struct StableReadGuard<'a> {
     _guard: MutexGuard<'a, ()>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TransitionDomain;
+    use std::time::Duration;
+
+    #[test]
+    fn stable_read_counts_only_successful_acquisitions_across_all_entry_paths() {
+        let domain = TransitionDomain::new();
+        let reader = domain.stable_read();
+        let authority = domain.authority();
+        let held = authority.lock();
+        assert!(reader.try_lock().is_none());
+        assert!(reader.try_lock_for(Duration::ZERO).is_none());
+        assert_eq!(reader.lock_acquisitions(), 0);
+        drop(held);
+        drop(reader.lock());
+        assert_eq!(reader.lock_acquisitions(), 1);
+        let immediate = reader.try_lock();
+        assert!(immediate.is_some());
+        assert_eq!(reader.lock_acquisitions(), 2);
+        drop(immediate);
+        let timed = reader.try_lock_for(Duration::ZERO);
+        assert!(timed.is_some());
+        assert_eq!(reader.lock_acquisitions(), 3);
+        drop(timed);
+    }
 }
