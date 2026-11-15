@@ -15,7 +15,9 @@ use bitcoin_rs_projection::segment::{
 };
 use bitcoin_rs_projection::{IndexCapability, IndexWatermark, IndexWriter};
 use bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus;
-use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
+use bitcoin_rs_storage::committed_facts::{
+    CommittedBlock, CreatedOutput, FactsScript, SpentPrevout, TxFacts,
+};
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::utxo::contract::decode_undo_record;
 use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore, block_undo_key};
@@ -253,7 +255,7 @@ type CoinLedger = HashMap<([u8; 32], u32), (u64, Vec<u8>, u32, bool)>;
 
 type RestoreSpec = ([u8; 32], u32, u64, Vec<u8>, bool, u32);
 
-type CreatedCoin = (u64, Bytes, u32, bool);
+type CreatedCoin = (u64, FactsScript, u32, bool);
 
 #[derive(Clone)]
 struct FixtureBlock {
@@ -409,7 +411,12 @@ fn assemble_block(spec: BlockSpec, ledger: &mut CoinLedger) -> FixtureBlock {
                             coinbase,
                             coin_height,
                         ));
-                        (value, Bytes::from(script), coin_height, coinbase)
+                        (
+                            value,
+                            FactsScript::copy_from_slice(&script),
+                            coin_height,
+                            coinbase,
+                        )
                     };
                 inputs.push(SpentPrevout {
                     txid: prev_txid,
@@ -426,7 +433,7 @@ fn assemble_block(spec: BlockSpec, ledger: &mut CoinLedger) -> FixtureBlock {
             let vout = u32::try_from(vout).expect("fixture vout fits u32");
             let script = output.script_pubkey.as_bytes().to_vec();
             let value = output.value.to_sat();
-            let script_bytes = Bytes::copy_from_slice(&script);
+            let script_bytes = FactsScript::copy_from_slice(&script);
             outputs.push(CreatedOutput {
                 vout,
                 value,

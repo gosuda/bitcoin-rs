@@ -28,7 +28,7 @@ use bitcoin_rs_projection::runtime::{
 use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource, BlockBodyStore};
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget, RetentionRegistry};
 use bitcoin_rs_storage::{
-    Bytes, CommittedBlock, CommittedFacts, CreatedOutput, RocksDbStore, SpentPrevout,
+    CommittedBlock, CommittedFacts, CreatedOutput, FactsScript, RocksDbStore, SpentPrevout,
     StorageBackend, StorageError, TxFacts,
 };
 use parking_lot::RwLock;
@@ -199,7 +199,7 @@ fn block_to_facts(
     block: &bitcoin::Block,
     height: u32,
     commit_id: u64,
-    undo_scripts: &HashMap<([u8; 32], u32), (u64, Bytes)>,
+    undo_scripts: &HashMap<([u8; 32], u32), (u64, FactsScript)>,
 ) -> CommittedFacts {
     let bytes = serialize(block);
     let parsed = ParsedBlock::parse_exact(&bytes).expect("valid block layout");
@@ -224,7 +224,7 @@ fn block_to_facts(
                 let (value, script) = undo_scripts
                     .get(&(prev_txid, prev_vout))
                     .cloned()
-                    .unwrap_or((0, Bytes::from_static(&[0x51])));
+                    .unwrap_or((0, FactsScript::copy_from_slice(&[0x51])));
                 inputs.push(SpentPrevout {
                     txid: prev_txid,
                     vout: prev_vout,
@@ -242,7 +242,7 @@ fn block_to_facts(
             outputs.push(CreatedOutput {
                 vout: vout_u32,
                 value: out.value.to_sat(),
-                script: Bytes::copy_from_slice(out.script_pubkey.as_bytes()),
+                script: FactsScript::copy_from_slice(out.script_pubkey.as_bytes()),
             });
         }
 
@@ -398,7 +398,7 @@ fn live_index_path_reads_zero_block_bodies() {
     let mut undo_map = HashMap::new();
     undo_map.insert(
         (genesis.txdata[0].compute_txid().to_byte_array(), 0),
-        (50_000_000, Bytes::from_static(&[0x51])),
+        (50_000_000, FactsScript::copy_from_slice(&[0x51])),
     );
 
     let facts0 = block_to_facts(&genesis, 0, 1, &undo_map);

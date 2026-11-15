@@ -3,8 +3,8 @@ use super::IndexCapability;
 use super::IndexWriter;
 use crate::segment::tail::FILTER_BUILDS;
 use crate::segment::tail::SCRIPT_HASH_BUILDS;
-use bitcoin_rs_storage::Bytes;
 use bitcoin_rs_storage::CommittedBlock;
+use bitcoin_rs_storage::FactsScript;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::RocksDbStore;
 use bitcoin_rs_storage::committed_facts::CreatedOutput;
@@ -37,14 +37,14 @@ fn block_with_spends_at(height: u32, hash: u8, parent: [u8; 32]) -> CommittedBlo
                 txid: [prev_txid; 32],
                 vout: 0,
                 value: 5,
-                script: Bytes::from_static(&[0x51]),
+                script: FactsScript::copy_from_slice(&[0x51]),
                 height: 0,
                 coinbase: false,
             }],
             outputs: vec![CreatedOutput {
                 vout: 0,
                 value: 4,
-                script: Bytes::from_static(&[0x51]),
+                script: FactsScript::copy_from_slice(&[0x51]),
             }],
         }],
     }

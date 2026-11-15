@@ -2,7 +2,7 @@ use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::{IndexReader, Indexer, ScriptHash};
 use bitcoin_rs_storage::budget::UnboundedBudget;
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, TxFacts};
-use bitcoin_rs_storage::{Bytes, PrefixScanLimit, RocksDbStore};
+use bitcoin_rs_storage::{FactsScript, PrefixScanLimit, RocksDbStore};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -21,7 +21,7 @@ fn no_segment_offset_in_answers() -> Result<(), TestError> {
     let block_hash = [0x55u8; 32];
     let txid = [0x42u8; 32];
     let height = 100u32;
-    let script = Bytes::copy_from_slice(b"\x76\xa9\x14query_ans_script\x88\xac");
+    let script = FactsScript::copy_from_slice(b"\x76\xa9\x14query_ans_script\x88\xac");
 
     let block = CommittedBlock {
         height,

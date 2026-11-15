@@ -899,17 +899,17 @@ pub(crate) fn build_committed_facts(
     undo: &UndoBatch,
 ) -> Option<std::sync::Arc<bitcoin_rs_storage::CommittedFacts>> {
     use bitcoin_rs_storage::{
-        CommittedBlock, CommittedFacts, CreatedOutput, SpentPrevout, TxFacts,
+        CommittedBlock, CommittedFacts, CreatedOutput, FactsScript, SpentPrevout, TxFacts,
     };
-    use bytes::Bytes;
     use hashbrown::HashMap;
 
     let header: [u8; 80] = image.header_bytes();
     let block_hash = outcome.hash.to_le_bytes();
     let parent_hash = image.header().prev_blockhash.0.to_le_bytes();
 
-    let mut prevout_map =
-        HashMap::<([u8; 32], u32), (u64, Bytes, u32, bool)>::with_capacity(undo.restores().len());
+    let mut prevout_map = HashMap::<([u8; 32], u32), (u64, FactsScript, u32, bool)>::with_capacity(
+        undo.restores().len(),
+    );
     for add in undo.restores() {
         let txid = *add.outpoint.txid.as_bytes();
         let vout = add.outpoint.vout;
@@ -917,7 +917,7 @@ pub(crate) fn build_committed_facts(
             (txid, vout),
             (
                 add.txout.value.to_sat(),
-                Bytes::copy_from_slice(&add.txout.script_pubkey),
+                FactsScript::copy_from_slice(&add.txout.script_pubkey),
                 add.height,
                 add.coinbase,
             ),
@@ -955,7 +955,7 @@ pub(crate) fn build_committed_facts(
         let mut outputs = Vec::with_capacity(output_count);
         for vout in 0..output_count {
             let vout_u32 = u32::try_from(vout).ok()?;
-            let script = Bytes::copy_from_slice(tx.output_script(vout));
+            let script = FactsScript::copy_from_slice(tx.output_script(vout));
             let value = tx.output_value(vout).to_sat();
             outputs.push(CreatedOutput {
                 vout: vout_u32,

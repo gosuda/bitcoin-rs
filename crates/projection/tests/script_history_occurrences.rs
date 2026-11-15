@@ -12,7 +12,7 @@ use bitcoin_rs_projection::{
 };
 use bitcoin_rs_storage::budget::UnboundedBudget;
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
-use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, PrefixScanLimit, RocksDbStore};
+use bitcoin_rs_storage::{ColumnFamily, FactsScript, KvStore, PrefixScanLimit, RocksDbStore};
 
 const BLOCKS: u32 = 12;
 
@@ -423,7 +423,7 @@ fn facts_chain(blocks: u32) -> Vec<CommittedBlock> {
             outputs: vec![CreatedOutput {
                 vout: 0,
                 value: 50_0000_0000,
-                script: Bytes::from(script_for(height)),
+                script: FactsScript::copy_from_slice(&script_for(height)),
             }],
         }];
         if height > 0 {
@@ -435,14 +435,14 @@ fn facts_chain(blocks: u32) -> Vec<CommittedBlock> {
                     txid: coinbase_txid(height - 1),
                     vout: 0,
                     value: 50_0000_0000,
-                    script: Bytes::from(script_for(height - 1)),
+                    script: FactsScript::copy_from_slice(&script_for(height - 1)),
                     height: height - 1,
                     coinbase: true,
                 }],
                 outputs: vec![CreatedOutput {
                     vout: 0,
                     value: 49_0000_0000,
-                    script: Bytes::from(script_for(height)),
+                    script: FactsScript::copy_from_slice(&script_for(height)),
                 }],
             });
         }

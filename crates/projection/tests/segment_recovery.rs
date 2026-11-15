@@ -7,7 +7,7 @@ use bitcoin_rs_projection::segment::{
 use bitcoin_rs_projection::{IndexCapabilities, IndexCapability};
 use bitcoin_rs_storage::budget::UnboundedBudget;
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
-use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, RocksDbStore};
+use bitcoin_rs_storage::{ColumnFamily, FactsScript, KvStore, RocksDbStore};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tempfile::{TempDir, tempdir};
@@ -29,7 +29,7 @@ fn one_spend_generation() -> Vec<CommittedBlock> {
                 outputs: vec![CreatedOutput {
                     vout: 0,
                     value: 5_000,
-                    script: Bytes::copy_from_slice(b"\x51recovery_script\x88\xac"),
+                    script: FactsScript::copy_from_slice(b"\x51recovery_script\x88\xac"),
                 }],
             },
             TxFacts {
@@ -40,14 +40,14 @@ fn one_spend_generation() -> Vec<CommittedBlock> {
                     txid: [0xE1; 32],
                     vout: 0,
                     value: 4_000,
-                    script: Bytes::copy_from_slice(b"\x51recovery_script\x88\xac"),
+                    script: FactsScript::copy_from_slice(b"\x51recovery_script\x88\xac"),
                     height: 1,
                     coinbase: false,
                 }],
                 outputs: vec![CreatedOutput {
                     vout: 0,
                     value: 3_000,
-                    script: Bytes::copy_from_slice(b"\x76\xa9\x14recovery_second\x88\xac"),
+                    script: FactsScript::copy_from_slice(b"\x76\xa9\x14recovery_second\x88\xac"),
                 }],
             },
         ],

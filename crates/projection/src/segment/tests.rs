@@ -443,7 +443,7 @@ fn core_filter_vectors_read_back_through_the_segment_snapshot()
                     input.previous_output.txid.to_byte_array(),
                     input.previous_output.vout,
                 ),
-                bitcoin_rs_storage::Bytes::copy_from_slice(&Vec::from_hex(&script)?),
+                bitcoin_rs_storage::FactsScript::copy_from_slice(&Vec::from_hex(&script)?),
             );
         }
         let facts = committed_facts(&block, height, &external)?;
@@ -461,13 +461,13 @@ fn core_filter_vectors_read_back_through_the_segment_snapshot()
 fn committed_facts(
     block: &bitcoin::Block,
     height: u32,
-    external: &hashbrown::HashMap<([u8; 32], u32), bitcoin_rs_storage::Bytes>,
+    external: &hashbrown::HashMap<([u8; 32], u32), bitcoin_rs_storage::FactsScript>,
 ) -> Result<bitcoin_rs_storage::CommittedBlock, crate::portable::TestError> {
     use bitcoin::hashes::Hash as _;
-    use bitcoin_rs_storage::Bytes;
+    use bitcoin_rs_storage::FactsScript;
     use bitcoin_rs_storage::committed_facts::{CreatedOutput, SpentPrevout, TxFacts};
 
-    let mut created = hashbrown::HashMap::<([u8; 32], u32), Bytes>::new();
+    let mut created = hashbrown::HashMap::<([u8; 32], u32), FactsScript>::new();
     let mut txs = Vec::with_capacity(block.txdata.len());
     for tx in &block.txdata {
         let txid = tx.compute_txid().to_byte_array();
@@ -480,7 +480,7 @@ fn committed_facts(
                     txid: [0; 32],
                     vout: u32::MAX,
                     value: 0,
-                    script: Bytes::new(),
+                    script: FactsScript::default(),
                     height,
                     coinbase: true,
                 });
@@ -503,7 +503,7 @@ fn committed_facts(
         let mut outputs = Vec::with_capacity(tx.output.len());
         for (vout, out) in tx.output.iter().enumerate() {
             let vout = u32::try_from(vout)?;
-            let script = Bytes::copy_from_slice(out.script_pubkey.as_bytes());
+            let script = FactsScript::copy_from_slice(out.script_pubkey.as_bytes());
             created.insert((txid, vout), script.clone());
             outputs.push(CreatedOutput {
                 vout,
@@ -617,7 +617,7 @@ fn same_block_spends_resolve_locally_and_empty_filters_encode_zero()
     child.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x52]);
     block.txdata.push(child);
     let mut same_block = committed_facts(&block, 1, &hashbrown::HashMap::new())?;
-    same_block.txs[1].inputs[0].script = bitcoin_rs_storage::Bytes::new();
+    same_block.txs[1].inputs[0].script = bitcoin_rs_storage::FactsScript::default();
     let filter = append_and_read(&same_block, [0; 32])?;
     let oracle = bitcoin::bip158::BlockFilter::new_script_filter(&block, |outpoint| {
         if *outpoint
@@ -659,7 +659,7 @@ fn same_block_spends_resolve_locally_and_empty_filters_encode_zero()
 }
 
 fn shared_script_blocks(count: u32) -> Vec<bitcoin_rs_storage::CommittedBlock> {
-    let script = bitcoin_rs_storage::Bytes::copy_from_slice(&[0x51]);
+    let script = bitcoin_rs_storage::FactsScript::copy_from_slice(&[0x51]);
     let mut blocks = Vec::new();
     let mut previous_coinbase: Option<[u8; 32]> = None;
     let mut previous_hash = [0u8; 32];
@@ -806,7 +806,7 @@ fn dense_block(
             bitcoin_rs_storage::committed_facts::CreatedOutput {
                 vout,
                 value: 1,
-                script: bitcoin_rs_storage::Bytes::copy_from_slice(&script),
+                script: bitcoin_rs_storage::FactsScript::copy_from_slice(&script),
             }
         })
         .collect();
@@ -1089,7 +1089,7 @@ fn block_tail_bound_covers_the_bytes_the_append_records() {
 }
 
 fn fund_and_spend_blocks(outputs: u32, script: &[u8]) -> [bitcoin_rs_storage::CommittedBlock; 2] {
-    use bitcoin_rs_storage::Bytes;
+    use bitcoin_rs_storage::FactsScript;
     use bitcoin_rs_storage::committed_facts::{CreatedOutput, SpentPrevout, TxFacts};
     let funding_txid = [0xD0; 32];
     let fund = bitcoin_rs_storage::CommittedBlock {
@@ -1106,7 +1106,7 @@ fn fund_and_spend_blocks(outputs: u32, script: &[u8]) -> [bitcoin_rs_storage::Co
                 .map(|vout| CreatedOutput {
                     vout,
                     value: 1,
-                    script: Bytes::copy_from_slice(script),
+                    script: FactsScript::copy_from_slice(script),
                 })
                 .collect(),
         }],
@@ -1125,7 +1125,7 @@ fn fund_and_spend_blocks(outputs: u32, script: &[u8]) -> [bitcoin_rs_storage::Co
                     txid: funding_txid,
                     vout,
                     value: 1,
-                    script: Bytes::copy_from_slice(script),
+                    script: FactsScript::copy_from_slice(script),
                     height: 1,
                     coinbase: false,
                 })
@@ -1595,13 +1595,13 @@ fn spend_after_seal_names_the_latest_duplicate_creation() -> Result<(), crate::p
     use bitcoin_rs_storage::committed_facts::{
         CommittedBlock, CreatedOutput, SpentPrevout, TxFacts,
     };
-    use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, RocksDbStore};
+    use bitcoin_rs_storage::{ColumnFamily, FactsScript, KvStore, RocksDbStore};
 
     let dir = tempfile::tempdir()?;
     let scratch = tempfile::tempdir()?;
     let store = RocksDbStore::open(dir.path())?;
     let txid = [0x5a; 32];
-    let script = Bytes::from_static(b"\x51creator");
+    let script = FactsScript::copy_from_slice(b"\x51creator");
     let creations: Vec<_> = (1_u8..=2)
         .map(|height| CommittedBlock {
             height: u32::from(height),

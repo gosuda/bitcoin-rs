@@ -293,7 +293,7 @@ pub(crate) struct BodyFacts<'a> {
 
 #[derive(Clone)]
 struct CreatedCoin {
-    script: bitcoin_rs_storage::Bytes,
+    script: bitcoin_rs_storage::FactsScript,
     value: u64,
     height: u32,
     coinbase: bool,
@@ -359,7 +359,7 @@ fn committed_inputs(
                 txid: [0u8; 32],
                 vout: u32::MAX,
                 value: 0,
-                script: bitcoin_rs_storage::Bytes::new(),
+                script: bitcoin_rs_storage::FactsScript::default(),
                 height: facts.height,
                 coinbase: true,
             });
@@ -389,7 +389,7 @@ fn resolve_spent_coin(
     }
     if let Some(coin) = facts.spent_coins.spent_coin(&prev_txid, vout) {
         return Ok(CreatedCoin {
-            script: bitcoin_rs_storage::Bytes::copy_from_slice(coin.script),
+            script: bitcoin_rs_storage::FactsScript::copy_from_slice(coin.script),
             value: coin.value,
             height: coin.height,
             coinbase: coin.coinbase,
@@ -403,7 +403,7 @@ fn resolve_spent_coin(
         });
     }
     Ok(CreatedCoin {
-        script: bitcoin_rs_storage::Bytes::new(),
+        script: bitcoin_rs_storage::FactsScript::default(),
         value: 0,
         height: 0,
         coinbase: false,
@@ -422,7 +422,7 @@ fn committed_outputs(
         let Ok(vout) = u32::try_from(index) else {
             break;
         };
-        let script = bitcoin_rs_storage::Bytes::copy_from_slice(output_script_at(tx, index));
+        let script = bitcoin_rs_storage::FactsScript::copy_from_slice(output_script_at(tx, index));
         let value = output_value_at(tx, index);
         created.insert(
             (txid, vout),
@@ -446,8 +446,8 @@ fn committed_outputs(
 mod tests {
     use super::pending_rows_for_facts;
     use crate::index::capability::IndexCapabilities;
-    use bitcoin_rs_storage::Bytes;
     use bitcoin_rs_storage::CommittedBlock;
+    use bitcoin_rs_storage::FactsScript;
     use bitcoin_rs_storage::committed_facts::{CreatedOutput, SpentPrevout, TxFacts};
 
     fn block_with_spend() -> CommittedBlock {
@@ -464,14 +464,14 @@ mod tests {
                     txid: [7; 32],
                     vout: 0,
                     value: 5,
-                    script: Bytes::from_static(&[0x51]),
+                    script: FactsScript::copy_from_slice(&[0x51]),
                     height: 0,
                     coinbase: false,
                 }],
                 outputs: vec![CreatedOutput {
                     vout: 0,
                     value: 4,
-                    script: Bytes::from_static(&[0x51]),
+                    script: FactsScript::copy_from_slice(&[0x51]),
                 }],
             }],
         }
