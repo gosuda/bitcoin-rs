@@ -221,6 +221,11 @@ impl IndexBundleManifestV1 {
                 "exactly one tx_lookup capability is required".to_owned(),
             ));
         };
+        if coverage.capability != BundleFamily::TxLookup {
+            return Err(IndexBundleError::UnsupportedCapability(
+                coverage.capability.label(),
+            ));
+        }
         if coverage.height != self.base.height
             || parse_hash_be(&coverage.hash, "capabilities.hash")? != base_hash
         {
@@ -236,6 +241,11 @@ impl IndexBundleManifestV1 {
                 "exactly one tx_lookup artifact is required".to_owned(),
             ));
         };
+        if artifact.family != BundleFamily::TxLookup {
+            return Err(IndexBundleError::UnsupportedCapability(
+                artifact.family.label(),
+            ));
+        }
         if artifact.name != BundleFamily::TxLookup.file_name() {
             return Err(refuse(format!(
                 "artifact name {:?} is not {:?}",
@@ -367,6 +377,22 @@ mod tests {
             parsed.validate(),
             Err(IndexBundleError::UnsupportedCapability("script_history"))
         ));
+    }
+
+    #[test]
+    fn compact_filters_are_refused_in_each_manifest_family_slot() {
+        for coverage_slot in [true, false] {
+            let mut manifest = IndexBundleManifestV1::parse(json().as_bytes()).expect("parses");
+            if coverage_slot {
+                manifest.index.capabilities[0].capability = BundleFamily::CompactFilters;
+            } else {
+                manifest.artifacts[0].family = BundleFamily::CompactFilters;
+            }
+            assert!(matches!(
+                manifest.validate(),
+                Err(IndexBundleError::UnsupportedCapability("compact_filters"))
+            ));
+        }
     }
 
     #[test]
