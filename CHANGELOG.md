@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- BREAKING CHANGE: storage `CreatedOutput::script` and `SpentPrevout::script` use immutable full-buffer `FactsScript` instead of arbitrary `Bytes`. Downstream constructors and consumers must use `FactsScript`; full-buffer ownership makes retained capacity and sharing accountable.
 - BREAKING CHANGE: `RetryReason` gains `MissingAppliedTip` and `PendingCapabilityCoverage(IndexCapability)`, and `TipMoved` renames its fields to `expected_revision` and `current_revision`. A downstream exhaustive match must change.
 - BREAKING CHANGE: `AppliedEpoch::commit_id` is renamed to `runtime_revision`. It counts runtime wake changes, not durable chain commits.
 - BREAKING CHANGE: `NodeBudget::available_of_charges` is renamed to `charged_bytes`. It returns the bytes charged to an owner, not the bytes still available.

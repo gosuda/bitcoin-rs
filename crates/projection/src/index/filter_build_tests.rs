@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use bitcoin_rs_storage::{Bytes, CommittedBlock, CreatedOutput, RocksDbStore, TxFacts};
+use bitcoin_rs_storage::{CommittedBlock, CreatedOutput, FactsScript, RocksDbStore, TxFacts};
 
 use super::{IndexCapabilities, IndexWriter, PreparedBatch, PreparedBatchLimits};
 use crate::segment::tail::FILTER_BUILDS;
@@ -22,7 +22,7 @@ fn facts(height: u32, hash: [u8; 32], parent_hash: [u8; 32], txid: u8) -> Commit
             outputs: vec![CreatedOutput {
                 vout: 0,
                 value: 50,
-                script: Bytes::copy_from_slice(&[0x51]),
+                script: FactsScript::copy_from_slice(&[0x51]),
             }],
         }],
     }

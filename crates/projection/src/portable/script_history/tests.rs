@@ -18,30 +18,55 @@ use crate::{IndexCapabilities, IndexError, IndexWatermark, IndexWriter, index_fo
 use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_storage::budget::UnboundedBudget;
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
-use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, PrefixScanLimit, RocksDbStore};
+use bitcoin_rs_storage::{ColumnFamily, FactsScript, KvStore, PrefixScanLimit, RocksDbStore};
 use parking_lot::RwLock;
 use sha2::{Digest as _, Sha256};
-use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::{TempDir, tempdir};
 
-type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+type TestResult<T = ()> = Result<T, TestError>;
+
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Index(#[from] IndexError),
+    #[error(transparent)]
+    Bundle(#[from] IndexBundleError),
+    #[error(transparent)]
+    Storage(#[from] bitcoin_rs_storage::StorageError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Import(#[from] ScriptHistoryImportError),
+    #[error(transparent)]
+    Bulk(#[from] crate::segment::bulk_builder::BulkBuilderError),
+    #[error(transparent)]
+    Integer(#[from] std::num::TryFromIntError),
+    #[error("missing {0}")]
+    Missing(&'static str),
+}
+
+impl From<&'static str> for TestError {
+    fn from(value: &'static str) -> Self {
+        Self::Missing(value)
+    }
+}
 type Rows = Vec<(Vec<u8>, Vec<u8>)>;
 
 const BLOCKS: u32 = 50;
 const TX_COUNT: u64 = 250;
 
-fn cross_block_script(height: u32) -> Bytes {
+fn cross_block_script(height: u32) -> FactsScript {
     let mut script = b"\x76\xa9\x14cross_block_spent_\x88\xac".to_vec();
     script[15] = u8::try_from(height & 0xff).unwrap_or(0);
-    Bytes::from(script)
+    FactsScript::copy_from_slice(&script)
 }
 
-fn self_transfer_script(height: u32) -> Bytes {
+fn self_transfer_script(height: u32) -> FactsScript {
     let mut script = b"\x76\xa9\x14self_transfer_script\x88\xac".to_vec();
     script[16] = u8::try_from(height & 0xff).unwrap_or(0);
-    Bytes::from(script)
+    FactsScript::copy_from_slice(&script)
 }
 
 fn cross_block_input(height: u32) -> SpentPrevout {
@@ -92,7 +117,9 @@ fn synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
                     txid: prev_txid,
                     vout: 0,
                     value: 50_000,
-                    script: Bytes::copy_from_slice(b"\x76\xa9\x14synthetic_prev_script\x88\xac"),
+                    script: FactsScript::copy_from_slice(
+                        b"\x76\xa9\x14synthetic_prev_script\x88\xac",
+                    ),
                     height: 0,
                     coinbase: false,
                 });
@@ -121,13 +148,13 @@ fn synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
                     script: if t == 4 {
                         self_transfer_script(h)
                     } else {
-                        Bytes::copy_from_slice(b"\x76\xa9\x14synthetic_output_script\x88\xac")
+                        FactsScript::copy_from_slice(b"\x76\xa9\x14synthetic_output_script\x88\xac")
                     },
                 },
                 CreatedOutput {
                     vout: 1,
                     value: 25_000,
-                    script: Bytes::copy_from_slice(b"\x00\x14synthetic_witness_script"),
+                    script: FactsScript::copy_from_slice(b"\x00\x14synthetic_witness_script"),
                 },
             ];
 
@@ -561,7 +588,7 @@ fn small_budget_restore_matches_the_live_export() -> TestResult {
             .map(|(key, value)| (key[8..].to_vec(), value))
             .collect();
         stripped.sort_unstable();
-        Ok::<_, Box<dyn Error>>(stripped)
+        Ok::<_, TestError>(stripped)
     };
     assert_eq!(
         family_rows(&receiver_store, ColumnFamily::TxDir)?,
@@ -573,9 +600,9 @@ fn small_budget_restore_matches_the_live_export() -> TestResult {
 // PRJ-06, PRJ-07
 #[test]
 fn one_spender_of_two_outpoints_names_one_transaction() -> TestResult {
-    let script_a = Bytes::copy_from_slice(b"\x76\xa9\x14double_spend_script_a\x88\xac");
-    let script_b = Bytes::copy_from_slice(b"\x76\xa9\x14double_spend_script_b\x88\xac");
-    let script_c = Bytes::copy_from_slice(b"\x76\xa9\x14double_spend_script_c\x88\xac");
+    let script_a = FactsScript::copy_from_slice(b"\x76\xa9\x14double_spend_script_a\x88\xac");
+    let script_b = FactsScript::copy_from_slice(b"\x76\xa9\x14double_spend_script_b\x88\xac");
+    let script_c = FactsScript::copy_from_slice(b"\x76\xa9\x14double_spend_script_c\x88\xac");
     let funding = CommittedBlock {
         height: 1,
         hash: [0x11_u8; 32],
@@ -696,7 +723,7 @@ fn one_spender_of_two_outpoints_names_one_transaction() -> TestResult {
             .map(|(key, value)| (key[8..].to_vec(), value))
             .collect();
         stripped.sort_unstable();
-        Ok::<_, Box<dyn Error>>(stripped)
+        Ok::<_, TestError>(stripped)
     };
     assert_eq!(
         family_rows(&receiver_store, ColumnFamily::TxDir)?,
@@ -761,7 +788,7 @@ fn restored_history_identity_resolves_subsequent_spender() -> TestResult {
     use crate::{IndexReader, PreparedBatch, PreparedBatchLimits};
     use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
 
-    let script = Bytes::from_static(&[0x51]);
+    let script = FactsScript::copy_from_slice(&[0x51]);
     let header = [0_u8; 80];
     let hash = bitcoin_rs_consensus::primitives::encode::double_sha256(&header).to_le_bytes();
     let funding_id = [0x22; 32];
@@ -790,7 +817,7 @@ fn restored_history_identity_resolves_subsequent_spender() -> TestResult {
                 outputs: vec![CreatedOutput {
                     vout: 0,
                     value: 0,
-                    script: Bytes::from_static(&[0x6a, 0x00]),
+                    script: FactsScript::copy_from_slice(&[0x6a, 0x00]),
                 }],
             },
         ],
@@ -914,7 +941,7 @@ fn restored_history_identity_resolves_subsequent_spender() -> TestResult {
             outputs: vec![CreatedOutput {
                 vout: 0,
                 value: 4_000,
-                script: Bytes::from_static(&[0x52]),
+                script: FactsScript::copy_from_slice(&[0x52]),
             }],
         }],
     };

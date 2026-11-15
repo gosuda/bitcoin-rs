@@ -18,7 +18,7 @@ use bitcoin_rs_projection::{
 };
 use bitcoin_rs_storage::budget::UnboundedBudget;
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
-use bitcoin_rs_storage::{Bytes, PrefixScanLimit, RocksDbStore};
+use bitcoin_rs_storage::{FactsScript, PrefixScanLimit, RocksDbStore};
 
 const BLOCKS: u32 = 3;
 const COINBASE_VALUE: u64 = 50 * 100_000_000;
@@ -156,14 +156,14 @@ fn build_chain() -> Result<Chain, TestError> {
                 txid: [0; 32],
                 vout: u32::MAX,
                 value: 0,
-                script: Bytes::new(),
+                script: FactsScript::default(),
                 height,
                 coinbase: true,
             }],
             outputs: vec![CreatedOutput {
                 vout: 0,
                 value: coin.value,
-                script: Bytes::from(coin.script.clone()),
+                script: FactsScript::copy_from_slice(&coin.script),
             }],
         }];
         chain.txids.push(coinbase_txid);
@@ -185,14 +185,14 @@ fn build_chain() -> Result<Chain, TestError> {
                     txid: previous_txid,
                     vout: 0,
                     value: previous_coin.value,
-                    script: Bytes::from(previous_coin.script),
+                    script: FactsScript::copy_from_slice(&previous_coin.script),
                     height: previous_coin.height,
                     coinbase: previous_coin.coinbase,
                 }],
                 outputs: vec![CreatedOutput {
                     vout: 0,
                     value: CHILD_VALUE,
-                    script: Bytes::from(spend_script),
+                    script: FactsScript::copy_from_slice(&spend_script),
                 }],
             });
             chain.txids.push(spend_txid);

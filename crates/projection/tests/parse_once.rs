@@ -2,8 +2,10 @@
 //! once on the fallback body path and never on the committed-facts path.
 //! The parse counter is process-global, so this binary holds one test.
 
-use std::error::Error;
+#[path = "support/error.rs"]
+mod test_error;
 use std::sync::Arc;
+use test_error::TestError;
 
 use bitcoin_rs_consensus::primitives::encode::double_sha256;
 use bitcoin_rs_consensus::primitives::layout::{
@@ -11,7 +13,7 @@ use bitcoin_rs_consensus::primitives::layout::{
 };
 use bitcoin_rs_projection::{IndexCapabilities, IndexWriter, SpentCoin, SpentCoins};
 use bitcoin_rs_storage::{
-    Bytes, CommittedBlock, CreatedOutput, RocksDbStore, SpentPrevout, TxFacts,
+    CommittedBlock, CreatedOutput, FactsScript, RocksDbStore, SpentPrevout, TxFacts,
 };
 
 const COINBASE_VALUE: u64 = 50 * 100_000_000;
@@ -109,12 +111,12 @@ fn created(vout: u32, value: u64, script: &[u8]) -> CreatedOutput {
     CreatedOutput {
         vout,
         value,
-        script: Bytes::copy_from_slice(script),
+        script: FactsScript::copy_from_slice(script),
     }
 }
 
 #[test]
-fn live_facts_path_parses_nothing_and_fallback_parses_once() -> Result<(), Box<dyn Error>> {
+fn live_facts_path_parses_nothing_and_fallback_parses_once() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let store = Arc::new(RocksDbStore::open(dir.path())?);
     let writer = IndexWriter::open(store, 1)?;
@@ -195,7 +197,7 @@ fn live_facts_path_parses_nothing_and_fallback_parses_once() -> Result<(), Box<d
                     txid: cb1_txid,
                     vout: 0,
                     value: COINBASE_VALUE,
-                    script: Bytes::copy_from_slice(&OP_TRUE),
+                    script: FactsScript::copy_from_slice(&OP_TRUE),
                     height: 1,
                     coinbase: true,
                 }],

@@ -1252,14 +1252,14 @@ mod prepare_from_facts_tests {
                     txid: [0x06; 32],
                     vout: 0,
                     value: 5_000,
-                    script: bitcoin_rs_storage::Bytes::from_static(&[0x51]),
+                    script: bitcoin_rs_storage::FactsScript::copy_from_slice(&[0x51]),
                     height: 6,
                     coinbase: false,
                 }],
                 outputs: vec![bitcoin_rs_storage::committed_facts::CreatedOutput {
                     vout: 0,
                     value: 5_000,
-                    script: bitcoin_rs_storage::Bytes::from_static(&[0x52]),
+                    script: bitcoin_rs_storage::FactsScript::copy_from_slice(&[0x52]),
                 }],
             }],
         };

@@ -12,7 +12,7 @@ use bitcoin_rs_projection::{
 use bitcoin_rs_storage::budget::{BudgetCharge, BudgetError, BudgetOwner, UnboundedBudget};
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
 use bitcoin_rs_storage::{
-    Bytes, ColumnFamily, KvStore, PrefixScanLimit, RocksDbStore, StorageError,
+    ColumnFamily, FactsScript, KvStore, PrefixScanLimit, RocksDbStore, StorageError,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -36,16 +36,16 @@ const SCAN_ALL: PrefixScanLimit = PrefixScanLimit {
     max_bytes: 64 << 20,
 };
 
-fn cross_block_script(height: u32) -> Bytes {
+fn cross_block_script(height: u32) -> FactsScript {
     let mut script = b"\x76\xa9\x14cross_block_spent_\x88\xac".to_vec();
     script[15] = u8::try_from(height & 0xff).unwrap_or(0);
-    Bytes::from(script)
+    FactsScript::copy_from_slice(&script)
 }
 
-fn self_transfer_script(height: u32) -> Bytes {
+fn self_transfer_script(height: u32) -> FactsScript {
     let mut script = b"\x76\xa9\x14self_transfer_script\x88\xac".to_vec();
     script[16] = u8::try_from(height & 0xff).unwrap_or(0);
-    Bytes::from(script)
+    FactsScript::copy_from_slice(&script)
 }
 
 fn cross_block_input(height: u32) -> SpentPrevout {
@@ -99,7 +99,9 @@ fn create_synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
                     txid: prev_txid,
                     vout: 0,
                     value: 50_000,
-                    script: Bytes::copy_from_slice(b"\x76\xa9\x14synthetic_prev_script\x88\xac"),
+                    script: FactsScript::copy_from_slice(
+                        b"\x76\xa9\x14synthetic_prev_script\x88\xac",
+                    ),
                     height: 0,
                     coinbase: false,
                 });
@@ -128,13 +130,13 @@ fn create_synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
                     script: if t == 4 {
                         self_transfer_script(h)
                     } else {
-                        Bytes::copy_from_slice(b"\x76\xa9\x14synthetic_output_script\x88\xac")
+                        FactsScript::copy_from_slice(b"\x76\xa9\x14synthetic_output_script\x88\xac")
                     },
                 },
                 CreatedOutput {
                     vout: 1,
                     value: 25_000,
-                    script: Bytes::copy_from_slice(b"\x00\x14synthetic_witness_script"),
+                    script: FactsScript::copy_from_slice(b"\x00\x14synthetic_witness_script"),
                 },
             ];
 
@@ -215,7 +217,7 @@ struct FamilyDigestPair {
 }
 
 fn cross_block_spend_generation() -> Vec<CommittedBlock> {
-    let funded_script = Bytes::copy_from_slice(b"\x76\xa9\x14fresh_output\x88\xac");
+    let funded_script = FactsScript::copy_from_slice(b"\x76\xa9\x14fresh_output\x88\xac");
     vec![
         CommittedBlock {
             height: 1,
@@ -254,7 +256,7 @@ fn cross_block_spend_generation() -> Vec<CommittedBlock> {
                 outputs: vec![CreatedOutput {
                     vout: 0,
                     value: 19_000,
-                    script: Bytes::copy_from_slice(b"\x76\xa9\x14spent_output\x88\xac"),
+                    script: FactsScript::copy_from_slice(b"\x76\xa9\x14spent_output\x88\xac"),
                 }],
             }],
         },
@@ -502,7 +504,7 @@ fn empty_script_history_matches_bulk_and_live() -> Result<(), TestError> {
                 outputs: vec![CreatedOutput {
                     vout: 0,
                     value: 20_000,
-                    script: Bytes::new(),
+                    script: FactsScript::default(),
                 }],
             }],
         },
@@ -519,14 +521,14 @@ fn empty_script_history_matches_bulk_and_live() -> Result<(), TestError> {
                     txid: FUND_TXID,
                     vout: 0,
                     value: 20_000,
-                    script: Bytes::new(),
+                    script: FactsScript::default(),
                     height: 1,
                     coinbase: false,
                 }],
                 outputs: vec![CreatedOutput {
                     vout: 0,
                     value: 19_000,
-                    script: Bytes::copy_from_slice(b"\x51"),
+                    script: FactsScript::copy_from_slice(b"\x51"),
                 }],
             }],
         },
@@ -601,7 +603,7 @@ fn seal_repack_respects_posting_chunk_byte_cap() -> Result<(), TestError> {
                     outputs: vec![CreatedOutput {
                         vout: 0,
                         value: 1,
-                        script: Bytes::copy_from_slice(&[0x51]),
+                        script: FactsScript::copy_from_slice(&[0x51]),
                     }],
                 }
             })
@@ -871,25 +873,25 @@ fn reset_offline_clears_segment_families_and_descriptors() -> Result<(), TestErr
     Ok(())
 }
 
-fn p2wpkh_script(tag: u32) -> Bytes {
+fn p2wpkh_script(tag: u32) -> FactsScript {
     let mut script = vec![0x00u8, 0x14];
     script.extend_from_slice(&tag.to_le_bytes());
     script.extend_from_slice(&[0x11u8; 16]);
-    Bytes::from(script)
+    FactsScript::copy_from_slice(&script)
 }
 
-fn p2tr_script(tag: u32) -> Bytes {
+fn p2tr_script(tag: u32) -> FactsScript {
     let mut script = vec![0x51u8, 0x20];
     script.extend_from_slice(&tag.to_le_bytes());
     script.extend_from_slice(&[0x22u8; 28]);
-    Bytes::from(script)
+    FactsScript::copy_from_slice(&script)
 }
 
-fn same_block_script(tag: u32) -> Bytes {
+fn same_block_script(tag: u32) -> FactsScript {
     let mut script = vec![0x00u8, 0x20];
     script.extend_from_slice(&tag.to_le_bytes());
     script.extend_from_slice(&[0x33u8; 26]);
-    Bytes::from(script)
+    FactsScript::copy_from_slice(&script)
 }
 
 fn chain_txid(height: u32, tag: u8) -> [u8; 32] {
@@ -902,7 +904,7 @@ fn chain_txid(height: u32, tag: u8) -> [u8; 32] {
 
 struct SpendChain {
     blocks: Vec<CommittedBlock>,
-    scripts: Vec<Bytes>,
+    scripts: Vec<FactsScript>,
     spent: Vec<([u8; 32], u32)>,
 }
 
@@ -911,7 +913,7 @@ fn create_spend_chain(count: u32) -> SpendChain {
     let mut seen = BTreeSet::new();
     let mut scripts = Vec::new();
     let mut spent = Vec::new();
-    let mut remember = |script: Bytes| {
+    let mut remember = |script: FactsScript| {
         if seen.insert(script.to_vec()) {
             scripts.push(script);
         }

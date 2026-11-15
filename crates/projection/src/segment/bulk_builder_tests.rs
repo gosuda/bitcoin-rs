@@ -1,6 +1,6 @@
 use super::*;
 use bitcoin_rs_storage::committed_facts::TxFacts;
-use bitcoin_rs_storage::{Bytes, RocksDbStore};
+use bitcoin_rs_storage::{FactsScript, RocksDbStore};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -94,7 +94,7 @@ fn synthetic_blocks(count: u32) -> Vec<CommittedBlock> {
             let mut txid = [0u8; 32];
             txid[..4].copy_from_slice(&height.to_be_bytes());
             txid[4..8].copy_from_slice(&t.to_be_bytes());
-            let script = Bytes::copy_from_slice(b"\x51spill_test_script_padding_padding00");
+            let script = FactsScript::copy_from_slice(b"\x51spill_test_script_padding_padding00");
             txs.push(TxFacts {
                 txid,
                 offset: t.saturating_mul(100),
@@ -314,7 +314,7 @@ fn tx_dir_gated_by_capabilities() -> Result<(), BulkBuilderError> {
 fn duplicate_txid_spends_resolve_to_the_creation_before_each_spend() -> Result<(), BulkBuilderError>
 {
     let dup = [0xaa; 32];
-    let script = |byte: u8| Bytes::copy_from_slice(&[byte]);
+    let script = |byte: u8| FactsScript::copy_from_slice(&[byte]);
     let output = |byte: u8| CreatedOutput {
         vout: 0,
         value: 5_000,

@@ -613,7 +613,7 @@ fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation(
             outputs: vec![CreatedOutput {
                 vout: 0,
                 value: 5_000,
-                script: bitcoin_rs_storage::Bytes::from_static(b"\x51creator"),
+                script: bitcoin_rs_storage::FactsScript::copy_from_slice(b"\x51creator"),
             }],
         }],
     };
@@ -630,7 +630,7 @@ fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation(
                 txid: [0xA1; 32],
                 vout: 0,
                 value: 5_000,
-                script: bitcoin_rs_storage::Bytes::from_static(b"\x51creator"),
+                script: bitcoin_rs_storage::FactsScript::copy_from_slice(b"\x51creator"),
                 height: 1,
                 coinbase: false,
             }],

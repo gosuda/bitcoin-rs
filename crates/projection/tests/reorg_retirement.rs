@@ -8,7 +8,7 @@ use bitcoin_rs_projection::types::{ScriptHash, ScriptHistoryOccurrence, TxPositi
 use bitcoin_rs_projection::{IndexCapabilities, IndexReader, Indexer};
 use bitcoin_rs_storage::budget::UnboundedBudget;
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
-use bitcoin_rs_storage::{Bytes, ColumnFamily, KvStore, PrefixScanLimit, RocksDbStore};
+use bitcoin_rs_storage::{ColumnFamily, FactsScript, KvStore, PrefixScanLimit, RocksDbStore};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -45,7 +45,7 @@ fn deep_reorg_retires_one_generation_only() -> Result<(), TestError> {
     let scratch = tempdir()?;
     let store = Arc::new(RocksDbStore::open(dir.path())?);
 
-    let script = Bytes::copy_from_slice(b"\x76\xa9\x14retire_script\x88\xac");
+    let script = FactsScript::copy_from_slice(b"\x76\xa9\x14retire_script\x88\xac");
     let block = CommittedBlock {
         height: 1,
         hash: [0x01; 32],

@@ -24,7 +24,9 @@ pub use coins::{COIN_KEY_LEN, CoinCache, CoinKey, CoinStatsFeed, CoinStore, Wind
 #[cfg(any(test, feature = "test-seam"))]
 pub use commit::CommitFault;
 pub use commit::{AcceptedPrefix, CommitAuthority, CommitError, DurableReceipt};
-pub use committed_facts::{CommittedBlock, CommittedFacts, CreatedOutput, SpentPrevout, TxFacts};
+pub use committed_facts::{
+    CommittedBlock, CommittedFacts, CreatedOutput, FactsScript, SpentPrevout, TxFacts,
+};
 
 pub use bytes::Bytes;
 pub use error::{BoundedReadError, StorageError};

@@ -12,7 +12,9 @@ use bitcoin_rs_projection::IndexCapabilities;
 use bitcoin_rs_projection::segment::Coverage;
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_storage::budget::{BudgetCharge, BudgetError, BudgetOwner};
-use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, SpentPrevout, TxFacts};
+use bitcoin_rs_storage::committed_facts::{
+    CommittedBlock, CreatedOutput, FactsScript, SpentPrevout, TxFacts,
+};
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::utxo::contract::decode_undo_record;
 use bitcoin_rs_storage::{ColumnFamily, KvStore, StorageBackend, block_undo_key};
@@ -148,7 +150,7 @@ struct Frame {
     record_end: u64,
 }
 
-type PrevoutMap = HashMap<([u8; 32], u32), (u64, Bytes, u32, bool)>;
+type PrevoutMap = HashMap<([u8; 32], u32), (u64, FactsScript, u32, bool)>;
 
 const GENERATION_FAMILIES: [ColumnFamily; 6] = [
     ColumnFamily::TxDir,
@@ -648,7 +650,7 @@ fn tx_outputs(
     let mut outputs = Vec::with_capacity(tx.output_count());
     for index in 0..tx.output_count() {
         let vout = u32::try_from(index).map_err(|_| span_overflow())?;
-        let script = Bytes::copy_from_slice(tx.output_script(index));
+        let script = FactsScript::copy_from_slice(tx.output_script(index));
         let value = tx.output_value(index).to_sat();
         prevouts.insert((txid, vout), (value, script.clone(), height, coinbase));
         outputs.push(CreatedOutput {
@@ -710,7 +712,7 @@ fn load_undo_prevouts(
             (*add.outpoint.txid.as_bytes(), add.outpoint.vout),
             (
                 add.txout.value.to_sat(),
-                Bytes::copy_from_slice(&add.txout.script_pubkey),
+                FactsScript::copy_from_slice(&add.txout.script_pubkey),
                 add.height,
                 add.coinbase,
             ),

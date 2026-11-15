@@ -168,7 +168,7 @@ mod tests {
                             txid: *coinbase.txid().as_bytes(),
                             vout: 0,
                             value: 50,
-                            script: bitcoin_rs_storage::Bytes::from_static(&[0x51]),
+                            script: bitcoin_rs_storage::FactsScript::copy_from_slice(&[0x51]),
                             height: 1,
                             coinbase: true,
                         }],
