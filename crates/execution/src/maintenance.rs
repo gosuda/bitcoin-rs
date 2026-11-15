@@ -56,6 +56,24 @@ fn maintenance_loop(
 }
 
 fn maintenance_step(publisher: &CheckpointPublisher, elapsed: Duration) -> bool {
+    if elapsed < CHECKPOINT_PUBLICATION_CADENCE {
+        return false;
+    }
+    match publisher.settle_disconnect_debt() {
+        Ok(true) => return true,
+        Ok(false) => {}
+        Err(CheckpointError::DisconnectInFlight { hash, height }) => {
+            tracing::debug!(%hash, height, "maintenance publication deferred: disconnect in flight");
+            return true;
+        }
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                "maintenance disconnect settlement failed; will retry on a later cadence tick"
+            );
+            return true;
+        }
+    }
     let applied_height = publisher
         .applied_tip
         .load_full()
