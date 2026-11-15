@@ -1669,6 +1669,8 @@ enum LocatorOutcome {
     NotChecked,
 }
 
+const MAX_RESTORE_POSITIONS: usize = 4_194_304;
+
 struct LocatorCheck<'a> {
     chain: &'a ChainBase,
     tree: &'a BlockTreeReader,
@@ -1691,13 +1693,18 @@ impl LocatorCheck<'_> {
             )
         })?;
         let added = record.positions.len();
+        let pending_positions = self
+            .pending_positions
+            .checked_add(added)
+            .filter(|&positions| positions <= MAX_RESTORE_POSITIONS)
+            .ok_or(IndexBundleError::RestoreTooLarge)?;
         self.pending.entry(height).or_default().extend(
             record
                 .positions
                 .iter()
                 .map(|&position| (position, record.txid)),
         );
-        self.pending_positions += added;
+        self.pending_positions = pending_positions;
         Ok(())
     }
 
@@ -2133,6 +2140,95 @@ mod tests {
     use crate::portable::chain::is_top_level_span;
     use crate::types::TxPosition;
     use std::cell::Cell;
+
+    #[test]
+    fn restore_locator_admission_bounds_accepted_positions_before_extension()
+    -> Result<(), crate::portable::TestError> {
+        use bitcoin_rs_consensus::primitives::{BlockHash, Network, consensus_bytes};
+        use bitcoin_rs_execution::chain::{BlockTree, ChainTxCount, NodeStatus, TipSnapshot};
+        use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
+        use std::sync::Arc;
+
+        struct GenesisBody {
+            hash: BlockHash,
+            body: Vec<u8>,
+        }
+        impl BlockBodySource for GenesisBody {
+            fn block_body(
+                &self,
+                height: u32,
+                hash: BlockHash,
+            ) -> Result<Option<Vec<u8>>, BlockBodyReadError> {
+                Ok((height == 0 && hash == self.hash).then(|| self.body.clone()))
+            }
+        }
+        let genesis = Network::Regtest.genesis_block();
+        let source = GenesisBody {
+            hash: genesis.block_hash(),
+            body: consensus_bytes(&genesis),
+        };
+        let mut tree = BlockTree::new();
+        let id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+        let node = tree.node(id)?;
+        let tip = TipSnapshot {
+            tip_id: id,
+            height: 0,
+            hash: node.hash,
+            chainwork: node.chainwork,
+            chain_tx_count: ChainTxCount::established(1),
+        };
+        let tree = BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(tree)));
+        let chain = ChainBase::capture(&tree, &tip, 0, &|| false)?;
+        let tx = &genesis.txs[0];
+        let bytes = consensus_bytes(tx);
+        let offset = source
+            .body
+            .windows(bytes.len())
+            .position(|window| window == bytes)
+            .ok_or("genesis transaction")?;
+        let positions = [TxPosition::new(
+            u32::try_from(offset)?,
+            u32::try_from(bytes.len())?,
+        )];
+        let record = TxLookupRecord {
+            txid: tx.txid().0.to_le_bytes(),
+            height: 0,
+            positions: &positions,
+        };
+        let mut check = LocatorCheck {
+            chain: &chain,
+            tree: &tree,
+            bodies: BodyReader::new(&source),
+            pending: HashMap::new(),
+            pending_positions: 0,
+            counts: HashMap::new(),
+            outcome: LocatorOutcome::Verified,
+        };
+        for _ in 0..MAX_RESTORE_POSITIONS {
+            check.check(&record)?;
+        }
+        assert!(matches!(
+            check.check(&record),
+            Err(IndexBundleError::RestoreTooLarge)
+        ));
+        assert_eq!(check.pending[&0].len(), MAX_RESTORE_POSITIONS);
+        assert_eq!(check.pending_positions, MAX_RESTORE_POSITIONS);
+        check.outcome = LocatorOutcome::Mismatch { height: 0 };
+        check.check(&record)?;
+        assert!(matches!(
+            check.outcome,
+            LocatorOutcome::Mismatch { height: 0 }
+        ));
+        assert_eq!(check.pending[&0].len(), MAX_RESTORE_POSITIONS);
+        check.outcome = LocatorOutcome::Withheld(Withheld::BodyUnavailable { height: 0 });
+        check.check(&record)?;
+        assert!(matches!(
+            check.outcome,
+            LocatorOutcome::Withheld(Withheld::BodyUnavailable { height: 0 })
+        ));
+        assert_eq!(check.pending[&0].len(), MAX_RESTORE_POSITIONS);
+        Ok(())
+    }
 
     #[test]
     fn invalid_tail_drain_polls_cancellation_per_bounded_chunk()

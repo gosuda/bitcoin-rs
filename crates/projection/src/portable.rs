@@ -102,6 +102,8 @@ pub enum IndexBundleError {
     NotFresh,
     #[error("a recorded locator at height {height} does not resolve to its transaction id")]
     Locator { height: u32 },
+    #[error("bundle restore exceeds the aggregate locator position limit")]
+    RestoreTooLarge,
     #[error("bundle omits transactions at height {height}: expected {expected}, found {actual}")]
     Incomplete {
         height: u32,
