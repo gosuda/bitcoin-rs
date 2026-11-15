@@ -3442,8 +3442,8 @@ fn block_page_reuses_parent_outside_the_selected_page() {
     for (error, status) in [
         (
             TxQueryError::Retry(bitcoin_rs_projection::RetryReason::TipMoved {
-                expected_commit: 0,
-                current_commit: 1,
+                expected_revision: 0,
+                current_revision: 1,
             }),
             503,
         ),
@@ -3570,8 +3570,8 @@ fn block_parent_reuse_checks_readiness_only_when_needed() -> Result<(), TestErro
             } else {
                 Err(TxQueryError::Retry(
                     bitcoin_rs_projection::RetryReason::TipMoved {
-                        expected_commit: 0,
-                        current_commit: 1,
+                        expected_revision: 0,
+                        current_revision: 1,
                     },
                 ))
             }
@@ -3910,8 +3910,8 @@ impl crate::context::DerivedIndexQuery for FailingParentIndex {
         self.error.clone().map_or(
             Err(TxQueryError::Retry(
                 bitcoin_rs_projection::RetryReason::TipMoved {
-                    expected_commit: 0,
-                    current_commit: 1,
+                    expected_revision: 0,
+                    current_revision: 1,
                 },
             )),
             Err,
@@ -3940,8 +3940,8 @@ fn parent_query_errors_and_republication_never_yield_a_cached_success() {
         (
             Some(TxQueryError::Retry(
                 bitcoin_rs_projection::RetryReason::TipMoved {
-                    expected_commit: 0,
-                    current_commit: 1,
+                    expected_revision: 0,
+                    current_revision: 1,
                 },
             )),
             503,

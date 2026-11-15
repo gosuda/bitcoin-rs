@@ -742,8 +742,8 @@ impl DerivedIndexQueryEngine {
                 .is_none_or(|tip| tip.height != tip_before.height || tip.hash != tip_before.hash)
         {
             return Err(TxQueryError::Retry(RetryReason::TipMoved {
-                expected_commit: revision_before,
-                current_commit: revision_after,
+                expected_revision: revision_before,
+                current_revision: revision_after,
             }));
         }
 

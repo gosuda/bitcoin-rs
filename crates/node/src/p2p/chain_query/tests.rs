@@ -270,8 +270,8 @@ fn compact_filters_wait_for_publication_without_replaying_sent_payloads() -> Tes
             if !self.ready.load(Ordering::Acquire) {
                 return Err(TxQueryError::Retry(
                     bitcoin_rs_projection::RetryReason::TipMoved {
-                        expected_commit: 0,
-                        current_commit: 1,
+                        expected_revision: 0,
+                        current_revision: 1,
                     },
                 ));
             }
@@ -281,8 +281,8 @@ fn compact_filters_wait_for_publication_without_replaying_sent_payloads() -> Tes
             if self.moves_after_delivery {
                 Err(TxQueryError::Retry(
                     bitcoin_rs_projection::RetryReason::TipMoved {
-                        expected_commit: 0,
-                        current_commit: 1,
+                        expected_revision: 0,
+                        current_revision: 1,
                     },
                 ))
             } else {
@@ -677,8 +677,8 @@ fn a_resumed_filter_range_that_stops_before_its_first_filter_is_interrupted() ->
         serve(
             Err(TxQueryError::Retry(
                 bitcoin_rs_projection::RetryReason::TipMoved {
-                    expected_commit: 0,
-                    current_commit: 1,
+                    expected_revision: 0,
+                    current_revision: 1,
                 }
             )),
             &resumed,

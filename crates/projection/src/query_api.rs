@@ -33,8 +33,8 @@ pub struct DerivedIndexInfo {
 pub enum RetryReason {
     #[error("index tip moved during query; retry")]
     TipMoved {
-        expected_commit: u64,
-        current_commit: u64,
+        expected_revision: u64,
+        current_revision: u64,
     },
     #[error("applied tip is missing; retry")]
     MissingAppliedTip,
