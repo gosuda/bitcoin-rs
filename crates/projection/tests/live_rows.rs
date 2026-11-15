@@ -78,3 +78,31 @@ fn tail_rows_count_toward_the_batch_byte_limit() -> Result<(), TestError> {
     );
     Ok(())
 }
+
+#[test]
+fn live_reader_distinguishes_full_hashes_with_the_same_scan_prefix() -> Result<(), TestError> {
+    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
+    use bitcoin_rs_projection::{IndexWatermark, ScriptHash, ScriptLiveCoin, ScriptLiveRow};
+
+    let (_dir, writer) = writer()?;
+    let first = ScriptHash::from_byte_array([0x11; 32]);
+    let mut colliding = [0x11; 32];
+    colliding[31] = 0x22;
+    let second = ScriptHash::from_byte_array(colliding);
+    let a = OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0);
+    let b = OutPoint::new(Txid(Hash256::from_le_bytes(&[2; 32])), 0);
+    let mut rows = Vec::new();
+    for (hash, outpoint) in [(first, a), (second, b)] {
+        let mut row = ScriptLiveRow::new(hash, &outpoint).as_bytes().to_vec();
+        row.extend_from_slice(&ScriptLiveCoin::new(hash, 100, 0, false).encode_value()?);
+        rows.push(row);
+    }
+    writer.stage_script_live_rows(&mut rows.into_iter())?;
+    writer.publish_script_live_seed(IndexWatermark {
+        height: 0,
+        hash: [0; 32],
+    })?;
+    assert_eq!(writer.indexer().iter_live_outpoints(first)?, vec![a]);
+    assert_eq!(writer.indexer().iter_live_outpoints(second)?, vec![b]);
+    Ok(())
+}

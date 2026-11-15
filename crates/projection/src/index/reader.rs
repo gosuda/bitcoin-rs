@@ -58,9 +58,11 @@ impl<S: KvStore> Indexer<S> {
             let (key, value) = row?;
             let row = crate::types::ScriptLiveRow::from_db_row(&key)
                 .ok_or(IndexError::InvalidPrefixRowLength { len: key.len() })?;
-            crate::types::ScriptLiveCoin::decode_value(&value)
+            let coin = crate::types::ScriptLiveCoin::decode_value(&value)
                 .map_err(|_| IndexError::InvalidLiveRowValue { len: value.len() })?;
-            outpoints.push(row.outpoint());
+            if coin.scripthash == scripthash {
+                outpoints.push(row.outpoint());
+            }
         }
         Ok(outpoints)
     }
