@@ -48,7 +48,7 @@ A clean shutdown adds the checkpoint and the owner-local files:
 └── mempool-snapshot.dat
 ```
 
-`CURRENT_SCHEMA` holds the datadir format epoch. For this commit the file contains `4` followed by a newline. It is written and synced before any authoritative store opens.
+`CURRENT_SCHEMA` holds the authoritative chainstate format epoch. The current epoch is `6`, written as `6` followed by a newline, as defined by `CURRENT_SCHEMA_VERSION` in `crates/storage/src/checkpoint/fs.rs` and the [datadir format policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/db-migration.md). It is written and synced before any authoritative store opens. Owner-local artifact versions do not change this marker.
 
 `.lock` is the data-directory lock. `process-epoch` is a monotonically increasing number written at startup, and `.process-epoch.lock` guards it. A corrupt `process-epoch` refuses startup instead of reusing an epoch.
 
