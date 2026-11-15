@@ -50,7 +50,7 @@ Row format has a version marker, currently row-format 9. `ScriptLive` rows have 
 
 Two read shapes exist and they do not mix:
 
-- `ScriptLive` reads are self-contained and lock-free (format 8, PRJ-11); they read stored coin payloads directly without acquiring a chain-transition lock or consulting the authoritative UTXO set.
+- `ScriptLive` reads are self-contained and lock-free (format 9, PRJ-11); they read stored coin payloads directly without acquiring a chain-transition lock or consulting the authoritative UTXO set.
 - Historical prefix reads are the three synchronous `Node` calls `transaction_at_prefix`, `script_history_at_prefix`, and `spender_at_prefix`. They take no live-UTXO or transition lock and return `Answer<T>` with a server-selected `CoveredPrefix { floor, height, hash }`.
 
 A historical query pins its serving view epoch and declared capability coverage once. Queries inside coverage return immutable answers regardless of concurrent chain extension or reorg (QRY-03). Queries outside declared coverage return `Unavailable(OutsideCoverage)` (QRY-05). Full history requires floor 0; a standalone spend lookup may return a scoped `None` (`IDX-12`).
