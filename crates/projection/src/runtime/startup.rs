@@ -285,13 +285,31 @@ fn execute_portable_bundle(
         enabled: setup.spec.enabled,
         cancelled: &cancelled,
     };
-    match crate::portable::run(&host, &setup.spec.bundle) {
+    finish_portable_bundle(crate::portable::run(&host, &setup.spec.bundle))
+}
+
+fn finish_portable_bundle(
+    result: Result<Option<BundleOutcome>, IndexBundleError>,
+) -> Result<(), DerivedIndexWorkerError> {
+    match result {
         Ok(None) => Ok(()),
         Ok(Some(outcome)) => {
             log_bundle_outcome(&outcome);
             Ok(())
         }
         Err(IndexBundleError::Cancelled) => Err(DerivedIndexWorkerError::Stopped),
+        Err(IndexBundleError::Index(
+            error @ IndexError::WatermarkMismatch {
+                expected: None,
+                actual: Some(_),
+            },
+        )) => {
+            tracing::error!(
+                %error,
+                "portable index attach refused a populated capability; ordinary reconciliation proceeds"
+            );
+            Ok(())
+        }
         Err(IndexBundleError::Index(error)) => Err(DerivedIndexWorkerError::Index(error)),
         Err(IndexBundleError::Incomplete {
             height,

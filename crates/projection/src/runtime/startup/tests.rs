@@ -585,3 +585,74 @@ fn cancellation_after_spawn_resumes_panic_when_helper_panics() -> std::io::Resul
 
     Ok(())
 }
+
+// SNP-10
+#[test]
+fn populated_attach_refusal_preserves_sibling_coverage() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
+        dir.path(),
+        8 * 1024 * 1024,
+    )?);
+    let writer = IndexWriter::open(store, 1)?;
+    let existing = crate::IndexWatermark {
+        height: 1,
+        hash: [1; 32],
+    };
+    let base = crate::IndexWatermark {
+        height: 2,
+        hash: [2; 32],
+    };
+    writer.anchor_watermark(crate::IndexCapabilities::TX_LOOKUP, existing, 0)?;
+    writer.publish_script_live_seed(existing)?;
+    let family = crate::segment::import::StreamedFamily {
+        runs: Vec::new(),
+        rows: 0,
+    };
+    let seal = crate::segment::import::tx_lookup_seal(0, base.height, base.hash, 0, 0)?;
+    let attachment = crate::writer::TxLookupAttachment {
+        headers: &[],
+        base,
+        floor: 0,
+        scratch: dir.path(),
+    };
+    let refusal = writer
+        .attach_streamed_tx_lookup(&family, &seal, &attachment)
+        .map_err(IndexBundleError::Index);
+    assert!(matches!(
+        &refusal,
+        Err(IndexBundleError::Index(IndexError::WatermarkMismatch {
+            expected: None,
+            actual: Some(actual),
+        })) if *actual == existing
+    ));
+    assert!(finish_portable_bundle(refusal.map(|_| None)).is_ok());
+    let watermarks = writer.watermarks()?;
+    assert_eq!(watermarks.tx_lookup, Some(existing));
+    assert_eq!(watermarks.script_live, Some(existing));
+    Ok(())
+}
+
+// SNP-10
+#[test]
+fn portable_attach_storage_and_corruption_remain_worker_failures() {
+    for error in [
+        IndexError::Storage(bitcoin_rs_storage::StorageError::Io(std::io::Error::other(
+            "attach storage unavailable",
+        ))),
+        IndexError::InvalidWatermark,
+        IndexError::WatermarkMismatch {
+            expected: Some(crate::IndexWatermark {
+                height: 2,
+                hash: [2; 32],
+            }),
+            actual: None,
+        },
+    ] {
+        assert!(matches!(
+            finish_portable_bundle(Err(IndexBundleError::Index(error))),
+            Err(DerivedIndexWorkerError::Index(_))
+        ));
+    }
+    assert!(finish_portable_bundle(Ok(None)).is_ok());
+}
