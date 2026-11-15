@@ -2,7 +2,10 @@
 
 ## Unreleased
 
+- BREAKING CHANGE: runtime `fjall` and `redb` backends and the `rocksdb` feature switch are removed. RocksDB is the mandatory, unconditionally compiled default; existing Fjall/Redb datadirs require offline conversion with `bitcoin-rs-storage-convert`, not an in-place reset.
+- BREAKING CHANGE: workspace crates are consolidated into the canonical `bitcoin-rs-consensus`, `bitcoin-rs-storage`, `bitcoin-rs-execution`, `bitcoin-rs-projection`, `bitcoin-rs-wire`, `bitcoin-rs-mempool`, `bitcoin-rs-serving`, and `bitcoin-rs-node` owners. Downstream dependencies and public type imports must use their owning crates; `BlockHeader` and `ChainWork` are available from `bitcoin_rs_consensus::header_rules`, not `bitcoin_rs_execution::chain::node`.
 - BREAKING CHANGE: storage `CreatedOutput::script` and `SpentPrevout::script` use immutable full-buffer `FactsScript` instead of arbitrary `Bytes`. Downstream constructors and consumers must use `FactsScript`; full-buffer ownership makes retained capacity and sharing accountable.
+- Maintenance settles completed disconnect publication debt on its existing checkpoint cadence, including rollbacks to the same or a lower height. Stable-read acquisition counts include successful blocking, immediate and timed locks, and verification preserves typed corrupt-frame evidence.
 - BREAKING CHANGE: `RetryReason` gains `MissingAppliedTip` and `PendingCapabilityCoverage(IndexCapability)`, and `TipMoved` renames its fields to `expected_revision` and `current_revision`. A downstream exhaustive match must change.
 - BREAKING CHANGE: `AppliedEpoch::commit_id` is renamed to `runtime_revision`. It counts runtime wake changes, not durable chain commits.
 - BREAKING CHANGE: `NodeBudget::available_of_charges` is renamed to `charged_bytes`. It returns the bytes charged to an owner, not the bytes still available.
