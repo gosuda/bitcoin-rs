@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Query retries distinguish a missing applied tip and pending capability coverage from an actual runtime revision change.
+- BREAKING CHANGE: `RetryReason` gains `MissingAppliedTip` and `PendingCapabilityCoverage(IndexCapability)`, and `TipMoved` renames its fields to `expected_revision` and `current_revision`. A downstream exhaustive match must change.
 - BREAKING CHANGE: `AppliedEpoch::commit_id` is renamed to `runtime_revision`. It counts runtime wake changes, not durable chain commits.
 - BREAKING CHANGE: `NodeBudget::available_of_charges` is renamed to `charged_bytes`. It returns the bytes charged to an owner, not the bytes still available.
 - A rejected snapshot ingest on a fresh node clears the activation marker it wrote. If the marker cannot be cleared, the chain closes for recovery and the call reports `PartialIngestNotDiscarded`.

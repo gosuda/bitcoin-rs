@@ -120,7 +120,7 @@ The node itself spawns the event loop, RPC listeners, P2P workers, index worker,
 
 `Node::start` returns `NodeError::Startup` for configuration, storage, recovery, or bind failures, and it rolls back through the same ordered teardown with no clean checkpoint. `Node::shutdown` returns `NodeError::Shutdown` only from a consuming shutdown, never from `Drop`. Reads return `Unavailable` when a capability is disabled and `NotFound` when a proven-absent transaction is requested. Prefix reads return `TxQueryError`, not `NodeError`.
 
-The projection query API defines `TxQueryError::Retry(RetryReason)` for retryable conditions: `TipMoved { expected_commit, current_commit }`, `MissingAppliedTip`, or `PendingCapabilityCoverage(IndexCapability)`. The other query error variants are `Unavailable(TxUnavailableCause)`, `ExpiredView`, and `Storage(CompactString)`. Do not treat an error as an absent transaction or spender; scoped absence is a successful answer whose `value` is `None`.
+The projection query API defines `TxQueryError::Retry(RetryReason)` for retryable conditions: `TipMoved { expected_revision, current_revision }`, `MissingAppliedTip`, or `PendingCapabilityCoverage(IndexCapability)`. The other query error variants are `Unavailable(TxUnavailableCause)`, `ExpiredView`, and `Storage(CompactString)`. Do not treat an error as an absent transaction or spender; scoped absence is a successful answer whose `value` is `None`.
 
 Two startup refusals matter for embedders:
 

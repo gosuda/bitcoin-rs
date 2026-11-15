@@ -680,8 +680,8 @@ impl<'a> Projection<'a> {
             if current_sequence != sequence {
                 return Err(query_error(TxQueryError::Retry(
                     bitcoin_rs_projection::RetryReason::TipMoved {
-                        expected_commit: sequence,
-                        current_commit: current_sequence,
+                        expected_revision: sequence,
+                        current_revision: current_sequence,
                     },
                 )));
             }

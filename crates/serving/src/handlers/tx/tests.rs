@@ -1380,8 +1380,8 @@ fn gettxoutproof_maps_a_transient_index_error_instead_of_reporting_absence() {
         |_: &Txid| -> Result<Option<(Tx, TransactionBlock)>, TxQueryError> {
             Err(TxQueryError::Retry(
                 bitcoin_rs_projection::RetryReason::TipMoved {
-                    expected_commit: 0,
-                    current_commit: 1,
+                    expected_revision: 0,
+                    current_revision: 1,
                 },
             ))
         },
