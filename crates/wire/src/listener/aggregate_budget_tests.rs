@@ -22,6 +22,104 @@ use crate::test_support::hog;
 use crate::{Message, PeerLease};
 
 #[test]
+fn compact_completion_reserves_before_consuming_pending_and_transfers_image_credit() -> TestResult {
+    struct EmptyHints;
+    impl crate::compact_blocks::CompactBlockHints for EmptyHints {
+        fn for_each_identity(
+            &self,
+            _: &mut dyn FnMut(
+                bitcoin_rs_consensus::primitives::Txid,
+                bitcoin_rs_consensus::primitives::Wtxid,
+            ),
+        ) {
+        }
+        fn get_tx_by_txid(
+            &self,
+            _: bitcoin_rs_consensus::primitives::Txid,
+        ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+            None
+        }
+        fn get_tx_by_wtxid(
+            &self,
+            _: bitcoin_rs_consensus::primitives::Wtxid,
+        ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+            None
+        }
+    }
+    for scenario in ["complete", "cancelled", "full"] {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut compact = HeaderAndShortIds::from_block(&block, 7, 2, &[])
+            .map_err(|_| "genesis compact block")?;
+        let keys = ShortId::calculate_siphash_keys(&block.header, 7);
+        compact.prefilled_txs.clear();
+        compact.short_ids = vec![ShortId::with_siphash_keys(
+            block.txdata[0].compute_wtxid().as_byte_array(),
+            keys,
+        )];
+        let mut reconstruction = crate::compact_blocks::Reconstruction::new();
+        assert!(matches!(
+            reconstruction.receive_cmpctblock(
+                &CmpctBlock {
+                    compact_block: compact
+                },
+                2,
+                &EmptyHints,
+                Instant::now(),
+            ),
+            crate::compact_blocks::Outcome::RequestMissing(_)
+        ));
+        let message = Message::BlockTxn(bitcoin::p2p::message_compact_blocks::BlockTxn {
+            transactions: bitcoin::bip152::BlockTransactions {
+                block_hash: block.block_hash(),
+                transactions: block.txdata.clone(),
+            },
+        });
+        let (queue, _receiver) = crate::test_support::message_channel();
+        let lease = PeerLease::new(queue);
+        let sink = ProductionSink::new(&lease, None);
+        let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
+        let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(1);
+        shared.blocks_tx = blocks_tx;
+        let ledger = Arc::clone(shared.block_memory.ledger());
+        let capacity = ledger.capacity();
+        let held = if scenario == "full" {
+            Some(shared.block_memory.reserve(capacity, || false)?)
+        } else {
+            None
+        };
+        if scenario == "cancelled" {
+            lease.cancel();
+        }
+        super::process_compact_wire_message(
+            &message,
+            &mut reconstruction,
+            Some(2),
+            None,
+            &sink,
+            bitcoin_rs_consensus::primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333)),
+            &shared,
+            None,
+        );
+        if scenario != "complete" {
+            assert_eq!(reconstruction.pending_len(), 1);
+            assert!(blocks_rx.is_empty());
+        } else {
+            assert_eq!(reconstruction.pending_len(), 0);
+            let inbound = blocks_rx
+                .recv_timeout(FAILSAFE)
+                .map_err(|_| "reconstructed block was not delivered")?;
+            assert!(!ledger.try_take(capacity));
+            drop(inbound);
+        }
+        drop(reconstruction);
+        drop(held);
+        assert!(ledger.try_take(capacity));
+        ledger.give_back(capacity);
+    }
+    Ok(())
+}
+
+#[test]
 fn headroom_retains_one_credit() -> TestResult {
     let reserve = 1_000;
     let aggregate = Arc::new(SharedOutboundBudget::with_limits(reserve + 64, 64));

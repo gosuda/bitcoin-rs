@@ -2205,6 +2205,9 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
         }
 
         compact_reconstruction.prune(Instant::now());
+        if compact_reconstruction.pending_len() == 0 {
+            compact_reconstruction.memory_credit = None;
+        }
 
         if let Some(chain) = shared.chain_query.as_deref()
             && let Some(mut parked) = peer.pending_filter_request.take()
@@ -2782,6 +2785,51 @@ fn learn_addresses(
     }
 }
 
+fn reserve_compact_materialization(
+    reconstruction: &mut crate::compact_blocks::Reconstruction,
+    message: &crate::Message,
+    shared: &ConnectionShared,
+    lease: &crate::PeerLease,
+) -> Result<crate::inbound::block_memory::BlockMemoryCredit, crate::wire::PeerError> {
+    reconstruction.prune(Instant::now());
+    if reconstruction.pending_len() == 0 {
+        reconstruction.memory_credit = None;
+    }
+    if shared.is_session_cancelled() || lease.is_cancelled() {
+        return Err(std::io::Error::from(std::io::ErrorKind::Interrupted).into());
+    }
+    if reconstruction.memory_credit.is_none() {
+        reconstruction.memory_credit = Some(
+            shared
+                .block_memory
+                .try_reserve(crate::compact_blocks::MAX_PENDING_RETAINED_BYTES)?,
+        );
+    }
+    let incoming_bytes = match message {
+        crate::Message::CmpctBlock(compact) => compact
+            .compact_block
+            .prefilled_txs
+            .iter()
+            .map(|entry| entry.tx.total_size())
+            .sum::<usize>(),
+        crate::Message::BlockTxn(txns) => txns
+            .transactions
+            .transactions
+            .iter()
+            .map(bitcoin::Transaction::total_size)
+            .sum::<usize>(),
+        _ => 0,
+    };
+    let peak_bytes = bitcoin_rs_consensus::primitives::layout::decode_reservation(
+        crate::compact_blocks::MAX_PENDING_RETAINED_BYTES.saturating_add(incoming_bytes),
+    );
+    let credit = shared.block_memory.try_reserve(peak_bytes);
+    if credit.is_err() && reconstruction.pending_len() == 0 {
+        reconstruction.memory_credit = None;
+    }
+    credit
+}
+
 pub fn process_compact_wire_message(
     message: &crate::Message,
     compact_reconstruction: &mut crate::compact_blocks::Reconstruction,
@@ -2809,6 +2857,18 @@ pub fn process_compact_wire_message(
         return;
     }
 
+    let mut materialization = match reserve_compact_materialization(
+        compact_reconstruction,
+        message,
+        shared,
+        lease,
+    ) {
+        Ok(credit) => credit,
+        Err(error) => {
+            tracing::debug!(peer_addr = %peer_addr, %error, "compact reconstruction admission refused");
+            return;
+        }
+    };
     let identity_version = local_compact_version.unwrap_or(crate::peer::COMPACT_BLOCK_VERSION);
     let outcome = process_compact_message(
         compact_reconstruction,
@@ -2817,6 +2877,24 @@ pub fn process_compact_wire_message(
         compact_hints,
         Instant::now(),
     );
+    if compact_reconstruction.pending_len() == 0 {
+        compact_reconstruction.memory_credit = None;
+    }
+    let produced_credit = if let crate::compact_blocks::Outcome::Complete(image) = &outcome {
+        if let Err(error) = materialization.retain(
+            image
+                .bytes()
+                .len()
+                .saturating_add(image.retained_heap_bytes()),
+        ) {
+            tracing::error!(peer_addr = %peer_addr, %error, "compact reconstruction exceeded ingress reservation");
+            return;
+        }
+        Some(materialization)
+    } else {
+        None
+    };
+    drop(memory_credit);
     let announced_header = if let crate::Message::CmpctBlock(cmpct) = message
         && !matches!(outcome, crate::compact_blocks::Outcome::Complete(_))
     {
@@ -2826,7 +2904,7 @@ pub fn process_compact_wire_message(
     };
     let source = lease.source(peer_addr.endpoint());
     if let Some((hash, follow_up)) =
-        handle_compact_outcome(outcome, sink, peer_addr, shared, memory_credit)
+        handle_compact_outcome(outcome, sink, peer_addr, shared, produced_credit)
         && let Some(sync) = shared.block_sync.as_ref()
     {
         sync.enqueue_owned_body_fetch(source, hash, &mut || sink.send(follow_up.clone()).is_ok());
