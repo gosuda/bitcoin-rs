@@ -688,6 +688,14 @@ fn scratch_copy(
     files: &[bitcoin_rs_storage::checkpoint::EngineFileV1],
 ) -> Result<EngineScratch, CheckpointError> {
     static SCRATCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    scratch_copy_with_sequence(&SCRATCH_SEQ, chainstate_path, files)
+}
+
+fn scratch_copy_with_sequence(
+    sequence: &std::sync::atomic::AtomicU64,
+    chainstate_path: &std::path::Path,
+    files: &[bitcoin_rs_storage::checkpoint::EngineFileV1],
+) -> Result<EngineScratch, CheckpointError> {
     let Some(parent) = chainstate_path.parent() else {
         return Err(CheckpointError::Store(StoreError::Invalid(
             "checkpoint engine image path has no parent".to_owned(),
@@ -696,7 +704,7 @@ fn scratch_copy(
     std::fs::create_dir_all(parent).map_err(CheckpointError::from)?;
     let pid = std::process::id();
     let scratch_path = loop {
-        let seq = SCRATCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let seq = sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let candidate = parent.join(format!(".scratch-{pid}-{seq}"));
         match std::fs::create_dir(&candidate) {
             Ok(()) => break candidate,

@@ -223,13 +223,14 @@ fn scratch_copy_isolates_owned_byte_copies_and_skips_stale_directories() -> Test
         sha256: super::hex_encode(&Sha256::digest(original_bytes)),
     }];
 
-    let stale = dir
-        .path()
-        .join(format!(".scratch-{}-0", std::process::id()));
+    let pid = std::process::id();
+    let stale = dir.path().join(format!(".scratch-{pid}-0"));
     fs::create_dir_all(&stale)?;
     fs::write(stale.join("stale.dat"), b"stale-residue")?;
 
-    let scratch = super::scratch_copy(&chainstate, &files)?;
+    let sequence = std::sync::atomic::AtomicU64::new(0);
+    let scratch = super::scratch_copy_with_sequence(&sequence, &chainstate, &files)?;
+    assert_eq!(scratch.path, dir.path().join(format!(".scratch-{pid}-1")));
     assert_ne!(scratch.path, stale);
     assert!(stale.exists());
     assert_eq!(fs::read(stale.join("stale.dat"))?, b"stale-residue");
