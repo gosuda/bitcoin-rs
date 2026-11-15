@@ -157,7 +157,7 @@ inductive utxo.scan.UtxoScanError where
 | Corrupt : String → utxo.scan.UtxoScanError
 
 /-- [bitcoin_rs_storage::utxo::set::UtxoError]
-    Source: 'crates/storage/src/utxo/set.rs', lines 13:0-50:1
+    Source: 'crates/storage/src/utxo/set.rs', lines 15:0-52:1
     Visibility: public -/
 @[discriminant isize]
 inductive utxo.set.UtxoError where
