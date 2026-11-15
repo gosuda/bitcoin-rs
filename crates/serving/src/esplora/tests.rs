@@ -1079,7 +1079,7 @@ fn esplora_is_the_mempool_backend_superset() -> Result<(), TestError> {
 #[test]
 fn composed_response_refuses_when_a_fresh_identical_tip_is_published_during_the_read() {
     let block = fixture_genesis();
-    for (path_suffix, expected_status) in [("", 503u16), ("/txs/chain/not-a-txid", 200u16)] {
+    for path_suffix in ["", "/txs/chain/not-a-txid"] {
         let mut context = Context::new();
         context
             .chain
@@ -1107,7 +1107,7 @@ fn composed_response_refuses_when_a_fresh_identical_tip_is_published_during_the_
             &format!("/scripthash/{0}{path_suffix}", "00".repeat(32)),
             "",
         );
-        assert_eq!(response.status, expected_status);
+        assert_eq!(response.status, 503);
         let end = reader.load_full().expect("tip after the read");
         assert!(
             !Arc::ptr_eq(&end, &start),
@@ -1118,22 +1118,24 @@ fn composed_response_refuses_when_a_fresh_identical_tip_is_published_during_the_
             "the new publication returns to the same block"
         );
         assert_eq!(end.height, start.height);
-        if expected_status == 503 {
-            assert_eq!(
-                String::from_utf8_lossy(&response.body),
-                "transaction index changed during query; retry"
-            );
-            let retry = route(&handler, &format!("/scripthash/{}", "00".repeat(32)), "");
-            assert_eq!(
-                retry.status, 200,
-                "the retry runs on one stable publication"
-            );
-            let settled = reader.load_full().expect("tip after the retry");
-            assert!(
-                Arc::ptr_eq(&settled, &end),
-                "the retry must observe the same publication end to end"
-            );
-        }
+        assert_eq!(
+            String::from_utf8_lossy(&response.body),
+            "transaction index changed during query; retry"
+        );
+        let retry = route(
+            &handler,
+            &format!("/scripthash/{0}{path_suffix}", "00".repeat(32)),
+            "",
+        );
+        assert_eq!(
+            retry.status, 200,
+            "the retry runs on one stable publication"
+        );
+        let settled = reader.load_full().expect("tip after the retry");
+        assert!(
+            Arc::ptr_eq(&settled, &end),
+            "the retry must observe the same publication end to end"
+        );
     }
 }
 
@@ -1165,9 +1167,9 @@ fn composed_response_refuses_when_the_applied_tip_moves_between_reads() -> Resul
     Ok(())
 }
 
-// QRY-03
+// WF-02
 #[test]
-fn chain_only_history_survives_an_ordinary_extension() -> Result<(), TestError> {
+fn chain_only_history_refuses_an_ordinary_extension_during_the_read() -> Result<(), TestError> {
     use bitcoin_rs_consensus::primitives::Header;
 
     let block = fixture_genesis();
@@ -1223,8 +1225,18 @@ fn chain_only_history_survives_an_ordinary_extension() -> Result<(), TestError> 
         &format!("/scripthash/{}/txs/chain", "00".repeat(32)),
         "",
     );
-    assert_eq!(response.status, 200);
-    let page: Value = sonic_rs::from_slice(&response.body)?;
+    assert_eq!(response.status, 503);
+    assert_eq!(
+        String::from_utf8_lossy(&response.body),
+        "transaction index changed during query; retry"
+    );
+    let retry = route(
+        &handler,
+        &format!("/scripthash/{}/txs/chain", "00".repeat(32)),
+        "",
+    );
+    assert_eq!(retry.status, 200, "the retry uses the settled publication");
+    let page: Value = sonic_rs::from_slice(&retry.body)?;
     let Some(page) = page.as_array() else {
         return Err("chain page missing".into());
     };
@@ -1908,6 +1920,67 @@ fn joined_answer_refuses_a_same_height_tip_replacement() -> Result<(), TestError
     let handler = Handler::new(Arc::new(context));
     let response = route(&handler, &format!("/scripthash/{}", "00".repeat(32)), "");
     assert_eq!(response.status, 503);
+    Ok(())
+}
+
+#[test]
+fn composed_history_and_mempool_routes_refuse_reorg_and_aba_publications() -> Result<(), TestError>
+{
+    for aba in [false, true] {
+        for (path, post) in [
+            (
+                format!("/scripthash/{}/txs/summary", "00".repeat(32)),
+                false,
+            ),
+            (format!("/scripthash/{}/txs/chain", "00".repeat(32)), false),
+            ("/internal/mempool/txs".to_owned(), false),
+            ("/internal/mempool/txs".to_owned(), true),
+        ] {
+            let block = fixture_genesis();
+            let mut context = Context::new();
+            context
+                .chain
+                .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+                    0, &block,
+                ));
+            let (tip, extended, _) = extend_tip(&context, &block)?;
+            context.chain.applied_tip.store(Some(Arc::clone(&tip)));
+            context.indexes.script_index = Some(Arc::new(MonitoredScriptIndex {
+                history: Vec::new(),
+                funding: Vec::new(),
+                unspent: Vec::new(),
+                unspent_calls: Arc::new(AtomicUsize::new(0)),
+                history_calls: Arc::new(AtomicUsize::new(0)),
+            }));
+            let ctx = Arc::new(context);
+            let handler = Handler::new(Arc::clone(&ctx));
+            let stable = if post {
+                backend_route_post(&handler, &path, b"[]")
+            } else {
+                backend_route(&handler, &path, "")
+            };
+            assert_eq!(stable.status, 200, "stable route {path}");
+            let (entered_send, entered_recv) = channel();
+            let (release_send, release_recv) = channel();
+            let request = std::thread::spawn(move || {
+                arm_route_gate(entered_send, release_recv);
+                if post {
+                    backend_route_post(&handler, &path, b"[]")
+                } else {
+                    backend_route(&handler, &path, "")
+                }
+            });
+            let entered = entered_recv.recv_timeout(GATE_TIMEOUT);
+            ctx.chain.applied_tip.store(Some(extended));
+            if aba {
+                ctx.chain.applied_tip.store(Some(Arc::new((*tip).clone())));
+            }
+            let _ = release_send.send(());
+            let response = request.join().map_err(|_| "route thread failed")?;
+            entered.map_err(|_| "request did not capture its publication")?;
+            assert_eq!(response.status, 503);
+        }
+    }
     Ok(())
 }
 

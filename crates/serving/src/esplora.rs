@@ -117,14 +117,11 @@ fn needs_tip_fence(path: &str) -> bool {
             | ["tx", _]
             | ["tx", _, "hex" | "raw" | "status" | "outspends"]
             | ["tx", _, "outspend", _]
-            | ["address" | "scripthash", _, "txs", "summary"]
-            | ["address" | "scripthash", _, "txs", "chain", ..]
             | ["address-prefix", ..]
             | ["internal", "block", _, "txs"]
             | ["mempool", ..]
             | ["fee-estimates"]
             | ["address" | "scripthash", _, "txs", "mempool"]
-            | ["internal", "mempool", "txs", ..]
     )
 }
 
