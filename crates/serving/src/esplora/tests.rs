@@ -342,6 +342,7 @@ struct StaticScriptIndex {
 struct RepublishTipScriptIndex {
     applied_tip: bitcoin_rs_execution::chain::TipReader,
     replacement: Option<Arc<bitcoin_rs_execution::chain::TipSnapshot>>,
+    published: AtomicBool,
 }
 
 impl crate::context::ScriptIndexQuery for RepublishTipScriptIndex {
@@ -356,7 +357,9 @@ impl crate::context::ScriptIndexQuery for RepublishTipScriptIndex {
         &self,
         _script_hash: ScriptHash,
     ) -> Result<crate::context::ScriptIndexSnapshot, TxQueryError> {
-        if let Some(tip) = self.applied_tip.load_full() {
+        if !self.published.swap(true, Ordering::SeqCst)
+            && let Some(tip) = self.applied_tip.load_full()
+        {
             self.applied_tip.store(Some(
                 self.replacement
                     .clone()
@@ -1072,35 +1075,65 @@ fn esplora_is_the_mempool_backend_superset() -> Result<(), TestError> {
     Ok(())
 }
 
+// WF-02
 #[test]
-fn composed_response_stays_valid_when_the_applied_tip_identity_changes() {
+fn composed_response_refuses_when_a_fresh_identical_tip_is_published_during_the_read() {
     let block = fixture_genesis();
-    let mut context = Context::new();
-    context
-        .chain
-        .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
-            0, &block,
-        ));
-    let tip = {
-        let mut tree = context.chain.block_tree.write();
-        tree.insert_node(None, block.header, NodeStatus::Active)
-            .expect("insert applied tip");
-        tree.tip().expect("applied tip")
-    };
-    context.chain.applied_tip.store(Some(tip));
-    context.indexes.script_index = Some(Arc::new(RepublishTipScriptIndex {
-        applied_tip: context.chain.applied_tip.clone(),
-        replacement: None,
-    }));
-    let handler = Handler::new(Arc::new(context));
+    for (path_suffix, expected_status) in [("", 503u16), ("/txs/chain/not-a-txid", 200u16)] {
+        let mut context = Context::new();
+        context
+            .chain
+            .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+                0, &block,
+            ));
+        let tip = {
+            let mut tree = context.chain.block_tree.write();
+            tree.insert_node(None, block.header, NodeStatus::Active)
+                .expect("insert applied tip");
+            tree.tip().expect("applied tip")
+        };
+        context.chain.applied_tip.store(Some(tip));
+        let reader = context.chain.applied_tip.clone();
+        let start = reader.load_full().expect("captured tip");
+        context.indexes.script_index = Some(Arc::new(RepublishTipScriptIndex {
+            applied_tip: context.chain.applied_tip.clone(),
+            replacement: None,
+            published: AtomicBool::new(false),
+        }));
+        let handler = Handler::new(Arc::new(context));
 
-    for suffix in ["", "/txs/chain/not-a-txid"] {
         let response = route(
             &handler,
-            &format!("/scripthash/{0}{suffix}", "00".repeat(32)),
+            &format!("/scripthash/{0}{path_suffix}", "00".repeat(32)),
             "",
         );
-        assert_eq!(response.status, 200);
+        assert_eq!(response.status, expected_status);
+        let end = reader.load_full().expect("tip after the read");
+        assert!(
+            !Arc::ptr_eq(&end, &start),
+            "a fresh identical-content publication must have landed during the read"
+        );
+        assert_eq!(
+            end.hash, start.hash,
+            "the new publication returns to the same block"
+        );
+        assert_eq!(end.height, start.height);
+        if expected_status == 503 {
+            assert_eq!(
+                String::from_utf8_lossy(&response.body),
+                "transaction index changed during query; retry"
+            );
+            let retry = route(&handler, &format!("/scripthash/{}", "00".repeat(32)), "");
+            assert_eq!(
+                retry.status, 200,
+                "the retry runs on one stable publication"
+            );
+            let settled = reader.load_full().expect("tip after the retry");
+            assert!(
+                Arc::ptr_eq(&settled, &end),
+                "the retry must observe the same publication end to end"
+            );
+        }
     }
 }
 
@@ -1123,6 +1156,7 @@ fn composed_response_refuses_when_the_applied_tip_moves_between_reads() -> Resul
     context.indexes.script_index = Some(Arc::new(RepublishTipScriptIndex {
         applied_tip: context.chain.applied_tip.clone(),
         replacement: Some(moved),
+        published: AtomicBool::new(false),
     }));
     let handler = Handler::new(Arc::new(context));
 
@@ -1869,6 +1903,7 @@ fn joined_answer_refuses_a_same_height_tip_replacement() -> Result<(), TestError
     context.indexes.script_index = Some(Arc::new(RepublishTipScriptIndex {
         applied_tip: context.chain.applied_tip.clone(),
         replacement: Some(replacement),
+        published: AtomicBool::new(false),
     }));
     let handler = Handler::new(Arc::new(context));
     let response = route(&handler, &format!("/scripthash/{}", "00".repeat(32)), "");
@@ -2066,14 +2101,19 @@ fn orphaned_page_fixture() -> Result<OrphanedPageFixture, TestError> {
         bits: CompactTarget::from_consensus(0x207f_ffff),
         nonce,
     };
-    let coinbase = paying_transaction(&[OutPoint::null()], &[(5_000_000_000, vec![0x51])]);
+    let coinbase =
+        |tag: u8| paying_transaction(&[OutPoint::null()], &[(5_000_000_000, vec![0x51, tag])]);
+    let funding = paying_transaction(
+        &[OutPoint::null()],
+        &[(2_500_000_000, vec![0x51]), (2_500_000_000, vec![0x51])],
+    );
     let first = paying_transaction(
-        &[OutPoint::new(coinbase.txid(), 0)],
-        &[(4_999_999_000, vec![0x52])],
+        &[OutPoint::new(funding.txid(), 0)],
+        &[(2_499_999_000, vec![0x52])],
     );
     let second = paying_transaction(
-        &[OutPoint::new(coinbase.txid(), 0)],
-        &[(4_999_998_000, vec![0x53])],
+        &[OutPoint::new(funding.txid(), 1)],
+        &[(2_499_998_000, vec![0x53])],
     );
     let block_at = |block_header: Header, txs: Vec<Tx>| {
         let mut block = Block {
@@ -2085,23 +2125,24 @@ fn orphaned_page_fixture() -> Result<OrphanedPageFixture, TestError> {
     };
     let genesis = block_at(
         header(BlockHash::default(), 0, 1_000_000),
-        vec![coinbase.clone()],
+        vec![funding.clone()],
     );
     let genesis_hash = genesis.block_hash();
+    let orphan_coinbase = coinbase(1);
     let orphan = block_at(
         header(genesis_hash, 1, 1_000_900),
-        vec![coinbase.clone(), first.clone(), second.clone()],
+        vec![orphan_coinbase.clone(), first.clone(), second.clone()],
     );
-    let b1 = block_at(header(genesis_hash, 2, 1_000_901), vec![coinbase.clone()]);
+    let b1 = block_at(header(genesis_hash, 2, 1_000_901), vec![coinbase(2)]);
     let b1_hash = b1.block_hash();
     let b2 = block_at(
         header(b1_hash, 3, 1_001_800),
-        vec![coinbase.clone(), first.clone()],
+        vec![coinbase(3), first.clone()],
     );
     let b2_hash = b2.block_hash();
     let b3 = block_at(
         header(b2_hash, 4, 1_002_700),
-        vec![coinbase.clone(), second.clone()],
+        vec![coinbase(4), second.clone()],
     );
     let b3_hash = b3.block_hash();
     let orphan_hash = orphan.block_hash();
@@ -2145,7 +2186,7 @@ fn orphaned_page_fixture() -> Result<OrphanedPageFixture, TestError> {
     Ok(OrphanedPageFixture {
         context,
         orphan_hash,
-        transactions: vec![coinbase, first, second],
+        transactions: vec![orphan_coinbase, first, second, funding],
         first_mined: (2, b2_hash),
         second_mined: (3, b3_hash),
     })
@@ -2154,7 +2195,10 @@ fn orphaned_page_fixture() -> Result<OrphanedPageFixture, TestError> {
 struct PageTxIndex {
     transactions: Vec<Tx>,
     confirmed: Vec<(Txid, TransactionBlock)>,
-    republish: Option<(bitcoin_rs_execution::chain::TipReader, Arc<TipSnapshot>)>,
+    republish: Option<(
+        bitcoin_rs_execution::chain::TipReader,
+        Vec<Arc<TipSnapshot>>,
+    )>,
     reads: AtomicUsize,
 }
 
@@ -2192,10 +2236,13 @@ impl crate::context::DerivedIndexQuery for PageTxIndex {
         else {
             return Ok(None);
         };
-        if self.reads.fetch_add(1, Ordering::SeqCst) > 0
-            && let Some((applied_tip, replacement)) = &self.republish
+        let read = self.reads.fetch_add(1, Ordering::SeqCst);
+        if let Some((applied_tip, publications)) = &self.republish
+            && let Some(next) = read
+                .checked_sub(1)
+                .and_then(|index| publications.get(index))
         {
-            applied_tip.store(Some(Arc::clone(replacement)));
+            applied_tip.store(Some(Arc::clone(next)));
         }
         Ok(self
             .confirmed
@@ -2226,7 +2273,8 @@ fn mined(height: u32, hash: BlockHash) -> TransactionBlock {
 // WF-02
 #[test]
 fn block_page_never_mixes_confirmations_from_two_branches() -> Result<(), TestError> {
-    for backend in [false, true] {
+    for (returns_to_start, backend) in [(false, false), (false, true), (true, false), (true, true)]
+    {
         let OrphanedPageFixture {
             mut context,
             orphan_hash,
@@ -2243,13 +2291,18 @@ fn block_page_never_mixes_confirmations_from_two_branches() -> Result<(), TestEr
             tip.hash, moved.hash,
             "the page must observe a different tip"
         );
-        let moved = Arc::new(moved);
-        let moved_hash = moved.hash;
+        let mut publications = vec![Arc::new(moved)];
+        if returns_to_start {
+            publications.push(Arc::new((*tip).clone()));
+        }
+        let Some(last) = publications.last().cloned() else {
+            return Err("fixture publications missing".into());
+        };
         let second_txid = transactions[2].txid();
         context.indexes.esplora_tx_index = Some(Arc::new(PageTxIndex {
             transactions,
             confirmed: vec![(second_txid, mined(second_mined.0, second_mined.1))],
-            republish: Some((context.chain.applied_tip.clone(), moved)),
+            republish: Some((context.chain.applied_tip.clone(), publications)),
             reads: AtomicUsize::new(0),
         }));
         let ctx = Arc::new(context);
@@ -2260,25 +2313,31 @@ fn block_page_never_mixes_confirmations_from_two_branches() -> Result<(), TestEr
         } else {
             route(&handler, &format!("/block/{orphan_hash}/txs"), "")
         };
+        let label = format!("returns_to_start={returns_to_start} backend={backend}");
         assert_eq!(
             response.status,
             503,
-            "backend={backend} page body: {}",
+            "{label} page body: {}",
             String::from_utf8_lossy(&response.body)
         );
         assert_eq!(
             String::from_utf8_lossy(&response.body),
             "transaction index changed during query; retry"
         );
-        assert_eq!(
-            ctx.chain
-                .applied_tip
-                .load_full()
-                .as_ref()
-                .map(|tip| tip.hash),
-            Some(moved_hash),
-            "the page must have read confirmations across the tip move"
+        let Some(end) = ctx.chain.applied_tip.load_full() else {
+            return Err("fixture tip missing after the page".into());
+        };
+        assert!(
+            Arc::ptr_eq(&end, &last),
+            "{label}: the page must have read confirmations across every tip publication"
         );
+        if returns_to_start {
+            assert_eq!(end.hash, tip.hash, "the tip must end where it started");
+            assert!(
+                !Arc::ptr_eq(&end, &tip),
+                "the returned tip must be a new publication"
+            );
+        }
     }
     Ok(())
 }
@@ -3551,6 +3610,7 @@ fn block_page_reuses_parent_outside_the_selected_page() {
         ctx.indexes.esplora_tx_index = Some(Arc::new(FailingParentIndex {
             error: Some(error),
             republish: None,
+            published: AtomicBool::new(false),
             parent: parent.clone(),
         }));
         assert_eq!(block_txs(&ctx, &record.hash.to_string(), 1).status, status);
@@ -3973,6 +4033,7 @@ fn backend_transaction_batches_share_duplicate_bodies_and_preserve_rows() {
 struct FailingParentIndex {
     error: Option<TxQueryError>,
     republish: Option<bitcoin_rs_execution::chain::TipReader>,
+    published: AtomicBool,
     parent: Tx,
 }
 
@@ -3981,10 +4042,11 @@ impl crate::context::DerivedIndexQuery for FailingParentIndex {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
-        if let Some(reader) = &self.republish {
-            if let Some(tip) = reader.load_full() {
-                reader.store(Some(Arc::new((*tip).clone())));
-            }
+        if let Some(reader) = &self.republish
+            && !self.published.swap(true, Ordering::SeqCst)
+            && let Some(tip) = reader.load_full()
+        {
+            reader.store(Some(Arc::new((*tip).clone())));
         }
         Ok(Some(self.parent.clone()))
     }
@@ -4056,6 +4118,7 @@ fn parent_query_errors_and_republication_never_yield_a_cached_success() {
         ctx.indexes.esplora_tx_index = Some(Arc::new(FailingParentIndex {
             error,
             republish: Some(ctx.chain.applied_tip.clone()),
+            published: AtomicBool::new(false),
             parent: parent.clone(),
         }));
         let response = Projection::new(&ctx)
@@ -4066,6 +4129,7 @@ fn parent_query_errors_and_republication_never_yield_a_cached_success() {
     ctx.indexes.esplora_tx_index = Some(Arc::new(FailingParentIndex {
         error: None,
         republish: Some(ctx.chain.applied_tip.clone()),
+        published: AtomicBool::new(false),
         parent: parent.clone(),
     }));
     let child_id = child.txid();
@@ -4075,14 +4139,41 @@ fn parent_query_errors_and_republication_never_yield_a_cached_success() {
         .write()
         .insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 0, 0))
         .expect("child");
+    let reader = ctx.chain.applied_tip.clone();
+    let start = reader.load_full().expect("captured tip");
     let handler = Handler::new(Arc::new(ctx));
-    assert_eq!(route(&handler, &format!("/tx/{child_id}"), "").status, 200);
+    let refused = route(&handler, &format!("/tx/{child_id}"), "");
+    assert_eq!(refused.status, 503);
+    assert_eq!(
+        String::from_utf8_lossy(&refused.body),
+        "transaction index changed during query; retry"
+    );
+    let moved = reader
+        .load_full()
+        .expect("tip after the refused parent query");
+    assert!(
+        !Arc::ptr_eq(&moved, &start),
+        "the successful parent query must have published a fresh tip"
+    );
+    assert_eq!(
+        moved.hash, start.hash,
+        "the fresh publication repeats the same block"
+    );
+    assert_eq!(moved.height, start.height);
     let response = backend_route_post(
         &handler,
         "/internal/txs",
         &sonic_rs::to_vec(&[parent.txid().to_string()]).expect("request"),
     );
-    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.status, 200,
+        "the batch runs on one stable publication and recomputes fresh values"
+    );
+    let settled = reader.load_full().expect("tip after the batch");
+    assert!(
+        Arc::ptr_eq(&settled, &moved),
+        "the batch must observe the unchanged publication end to end"
+    );
 }
 
 #[test]

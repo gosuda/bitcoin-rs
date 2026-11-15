@@ -1341,6 +1341,15 @@ impl AppliedView {
     }
 
     #[must_use]
+    pub(crate) fn is_same_publication(&self, other: &Self) -> bool {
+        match (&self.tip, &other.tip) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    #[must_use]
     pub(crate) fn height(&self) -> u32 {
         self.tip.as_ref().map_or(0, |tip| tip.height)
     }
