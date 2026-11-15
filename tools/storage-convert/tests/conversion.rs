@@ -10,7 +10,7 @@ use super::support::harness::{
 use super::support::oracle::{
     FamilyRows, RedbTxIndexFixture, assert_independent_files_copied_and_ignored_skipped,
     read_rocksdb_all_rows, write_fjall_namespace, write_ignored_files, write_independent_files,
-    write_redb_txindex, write_schema_marker,
+    write_legacy_redb_namespace, write_redb_txindex, write_schema_marker,
 };
 
 fn build_chainstate_oracle() -> Vec<FamilyRows> {
@@ -283,5 +283,74 @@ fn epoch2_fjall_and_redb_convert_to_epoch3_rocksdb_preserves_all_rows_and_files(
     verify_namespace_report(&report, "txindex", "redb", &expected_txindex)?;
     verify_copied_files_report(&report, &independent_files)?;
 
+    Ok(())
+}
+
+#[test]
+fn epoch2_generic_redb_preserves_rows_and_refuses_nonempty_legacy_coins() -> TestResult<()> {
+    for (extra_table, legacy_rows) in [
+        (None, Vec::new()),
+        (
+            None,
+            vec![(
+                b"legacy-coin".to_vec(),
+                b"unmapped-authoritative-value".to_vec(),
+            )],
+        ),
+        (Some("operator_table"), Vec::new()),
+        (Some("txindex_v1_meta"), Vec::new()),
+    ] {
+        let source = tempdir()?;
+        let destination = tempdir()?;
+        let target = destination.path().join("converted");
+        write_schema_marker(source.path(), 2)?;
+        let oracle: Vec<FamilyRows> = ColumnFamily::ALL
+            .iter()
+            .map(|cf| {
+                let rows = if *cf == ColumnFamily::BlockTree {
+                    vec![(b"tree-key".to_vec(), b"tree-value".to_vec())]
+                } else if *cf == ColumnFamily::PoolLedger {
+                    vec![(b"ledger-key".to_vec(), b"ledger-value".to_vec())]
+                } else {
+                    Vec::new()
+                };
+                (*cf, rows)
+            })
+            .collect();
+        write_legacy_redb_namespace(&source.path().join("chainstate"), &oracle, &legacy_rows)?;
+        if let Some(name) = extra_table {
+            let db = redb::Database::open(source.path().join("chainstate/redb.db"))?;
+            let txn = db.begin_write()?;
+            txn.open_table(redb::TableDefinition::<&[u8], &[u8]>::new(name))?;
+            txn.commit()?;
+        }
+        let files = write_independent_files(source.path())?;
+        write_ignored_files(source.path())?;
+        let before = recursive_dir_digest(source.path())?;
+        let output = run_converter(&[
+            "--from",
+            source.path().to_str().expect("utf8"),
+            "--to",
+            target.to_str().expect("utf8"),
+            "--to-engine",
+            "rocksdb",
+        ])?;
+        assert_eq!(before, recursive_dir_digest(source.path())?);
+        if legacy_rows.is_empty() && extra_table.is_none() {
+            let report = parse_report(&output)?;
+            verify_cf_rows(
+                "chainstate",
+                &read_rocksdb_all_rows(&target.join("chainstate"))?,
+                &oracle,
+            )?;
+            verify_namespace_report(&report, "chainstate", "redb", &oracle)?;
+            assert_independent_files_copied_and_ignored_skipped(&target, &files)?;
+            verify_copied_files_report(&report, &files)?;
+            assert_eq!(fs::read_to_string(target.join("CURRENT_SCHEMA"))?, "3\n");
+        } else {
+            assert!(!output.status.success());
+            assert!(!target.join("CURRENT_SCHEMA").exists());
+        }
+    }
     Ok(())
 }
