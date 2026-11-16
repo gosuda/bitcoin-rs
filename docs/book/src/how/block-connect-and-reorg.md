@@ -28,7 +28,7 @@ The log line for a group flush is `durable_head: group commit` with `blocks`, `s
 
 1. Locate the predecessor: `application_predecessor` in `crates/chain/src/connect.rs` resolves the parent tip and height, from the staged group when grouped.
 2. Historical-target guard in `crates/chain/src/connect.rs`: under the assumeutxo historical role, blocks past `base_height` fail with `ConnectPastHistoricalTarget` and a height-equal mismatch fails with `HistoricalTargetHashMismatch`.
-3. Contextual header check in `crates/chain/src/connect.rs`: median-time-past, nbits, version gates, reusing `validate_contextual_header` from the execution chain module (`crates/chain/src/chain/header_sync.rs`) (see the next chapter).
+3. Contextual header check in `crates/chain/src/connect.rs`: median-time-past, nbits, version gates, reusing `validate_contextual_header` from the chain crate's `chain` module (`crates/chain/src/chain/header_sync.rs`) (see the next chapter).
 4. Self proof of work in `crates/chain/src/connect.rs`.
 5. `BlockRules::check` in `crates/chain/src/connect.rs`: block rules from `verify_block_rules_precomputed` (merkle roots, size, weight, coinbase structure), signet solution, block finality (`check_block_finality`), an early BIP34 check, the optional pow-valid announce hook, and the combined BIP30/BIP34 scan (`check_bip30_and_bip34`).
 6. Script verification (`ScriptVerification::run` in `crates/chain/src/connect.rs`), possibly skipped under assume-valid; see [how/validation.md](validation.md) and clause `VAL-02` of `docs/contracts/validation-default.md`.
