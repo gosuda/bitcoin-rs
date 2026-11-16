@@ -60,6 +60,13 @@ jobs:
 
   clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [services, node-runtime]
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,16 +77,18 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
+          key: clippy-${{ matrix.lane }}
           cache-on-failure: true
           # Do not restore cross-commit target metadata into the clippy
           # matrix; stale rmeta can make dependent workspace crates appear
           # to use an older public API.
           cache-targets: false
-      - run: ./scripts/ci-pr.sh clippy
+      - run: ./scripts/ci-pr.sh clippy ${{ matrix.lane }}
 
   test-crates:
     needs: [fmt, deny]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -112,6 +121,7 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: [fmt, deny]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       BITCOIN_RS_FUZZ_CORPUS: ${{ github.workspace }}/.fuzz-corpus/corpus
@@ -148,6 +158,7 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: [fmt, deny]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       BITCOIN_RS_FUZZ_CORPUS: ${{ github.workspace }}/.fuzz-corpus/corpus
