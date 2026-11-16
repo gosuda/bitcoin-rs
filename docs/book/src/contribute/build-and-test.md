@@ -15,7 +15,7 @@ The default build is kernel-free. `cargo build -p bitcoin-rs` uses the native Ru
 | Subcommand | What it runs |
 | :--- | :--- |
 | `fmt` | `cargo fmt --all -- --check` |
-| `clippy` | Four kernel-free clippy profiles plus a production `cargo check` for the binary |
+| `clippy [lane]` | Kernel-free clippy profiles (`all`, `services`, `node-runtime`) plus production cargo check |
 | `test-crates [lane]` | Library test lanes (`all`, `silent-payments`, `storage`, `consensus-execution`, `node-serving`) |
 | `test-binary` | Node binary test lane |
 | `test-workspace` | Workspace test lane |
@@ -29,7 +29,7 @@ The default build is kernel-free. `cargo build -p bitcoin-rs` uses the native Ru
 
 `all` deliberately omits `proofs`. CI runners carry no Kani, Lean, or Aeneas toolchain. Run `proofs` yourself when you change a module with a `proofs.rs` file, a `*_model.rs` model, or a Lean file.
 
-The clippy profiles are not one command. The script checks the workspace with `silent-payments` but excludes `bitcoin-rs-consensus`, `bitcoin-rs-execution`, and `bitcoin-rs-node`. It then checks each of those three with its own feature set, and adds a production `check` of the `bitcoin-rs` binary. A clippy run over only the workspace misses those per-crate feature sets.
+The clippy profiles are not one command. They can be run as a whole or split into lanes: `services` (storage, projection, serving, mempool, tools) and `node-runtime` (bitcoin-rs, e2e, wire, consensus, execution, node). The script checks consensus, execution, and node with their respective native/feature combinations, and adds a production check of the bitcoin-rs binary. A clippy run over only the workspace misses those per-crate feature sets.
 
 The test lanes use `cargo nextest` when it is installed. Without nextest they fall back to `cargo test --no-fail-fast`. The two runners execute the same tests because the tree has no doctests.
 

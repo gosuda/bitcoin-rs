@@ -48,7 +48,7 @@ pre-commit hooks, and this guide all invoke:
 
 ```sh
 ./scripts/ci-pr.sh fmt            # format check
-./scripts/ci-pr.sh clippy         # four kernel-free all-target Clippy profiles + production silent-payments check
+./scripts/ci-pr.sh clippy [lane]     # kernel-free Clippy profiles, optional lane: services, node-runtime
 ./scripts/ci-pr.sh test-crates [lane] # per-crate profiles, optional lane: silent-payments, storage, consensus-execution, node-serving
 ./scripts/ci-pr.sh test-binary    # binary profile
 ./scripts/ci-pr.sh test-workspace # workspace kernel-free pass

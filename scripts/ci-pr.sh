@@ -7,12 +7,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  echo "usage: $0 {fmt|clippy|test-crates [lane]|test-binary|test-workspace|test|deny|contracts|book|deep|all|proofs}" >&2
+  echo "usage: $0 {fmt|clippy [lane]|test-crates [lane]|test-binary|test-workspace|test|deny|contracts|book|deep|all|proofs}" >&2
   exit 2
 }
 
 [[ $# -ge 1 && $# -le 2 ]] || usage
-[[ $# -eq 1 || "$1" == "test-crates" ]] || usage
+[[ $# -eq 1 || "$1" == "test-crates" || "$1" == "clippy" ]] || usage
 
 failures=0
 collect_failures=false
@@ -51,19 +51,19 @@ cargo_test() {
   fi
 }
 
-clippy_profiles() {
-  # Four kernel-free all-target profiles. The kernel capability is opt-in and
-  # never implied by a default, so these lanes exercise the plain builds. The
-  # explicit `--no-default-features` spellings keep the per-crate rows'
-  # feature sets pinned even if a default changes again; the workspace row
-  # builds with default features by design (it is the "plain build works"
-  # row).
-  profile "clippy: workspace (kernel-free)" \
+clippy_lane_services() {
+  profile "clippy: services and tools (kernel-free)" \
     cargo clippy --locked --workspace --all-targets \
-      --features bitcoin-rs/silent-payments \
+      --exclude bitcoin-rs --exclude bitcoin-rs-node \
       --exclude bitcoin-rs-consensus --exclude bitcoin-rs-execution \
-      --exclude bitcoin-rs-node \
+      --exclude bitcoin-rs-e2e --exclude bitcoin-rs-wire \
       -- -D warnings
+}
+
+clippy_lane_node_runtime() {
+  profile "clippy: node runtime and wire" \
+    cargo clippy --locked -p bitcoin-rs -p bitcoin-rs-e2e -p bitcoin-rs-wire \
+      --features bitcoin-rs/silent-payments --all-targets -- -D warnings
   profile "clippy: bitcoin-rs-consensus (native)" \
     cargo clippy --locked -p bitcoin-rs-consensus \
       --no-default-features --all-targets -- -D warnings
@@ -78,6 +78,26 @@ clippy_profiles() {
   profile "check: bitcoin-rs (production silent-payments)" \
     cargo check --locked -p bitcoin-rs \
       --no-default-features --features silent-payments
+}
+
+clippy_profiles() {
+  local lane="${1:-all}"
+  case "$lane" in
+    all)
+      clippy_lane_services
+      clippy_lane_node_runtime
+      ;;
+    services)
+      clippy_lane_services
+      ;;
+    node-runtime)
+      clippy_lane_node_runtime
+      ;;
+    *)
+      echo "unknown clippy lane: $lane" >&2
+      exit 2
+      ;;
+  esac
 }
 
 test_crates_silent_payments() {
@@ -398,7 +418,7 @@ case "$1" in
     ;;
 
   clippy)
-    clippy_profiles
+    clippy_profiles "${2:-all}"
     ;;
 
   test-crates)
