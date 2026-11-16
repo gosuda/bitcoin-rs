@@ -712,7 +712,8 @@ mod tests {
 
     // P2P-01
     #[test]
-    fn versions_below_the_minimum_peer_protocol_are_refused_without_state() -> Result<(), PeerError> {
+    fn versions_below_the_minimum_peer_protocol_are_refused_without_state() -> Result<(), PeerError>
+    {
         let mut peer = fresh_peer();
 
         for refused_version in [31_799, 0, 2_147_483_648, u32::MAX] {

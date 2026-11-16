@@ -815,8 +815,8 @@ mod tests {
 
     // P2P-01
     #[test]
-    fn obsolete_remote_version_ends_the_inbound_handshake_without_misbehavior() -> Result<(), PeerError>
-    {
+    fn obsolete_remote_version_ends_the_inbound_handshake_without_misbehavior()
+    -> Result<(), PeerError> {
         let magic = Magic::BITCOIN;
         let our_nonce = 0x1234_5678_9abc_def0;
         let mut remote_version_bytes = Vec::new();
