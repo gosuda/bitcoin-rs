@@ -204,6 +204,14 @@ pub(crate) fn run(
                             "portable index attach refused a populated capability; sibling artifacts continue: error={error}, capability={capability:?}"
                         );
                     }
+                    Err(IndexBundleError::Index(
+                        error @ (IndexError::ScriptHistoryPopulated
+                        | IndexError::CompactFiltersPopulated),
+                    )) if capability.is_some() => {
+                        log::error!(
+                            "portable index attach refused a populated capability; sibling artifacts continue: error={error}, capability={capability:?}"
+                        );
+                    }
                     Err(error) => return Err(error),
                 }
             }

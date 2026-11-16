@@ -92,7 +92,7 @@ Owners:
 - Stored `ScriptPost` items keep each funding and spending event, including events with the same transaction ordinal. The history reader merges these items into one public occurrence per script and transaction with both flags.
 - The spent script comes from authoritative UTXO or undo state.
 - A missing spent script fails preparation with `MissingSpentCoin` instead of writing a partial history.
-- `ColumnFamily::Spending` keeps outpoint-keyed spend events for `spender` queries only. Each format 10 key is `generation_BE8 || funding_txid_32 || vout_BE4 || spending_height_BE4`; its value is `spending_ordinal_BE4`.
+- `ColumnFamily::SpendDir` keeps outpoint-keyed spend events for `spender` queries only. Each format 10 key is `generation_BE8 || funding_txid_32 || vout_BE4 || spending_height_BE4`; its value is `spending_ordinal_BE4`.
 - Each spend event MUST be stored independently of the funding transaction's creation height or retained coverage. The spender transaction directory resolves only the spending occurrence; funding discovery is not required.
 - Each occurrence names the script and the block position.
 - A history page is one bounded seek over one script prefix.
@@ -111,6 +111,7 @@ Owners:
 - An enabled `TxLookup` whose watermark is not at the applied tip refuses a cursor page with `Retry`.
 - An enabled `TxLookup` whose floor does not cover the page refuses a cursor page with a typed unavailable cause.
 - Without `TxLookup`, the page starts from the first page, as `API-09` defines for an unknown cursor.
+- Proof: `crates/projection/tests/generation_parity.rs` (`same_tx_fund_and_spend_keeps_both_posting_occurrences`) checks stored funding and spending events merge into one public occurrence with both flags; `crates/projection/src/index/tests.rs` (`spend_event_codec_preserves_full_identity_and_rejects_noncanonical_lengths`) checks the format 10 spend-row layout; `crates/projection/tests/index_roundtrip.rs` (`spending_rows_carry_transaction_positions`) checks stored transaction positions.
 
 ### `IDX-03`: Query gating and snapshot consistency
 
@@ -202,6 +203,7 @@ Owners:
 - They emit a storage error that directs a rebuild of the derived index.
 - Other invalid or mismatched positions retain full-block verification for collision and correctness handling.
 - Proof: `empty_position_rows_are_refused_before_body_reads`, position-mismatch and full-block tests in `runtime/query_tests.rs`, and `tests/tx_positions.rs`.
+- Proof: `crates/projection/tests/adversarial_index.rs` (`wrong_format_version_refuses_open`) and `crates/projection/tests/script_history_occurrences.rs` (`format_5_marker_refuses_and_rebuilds_the_derived_store`) check foreign-marker refusal and the owner-local rebuild; `tools/storage-convert/tests/rebuild_index.rs` (`rebuild_index_resets_derived_rows_and_stamps_the_current_format`) checks the rebuild stamps the current format marker.
 - On node startup, index workers read persisted watermarks and reconcile against `Chainstate::chain_snapshot()` through `NodeState::chainstate()`.
 - A watermark that is an ancestor of the restored tip connects forward.
 - A watermark on an abandoned branch rolls back to the common ancestor and connects forward to the active tip.

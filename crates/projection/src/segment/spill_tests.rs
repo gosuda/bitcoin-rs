@@ -323,7 +323,22 @@ fn failed_online_compaction_cleans_partial_output_and_owned_inputs() -> IoResult
     let first = std::fs::read_dir(scratch.path())?
         .next()
         .ok_or_else(|| std::io::Error::other("spill input missing"))??;
-    std::fs::remove_file(first.path())?;
+    let bytes = std::fs::read(first.path())?;
+    let key_len = usize::try_from(u32::from_le_bytes(
+        bytes[..4]
+            .try_into()
+            .map_err(|_| std::io::Error::other("spill header missing"))?,
+    ))
+    .map_err(|_| std::io::Error::other("spill header overflow"))?;
+    let value_len = usize::try_from(u32::from_le_bytes(
+        bytes[4..8]
+            .try_into()
+            .map_err(|_| std::io::Error::other("spill header missing"))?,
+    ))
+    .map_err(|_| std::io::Error::other("spill header overflow"))?;
+    let mut truncated = bytes[..8 + key_len + value_len].to_vec();
+    truncated.extend_from_slice(&[0x02, 0x00]);
+    std::fs::write(first.path(), &truncated)?;
     assert!(sorter.push(vec![255], vec![2]).is_err());
     drop(set);
     assert_eq!(budget.current_bytes(), 0);

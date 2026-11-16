@@ -1765,10 +1765,20 @@ fn validate_artifact_with_budget(
     chain: Option<&ChainBase>,
     budget: &SpillBudget,
 ) -> Result<(ArtifactHeader, LocatorOutcome), IndexBundleError> {
-    let work = tempfile::Builder::new()
-        .prefix("restore-locators-")
-        .tempdir()
-        .map_err(|error| io_error(path, error))?;
+    let scratch_root = host
+        .writer
+        .restore_scratch()
+        .or_else(|| path.parent().map(Path::to_path_buf));
+    let work = match &scratch_root {
+        Some(root) => tempfile::Builder::new()
+            .prefix("restore-locators-")
+            .tempdir_in(root)
+            .map_err(|error| io_error(path, error))?,
+        None => tempfile::Builder::new()
+            .prefix("restore-locators-")
+            .tempdir()
+            .map_err(|error| io_error(path, error))?,
+    };
     let set = SpillSet::new(budget, work.path().to_path_buf());
     let mut sorter = set.sorter("occurrences");
     let name = BundleFamily::TxLookup.file_name();
@@ -1999,10 +2009,21 @@ impl ImportPlan<'_> {
             headers.push(header);
         }
         let header_refs: Vec<&[u8; crate::types::HEADER_ROW_SIZE]> = headers.iter().collect();
-        let work = tempfile::Builder::new()
-            .prefix("restore-import-")
-            .tempdir()
-            .map_err(|error| io_error(self.path, error))?;
+        let scratch_root = self
+            .host
+            .writer
+            .restore_scratch()
+            .or_else(|| self.path.parent().map(Path::to_path_buf));
+        let work = match &scratch_root {
+            Some(root) => tempfile::Builder::new()
+                .prefix("restore-import-")
+                .tempdir_in(root)
+                .map_err(|error| io_error(self.path, error))?,
+            None => tempfile::Builder::new()
+                .prefix("restore-import-")
+                .tempdir()
+                .map_err(|error| io_error(self.path, error))?,
+        };
         self.import_streamed(&header_refs, work.path(), hashed, base)
     }
 
@@ -2105,6 +2126,7 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
+    // IDX-11
     fn restore_locator_spills_check_canonical_positions_and_late_completeness()
     -> Result<(), crate::portable::TestError> {
         use bitcoin::consensus::serialize;
