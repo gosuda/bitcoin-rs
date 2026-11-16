@@ -69,23 +69,26 @@ pub(crate) fn encode(command: &CommandString, payload: &[u8]) -> Vec<u8> {
     contents
 }
 
-/// Splits packet contents into their command and payload, or `None` when the
-/// type is empty, undefined, or malformed. BIP324 peers drop such a message
-/// and keep the connection.
-pub(crate) fn decode(contents: &Bytes) -> Option<(String, Bytes)> {
+pub(crate) fn split(contents: &[u8]) -> Option<(&str, usize)> {
     let first = *contents.first()?;
     if first == LONG_FORM {
         let field = contents.get(1..=COMMAND_LEN)?;
         let command = read_command(field)
             .ok()
             .filter(|command| !command.is_empty())?;
-        return Some((command, contents.slice(1 + COMMAND_LEN..)));
+        Some((command, 1 + COMMAND_LEN))
+    } else {
+        let command = SHORT_IDS
+            .get(usize::from(first))
+            .copied()
+            .filter(|command| !command.is_empty())?;
+        Some((command, 1))
     }
-    let command = SHORT_IDS
-        .get(usize::from(first))
-        .copied()
-        .filter(|command| !command.is_empty())?;
-    Some((command.to_owned(), contents.slice(1..)))
+}
+
+pub(crate) fn decode(contents: &Bytes) -> Option<(String, Bytes)> {
+    let (command, offset) = split(contents)?;
+    Some((command.to_owned(), contents.slice(offset..)))
 }
 
 #[cfg(test)]

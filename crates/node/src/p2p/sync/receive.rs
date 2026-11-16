@@ -12,9 +12,11 @@ use bitcoin_rs_execution::chain::BlockTree;
 use bitcoin_rs_execution::chain::ChainError;
 use bitcoin_rs_execution::chain::NodeId;
 use bitcoin_rs_execution::chain::TipSnapshot;
+use bitcoin_rs_storage::budget::BudgetReclaimer;
 use bitcoin_rs_wire::connection::PeerSource;
 use bitcoin_rs_wire::inbound::InboundBlock;
 use smallvec::SmallVec;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -666,6 +668,53 @@ impl BlockSync {
                 }
             }
         }
+    }
+    pub(crate) fn staged_image_reclaimer(self: &Arc<Self>) -> Arc<dyn BudgetReclaimer> {
+        Arc::new(StagedImageReclaimer {
+            sync: Arc::downgrade(self),
+        })
+    }
+
+    /// The current frontier remains staged, and evicted known-header bodies remain requestable.
+    pub(super) fn reclaim_staged_for_ingress(&self, bytes: u64) -> u64 {
+        let expected = self.next_expected_block_hash();
+        let target = usize::try_from(bytes).unwrap_or(usize::MAX);
+        let (evicted, freed) = {
+            let mut scheduler = self.scheduler.lock();
+            scheduler.stager.evict_for_reclaim(expected, target)
+        };
+        if evicted.is_empty() {
+            return 0;
+        }
+        let tree = self.chain.block_tree();
+        let heights: Vec<(Hash256, Option<u32>)> = evicted
+            .iter()
+            .map(|hash| {
+                let height = tree
+                    .lookup(*hash)
+                    .and_then(|node_id| tree.node(node_id).ok())
+                    .map(|node| node.height);
+                (*hash, height)
+            })
+            .collect();
+        let now = Instant::now();
+        let mut scheduler = self.scheduler.lock();
+        for (hash, height) in &heights {
+            scheduler.window.requeue_for_retry(hash, *height, now);
+        }
+        freed
+    }
+}
+
+struct StagedImageReclaimer {
+    sync: Weak<BlockSync>,
+}
+
+impl BudgetReclaimer for StagedImageReclaimer {
+    fn reclaim(&self, bytes: u64) -> u64 {
+        self.sync
+            .upgrade()
+            .map_or(0, |sync| sync.reclaim_staged_for_ingress(bytes))
     }
 }
 

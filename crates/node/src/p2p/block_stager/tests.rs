@@ -995,3 +995,63 @@ fn duplicate_and_refused_inserts_leave_attribution_untouched() {
     );
     assert_eq!(stager.received_bytes(), wire);
 }
+
+#[test]
+fn reclaim_eviction_protects_frontier_and_frees_retained() {
+    let block = Network::Regtest.genesis_block();
+    let payload = BlockImage::from_local(block.clone());
+    let retained_per_block = payload.bytes().len() + payload.retained_heap_bytes();
+    let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
+    let now = Instant::now();
+    let frontier = Hash256::from_le_bytes(&[0x41; 32]);
+    stager.insert(
+        frontier,
+        Some(frontier),
+        BlockImage::from_local(block.clone()),
+        None,
+        now,
+    );
+    let mut successors = Vec::new();
+    for seed in [0x42_u8, 0x43, 0x44] {
+        let hash = Hash256::from_le_bytes(&[seed; 32]);
+        stager.insert(
+            hash,
+            Some(frontier),
+            BlockImage::from_local(block.clone()),
+            None,
+            now,
+        );
+        successors.push(hash);
+    }
+    assert_eq!(stager.received_len(), 4);
+    let two_blocks = retained_per_block.saturating_mul(2);
+    let (evicted, freed) = stager.evict_for_reclaim(Some(frontier), two_blocks);
+    assert_eq!(evicted, successors[..2].to_vec());
+    assert_eq!(freed, u64::try_from(two_blocks).unwrap_or(u64::MAX));
+    assert!(stager.contains(&frontier));
+    assert!(stager.contains(&successors[2]));
+    assert_eq!(stager.received_len(), 2);
+    assert_eq!(stager.received_bytes(), 2 * payload.bytes().len());
+    let (evicted_all, _) = stager.evict_for_reclaim(Some(frontier), usize::MAX);
+    assert_eq!(evicted_all, vec![successors[2]]);
+    assert!(stager.contains(&frontier));
+    assert_eq!(stager.received_len(), 1);
+    let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
+    let mut staged = Vec::new();
+    for seed in [0x51_u8, 0x52, 0x53] {
+        let hash = Hash256::from_le_bytes(&[seed; 32]);
+        stager.insert(
+            hash,
+            Some(frontier),
+            BlockImage::from_local(block.clone()),
+            None,
+            now,
+        );
+        staged.push(hash);
+    }
+    let (evicted, _) = stager.evict_for_reclaim(Some(frontier), two_blocks);
+    assert_eq!(evicted, staged[..2].to_vec());
+    let (rest, _) = stager.evict_for_reclaim(None, usize::MAX);
+    assert_eq!(rest, vec![staged[2]]);
+    assert_eq!(stager.received_len(), 0);
+}

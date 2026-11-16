@@ -323,6 +323,38 @@ impl NodeBudget {
         }
         self.reserve(owner, bytes)
     }
+    /// Move a receive charge into the staged-image lane without inflating
+    /// the total (`BUD-07`): attempt under one lock, then reclaim with the
+    /// ledger unlocked and retry once. A final refusal leaves the receive
+    /// charge untouched.
+    pub(crate) fn transfer_receive_to_image(&self, bytes: u64) -> bool {
+        if self.try_transfer_receive_to_image(bytes) {
+            return true;
+        }
+        for reclaimer in self.reclaimers.read().iter() {
+            reclaimer.reclaim(bytes);
+        }
+        self.try_transfer_receive_to_image(bytes)
+    }
+
+    fn try_transfer_receive_to_image(&self, bytes: u64) -> bool {
+        let mut ledger = self.ledger.lock();
+        let image = BudgetOwner::StagedImages.index();
+        let receive = BudgetOwner::PeerReceive.index();
+        if ledger.charges[receive] < bytes {
+            return false;
+        }
+        let committed = ledger.charges[image].saturating_add(ledger.reserved[image]);
+        if bytes > self.caps.image_ingress_cap().saturating_sub(committed) {
+            ledger.ingress_refused = true;
+            return false;
+        }
+        ledger.charges[image] = ledger.charges[image].saturating_add(bytes);
+        ledger.charges[receive] -= bytes;
+        drop(ledger);
+        self.released.notify_all();
+        true
+    }
 
     pub fn allocate(&self, owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
         let mut ledger = self.ledger.lock();
@@ -469,6 +501,14 @@ impl BudgetedIngressLedger {
     pub fn new(budget: Arc<NodeBudget>) -> Self {
         Self { budget }
     }
+    fn try_take_once(&self, bytes: usize) -> bool {
+        let bytes_u64 = u64::try_from(bytes).unwrap_or(u64::MAX);
+        self.budget.reserve_ingress(bytes_u64).is_ok()
+            && self
+                .budget
+                .allocate(BudgetOwner::StagedImages, bytes_u64)
+                .is_ok()
+    }
 }
 
 impl bitcoin_rs_wire::inbound::block_memory::IngressLedger for BudgetedIngressLedger {
@@ -477,12 +517,14 @@ impl bitcoin_rs_wire::inbound::block_memory::IngressLedger for BudgetedIngressLe
     }
 
     fn try_take(&self, bytes: usize) -> bool {
+        if self.try_take_once(bytes) {
+            return true;
+        }
         let bytes_u64 = u64::try_from(bytes).unwrap_or(u64::MAX);
-        self.budget.reserve_ingress(bytes_u64).is_ok()
-            && self
-                .budget
-                .allocate(BudgetOwner::StagedImages, bytes_u64)
-                .is_ok()
+        for reclaimer in self.budget.reclaimers.read().iter() {
+            reclaimer.reclaim(bytes_u64);
+        }
+        self.try_take_once(bytes)
     }
 
     fn give_back(&self, bytes: usize) {
@@ -512,6 +554,11 @@ impl bitcoin_rs_wire::inbound::block_memory::IngressLedger for BudgetedIngressLe
         ledger.reserved[idx] -= bytes;
         ledger.charges[idx] += bytes;
         true
+    }
+
+    fn transfer_receive_to_image(&self, bytes: usize) -> bool {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        self.budget.transfer_receive_to_image(bytes)
     }
 
     fn give_back_receive(&self, bytes: usize) {

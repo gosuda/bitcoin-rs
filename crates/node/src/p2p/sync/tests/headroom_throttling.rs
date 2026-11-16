@@ -598,3 +598,62 @@ fn padded_block_exact(size: usize, seed: u8) -> Block {
     assert_eq!(consensus_bytes(&block).len(), size);
     block
 }
+
+// BUD-07, SYNC-02, SYNC-06
+#[test]
+fn reclaimed_successor_is_requeued_with_height_for_refetch() -> TestResult {
+    let (sync, peers, _block_tree, _applied_tip, expected) = sync_with_header_chain(4)?;
+    install_budget(&sync, super::super::default_sync_budget(Network::Regtest));
+    let addr = test_addr(9471, 0)?;
+    let rx = connect_peer(&peers, synthetic_peer(addr, 100));
+
+    sync.scheduler
+        .lock()
+        .window
+        .seed_front_cadence_for_test(50, Instant::now());
+
+    sync.tick();
+    assert!(witness_block_inventory(next_getdata(&rx)?)?.contains(&expected[1]));
+
+    let successor = Hash256::from_le_bytes(expected[1].as_bytes());
+    let mut batch = vec![bitcoin_rs_wire::InboundBlock::from_local(
+        super::header_chain_block(&expected, 2)?,
+    )];
+    batch[0].source = Some(current_source(&peers, addr));
+    assert_eq!(
+        sync.buffer_received_block_chunk(
+            &mut batch,
+            Some(Hash256::from_le_bytes(expected[0].as_bytes()))
+        ),
+        1
+    );
+    assert!(sync.scheduler.lock().stager.contains(&successor));
+    assert!(
+        !sync.scheduler.lock().window.contains_pending(&successor),
+        "staging must consume the pending fetch"
+    );
+
+    let freed = sync.reclaim_staged_for_ingress(u64::MAX);
+    assert!(freed > 0);
+    assert!(!sync.scheduler.lock().stager.contains(&successor));
+    assert!(
+        sync.scheduler.lock().window.request_cursor() <= 2,
+        "requeue must rewind the request cursor to the evicted height"
+    );
+
+    sync.tick();
+    let mut refetched = false;
+    for _ in 0..3 {
+        match next_getdata(&rx) {
+            Ok(inventory) => {
+                if witness_block_inventory(inventory)?.contains(&expected[1]) {
+                    refetched = true;
+                    break;
+                }
+            }
+            Err(_) => sync.tick(),
+        }
+    }
+    assert!(refetched, "the evicted successor must be re-requested");
+    Ok(())
+}

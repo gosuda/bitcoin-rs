@@ -735,3 +735,58 @@ fn default_image_lane_keeps_the_maximum_decoder_admission_floor() {
     ingress.give_back(decoder);
     assert_eq!(budget.total_committed(), 0);
 }
+// BUD-07: a refused receive-to-image transfer reclaims staged image bytes
+// and retries once; a final refusal leaves the receive charge untouched.
+#[test]
+fn transfer_reclaims_staged_image_and_retries_once() {
+    use bitcoin_rs_storage::budget::BudgetReclaimer;
+    use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
+
+    struct ReleaseStaged {
+        budget: Arc<NodeBudget>,
+        bytes: u64,
+    }
+
+    impl BudgetReclaimer for ReleaseStaged {
+        fn reclaim(&self, bytes: u64) -> u64 {
+            let free = self.bytes.min(bytes);
+            if self.budget.release(BudgetOwner::StagedImages, free).is_ok() {
+                free
+            } else {
+                0
+            }
+        }
+    }
+
+    let caps =
+        BudgetCaps::from_chainstate_cache_budget(split_chainstate_cache_budget(64 * 1024 * 1024));
+
+    let image_ceiling = caps.image_ingress_cap();
+    let transfer = 4 * 1024 * 1024usize;
+    let budget = Arc::new(NodeBudget::new(caps, 4));
+    let ingress = super::BudgetedIngressLedger::new(Arc::clone(&budget));
+    assert!(ingress.try_take(usize::try_from(image_ceiling).unwrap_or(usize::MAX)));
+    assert!(ingress.try_take_receive(transfer));
+    assert!(!ingress.transfer_receive_to_image(transfer));
+    assert_eq!(
+        budget.charged_bytes(BudgetOwner::PeerReceive),
+        u64::try_from(transfer).unwrap_or(u64::MAX)
+    );
+    assert_eq!(
+        budget.charged_bytes(BudgetOwner::StagedImages),
+        image_ceiling
+    );
+
+    budget.add_reclaimer(Arc::new(ReleaseStaged {
+        budget: Arc::clone(&budget),
+        bytes: 8 * 1024 * 1024,
+    }));
+    assert!(ingress.transfer_receive_to_image(transfer));
+    assert_eq!(budget.charged_bytes(BudgetOwner::PeerReceive), 0);
+    assert_eq!(
+        budget.charged_bytes(BudgetOwner::StagedImages),
+        image_ceiling
+    );
+    assert!(budget.ingress_refused());
+    assert!(budget.is_safe());
+}

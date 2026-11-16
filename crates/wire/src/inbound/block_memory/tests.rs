@@ -391,15 +391,83 @@ fn completed_receive_backing_holds_quota_until_the_last_raw_slice_drops() -> Tes
         drop(raw);
         drop(decoder_credit);
         assert!(*memory.used.lock() >= received_backing_minimum);
+        // The completed backing moved to the image lane: the receive lane is
+        // free while a live raw slice still owns image quota.
         let capacity = memory.ledger().receive_capacity();
-        let competing = memory.reserve_receive(capacity);
-        assert!(
-            matches!(&competing, Err(error) if error.kind() == std::io::ErrorKind::Other),
-            "a live raw slice must own quota"
-        );
-        drop(memory.try_reserve(memory.ledger().capacity())?);
-        drop(retained);
         drop(memory.reserve_receive(capacity)?);
+        let competing = memory.try_reserve(memory.ledger().capacity());
+        assert!(
+            matches!(
+                &competing,
+                Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
+            ),
+            "a live raw slice must own image quota after the transfer"
+        );
+
+        drop(retained);
+        drop(memory.try_reserve(memory.ledger().capacity())?);
+    }
+    Ok(())
+}
+
+fn lean_big_block_bytes() -> Vec<u8> {
+    const TARGET: usize = 2_100_000;
+    let mut bytes = vec![0; 80];
+    bytes.push(1);
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.push(1);
+    bytes.extend_from_slice(&[0; 36]);
+    bytes.push(0);
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+    bytes.push(1);
+    bytes.extend_from_slice(&[0; 8]);
+    let script_len = TARGET - (bytes.len() + 5 + 4);
+    bytes.extend_from_slice(&varint::encode(
+        u64::try_from(script_len).unwrap_or(u64::MAX),
+    ));
+    bytes.extend(vec![0; script_len]);
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    assert_eq!(bytes.len(), TARGET);
+    bytes
+}
+
+// BUD-05
+#[test]
+fn staged_successors_keep_receive_headroom_for_the_missing_frontier() -> TestResult {
+    const SUCCESSORS: usize = 16;
+    const FRAME_CAPACITY: usize = 4_194_304;
+    let image = BlockImage::from_raw(bytes::Bytes::from(lean_big_block_bytes()))
+        .map_err(|_| TestError::Missing("lean big block"))?;
+    let heap = image.retained_heap_bytes();
+    for make_peer in [legacy_receive_block, encrypted_receive_block] {
+        let memory = Arc::new(BlockMemory::default());
+        let mut staged = Vec::with_capacity(SUCCESSORS + 1);
+        for _ in 0..SUCCESSORS {
+            let mut peer = make_peer(&image)?;
+            let received = peer
+                .read_message_bounded(&memory, || false)?
+                .ok_or(TestError::Missing("staged successor"))?;
+            assert!(matches!(received.0, Message::Block(_)));
+            staged.push(received);
+            drop(peer);
+        }
+        // Sixteen staged successors pin a full receive lane without the
+        // transfer; with it the lane stays free for the missing frontier.
+        drop(memory.reserve_receive(memory.ledger().receive_capacity())?);
+        let mut peer = make_peer(&image)?;
+        let frontier = peer
+            .read_message_bounded(&memory, || false)?
+            .ok_or(TestError::Missing("frontier block"))?;
+        assert!(matches!(frontier.0, Message::Block(_)));
+        staged.push(frontier);
+        drop(peer);
+        assert_eq!(
+            *memory.used.lock(),
+            (SUCCESSORS + 1) * (FRAME_CAPACITY + heap),
+            "staged raw plus heap must stay exactly charged"
+        );
+        drop(staged);
+        assert_eq!(*memory.used.lock(), 0);
     }
     Ok(())
 }
@@ -514,6 +582,13 @@ impl IngressLedger for ReceiveProbe {
         self.used.lock().1 -= bytes;
         self.released.notify_all();
     }
+    fn transfer_receive_to_image(&self, bytes: usize) -> bool {
+        if !self.try_take(bytes) {
+            return false;
+        }
+        self.give_back_receive(bytes);
+        true
+    }
 }
 
 #[test]
@@ -539,21 +614,26 @@ fn receive_capacity_and_growth_overlap_are_admitted_before_consuming_more_bytes(
         drop(message);
         drop(decoder);
         drop(peer);
-        let (image, retained_capacity, peak) = *ledger.used.lock();
-        assert_eq!(image, 0);
-        assert!(retained_capacity > initial_chunk);
+        let (image, receive, peak) = *ledger.used.lock();
+        assert_eq!(
+            receive, 0,
+            "transferred backing leaves the receive lane free"
+        );
+        assert!(image > initial_chunk);
+        assert!(image > raw.len(), "spare allocation capacity stays charged");
         assert!(
-            retained_capacity > raw.len(),
-            "spare allocation capacity stays charged"
+            peak >= image,
+            "the moved charge cannot exceed the observed receive peak"
         );
         assert!(
-            peak > retained_capacity,
+            peak > raw.len(),
             "old and new allocations overlap during growth"
         );
         drop(raw);
+        assert_eq!(ledger.used.lock().0, 0);
         assert_eq!(ledger.used.lock().1, 0);
 
-        let ledger = Arc::new(ReceiveProbe::new(retained_capacity));
+        let ledger = Arc::new(ReceiveProbe::new(initial_chunk * 2));
         let memory = Arc::new(BlockMemory::new(ledger.clone()));
         let mut peer = make_peer(&block)?;
         peer.stream.max_read = 17;
@@ -573,9 +653,10 @@ fn receive_capacity_and_growth_overlap_are_admitted_before_consuming_more_bytes(
             .map_err(|_| TestError::Missing("received position"))?;
         let received_body = received.saturating_sub(if index == 0 { 24 } else { 3 });
         assert!(
-            received_body > initial_chunk,
-            "refusal must follow admission and consumption of the initial body chunk"
+            received_body >= peer.stream.max_read,
+            "receive refusal must follow admission of the first short body read"
         );
+        assert!(received <= initial_chunk + crate::wire::HEADER_LEN);
         assert!(received < end);
         assert_eq!(ledger.used.lock().1, 0);
         assert_eq!(ledger.used.lock().0, 0);

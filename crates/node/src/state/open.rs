@@ -757,6 +757,7 @@ impl NodeState {
         let block_memory = Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
             ingress_ledger,
         ));
+        budget.add_reclaimer(sync.staged_image_reclaimer());
         let prune_service = if config.storage.prune_target_mb > 0 {
             Some(storage.deferred.prune_service(
                 Arc::clone(&block_files),

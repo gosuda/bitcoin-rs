@@ -121,6 +121,19 @@ impl PacketReader {
             return Ok(None);
         }
         let end = HEADER_LEN + opened.contents.len();
+        if let Some((command, offset)) = super::msg_type::split(&body.bytes[HEADER_LEN..end])
+            && command == "block"
+            && !body.bytes.transfer_to_image()
+        {
+            let wire_len = super::PACKET_OVERHEAD + (end - HEADER_LEN);
+            let raw = body.bytes.into_bytes();
+            let payload = raw.slice(HEADER_LEN + offset..end);
+            return Err(TransportError::BudgetDrop {
+                command: "block".to_owned(),
+                payload,
+                wire_len,
+            });
+        }
         Ok(Some(body.bytes.into_bytes().slice(HEADER_LEN..end)))
     }
 

@@ -384,10 +384,11 @@ impl<S: Read + Write> Peer<S> {
 }
 
 impl<S: Read> Peer<S> {
-    /// `Ok(None)` only from a v2 session: the packet was a BIP324 decoy or a message of
-    /// an empty or undefined type, both dropped.
+    /// `Ok(None)` means the packet was dropped: a BIP324 decoy, a message of
+    /// an empty or undefined type, or a completed `block` frame the image
+    /// lane refused (its charges release with the frame).
     ///
-    /// A v1 frame always yields `Some`. A poll timeout part-way through a frame or
+    /// A poll timeout part-way through a frame or
     /// packet keeps the bytes already read, so retrying after `TimedOut` or
     /// `WouldBlock` continues it.
     pub fn read_message(&mut self) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {

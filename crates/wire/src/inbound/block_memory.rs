@@ -30,6 +30,12 @@ pub trait IngressLedger: Send + Sync {
     fn try_take(&self, bytes: usize) -> bool;
     fn give_back(&self, bytes: usize);
     fn wait_released(&self, timeout: Duration);
+    /// Move a receive charge into the image lane without inflating the total.
+    ///
+    /// Takes the image charge before releasing the receive charge, so a
+    /// refusal leaves the original receive charge untouched.
+    fn transfer_receive_to_image(&self, bytes: usize) -> bool;
+
     fn receive_capacity(&self) -> usize;
     fn try_take_receive(&self, bytes: usize) -> bool;
     fn give_back_receive(&self, bytes: usize);
@@ -73,6 +79,25 @@ impl IngressLedger for FixedIngressLedger {
 
     fn receive_capacity(&self) -> usize {
         RECEIVE_INGRESS_BYTES
+    }
+
+    /// Move a receive charge into the image lane without inflating the total:
+    /// the shared `used` counter is untouched, only `receive_used` drops, so
+    /// a transfer at the total cap is judged on its conserving post-state.
+    fn transfer_receive_to_image(&self, bytes: usize) -> bool {
+        let used = self.used.lock();
+        let mut receive_used = self.receive_used.lock();
+        if *receive_used < bytes {
+            return false;
+        }
+        if used.saturating_sub(*receive_used).saturating_add(bytes) > self.capacity {
+            return false;
+        }
+        *receive_used -= bytes;
+        drop(used);
+        drop(receive_used);
+        self.released.notify_all();
+        true
     }
 
     fn try_take_receive(&self, bytes: usize) -> bool {
@@ -254,6 +279,18 @@ impl BlockMemoryCredit {
             self.bytes = bytes;
         }
         Ok(())
+    }
+
+    /// A refused transfer preserves the full receive charge.
+    pub(crate) fn transfer_to_image(&mut self) -> bool {
+        if !matches!(self.allocation, Allocation::Receive) {
+            return true;
+        }
+        if !self.owner.ledger.transfer_receive_to_image(self.bytes) {
+            return false;
+        }
+        self.allocation = Allocation::Image;
+        true
     }
 }
 

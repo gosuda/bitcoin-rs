@@ -202,6 +202,7 @@ fn harness_negative_control_ingress_refusal_invalidation() {
     assert!(!s_next.consensus_invalid);
 }
 
+// BUD-05
 #[kani::proof]
 fn harness_receive_partition_preserves_total_and_ingress_headroom() {
     let staged: u32 = kani::any();

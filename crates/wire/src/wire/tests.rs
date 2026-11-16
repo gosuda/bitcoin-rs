@@ -96,9 +96,13 @@ fn receiver_resumes_a_frame_split_by_poll_timeouts() -> Result<(), PeerError> {
             "a stall surfaces as a retryable timeout, got {result:?}"
         );
     }
-    let (first, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()))?;
+    let (first, _) = receiver
+        .read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()))?
+        .ok_or(PeerError::Protocol("ping frame dropped"))?;
     assert_eq!(first, super::Message::Ping(42));
-    let (second, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()))?;
+    let (second, _) = receiver
+        .read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()))?
+        .ok_or(PeerError::Protocol("pong frame dropped"))?;
     assert_eq!(second, super::Message::Pong(7));
     Ok(())
 }
@@ -197,7 +201,9 @@ fn receiver_restarts_at_a_frame_boundary_after_a_rejected_frame() -> Result<(), 
     let mut receiver = super::V1Receiver::default();
     let rejected = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
     assert!(matches!(rejected, Err(PeerError::BadChecksum)));
-    let (message, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()))?;
+    let (message, _) = receiver
+        .read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()))?
+        .ok_or(PeerError::Protocol("pong frame dropped"))?;
     assert_eq!(message, super::Message::Pong(2));
     Ok(())
 }

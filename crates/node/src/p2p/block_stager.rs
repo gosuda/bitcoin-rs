@@ -390,6 +390,34 @@ impl BlockStager {
         Some(*hash)
     }
 
+    /// Evict the oldest entries the frontier does not protect until at
+    /// least `bytes` of retained image are freed, returning the evicted
+    /// hashes and the freed retained bytes. Freed image-lane bytes are at
+    /// least the freed retained bytes, since wire capacity covers length.
+    pub(crate) fn evict_for_reclaim(
+        &mut self,
+        protected: Option<Hash256>,
+        bytes: usize,
+    ) -> (Vec<Hash256>, u64) {
+        let mut evicted = Vec::new();
+        let mut freed = 0u64;
+        let target = u64::try_from(bytes).unwrap_or(u64::MAX);
+        while freed < target {
+            let Some(hash) = self.oldest_unprotected_candidate(protected) else {
+                break;
+            };
+            let Some(entry) = self.received.remove(&hash) else {
+                break;
+            };
+            freed = freed.saturating_add(
+                u64::try_from(entry.bytes.saturating_add(entry.decoded_bytes)).unwrap_or(u64::MAX),
+            );
+            self.release(&entry);
+            evicted.push(hash);
+        }
+        (evicted, freed)
+    }
+
     pub(crate) fn discard(&mut self, hash: &Hash256) -> bool {
         self.remove(hash).is_some()
     }

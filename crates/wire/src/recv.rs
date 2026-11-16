@@ -45,6 +45,18 @@ impl Backing {
         self.bytes.truncate(len);
     }
 
+    /// Move a completed frame's receive charge into the image lane.
+    ///
+    /// Call once, after the frame is fully read and before [`Backing::into_bytes`].
+    /// The backing never grows afterwards, so the moved charge stays exact.
+    /// `false` means the image lane refused: drop the frame (the untouched
+    /// receive charge releases with `self`) and keep the connection.
+    pub(crate) fn transfer_to_image(&mut self) -> bool {
+        self.credit
+            .as_mut()
+            .is_none_or(BlockMemoryCredit::transfer_to_image)
+    }
+
     pub(crate) fn into_bytes(self) -> bytes::Bytes {
         bytes::Bytes::from_owner(self)
     }

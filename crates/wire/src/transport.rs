@@ -92,10 +92,11 @@ impl RecvTransport {
     /// an unknown command) before the drop; a decoy packet carries no message and
     /// keeps no per-message charge.
     ///
-    /// A v1 frame always carries a message and is never `None`. `observe`
-    /// receives the command, its payload, and the frame's exact wire size:
-    /// header plus payload for v1, or the BIP324 packet's ciphertext length
-    /// for v2.
+    /// `observe` receives the command, its payload, and the frame's exact wire
+    /// size: header plus payload for v1, or the BIP324 packet's ciphertext
+    /// length for v2.
+    /// A `block` frame refused for image budget is also `None`, after it is
+    /// observed with its real command, payload, and wire size.
     pub(crate) fn read_message<R: Read>(
         &mut self,
         reader: &mut R,
@@ -103,9 +104,20 @@ impl RecvTransport {
         observe: impl FnOnce(&str, &[u8], usize) -> Result<(), PeerError>,
     ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         match self {
-            Self::V1(receiver) => receiver.read_message_with(reader, magic, observe).map(Some),
+            Self::V1(receiver) => receiver.read_message_with(reader, magic, observe),
             Self::V2(packets) => {
-                let Some(contents) = packets.read_contents(reader).map_err(transport_error)? else {
+                let contents = match packets.read_contents(reader) {
+                    Err(TransportError::BudgetDrop {
+                        command,
+                        payload,
+                        wire_len,
+                    }) => {
+                        observe(&command, &payload, wire_len)?;
+                        return Ok(None);
+                    }
+                    contents => contents.map_err(transport_error)?,
+                };
+                let Some(contents) = contents else {
                     return Ok(None);
                 };
                 let Some((command, payload)) = msg_type::decode(&contents) else {
@@ -242,6 +254,63 @@ mod tests {
                 u64::try_from(PACKET_OVERHEAD + contents.len()).expect("fits u64")
             )],
             "the undefined-type frame's wire bytes land in the *other* bucket"
+        );
+    }
+
+    #[test]
+    fn a_v2_block_refused_for_image_budget_is_observed_then_dropped() {
+        use crate::bip324::msg_type;
+        use crate::inbound::block_memory::{BLOCK_INGRESS_BYTES, BlockMemory};
+
+        let block = bitcoin_rs_consensus::primitives::BlockImage::from_local(
+            bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
+        );
+        let payload = block.bytes().to_vec();
+        let command = "block"
+            .parse::<bitcoin::p2p::message::CommandString>()
+            .expect("block command");
+        let contents = msg_type::encode(&command, &payload);
+        let mut cipher = SendCipher::new([1; 32], [2; 32]);
+        let packet = cipher.seal(&contents, &[], false).expect("seal");
+
+        let mut transport = v2_receiver();
+        let memory = Arc::new(BlockMemory::default());
+        let _held = memory
+            .try_reserve(BLOCK_INGRESS_BYTES - 1)
+            .expect("hold the image lane");
+        transport.bind_memory(&memory).expect("bind memory");
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut observed = Vec::new();
+        let message = transport
+            .read_message(
+                &mut Cursor::new(packet),
+                Magic::BITCOIN,
+                |command, payload, len| {
+                    counters.record_msg_recv(command, len);
+                    observed.push((command.to_owned(), payload.to_vec(), len));
+                    Ok(())
+                },
+            )
+            .expect("a budget refusal drops the frame, never errors");
+
+        assert!(message.is_none(), "a refused block frame drops");
+        assert_eq!(
+            observed,
+            vec![(
+                String::from("block"),
+                payload,
+                PACKET_OVERHEAD + contents.len()
+            )],
+            "the refused frame is observed with its command, payload, and wire size"
+        );
+        assert_eq!(
+            counters.recv_per_message(),
+            vec![(
+                "block",
+                u64::try_from(PACKET_OVERHEAD + contents.len()).expect("fits u64")
+            )],
+            "the refused block's wire bytes land in the block bucket"
         );
     }
 

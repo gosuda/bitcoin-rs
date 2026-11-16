@@ -458,7 +458,13 @@ pub fn read_message<R: Read>(
     reader: &mut R,
     expected_magic: Magic,
 ) -> Result<(Message, bytes::Bytes), PeerError> {
-    V1Receiver::default().read_message_with(reader, expected_magic, |_, _, _| Ok(()))
+    loop {
+        if let Some(message) =
+            V1Receiver::default().read_message_with(reader, expected_magic, |_, _, _| Ok(()))?
+        {
+            return Ok(message);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -510,12 +516,17 @@ impl V1Receiver {
     /// Reads one message, then hands `(command, payload, framed length)` to
     /// `observe`: the framed length is the v1 header plus payload bytes this
     /// frame took from the wire.
+    ///
+    /// `Ok(None)` means a completed `block` frame was dropped because the
+    /// image lane refused its backing: the untouched receive charge releases
+    /// with the frame, the decode reservation (if any) releases with the
+    /// caller, and the connection stays up to read the next frame.
     pub(crate) fn read_message_with<R: Read>(
         &mut self,
         reader: &mut R,
         expected_magic: Magic,
         observe: impl FnOnce(&str, &[u8], usize) -> Result<(), PeerError>,
-    ) -> Result<(Message, bytes::Bytes), PeerError> {
+    ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         let mut body = if let Some(body) = self.body.take() {
             body
         } else {
@@ -541,9 +552,12 @@ impl V1Receiver {
             &body.payload,
             HEADER_LEN + body.payload.len(),
         )?;
+        if body.command == "block" && !body.payload.transfer_to_image() {
+            return Ok(None);
+        }
         let payload = body.payload.into_bytes();
         let message = decode_payload(&body.command, &payload)?;
-        Ok((message, payload))
+        Ok(Some((message, payload)))
     }
 
     fn read_header<R: Read>(
@@ -588,7 +602,7 @@ fn pending_body(
     let mut checksum = [0u8; 4];
     checksum.copy_from_slice(&header[20..24]);
     Ok(PendingBody {
-        command,
+        command: command.to_owned(),
         checksum,
         expected: payload_len,
         payload: crate::recv::Backing::default(),
@@ -1012,7 +1026,7 @@ fn encode_command(command: &CommandString) -> Result<[u8; COMMAND_LEN], PeerErro
     Ok(raw)
 }
 
-pub(crate) fn read_command(raw: &[u8]) -> Result<String, PeerError> {
+pub(crate) fn read_command(raw: &[u8]) -> Result<&str, PeerError> {
     let end = raw.iter().position(|byte| *byte == 0).unwrap_or(raw.len());
     if raw[end..].iter().any(|byte| *byte != 0) {
         return Err(PeerError::InvalidCommand(
@@ -1029,7 +1043,6 @@ pub(crate) fn read_command(raw: &[u8]) -> Result<String, PeerError> {
         ));
     }
     std::str::from_utf8(command_bytes)
-        .map(str::to_owned)
         .map_err(|_| PeerError::InvalidCommand(String::from_utf8_lossy(raw).into_owned()))
 }
 
