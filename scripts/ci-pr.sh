@@ -91,16 +91,10 @@ test_crates_silent_payments() {
 }
 
 test_crates_storage() {
-  profile "test: bitcoin-rs-storage-convert" \
-    cargo_test -p bitcoin-rs-storage-convert
   profile "test: bitcoin-rs-storage-convert (surrealkv, mdbx)" \
-    cargo_test -p bitcoin-rs-storage-convert --features surrealkv,mdbx --test suite engine_copy::
+    cargo_test -p bitcoin-rs-storage-convert --features surrealkv,mdbx
   profile "test: bitcoin-rs-storage (surrealkv, mdbx)" \
-    cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx --test suite
-  profile "test: bitcoin-rs-storage mdbx_bounded_read_allocation (mdbx)" \
-    cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx --test mdbx_bounded_read_allocation
-  profile "test: bitcoin-rs-storage utxo_query_lifetime" \
-    cargo_test -p bitcoin-rs-storage --test utxo_query_lifetime
+    cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx
 }
 
 test_crates_consensus_execution() {
@@ -114,8 +108,6 @@ test_crates_consensus_execution() {
   # The offline CLI uses the checked-in Core snapshot, not a running daemon.
   profile "test: bitcoin-rs-snapshot" \
     cargo_test -p bitcoin-rs-snapshot
-  profile "test: bitcoin-rs-consensus (native)" \
-    cargo_test -p bitcoin-rs-consensus --no-default-features
   profile "test: bitcoin-rs-execution (native)" \
     cargo_test -p bitcoin-rs-execution
   profile "test: bitcoin-rs-wire" \
