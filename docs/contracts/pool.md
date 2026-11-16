@@ -7,7 +7,7 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, 
 | Operator configuration | `crates/node/src/options.rs`, `crates/node/src/config.rs` | Owner-local configuration refusal tests. |
 | Composition and shutdown | `crates/node/src/lifecycle.rs`, `crates/node/src/pool.rs::composed_core_config` | Lifecycle and pool composition tests; no deployment certification. |
 | Jobs and SV1 | `crates/rpc/src/mining/pool/job.rs`, `crates/rpc/src/mining/pool/core.rs`, `crates/rpc/src/mining/pool/stratum/sv1.rs` | In-tree job and SV1 protocol tests. |
-| SV2 protocol | `crates/rpc/src/mining/pool/stratum/sv2.rs` | `crates/rpc/tests/mining_pool_sv2.rs`; no external miner interoperability claim. |
+| SV2 protocol | `crates/rpc/src/mining/pool/stratum/sv2.rs` | `crates/rpc/tests.rs` (`mod mining_pool_sv2`, `pool-sv2`); no external miner interoperability claim. |
 | Node SV2 adapter | `crates/node/src/pool/sv2.rs`, `crates/node/src/pool/authority.rs` | Adapter and authority-file refusal tests. |
 | Accounting | `crates/rpc/src/mining/pool/ledger.rs`, `crates/node/src/pool/ledger/store.rs`, `crates/node/src/pool/ledger/kv.rs` | Shared ledger cases and the independent backend crash-worker target. |
 | Applied-chain observations | `crates/node/src/pool/ledger.rs` | Local observation/reconciliation evidence, qualified by available indexes. |

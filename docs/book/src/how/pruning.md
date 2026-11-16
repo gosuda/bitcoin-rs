@@ -34,7 +34,7 @@ retention_depth = max(keep_below_tip, 288)
 
 That clamp is visible in the live trace and is the reason two height keys exist. On a cold datadir with 300 blocks and no checkpoint yet, `pruneblockchain 5` returned 5 and stored `node:pruneheight = 5`, but every block was still served because `durable_tip_height` was 0 and the policy line was 0. After a clean stop published checkpoint generation 1 at height 300, a restart made the same call delete heights 0 through 4.
 
-`retention.reserve(policy_line)` further lowers the line to the lowest active lease floor (`crates/storage/src/pruning/lease.rs:180-191`). Pruning takes the chain transition before it reads the applied tip, so a connect cannot move the tip under an in-flight prune (`crates/chain/src/lib.rs:224-250`). The history path used by block-spend reads carries a 288-block retention budget (`crates/node/src/state/storage.rs:143-149`); a request below the registry's refusal line returns `HistoryUnavailable::Pruned { below }` or `HistoryUnavailable::Reserved { below }`, never an empty success (`crates/storage/src/pruning/lease.rs:98-108`).
+`retention.reserve(policy_line)` further lowers the line to the lowest active lease floor (`crates/storage/src/pruning/lease.rs:180-191`). Pruning takes the chain transition before it reads the applied tip, so a connect cannot move the tip under an in-flight prune (`crates/chain/src/lib.rs:224-250`). The history path used by block-spend reads carries a 288-block retention budget (`crates/node/src/state/storage.rs:185-190`); a request below the registry's refusal line returns `HistoryUnavailable::Pruned { below }` or `HistoryUnavailable::Reserved { below }`, never an empty success (`crates/storage/src/pruning/lease.rs:98-108`).
 
 ## The three metadata keys
 
@@ -144,7 +144,7 @@ Height 4 is gone, height 5 is the first retained block, and `size_on_disk` staye
 ## Where the invariant is proven
 
 - `ARCH-08` owns durable pruning and the executed frontier; `SYNC-07` owns required-history availability; `RCV-07` owns missing-body recovery; `ARCH-07b` owns the snapshot roles that refuse pruning.
-- `crates/storage/tests/prune_then_reorg.rs::prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight` proves the exclusive boundary and the stored height. It ran on this checkout:
+- `crates/storage/tests.rs::prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight` proves the exclusive boundary and the stored height. It ran on this checkout:
 
 ```text
 test prune_then_reorg::prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight ... ok
@@ -154,9 +154,9 @@ test result: ok. 2 passed; 0 failed; 52 filtered out
 - In the same file, `undo_pruning_keeps_records_the_durable_tip_still_needs`, `prune_to_height_respects_an_active_retention_lease`, `retention_lease_stops_the_prune_line_at_its_floor`, and `history_request_between_planning_and_commit_is_refused` prove the lease and reservation bounds.
 - `ambiguous_durability_promotes_the_line_the_batch_already_persisted`, `ambiguous_durability_releases_the_claim_when_nothing_applied`, `ambiguous_durability_fails_closed_when_the_outcome_is_unprovable`, and `ambiguous_durability_does_not_confuse_a_retry_with_its_earlier_pass` prove the crash matrix.
 - `executed_frontier_survives_restart_and_refuses_deleted_heights`, `executed_frontier_is_monotonic_across_passes_and_reintroduced_rows`, `missing_executed_frontier_after_prune_fails_closed`, and `corrupt_prune_metadata_never_becomes_an_empty_frontier` prove the three keys.
-- `crates/node/src/state/tests/prune.rs::prune_waits_for_chain_transition_and_revalidates_applied_tip` proves the transition fence; `assumeutxo_validating_blocks_prefix_pruning_even_above_base_height` proves the snapshot-role refusal.
-- `crates/node/src/state/tests/recovery.rs::prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs` proves reorgs still work inside retained history.
-- `crates/node/tests/crash_recovery.rs::pruned_frontier_survives_sigkill_and_preserves_boundary` proves a `SIGKILL` leaves the frontier intact.
+- `crates/node/src/state.rs::prune_waits_for_chain_transition_and_revalidates_applied_tip` proves the transition fence; `assumeutxo_validating_blocks_prefix_pruning_even_above_base_height` proves the snapshot-role refusal.
+- `crates/node/src/state.rs::prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs` proves reorgs still work inside retained history.
+- `crates/node/crash_recovery_tests.rs::pruned_frontier_survives_sigkill_and_preserves_boundary` proves a `SIGKILL` leaves the frontier intact.
 
 ## Boundaries
 

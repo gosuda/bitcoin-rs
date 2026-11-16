@@ -71,11 +71,11 @@ The full mapping is `classify_apply_error` (`crates/chain/src/window.rs`). A fai
 ## Where the invariant is proven
 
 - `RCV-01`, `RCV-02`, `RCV-03`, `RCV-04`, `RCV-09`, `SYNC-05`, `ARCH-07`, and the datadir policy own the rules above.
-- `crates/chain/src/durable/tests.rs::committed_gap_replays_to_head_without_recommitting_it` proves replay reuses the receipt instead of recommitting.
+- `crates/chain/src/durable.rs::committed_gap_replays_to_head_without_recommitting_it` proves replay reuses the receipt instead of recommitting.
 - `committed_gap_with_missing_body_fails_closed`, `committed_gap_body_must_hash_to_the_head_identity`, `committed_gap_must_descend_from_restored_tip`, `committed_gap_replay_failure_fails_closed`, and `cold_replay_attestation_failure_fails_closed` in the same module prove the refusal paths.
-- `crates/chain/src/tests/window_commit_tests.rs::failure_at_block_j_commits_prefix_before_j` proves a failed prefix commits exactly the blocks before the failure, and `crash_between_commit_and_cache_install_reloads_from_engine` proves the restarted node rebuilds the coin cache from the engine rather than from memory.
-- `crates/storage/tests/overhaul_atomic_durability.rs::rocksdb_injected_faults_never_mix_families` proves an injected fault at apply, sync, or flush boundaries never leaves a mixed batch.
-- `crates/node/tests/crash_recovery.rs::pruned_frontier_survives_sigkill_and_preserves_boundary` proves the process-level kill path; `run_sigkill_scenario` is the driver.
+- `crates/chain/src/lib.rs::failure_at_block_j_commits_prefix_before_j` proves a failed prefix commits exactly the blocks before the failure, and `crash_between_commit_and_cache_install_reloads_from_engine` proves the restarted node rebuilds the coin cache from the engine rather than from memory.
+- `crates/storage/tests.rs::rocksdb_injected_faults_never_mix_families` proves an injected fault at apply, sync, or flush boundaries never leaves a mixed batch.
+- `crates/node/crash_recovery_tests.rs::pruned_frontier_survives_sigkill_and_preserves_boundary` proves the process-level kill path; `run_sigkill_scenario` is the driver.
 
 ## Boundaries
 

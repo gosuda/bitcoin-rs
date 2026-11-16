@@ -42,4 +42,4 @@ bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 
 [[test]]
 name = "suite"
-path = "tests/suite.rs"
+path = "tests.rs"

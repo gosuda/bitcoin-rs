@@ -234,7 +234,7 @@ the two makes every network report difficulty `1.0` at its easiest target.
 Equal IEEE-754 values versus equal serialized spellings. Core's UniValue uses
 `%.16g`; the RPC path's sonic-rs serializer uses shortest round-trip. Compatibility
 means preserving value and operation order, not forcing JSON text to match.
-Owners: `crates/rpc/tests/support/compare.rs` (bitwise numeric comparison) and `crates/rpc/tests/policy_contract.rs`.
+Owners: `crates/rpc/tests.rs` (`support::compare`, bitwise numeric comparison) and `crates/rpc/tests.rs` (`policy_contract`).
 
 ### Provably unspendable outputs (UTXO admission)
 Outputs the UTXO set never admits: a `scriptPubKey` starting with `OP_RETURN`, or longer than `MAX_SCRIPT_SIZE`. Excluding them changes no consensus outcome, so the snapshot codec carries the version tag `bitcoin-rs-utxo-spendable-v1`; a change to admission semantics is a codec change.

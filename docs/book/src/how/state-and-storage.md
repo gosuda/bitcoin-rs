@@ -110,9 +110,9 @@ INFO bitcoin_rs_node::lifecycle published clean chainstate checkpoint generation
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| A matching head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/chain/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/src/durable/tests.rs) |
-| Replayed body matches the head identity | `committed_gap_body_must_hash_to_the_head_identity` | [`crates/chain/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/src/durable/tests.rs) |
-| Pruning keeps retained reorg history | `prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs` | [`crates/node/src/state/tests/recovery.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state/tests/recovery.rs) |
-| A second open is refused while the first lives | `second_open_while_first_lives_refuses_and_reopen_succeeds_after_drop` | [`crates/node/src/state/tests/data_dir_lock.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state/tests/data_dir_lock.rs) |
+| A matching head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/chain/src/durable.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/src/durable.rs) |
+| Replayed body matches the head identity | `committed_gap_body_must_hash_to_the_head_identity` | [`crates/chain/src/durable.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/src/durable.rs) |
+| Pruning keeps retained reorg history | `prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs` | [`crates/node/src/state.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state.rs) |
+| A second open is refused while the first lives | `second_open_while_first_lives_refuses_and_reopen_succeeds_after_drop` | [`crates/node/src/state.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state.rs) |
 
 The [node lifecycle](../embed/lifecycle.md) chapter covers the data-directory lock and shutdown checkpoint. The [indexes](index.md) chapter covers the rows the worker adds on top of this state.

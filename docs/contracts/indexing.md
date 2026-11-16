@@ -74,9 +74,9 @@ Owners:
 - Filter progress, reconciliation, and local failures do not change that row.
 - `getindexinfo` and service flags report filter status.
 - Proof:
-  - `crates/index/src/runtime/query_tests.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
-  - `crates/rpc/tests/handler_smoke.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
-  - `crates/p2p/src/listener/writer_shutdown_tests.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
+  - `crates/index/src/runtime.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
+  - `crates/rpc/tests.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
+  - `crates/p2p/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
 - `ScriptLive` is self-contained under format 9 (PRJ-11).
 - Its 43-byte key is `script-hash-prefix || full-outpoint`.
 - Its value stores `script_hash` followed by the compact varint coin payload `varint(compress_amount(value)) || varint((height << 1) | coinbase)` with Core's `CompressAmount` and minimal varints; decoding refuses truncated input, malformed varints, amount overflow, height overflow, and trailing bytes.
@@ -137,7 +137,7 @@ Owners:
 - The engine MUST never return stale, unconfirmed, or torn rows.
 - A body-store read failure is `TxQueryError::Storage`, not a missing body.
 - `unspent_outputs` consumes the `ScriptLive` watermark only.
-- The captured `ScriptLive` snapshot carries the coin payload directly and takes no live chain-transition lock or live UTXO read. The `script_live_takes_no_transition_lock` test proves that the listed coin value comes from the captured snapshot row payload and that no transition lock is acquired (`crates/index/src/runtime/query_tests.rs`).
+- The captured `ScriptLive` snapshot carries the coin payload directly and takes no live chain-transition lock or live UTXO read. The `script_live_takes_no_transition_lock` test proves that the listed coin value comes from the captured snapshot row payload and that no transition lock is acquired (`crates/index/src/runtime.rs`).
 - History, script-live, and tx-lookup queries take no chain-transition lock.
 - A missing locator under a ready matching watermark is unavailable.
 - Exact script checks filter compact-prefix collisions.
@@ -149,7 +149,7 @@ Owners:
 - Evicted identities are read and charged again.
 - Proof:
   - `crates/index/src/runtime/query.rs`: `block_memo_retains_only_the_latest_identity`
-  - `crates/index/src/runtime/query_tests.rs`:
+  - `crates/index/src/runtime.rs`:
     - `history_limit_counts_occurrences_not_heights`
     - `confirmed_history_serves_stored_occurrences_without_block_bodies`
     - `history_summary_never_consults_spender_rows`
@@ -172,7 +172,7 @@ Owners:
 - Configured families never rebuild as a side effect.
 
 - Proof:
-  - `crates/index/tests/index_roundtrip.rs`:
+  - `crates/index/tests.rs`:
     - `script_index_reset_preserves_tx_lookup_and_shared_identity`
     - `tx_lookup_reset_preserves_script_history_directories`
 
@@ -225,7 +225,7 @@ Owners:
 - It emits one transaction row per indexed transaction.
 - For `ScriptHistory`, it emits one occurrence per `(script, height, transaction)` without duplicate hash-prefix rows.
 - Script history includes an empty script; only an OP_RETURN script is excluded.
-- Pinned tests in `crates/index/tests/index_roundtrip.rs` and `crates/index/tests/script_history_occurrences.rs` own these cardinalities.
+- Pinned tests in `crates/index/tests.rs` (`index_roundtrip` and `script_history_occurrences` modules) own these cardinalities.
 - `NodeState::open` restores the authenticated checkpoint.
 - It then replays the certified committed suffix from canonical block files and undo records (`docs/contracts/recovery.md`).
 - This replay finishes before `NodeState::start_index_workers()` spawns worker threads in `crates/node/src/run.rs`.
@@ -240,7 +240,7 @@ Owners:
 - Rollback depth is watermark height minus common ancestor height.
 - When rollback depth exceeds `txindex::DEFAULT_ROLLBACK_REBUILD_CUTOVER` (100,000 blocks), the worker routes to `reset_capabilities`.
 - It backfills forward instead of running a long block-by-block rollback.
-- Proof: `crates/index/src/runtime/recovery_tests.rs`:
+- Proof: `crates/index/src/runtime.rs`:
   - `index_ahead_of_restored_tip_is_reported_once_and_rewound`
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
 - Connect walk: the worker loads bodies from `BlockBodyStore`.
@@ -291,7 +291,7 @@ Owners:
 - Peak resident memory of these stages is unmeasured.
 - A window's bodies (at most 256, or 32 MiB plus one body), its in-flight anchors, prepared rows, and admitted batch are limited independently.
 - This contract claims no total resident bound and no bound that depends on script sizes.
-- Proof (all in `crates/index/src/runtime/recovery_tests.rs`):
+- Proof (all in `crates/index/src/runtime.rs`):
   - forward-group scheduling:
     - `absent_prefix_body_holds_back_only_its_own_group`
     - `shutdown_after_an_absent_body_does_not_run_a_higher_group`
@@ -341,19 +341,19 @@ Owners:
 - Block validation, UTXO commits, and chainstate progress continue without interruption.
 - The apply path MUST never depend on index writes.
 - Proof:
-  - `crates/index/src/runtime/supervisor_tests.rs`:
+  - `crates/index/src/runtime.rs`:
     - `blocked_open_abandonment_detaches_and_poisons`
-    - `shutdown_during_open_reports_abandonment_after_supervisor_exit`
+    - `shutdown_during_open_joins_helper_releases_lock_and_leaves_namespace_reusable`
     - `open_timeout_publishes_error_not_infinite_spin`
-  - `crates/index/src/runtime/query_tests.rs`:
+  - `crates/index/src/runtime.rs`:
     - `unusable_worker_makes_queries_unavailable`
-  - `crates/index/src/runtime/recovery_tests.rs`:
+  - `crates/index/src/runtime.rs`:
     - `undo_read_failure_is_not_a_missing_undo`
     - `missing_undo_pauses_the_tail_group_and_resumes_to_bulk`
     - `rollback_without_undo_preserves_script_history_and_rewinds_siblings`
     - the `IDX-06`/`IDX-07` anchor and reseed tests cited above
     - `unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark`
-  - `group_rollback_releases_identity_and_refuses_a_second_member` in `crates/index/tests/index_roundtrip.rs`
+  - `group_rollback_releases_identity_and_refuses_a_second_member` in `crates/index/tests.rs`
 
 ### `IDX-11`: Portable index bundle
 
@@ -658,7 +658,7 @@ That document gives consumer usage and defers to this clause for every consisten
 
 - **Full-stack crash convergence**: the recovery model across chainstate, checkpoints, block bodies, and derived indexes is normative in [recovery.md](recovery.md) (`RCV-01` to `RCV-04`).
 - A `kill -9` gate that re-applies real block bodies through it is not yet exercised.
-- **Portable bundle cross-process scope**: `crates/index/tests/portable_bundle.rs` proves export/restore equality, damage refusal, existing-destination preservation, cancellation, missing-body withhold, restore-below-tip reconciliation, and reset over real RocksDB stores (`IDX-11`).
+- **Portable bundle cross-process scope**: `crates/index/tests.rs` proves export/restore equality, damage refusal, existing-destination preservation, cancellation, missing-body withhold, restore-below-tip reconciliation, and reset over real RocksDB stores (`IDX-11`).
 - The live Core200/C150/withheld receipts are private external runs, not a repository portable process suite.
 - One scoped live run (`.outline/evidence/snapshot-stage2-live/runs/20261026T200208Z-remaining-1850397/`, binary SHA-256 `9406226483c7ac4c29f822e133a1f36bea82cc2c1078b8f16388a4e5df2`, PASS 64/0, error null, survivors empty) covers four selected cases:
   - base-200 bundle into same-chain receiver at 202 restores and serves all 202 txid/blockhash/sample queries.

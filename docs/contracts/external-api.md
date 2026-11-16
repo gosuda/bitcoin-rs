@@ -25,7 +25,7 @@ wallet interoperability remain unverified.
 - Unsupported Core surfaces stay `Unimplemented` and answer `RpcError::MethodNotFound` (`-32601`).
 - No wallet-only RPC is a disguised successful no-op.
 - The build generates `docs/rpc-reference.md` from the registry. Maintainers MUST NOT edit that file by hand.
-- `crates/rpc/tests/manifest_coverage.rs` enforces set equality between registry and live dispatch in both directions.
+- `crates/rpc/tests.rs` enforces set equality between registry and live dispatch in both directions.
 - The test regenerates the reference (`REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test suite manifest_coverage::regenerate_reference -- --ignored`).
 
 ### `API-02`: JSON-RPC mechanics and the wallet-free surface
@@ -246,7 +246,7 @@ wallet interoperability remain unverified.
 - Malformed hashes return `-8`.
 - REST keeps its JSON-only format with 400 for malformed or unknown hashes.
 - Excess arguments keep the local JSON-RPC parameter-shape error, not Core help text.
-- Envelope proof: `crates/rpc/src/server.rs` envelope and batch tests plus `crates/rpc/tests/auth.rs` legacy-envelope pin.
+- Envelope proof: `crates/rpc/src/server.rs` envelope and batch tests plus `crates/rpc/tests.rs` legacy-envelope pin.
 - Pinned Core sources: `src/rpc/request.cpp`, `src/httprpc.cpp` (rules read from pinned source, no Core binary run).
 
 ### `API-03`: REST dialect
@@ -321,7 +321,7 @@ wallet interoperability remain unverified.
 
 ### `API-07`: RPC fixture reference provenance
 
-- Owner: the corpus loader in `crates/rpc/tests/support/fixture.rs` owns `core_version` and `core_binary_sha256` pins and their validation.
+- Owner: the corpus loader in `crates/rpc/tests.rs` owns `core_version` and `core_binary_sha256` pins and their validation.
 - Every fixture records the version and exact binary digest of its capture.
 - Missing, empty, or mismatched values fail loading before replay.
 - The pins describe the released Core node used for recorded responses.
@@ -729,7 +729,7 @@ wallet interoperability remain unverified.
 - Interrupted export or full blocking quota returns `-1`.
 - Error `-32603` covers no-rename platform, closed admission, missing applied tip, unestablished chain tx count, concurrent export, and encode/write/length/sync failure.
 - Export evidence needs the pinned Core 31.1 `bitcoind`.
-- Test `e2e/tests/assumeutxo.rs::bitcoin_rs_export_is_accepted_by_a_fresh_core_node` submits the 200 fixture blocks and compares against `crates/storage/tests/fixtures/core-v2/core200.dat`.
+- Test `e2e/tests/assumeutxo.rs::bitcoin_rs_export_is_accepted_by_a_fresh_core_node` submits the 200 fixture blocks and compares against `testdata/storage/fixtures/core-v2/core200.dat`.
 - The test loads the export into a fresh Core node.
 - The test fails (does not skip) when the binary is missing or its digest differs per `crates/rpc/core-compat.toml` (`scripts/install-bitcoind.sh`).
 - This covers regtest height-200 only; there is no mainnet memory, throughput, or commit-blocking claim.

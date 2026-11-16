@@ -246,7 +246,7 @@ if verification runs. Consumers must not require every field on a single event.
 - The chainstate observability fixtures check retired metric names only on the
   caller thread. The fixtures connect coinbase-only apply/window cases on
   top of a directly published genesis seed. Seeding alone (`seed_genesis` in
-  `crates/chain/src/test_fixtures.rs`) publishes the genesis tip with
+  `crates/chain/src/lib.rs`) publishes the genesis tip with
   count 1 without connect and without hooks, so it emits no apply/window
   observation. Nonzero stage observations require at least one connected mined
   coinbase-only child: `apply_block` for the apply timers, a `connect_window`
@@ -262,7 +262,7 @@ if verification runs. Consumers must not require every field on a single event.
   valid-block fixture.
 - `composite_isolates_a_panicking_leg` exercises the real observer failure
   path and requires the operator counter to have no leg label.
-- `family_byte_histograms_recording` (`crates/index/src/index/rows/tests.rs`)
+- `family_byte_histograms_recording` (`crates/index/src/index/rows.rs`)
   drives `record_family_byte_histograms` against a local recorder. It checks the
   six `family` label values with their byte values, and that a family with zero
   planned bytes records nothing. It does not drive a commit.

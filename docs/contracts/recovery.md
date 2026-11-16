@@ -21,12 +21,12 @@ Startup ignores an unreferenced generation.
 
 Owners:
 - Authoritative durable root and ordered commit protocol (`crates/chain/src/connect.rs`, `disconnect.rs`, `durable.rs`).
-- Recovery and schema admission (`crates/chain/src/recovery.rs`, with process-composition tests in `crates/node/src/state/tests/`).
+- Recovery and schema admission (`crates/chain/src/recovery.rs`, with process-composition tests in `crates/node/src/state.rs` (`mod tests`)).
 - Persistent coin transition boundary (`crates/storage/src/commit.rs`, `crates/storage/src/coins.rs`; durable form in `crates/storage/src/durable_head.rs`).
-- Crash and lost-write fault tests (`crates/node/tests/crash_recovery.rs`).
+- Crash and lost-write fault tests (`crates/node/crash_recovery_tests.rs`).
 - Reorg and disconnect (`crates/chain/src/reorg.rs`, `disconnect.rs`).
 - Checkpoint publication and recovery (`crates/chain/src/checkpoint.rs` and companions, `crates/storage/src/checkpoint/`).
-- Index worker recovery (`crates/index/src/runtime/recovery_tests.rs`).
+- Index worker recovery (`crates/index/src/runtime.rs`).
 - Policy (`docs/policies/db-migration.md`).
 
 ## Durable root
@@ -131,8 +131,8 @@ struct DurableHead {
 - Startup retries this cleanup for a committed `Finalized` head.
 - Cleanup failures are warnings, not recovery failures.
 - Ordinary checkpoints and unknown files are preserved.
-- Proof: `crates/chain/src/assumeutxo/tests.rs` covers commitment verification, isolated replay, terminal-write failures, and role guards.
-- Proof: `assumeutxo_recovery_tests.rs` covers real-storage restart, process-kill boundaries, and lost failure receipts.
+- Proof: `crates/chain/src/assumeutxo.rs` covers commitment verification, isolated replay, terminal-write failures, and role guards.
+- Proof: `crates/chain/src/assumeutxo.rs` (`tests::recovery`) covers real-storage restart, process-kill boundaries, and lost failure receipts.
 - The tests also cover root-preserving archive replay, checkpoint pin binding, pruning, and below-base reorg restart.
 
 ## Clauses
@@ -216,8 +216,8 @@ Commit details:
 - Only committed prefixes are published.
 - Group caps are stated constants or budget limits; a failure at block j commits the prefix before j (`WIN-08`).
 - An ambiguous storage failure closes mutation admission until recovery resolves the durable outcome (`CMT-04`).
-- Proof: `crates/chain/src/tests/window_tx_count_tests.rs` (`a_grouped_window_publishes_each_blocks_own_prefix_count`, `a_grouped_window_stages_only_its_newest_block_before_the_sync`).
-- Proof: `crates/node/src/mining/coordinator/tests.rs` (receipt install, mismatch fallback, waiter release).
+- Proof: `crates/chain/src/lib.rs` (`a_grouped_window_publishes_each_blocks_own_prefix_count`, `a_grouped_window_stages_only_its_newest_block_before_the_sync`).
+- Proof: `crates/node/src/mining/coordinator.rs` (receipt install, mismatch fallback, waiter release).
 
 Replay validation rules:
 - Cold durable-head replay (no accepted checkpoint, including a full-revalidation marker) rechecks scripts for every replayed spend against the rebuilt UTXO view.
@@ -231,11 +231,11 @@ Replay validation rules:
 - Script failure stops admission before publishing the invalid block.
 - Script failure preserves the durable head and full-revalidation marker.
 - Script failure leaves checkpoint publication as the marker-retirement owner.
-- Proof: `crates/chain/src/durable/tests/revalidation.rs` tests script-invalid AssumeValid commits rejected in cold recovery.
+- Proof: `crates/chain/src/durable.rs` tests script-invalid AssumeValid commits rejected in cold recovery.
 - A `Full` start over such a head rebuilds cold.
 - A completed rebuild attests `Full`.
 - The tests verify valid-spend receipt reuse and corrupt-undo refusal.
-- Proof: `durable/tests.rs` (committed-gap receipt reuse, future-clock recheck exclusion, fail-closed replay).
+- Proof: `crates/chain/src/durable.rs` (committed-gap receipt reuse, future-clock recheck exclusion, fail-closed replay).
 ### `RCV-03`: Prior-or-whole-proposed and orphan tails
 
 - The storage engine resolves an outstanding atomic batch to the prior root or to the wholly proposed root.
@@ -396,7 +396,7 @@ The crash and error points produce exactly these results:
 - Publication acquires the exclusive apply fence, then admission's publication mutex, and checks recovery closure before writing artifacts.
 - Recovery closure takes only the publication mutex, so it can run while its caller holds an apply permit. A publication admitted first completes before closure; closure that wins first refuses later publication.
 - Recovery closure triggers its latch and wakes waiters under the publication mutex. It releases that mutex before it runs cancellation hooks. A hook can call recovery closure again without a lock cycle.
-- Proof: `crates/chain/src/tests/checkpoint_debt_tests.rs::recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication` (paused body sync), `checkpoint_refuses_a_closed_for_recovery_chainstate` (closure first), and `crates/chain/src/tests/admission_tests.rs::recovery_closure_does_not_upgrade_an_apply_permit` (lock order) and `recovery_closure_hooks_can_reenter_after_publication_unlocks` (cancellation hooks). The interleaving proof does not inject marker-retirement faults.
+- Proof: `crates/chain/src/lib.rs::recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication` (paused body sync), `checkpoint_refuses_a_closed_for_recovery_chainstate` (closure first), and `crates/chain/src/lib.rs::recovery_closure_does_not_upgrade_an_apply_permit` (lock order) and `recovery_closure_hooks_can_reenter_after_publication_unlocks` (cancellation hooks). The interleaving proof does not inject marker-retirement faults.
 - The checkpoint publisher freezes the published state.
 - The published state always trails or meets the durable head, because publication follows the batch.
 - Before writing, the publisher loads the head.

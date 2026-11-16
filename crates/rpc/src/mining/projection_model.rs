@@ -292,7 +292,18 @@ mod tests {
 
     // POOL-05
     prop_state_machine! {
-        #![proptest_config(ProptestConfig { cases: projection_model_cases(), ..ProptestConfig::default() })]
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/serving/regressions/mining/projection_model.txt"
+            )),
+        )),
+        ..(ProptestConfig {
+            cases: projection_model_cases(),
+            ..ProptestConfig::default()
+        })
+    })]
         #[test]
         fn mining_projection_matches_the_reference_model(sequential 1..24 => MiningMachine);
     }
@@ -308,7 +319,18 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig { cases: projection_model_cases(), ..ProptestConfig::default() })]
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/serving/regressions/mining/projection_safety.txt"
+            )),
+        )),
+        ..(ProptestConfig {
+            cases: projection_model_cases(),
+            ..ProptestConfig::default()
+        })
+    })]
 
         // POOL-05
         #[test]

@@ -66,7 +66,7 @@ stale index watermark exceeds the rollback cutover; rebuilding selected capabili
 
 and resets those capabilities instead of walking back block by block (`IDX-06`).
 
-Otherwise `rollback_one` loads the body at the watermark height, derives the same rows a forward commit would have written, and asks `commit_rollback_one_for_with_cursor_with_spent_scripts` to delete exactly those rows and set each grouped capability's watermark to the previous block (`crates/index/src/runtime/rollback.rs:261`, `crates/index/src/index/write.rs`). The call first expands the request to the tail group (`tail_rollback_group`, `crates/index/src/index/write.rs`), so a rollback of one tail-bound capability moves every tail-bound capability at that height, releases the shared header identity unless an unselected capability still needs it, and refuses a second rollback for an already-moved member (`group_rollback_releases_identity_and_refuses_a_second_member`, `crates/index/tests/index_roundtrip.rs`). Two details matter:
+Otherwise `rollback_one` loads the body at the watermark height, derives the same rows a forward commit would have written, and asks `commit_rollback_one_for_with_cursor_with_spent_scripts` to delete exactly those rows and set each grouped capability's watermark to the previous block (`crates/index/src/runtime/rollback.rs:261`, `crates/index/src/index/write.rs`). The call first expands the request to the tail group (`tail_rollback_group`, `crates/index/src/index/write.rs`), so a rollback of one tail-bound capability moves every tail-bound capability at that height, releases the shared header identity unless an unselected capability still needs it, and refuses a second rollback for an already-moved member (`group_rollback_releases_identity_and_refuses_a_second_member`, `crates/index/tests.rs`). Two details matter:
 
 - Header rows are deleted only when no unselected capability still needs an identity at that height. `unselected_keeps_identity` checks sibling watermarks; when a sibling is also at or above the height, only the selected family's rows are deleted (`crates/index/src/index/write.rs`).
 - `ScriptLive` and `CompactFilters` need spent-output scripts to rebuild their rows. Those come from the block's undo record (`live_anchor`, `crates/index/src/runtime/rollback.rs`). A missing undo record raises `UndoUnavailable`; `ScriptHistory` and `CompactFilters` become unavailable for the run, and when `ScriptLive` was part of the selection it is reset for a fresh seed (`crates/index/src/runtime/reconciliation.rs`).
@@ -293,15 +293,15 @@ Tests that pin the behavior, all verified in the tree:
 
 | Invariant | Test | File |
 | :--- | :--- | :--- |
-| rollback removes exactly the committed rows | `rollback_removes_every_row_a_matching_commit_wrote` | `crates/index/src/index/tests.rs` |
-| a stale body does not delete a replacement's rows | `a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone` | `crates/index/src/index/tests.rs` |
-| index ahead of the tip is rewound once | `index_ahead_of_restored_tip_is_reported_once_and_rewound` | `crates/index/src/runtime/recovery_tests.rs` |
-| deep rollback rebuilds until caught up | `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up` | `crates/index/src/runtime/recovery_tests.rs` |
-| export then restore answers equal queries | `export_then_restore_serves_the_same_queries_as_backfill` | `crates/index/tests/portable_bundle.rs` |
-| damaged bundles are refused before writes | `damaged_bundles_are_refused_before_any_write_or_reset` | `crates/index/tests/portable_bundle.rs` |
-| a cancelled restore writes nothing | `cancelled_restore_writes_nothing_and_restart_completes` | `crates/index/tests/portable_bundle.rs` |
-| an interrupted import is cleared on restart | `interrupted_import_is_cleared_on_restart_and_restore_retries` | `crates/index/tests/portable_bundle.rs` |
-| missing bodies withhold, then backfill | `missing_bodies_withhold_readiness_until_ordinary_backfill` | `crates/index/tests/portable_bundle.rs` |
+| rollback removes exactly the committed rows | `rollback_removes_every_row_a_matching_commit_wrote` | `crates/index/src/index.rs` |
+| a stale body does not delete a replacement's rows | `a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone` | `crates/index/src/index.rs` |
+| index ahead of the tip is rewound once | `index_ahead_of_restored_tip_is_reported_once_and_rewound` | `crates/index/src/runtime.rs` |
+| deep rollback rebuilds until caught up | `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up` | `crates/index/src/runtime.rs` |
+| export then restore answers equal queries | `export_then_restore_serves_the_same_queries_as_backfill` | `crates/index/tests.rs` |
+| damaged bundles are refused before writes | `damaged_bundles_are_refused_before_any_write_or_reset` | `crates/index/tests.rs` |
+| a cancelled restore writes nothing | `cancelled_restore_writes_nothing_and_restart_completes` | `crates/index/tests.rs` |
+| an interrupted import is cleared on restart | `interrupted_import_is_cleared_on_restart_and_restore_retries` | `crates/index/tests.rs` |
+| missing bodies withhold, then backfill | `missing_bodies_withhold_readiness_until_ordinary_backfill` | `crates/index/tests.rs` |
 | manifest round-trips and denies unknown fields | `manifest_round_trips_through_json_and_validates`, `unknown_fields_are_denied_at_every_level` | `crates/index/src/portable/manifest.rs` |
 | history is never a bundle capability | `script_live_is_never_a_capability_and_script_history_is_refused` | `crates/index/src/portable/manifest.rs` |
 | artifact framing refuses each violation | `framing_refuses_each_violation` | `crates/index/src/portable/artifact.rs` |

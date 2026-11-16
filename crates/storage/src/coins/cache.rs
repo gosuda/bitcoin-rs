@@ -1052,13 +1052,21 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig {
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/storage/regressions/coins/cache.txt"
+            )),
+        )),
+        ..(ProptestConfig {
             cases: std::env::var("PROPTEST_CASES")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(256),
             ..ProptestConfig::default()
-        })]
+        })
+    })]
         #[test]
         fn full_key_turnover_preserves_latest_values(
             budget in 2_000_u64..16_000_u64,

@@ -1548,7 +1548,9 @@ mod tests {
         use std::sync::Arc;
 
         let (exception_height, exception_hash) = BIP30_DUPLICATE_TXID_EXCEPTIONS[0];
-        let block: Block = deserialize(include_bytes!("../../consensus/tests/testdata/91842.bin"))?;
+        let block: Block = deserialize(include_bytes!(
+            "../../../testdata/consensus/blocks/91842.bin"
+        ))?;
         assert_eq!(Hash256::from(block.block_hash()), exception_hash);
         let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
         let duplicated = txids[0];

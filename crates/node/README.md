@@ -8,7 +8,7 @@ Start here:
 
 - [Embedded node lifecycle](../../docs/contracts/embedding.md) owns the `Node` lifecycle, readiness, broadcast, and shutdown contract; [architecture](../../docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary) owns the composition boundary.
 - [Getting started](../../docs/getting-started.md) builds, configures, and runs the same service graph as a daemon.
-- [`src/embed.rs`](src/embed.rs) and [`src/chain_feed.rs`](src/chain_feed.rs) hold the typed surface; [`tests/embed.rs`](tests/embed.rs) runs start, reads, broadcast, shutdown, and reopen in-process without an RPC socket.
+- [`src/embed.rs`](src/embed.rs) and [`src/chain_feed.rs`](src/chain_feed.rs) hold the typed surface; [`tests/embed.rs`](tests.rs) runs start, reads, broadcast, shutdown, and reopen in-process without an RPC socket.
 - [LDK adapter](../../tools/ldk/README.md) borrows the production `Node` for block-source, fee-estimate, and broadcast traits; [Stratum V2 example](../../tools/stratum-sv2/README.md) runs the production `Node` behind the template-distribution adapter on regtest.
 
 - `kernel`: compiles bitcoinkernel support in (`bitcoin-rs-consensus/kernel`).
