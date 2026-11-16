@@ -860,13 +860,7 @@ mod tests {
     }
     #[test]
     fn every_network_carries_chain_tx_data() {
-        for network in [
-            Network::Mainnet,
-            Network::Testnet3,
-            Network::Testnet4,
-            Network::Signet,
-            Network::Regtest,
-        ] {
+        for network in NETWORKS {
             let ChainTxData {
                 time,
                 tx_count,

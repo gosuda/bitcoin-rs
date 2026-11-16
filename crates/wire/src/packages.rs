@@ -225,6 +225,8 @@ fn has_duplicates(wtxids: &[Wtxid]) -> bool {
         .any(|(index, wtxid)| wtxids[index + 1..].contains(wtxid))
 }
 
+pub const MAX_PACKAGE_COUNT: usize = 25;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,5 +712,3 @@ mod tests {
         ));
     }
 }
-
-pub const MAX_PACKAGE_COUNT: usize = 25;

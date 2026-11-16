@@ -608,7 +608,6 @@ fn restored_overflow() -> IndexError {
 }
 
 #[cfg(test)]
-
 mod tests {
     use super::super::spill::{SpillBudget, SpillSet};
     use super::{StreamedFamily, stage_streamed};

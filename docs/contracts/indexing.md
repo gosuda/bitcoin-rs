@@ -343,7 +343,7 @@ Owners:
 - Proof:
   - `crates/projection/src/runtime.rs`:
     - `blocked_open_abandonment_detaches_and_poisons`
-    - `shutdown_during_open_reports_abandonment_after_supervisor_exit`
+    - `shutdown_during_open_joins_helper_releases_lock_and_leaves_namespace_reusable`
     - `open_timeout_publishes_error_not_infinite_spin`
   - `crates/projection/src/runtime.rs`:
     - `unusable_worker_makes_queries_unavailable`

@@ -1094,7 +1094,6 @@ impl Iterator for SortedRows {
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used)]
-
 mod tests {
     use super::*;
     use bitcoin_rs_storage::committed_facts::TxFacts;

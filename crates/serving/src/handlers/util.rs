@@ -1376,6 +1376,21 @@ pub(crate) fn descriptor_checksum(payload: &str) -> Option<String> {
     Some(out)
 }
 #[cfg(test)]
+fn testnet_compressed_wif() -> String {
+    let secret = bitcoin::secp256k1::SecretKey::from_slice(&[
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 1,
+    ])
+    .unwrap_or_else(|err| panic!("secret 1 is valid: {err}"));
+    bitcoin::PrivateKey {
+        compressed: true,
+        network: bitcoin::NetworkKind::Test,
+        inner: secret,
+    }
+    .to_string()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use alloc::sync::Arc;
@@ -2060,20 +2075,6 @@ mod descriptor_checksum_tests {
         assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
         assert!(error.to_string().contains("test network"), "got {error}");
     }
-
-    fn testnet_compressed_wif() -> String {
-        let secret = bitcoin::secp256k1::SecretKey::from_slice(&[
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 1,
-        ])
-        .unwrap_or_else(|err| panic!("secret 1 is valid: {err}"));
-        bitcoin::PrivateKey {
-            compressed: true,
-            network: bitcoin::NetworkKind::Test,
-            inner: secret,
-        }
-        .to_string()
-    }
 }
 
 #[cfg(test)]
@@ -2321,17 +2322,7 @@ mod deriveaddresses_tests {
     #[test]
     fn combo_does_not_derive_from_a_testnet_wif_on_mainnet() {
         let ctx = Arc::new(Context::new());
-        let secret = bitcoin::secp256k1::SecretKey::from_slice(&[
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 1,
-        ])
-        .unwrap_or_else(|err| panic!("secret 1 is valid: {err}"));
-        let wif = bitcoin::PrivateKey {
-            compressed: true,
-            network: bitcoin::NetworkKind::Test,
-            inner: secret,
-        }
-        .to_string();
+        let wif = testnet_compressed_wif();
         let error = deriveaddresses(&ctx, &json!([checksummed(&format!("combo({wif})"))]))
             .err()
             .unwrap_or_else(|| panic!("a testnet WIF must not derive on mainnet"));
