@@ -189,24 +189,29 @@ Owners:
 - An unversioned populated store and a valid interrupted full-capability reset claim use the same path.
 - Startup MUST publish and sync a `.txindex.reset` intent in the data root before it removes the namespace.
 - A pending intent MUST complete recreation before the backend opens.
-- Startup MUST remove and sync the intent only after the replacement store opens successfully.
+- Startup MUST remove and sync the intent only after the replacement store opens successfully. An unexpectedly missing intent at retirement MUST refuse publication.
 - A failed or cancelled recreation MUST retain the intent for the next start.
 - Startup MUST refuse an unknown intent and preserve its bytes.
 - Recreation MUST refuse a namespace outside the named direct child of the data root or a namespace that is a link.
 - A backend error or malformed reset claim MUST NOT authorize namespace removal.
-- An abandoned opener MUST check cancellation before it starts a reset.
+- An abandoned opener MUST check cancellation before it starts a reset. This check includes generation revocation.
 - No serving reader or writer can hold the replaced store.
 - Startup recreation writes no deletion batches to the rejected store.
 - Live capability resets retain the conditional purge and monotonic fences.
-- Proof: `crates/projection/src/runtime/supervisor_tests.rs::incompatible_populated_index_reopens_without_writing_obsolete_rows` and the recovery and refusal tests in `crates/projection/src/runtime/startup/tests/namespace_reset.rs`.
+- Proof: `crates/projection/src/runtime/supervisor_tests.rs` (`incompatible_populated_index_reopens_without_writing_obsolete_rows`, `surrealkv_incompatible_populated_index_reopens_without_writing_obsolete_rows`, `mdbx_incompatible_populated_index_reopens_without_writing_obsolete_rows`).
+- Proof: `crates/projection/src/runtime/startup/tests/namespace_reset.rs` (`pending_namespace_reset_completes_before_backend_open`, `unknown_namespace_reset_intent_preserves_files_and_refuses_open`, `namespace_reset_refuses_paths_outside_the_named_child`, `namespace_reset_refuses_a_link_to_another_directory`, `backend_failure_does_not_authorize_namespace_reset`, `malformed_reset_claim_does_not_authorize_namespace_reset`, `cancelled_fresh_open_releases_store_and_retains_reset_intent`, `abandoned_open_cannot_start_a_late_namespace_reset`, `revoked_generation_cannot_authorize_namespace_reset`, `compatible_linked_namespace_opens_without_recreation`, `missing_reset_intent_after_fresh_open_is_refused`).
+- A compatible namespace MAY open through a link. Only recreation requires a direct directory.
+- The public worker-store open helpers MUST report `FullResetRequired` for a valid interrupted full-capability claim. They do not own namespace removal. `IndexWriter::open` retains its in-store reset recovery.
+- Offline `rebuild-index` MUST refuse a pending startup reset intent before it opens a backend. The node owns completion of that reset.
+- Proof: `tools/storage-convert/src/rebuild.rs::pending_startup_reset_refuses_offline_rebuild_without_mutation`.
 - Selective reset under `IDX-04` covers corrupt watermarks, not versions.
 - Reset recovery accepts only current 17-byte claims and 9-byte Idle states.
 - Idle versions MUST remain monotonic generations to prevent ABA races.
 - Obsolete or malformed claims return `InvalidResetMarker` without modifying derived rows.
 - The worker reports failure through its existing startup boundary.
 - The store opens only the canonical 43-byte ScriptLive table.
-- An incompatible declaration, empty or populated, MUST refuse open without changing data.
-- The operator MUST rebuild the derived index in a separately named directory, with no live-row conversion.
+- Store-level open MUST refuse an incompatible declaration, empty or populated, without changing data. Worker startup then owns namespace recreation as specified above.
+- An operator who preserves an incompatible index MUST rebuild into a separately named directory, with no live-row conversion.
 - Current writers emit position values only for nonempty transaction groups.
 - Queries MUST reject empty values as corrupt derived state.
 - They emit a storage error that directs a rebuild of the derived index.

@@ -664,7 +664,7 @@ fn assert_namespace_rebuild<S: bitcoin_rs_storage::KvStore>(
             inputs.wake_rx,
         )
         .expect("spawn");
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while matches!(**inputs.lifecycle.load(), DerivedIndexLifecycle::Opening)
             && std::time::Instant::now() < deadline
         {

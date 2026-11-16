@@ -182,12 +182,15 @@ pub(super) fn open_and_run(
     std::fs::create_dir_all(&txindex_dir)
         .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
+    let shutdown = setup.shutdown.clone();
+    let generation = setup.generation.clone();
+    let runtime = Arc::clone(setup.runtime);
     let open: OpenDerivedIndex = open_with_recovery_heartbeat(
         setup.spec,
         &txindex_dir,
         HEARTBEAT_INTERVAL,
         &setup.cancel,
-        || setup.is_interrupted(),
+        move || shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop(),
     )?;
 
     if setup.is_interrupted() {
@@ -378,7 +381,7 @@ fn open_with_recovery_heartbeat(
     txindex_dir: &Path,
     heartbeat_interval: Duration,
     shutdown: &LatchReader,
-    should_stop: impl Fn() -> bool,
+    should_stop: impl Fn() -> bool + Send + Sync + 'static,
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
     let heartbeat = Heartbeat::start(
         "txindex",
@@ -402,7 +405,7 @@ pub(super) fn open_derived_index_with_timeout(
     txindex_dir: &Path,
     open_timeout: Duration,
     shutdown: &bitcoin_rs_consensus::latch::LatchReader,
-    should_stop: impl Fn() -> bool,
+    should_stop: impl Fn() -> bool + Send + Sync + 'static,
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
     if shutdown.is_triggered() || should_stop() {
         return Err(DerivedIndexWorkerError::Stopped);
@@ -415,6 +418,8 @@ pub(super) fn open_derived_index_with_timeout(
     let stop_open = LatchWriter::new();
     let stop_reader = stop_open.reader();
     let shutdown_reader = shutdown.clone();
+    let should_stop = Arc::new(should_stop);
+    let open_should_stop = Arc::clone(&should_stop);
     let open_thread = thread::Builder::new()
         .name("bitcoin-rs-txindex-open".to_owned())
         .spawn(move || {
@@ -422,14 +427,18 @@ pub(super) fn open_derived_index_with_timeout(
                 &root,
                 namespace,
                 &dir,
-                || stop_reader.is_triggered() || shutdown_reader.is_triggered(),
+                || {
+                    stop_reader.is_triggered()
+                        || shutdown_reader.is_triggered()
+                        || open_should_stop()
+                },
                 |path| open_store(path),
             );
             let _receiver_gone = tx.send(result);
         })
         .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
-    let result = wait_for_open_result(&rx, open_timeout, shutdown, &should_stop);
+    let result = wait_for_open_result(&rx, open_timeout, shutdown, || should_stop());
     if result.is_err() {
         stop_open.trigger();
     }

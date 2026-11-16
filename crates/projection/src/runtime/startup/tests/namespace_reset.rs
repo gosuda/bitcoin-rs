@@ -2,6 +2,100 @@ use super::*;
 
 // IDX-05
 #[test]
+fn missing_reset_intent_after_fresh_open_is_refused() -> Result<(), DerivedIndexWorkerError> {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("txindex");
+    let marker = root.path().join(".txindex.reset");
+    std::fs::write(&marker, b"bitcoin-rs-derived-index-reset-v1\n")?;
+    let result = rebuild::open(
+        root.path(),
+        "txindex",
+        &path,
+        || false,
+        |path| {
+            let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
+                path,
+                8 * 1024 * 1024,
+            )?);
+            let opened =
+                open_derived_index_store_on_worker(store, crate::runtime::DEFAULT_BATCH_LIMITS, 1)?;
+            std::fs::remove_file(&marker)?;
+            Ok(opened)
+        },
+    );
+    assert!(
+        matches!(result, Err(DerivedIndexWorkerError::NamespaceOpen(ref error)) if error.kind() == std::io::ErrorKind::NotFound)
+    );
+    assert!(path.is_dir());
+    Ok(())
+}
+
+// IDX-05, SYNC-03
+#[test]
+fn revoked_generation_cannot_authorize_namespace_reset() -> std::io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("txindex");
+    std::fs::create_dir(&path)?;
+    std::fs::write(path.join("keep"), b"index owned by revoked generation")?;
+    let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = Arc::clone(&revoked);
+    let mut spec = recovery_open_spec(root.path());
+    spec.open_store = Arc::new(move |_| {
+        observed.store(true, Ordering::Release);
+        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 5 }.into())
+    });
+    let result = open_derived_index_with_timeout(
+        &spec,
+        &path,
+        Duration::from_secs(5),
+        &LatchWriter::new().reader(),
+        move || revoked.load(Ordering::Acquire),
+    );
+    assert!(matches!(result, Err(DerivedIndexWorkerError::Stopped)));
+    assert_eq!(
+        std::fs::read(path.join("keep"))?,
+        b"index owned by revoked generation"
+    );
+    assert!(!root.path().join(".txindex.reset").exists());
+    Ok(())
+}
+
+// IDX-05
+#[test]
+#[cfg(unix)]
+fn compatible_linked_namespace_opens_without_recreation() -> Result<(), DerivedIndexWorkerError> {
+    let root = tempfile::tempdir()?;
+    let target = tempfile::tempdir()?;
+    let path = root.path().join("txindex");
+    std::os::unix::fs::symlink(target.path(), &path)?;
+    std::fs::write(target.path().join("keep"), b"compatible linked index")?;
+    let mut spec = recovery_open_spec(root.path());
+    spec.open_store = Arc::new(|path| {
+        let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
+            path,
+            8 * 1024 * 1024,
+        )?);
+        open_derived_index_store_on_worker(store, crate::runtime::DEFAULT_BATCH_LIMITS, 1)
+    });
+    let opened = open_derived_index_with_timeout(
+        &spec,
+        &path,
+        Duration::from_secs(5),
+        &LatchWriter::new().reader(),
+        || false,
+    )?;
+    drop(opened);
+    assert!(std::fs::symlink_metadata(&path)?.file_type().is_symlink());
+    assert_eq!(
+        std::fs::read(target.path().join("keep"))?,
+        b"compatible linked index"
+    );
+    assert!(!root.path().join(".txindex.reset").exists());
+    Ok(())
+}
+
+// IDX-05
+#[test]
 fn pending_namespace_reset_completes_before_backend_open() -> Result<(), DerivedIndexWorkerError> {
     for phase in 0..3 {
         let dir = tempfile::tempdir()?;
@@ -172,7 +266,7 @@ fn namespace_reset_refuses_a_link_to_another_directory() -> std::io::Result<()> 
         Err(DerivedIndexWorkerError::NamespaceOpen(ref error))
             if error.kind() == std::io::ErrorKind::InvalidInput
     ));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         std::fs::read(authoritative.path().join("keep"))?,
         b"authoritative bytes"
