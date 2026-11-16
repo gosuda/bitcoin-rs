@@ -254,7 +254,10 @@ mod tests {
     }
 
     fn core_signet_blocks() -> impl Iterator<Item = &'static str> {
-        include_str!("../../../testdata/consensus/vectors/core-signet-blocks.txt").lines()
+        let blocks =
+            include_str!("../../../testdata/consensus/vectors/core-signet-blocks.txt").lines();
+        assert_eq!(blocks.clone().count(), 10, "10 core signet blocks");
+        blocks
     }
 
     fn hex_bytes(hex: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
