@@ -21,11 +21,11 @@ use super::{BlockSync, SchedulerState};
 use crate::p2p::download_window::SyncPeer;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
+use bitcoin_rs_chain::chain::{ChainError, NodeId, NodeStatus, validate_pow};
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Header;
-use bitcoin_rs_execution::chain::{ChainError, NodeId, NodeStatus, validate_pow};
-use bitcoin_rs_wire::peer_info::PeerInfo;
-use bitcoin_rs_wire::{InboundHeaders, Message, OutboundRefusal, PeerSource};
+use bitcoin_rs_p2p::peer_info::PeerInfo;
+use bitcoin_rs_p2p::{InboundHeaders, Message, OutboundRefusal, PeerSource};
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -34,7 +34,7 @@ const MAX_UNRESOLVED_DEMONSTRATED_TIPS: usize = 8;
 pub(super) const MAX_HEADER_BATCHES_PER_TICK: usize = 32;
 /// Stop between whole batches, never in a download-twice response page.
 /// A final protocol-bounded batch can exceed this by at most 1,999 headers.
-pub(super) const MAX_HEADERS_PER_TICK: usize = 2 * bitcoin_rs_wire::wire::MAX_HEADERS_MESSAGE_COUNT;
+pub(super) const MAX_HEADERS_PER_TICK: usize = 2 * bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT;
 
 struct PresyncOutcome {
     failure: Option<HeaderSyncError>,
@@ -118,7 +118,7 @@ impl BlockSync {
                 continue;
             };
             if matches!(&admission, HeaderAdmission::Rejected(_)) {
-                let demoted = bitcoin_rs_execution::chain::header_sync::demoted_tip_after_rejection(
+                let demoted = bitcoin_rs_chain::chain::header_sync::demoted_tip_after_rejection(
                     &self.chain.block_tree(),
                     pre_tip,
                 );
@@ -316,7 +316,7 @@ impl BlockSync {
     fn request_ancestry_after_refusal(
         &self,
         source: Option<PeerSource>,
-        error: &bitcoin_rs_execution::chain::HeaderRefusal,
+        error: &bitcoin_rs_chain::chain::HeaderRefusal,
     ) {
         let now = Instant::now();
         let mut last = self.refused_rerequest_at.lock();
@@ -997,13 +997,13 @@ impl BlockSync {
         let hash = Hash256::from(header.compute_hash());
         validate_pow(header, hash, network)
             .and_then(|()| {
-                bitcoin_rs_execution::chain::validate_contextual_header(
+                bitcoin_rs_chain::chain::validate_contextual_header(
                     &tree,
                     parent_id,
                     header,
                     network,
-                    bitcoin_rs_execution::chain::current_unix_seconds(),
-                    bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
+                    bitcoin_rs_chain::chain::current_unix_seconds(),
+                    bitcoin_rs_chain::chain::HeaderValidationMode::LiveAdmission,
                 )
             })
             .is_err()
@@ -1035,13 +1035,13 @@ impl BlockSync {
         let hash = Hash256::from(headers[0].compute_hash());
         validate_pow(&headers[0], hash, network)
             .and_then(|()| {
-                bitcoin_rs_execution::chain::validate_contextual_header(
+                bitcoin_rs_chain::chain::validate_contextual_header(
                     &tree,
                     first_parent,
                     &headers[0],
                     network,
-                    bitcoin_rs_execution::chain::current_unix_seconds(),
-                    bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
+                    bitcoin_rs_chain::chain::current_unix_seconds(),
+                    bitcoin_rs_chain::chain::HeaderValidationMode::LiveAdmission,
                 )
             })
             .is_err()
@@ -1054,7 +1054,7 @@ impl BlockSync {
     ) -> PresyncOutcome {
         let (failure, request_more, ready_headers, finished) = match state.process(
             headers,
-            batch_len >= bitcoin_rs_wire::wire::MAX_HEADERS_MESSAGE_COUNT,
+            batch_len >= bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT,
         ) {
             Ok(result) => (
                 None,
@@ -1092,7 +1092,7 @@ impl BlockSync {
         });
         if page_self_valid {
             let claimed = headers.iter().fold(fork.chainwork, |sum, header| {
-                sum.saturating_add(bitcoin_rs_execution::chain::block_work(header))
+                sum.saturating_add(bitcoin_rs_chain::chain::block_work(header))
             });
             if claimed >= minimum_work {
                 return None;

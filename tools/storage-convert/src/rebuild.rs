@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -8,9 +8,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_projection::IndexCapabilities;
-use bitcoin_rs_projection::segment::Coverage;
-use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
+use bitcoin_rs_index::IndexCapabilities;
+use bitcoin_rs_index::segment::Coverage;
+use bitcoin_rs_index::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_storage::budget::{BudgetCharge, BudgetError, BudgetOwner};
 use bitcoin_rs_storage::committed_facts::{
     CommittedBlock, CreatedOutput, FactsScript, SpentPrevout, TxFacts,
@@ -210,7 +210,7 @@ pub(crate) fn run_rebuild_index(
     for hash in &canonical {
         let _block = committed_block(chainstate_store.as_deref(), &archive, hash)?;
     }
-    let reset = bitcoin_rs_projection::reset_offline(store.as_ref())
+    let reset = bitcoin_rs_index::reset_offline(store.as_ref())
         .map_err(|error| ConvertError::IncompatibleData(error.to_string()))?;
     clear_generations(store.as_ref())?;
     let gen_id = 1u64;
@@ -246,7 +246,7 @@ pub(crate) fn run_rebuild_index(
         stream.finish(store.as_ref())?
     };
     let next_ordinal = u32::try_from(tx_total).unwrap_or(u32::MAX);
-    bitcoin_rs_projection::segment::publish_bulk_generation(
+    bitcoin_rs_index::segment::publish_bulk_generation(
         store.as_ref(),
         gen_id,
         coverage,

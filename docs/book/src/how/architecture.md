@@ -1,12 +1,12 @@
-# Architecture
+﻿# Architecture
 
 A block moves through six stages: the peer connection, the sync loop, the block stager, the chainstate transition, the durable-head commit, and the node followers. Chainstate owns the authoritative mutation; every other stage either feeds it or observes its committed result (`ARCH-07`, [architecture contract](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/architecture.md#arch-07-chainstate-owns-authoritative-applied-chain-mutation)).
 
 ```text
-peer read loop (crates/wire/src/listener.rs)
+peer read loop (crates/p2p/src/listener.rs)
   |  InboundBlock { BlockImage, source, credits }
   v
-bounded inbound-block channel (crates/wire/src/service.rs)
+bounded inbound-block channel (crates/p2p/src/service.rs)
   |  wake
   v
 BlockSync::tick (crates/node/src/p2p/sync.rs)
@@ -21,17 +21,17 @@ apply_buffered_blocks (crates/node/src/p2p/sync/commit.rs)
 node commit_window (crates/node/src/sync.rs)
   |  chain transition + mempool generation fence
   v
-chainstate connect_window (crates/execution/src/window.rs)
+chainstate connect_window (crates/chain/src/window.rs)
   |  per block: validate, persist undo/body, build coin delta
   |  per group: one durable-head batch (64 blocks or 8 MiB)
   v
-publish_applied (crates/execution/src/lib.rs)
+publish_applied (crates/chain/src/lib.rs)
   |  applied-tip cell, ChainEventPublisher sequence
   v
 node ChainFollowers::on_connect (crates/node/src/chain_effects.rs)
   |  block log, ZMQ, index wake, sequence, mining generation, mempool
   v
-index worker (crates/projection/src/runtime) and RPC/ZMQ consumers
+index worker (crates/index/src/runtime) and RPC/ZMQ consumers
 ```
 
 ## Header sync
@@ -61,13 +61,13 @@ Inside chainstate, each block is applied with `PublishMode::Grouped`:
 5. After the durable batch succeeds, `CommitAuthority::commit_prefix` calls `CoinStore::install_committed` to install the coin-cache delta and stats feed before returning its receipt. Body append and sync precede this batch; it is not the group's only write.
 6. `publish_applied` stores the applied tip and advances the event sequence.
 
-The durable receipt exists before the tip is published. Apply returns only after the batch receipt, so a reader that sees the new tip is seeing a head that survives a crash. A head that does not match the restored tip at startup is a replay gap; `matching_durable_head_requires_no_replay` in [`crates/execution/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable/tests.rs) pins that rule.
+The durable receipt exists before the tip is published. Apply returns only after the batch receipt, so a reader that sees the new tip is seeing a head that survives a crash. A head that does not match the restored tip at startup is a replay gap; `matching_durable_head_requires_no_replay` in [`crates/chain/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/src/durable/tests.rs) pins that rule.
 
 Coin writes go only through the head batch, into the engine `Coins` keyspace (`ColumnFamily::Coins`). The head batch names the undo and body rows that make those coin writes recoverable. The resident `UtxoSet` receives no coin writes; it parses snapshot input only.
 
 ## Publication and followers
 
-`publish_applied` replaces the applied-tip cell under one gate and then records a `ChainSnapshot { epoch, sequence, tip_hash, tip_height }`. The snapshot is the coherent, non-torn view index consumers read (`EVT-01`). `resumed_snapshot_continues_sequence` in `crates/execution/src/events.rs` pins sequence continuity across restart.
+`publish_applied` replaces the applied-tip cell under one gate and then records a `ChainSnapshot { epoch, sequence, tip_hash, tip_height }`. The snapshot is the coherent, non-torn view index consumers read (`EVT-01`). `resumed_snapshot_continues_sequence` in `crates/chain/src/events.rs` pins sequence continuity across restart.
 
 `ChainFollowers::on_connect` runs while the transition is still held, in this order:
 
@@ -91,11 +91,11 @@ A reorg takes the same transition lock in the other direction. `ChainTransition:
 The trace below is verbatim from a regtest node started with `--log-level debug`. The block entered through `generatetoaddress`, not a peer, so the P2P stages are absent. The chainstate, publication, and follower stages are the same code path a peer-delivered block takes.
 
 ```text
-{"timestamp":"2026-11-01T16:44:33.923132Z","level":"DEBUG","fields":{"message":"apply_block: profile","height":1,"input.block_hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24","tx_count":1,"block_rules_us":"8","bip30_bip34_us":"5","script_verify_us":"0","utxo_commit_us":"53","block_body_persist_us":"62","block_tree_insert_us":"16","coin_stats_us":"0","total_us":"482"},"target":"bitcoin_rs_execution::connect"}
-{"timestamp":"2026-11-01T16:44:33.923168Z","level":"DEBUG","fields":{"message":"apply_block: tail begin","height":1,"outcome.hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24"},"target":"bitcoin_rs_execution::connect"}
-{"timestamp":"2026-11-01T16:44:33.923258Z","level":"DEBUG","fields":{"message":"apply_block: publish profile","height":1,"outcome.hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24","durable_sync_us":"4","durable_commit_us":"67"},"target":"bitcoin_rs_execution::connect"}
+{"timestamp":"2026-11-01T16:44:33.923132Z","level":"DEBUG","fields":{"message":"apply_block: profile","height":1,"input.block_hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24","tx_count":1,"block_rules_us":"8","bip30_bip34_us":"5","script_verify_us":"0","utxo_commit_us":"53","block_body_persist_us":"62","block_tree_insert_us":"16","coin_stats_us":"0","total_us":"482"},"target":"bitcoin_rs_chain::connect"}
+{"timestamp":"2026-11-01T16:44:33.923168Z","level":"DEBUG","fields":{"message":"apply_block: tail begin","height":1,"outcome.hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24"},"target":"bitcoin_rs_chain::connect"}
+{"timestamp":"2026-11-01T16:44:33.923258Z","level":"DEBUG","fields":{"message":"apply_block: publish profile","height":1,"outcome.hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24","durable_sync_us":"4","durable_commit_us":"67"},"target":"bitcoin_rs_chain::connect"}
 {"timestamp":"2026-11-01T16:44:33.923435Z","level":"DEBUG","fields":{"message":"chain_effects: on_connect profile","height":1,"tip_hash":"5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24","on_connect_us":"59"},"target":"bitcoin_rs_node::chain_effects"}
-{"timestamp":"2026-11-01T16:44:33.923453Z","level":"DEBUG","fields":{"message":"chainstate: transition held","transition_held_us":"807"},"target":"bitcoin_rs_execution"}
+{"timestamp":"2026-11-01T16:44:33.923453Z","level":"DEBUG","fields":{"message":"chainstate: transition held","transition_held_us":"807"},"target":"bitcoin_rs_chain"}
 ```
 
 The order is the contract: apply profile, durable commit receipt, tip publication, follower dispatch, then the transition drops. The block held only a coinbase, so no input scripts ran; `script_dispatch=coinbase_only` records that, not a disabled check.
@@ -105,9 +105,9 @@ The order is the contract: apply profile, durable commit receipt, tip publicatio
 | Invariant | Test | File |
 | --- | --- | --- |
 | Prefix drain stops at the first missing hash | `drain_expected_prefix_stops_at_first_missing_hash` | [`crates/node/src/p2p/block_stager/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/p2p/block_stager/tests.rs) |
-| A matching durable head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/execution/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable/tests.rs) |
+| A matching durable head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/chain/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/src/durable/tests.rs) |
 | Followers emit in commit order | `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order` | [`crates/node/src/chain_effects/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/chain_effects/tests.rs) |
-| Event sequence survives restart | `resumed_snapshot_continues_sequence` | [`crates/execution/src/events.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/events.rs) |
+| Event sequence survives restart | `resumed_snapshot_continues_sequence` | [`crates/chain/src/events.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/src/events.rs) |
 | Apply waits for a pending reorg | `apply_buffered_blocks_waits_for_pending_reorg` | [`crates/node/src/p2p/sync/tests/download_frontier.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/p2p/sync/tests/download_frontier.rs) |
 
 The chain-events contract owns the fence order and the consumer cursor: [docs/contracts/chain-events.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/chain-events.md). The [state and storage](state-and-storage.md) chapter covers the durable records, and the [p2p](p2p.md) chapter covers peer policy before staging.

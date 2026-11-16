@@ -1,4 +1,4 @@
-pub(crate) mod ingress;
+﻿pub(crate) mod ingress;
 mod relay;
 
 pub use ingress::{
@@ -16,10 +16,10 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use hashbrown::{HashMap, HashSet};
 
 use bitcoin_rs_consensus::primitives::{Hash256, Txid, Wtxid};
-use bitcoin_rs_wire::packages::{
+use bitcoin_rs_p2p::packages::{
     GetPkgTxns, MAX_GETPKGTXNS, MSG_ANCPKGINFO, MSG_PKGTXNS, combined_package_hash,
 };
-use bitcoin_rs_wire::{Message, OutboundRefusal, PeerSource, TxInventory};
+use bitcoin_rs_p2p::{Message, OutboundRefusal, PeerSource, TxInventory};
 
 pub(crate) const MAX_PEER_ANNOUNCEMENTS: usize = 5_000;
 pub const MAX_PEER_IN_FLIGHT: usize = 100;
@@ -864,30 +864,30 @@ fn ready_candidate(
 
 #[derive(Clone)]
 pub struct NodeTxPolicy {
-    pub(crate) table: Arc<bitcoin_rs_wire::PeerTable>,
+    pub(crate) table: Arc<bitcoin_rs_p2p::PeerTable>,
     pub(crate) tx_policy: Arc<parking_lot::Mutex<TxPolicy>>,
 }
 
 impl Default for NodeTxPolicy {
     fn default() -> Self {
-        Self::with_table(Arc::new(bitcoin_rs_wire::PeerTable::new()))
+        Self::with_table(Arc::new(bitcoin_rs_p2p::PeerTable::new()))
     }
 }
 
 impl NodeTxPolicy {
     pub fn new(
-        table: Arc<bitcoin_rs_wire::PeerTable>,
+        table: Arc<bitcoin_rs_p2p::PeerTable>,
         tx_policy: Arc<parking_lot::Mutex<TxPolicy>>,
     ) -> Self {
         Self { table, tx_policy }
     }
-    pub fn with_table(table: Arc<bitcoin_rs_wire::PeerTable>) -> Self {
+    pub fn with_table(table: Arc<bitcoin_rs_p2p::PeerTable>) -> Self {
         Self::new(
             table,
             Arc::new(parking_lot::Mutex::new(TxPolicy::default())),
         )
     }
-    pub fn peer_table(&self) -> &Arc<bitcoin_rs_wire::PeerTable> {
+    pub fn peer_table(&self) -> &Arc<bitcoin_rs_p2p::PeerTable> {
         &self.table
     }
     pub fn announce_transactions(&self, source: PeerSource, items: &[Inventory]) {
@@ -1248,7 +1248,7 @@ impl NodeTxPolicy {
             return false;
         }
         if self.table.transaction_witness(source) {
-            bitcoin_rs_wire::inv::request_witness(&mut items);
+            bitcoin_rs_p2p::inv::request_witness(&mut items);
         }
         self.request_parent_transactions(source, &items)
     }

@@ -1,9 +1,9 @@
-# Recovery contract
+﻿# Recovery contract
 
 This contract specifies how the node recovers an authoritative chainstate.
 Recovery handles crashes, lost writes, reorganizations, and incompatible datadirs.
 The chainstate is the single durable authority.
-`crates/execution` owns the ordered commit protocol over the storage durable head.
+`crates/chain` owns the ordered commit protocol over the storage durable head.
 That head certifies ordering and high-water bounds, not coin contents.
 If startup restores no chainstate while a durable head still exists, `reconcile_at_boot` replays the head chain.
 Replay starts from the newest accepted checkpoint out of the durable bodies it certifies.
@@ -20,13 +20,13 @@ Startup restores that checkpoint before replaying any remaining certified histor
 Startup ignores an unreferenced generation.
 
 Owners:
-- Authoritative durable root and ordered commit protocol (`crates/execution/src/connect.rs`, `disconnect.rs`, `durable.rs`).
-- Recovery and schema admission (`crates/execution/src/recovery.rs`, with process-composition tests in `crates/node/src/state/tests/`).
+- Authoritative durable root and ordered commit protocol (`crates/chain/src/connect.rs`, `disconnect.rs`, `durable.rs`).
+- Recovery and schema admission (`crates/chain/src/recovery.rs`, with process-composition tests in `crates/node/src/state/tests/`).
 - Persistent coin transition boundary (`crates/storage/src/commit.rs`, `crates/storage/src/coins.rs`; durable form in `crates/storage/src/durable_head.rs`).
 - Crash and lost-write fault tests (`crates/node/tests/crash_recovery.rs`).
-- Reorg and disconnect (`crates/execution/src/reorg.rs`, `disconnect.rs`).
-- Checkpoint publication and recovery (`crates/execution/src/checkpoint.rs` and companions, `crates/storage/src/checkpoint/`).
-- Index worker recovery (`crates/projection/src/runtime/recovery_tests.rs`).
+- Reorg and disconnect (`crates/chain/src/reorg.rs`, `disconnect.rs`).
+- Checkpoint publication and recovery (`crates/chain/src/checkpoint.rs` and companions, `crates/storage/src/checkpoint/`).
+- Index worker recovery (`crates/index/src/runtime/recovery_tests.rs`).
 - Policy (`docs/policies/db-migration.md`).
 
 ## Durable root
@@ -64,7 +64,7 @@ struct DurableHead {
 
 - The row carries a format version byte and a checksum over its payload.
 - Any malformed row MUST fail closed at load instead of decoding to absence.
-- The head record lives in the chainstate key-value store and the ordered protocol is owned by `crates/execution`.
+- The head record lives in the chainstate key-value store and the ordered protocol is owned by `crates/chain`.
 - One connect or disconnect commits one atomic named-family batch.
 - The `write_durable_if` receipt covers the head row, the block undo row, its body locator row, and block-file maximum-height rows.
 - Appended body bytes and the blocks directory are synced before the batch MAY name them.
@@ -131,7 +131,7 @@ struct DurableHead {
 - Startup retries this cleanup for a committed `Finalized` head.
 - Cleanup failures are warnings, not recovery failures.
 - Ordinary checkpoints and unknown files are preserved.
-- Proof: `crates/execution/src/assumeutxo/tests.rs` covers commitment verification, isolated replay, terminal-write failures, and role guards.
+- Proof: `crates/chain/src/assumeutxo/tests.rs` covers commitment verification, isolated replay, terminal-write failures, and role guards.
 - Proof: `assumeutxo_recovery_tests.rs` covers real-storage restart, process-kill boundaries, and lost failure receipts.
 - The tests also cover root-preserving archive replay, checkpoint pin binding, pruning, and below-base reorg restart.
 
@@ -140,7 +140,7 @@ struct DurableHead {
 ### `RCV-01`: Authority and identity
 
 - The chainstate is the only authoritative position.
-- `crates/execution` owns that position and its commit/recovery protocol.
+- `crates/chain` owns that position and its commit/recovery protocol.
 - Block bodies, `txindex`, `scriptindex`, and undo or lookup metadata are derived.
 - Every derived position is a `(height, block_hash)` pair, never height alone.
 - Off the active chain, stale pairs rewind to the common ancestor, not to a height.
@@ -216,7 +216,7 @@ Commit details:
 - Only committed prefixes are published.
 - Group caps are stated constants or budget limits; a failure at block j commits the prefix before j (`WIN-08`).
 - An ambiguous storage failure closes mutation admission until recovery resolves the durable outcome (`CMT-04`).
-- Proof: `crates/execution/src/tests/` (grouped-window staging).
+- Proof: `crates/chain/src/tests/` (grouped-window staging).
 - Proof: `crates/node/src/mining/coordinator/tests.rs` (receipt install, mismatch fallback, waiter release).
 
 Replay validation rules:
@@ -231,7 +231,7 @@ Replay validation rules:
 - Script failure stops admission before publishing the invalid block.
 - Script failure preserves the durable head and full-revalidation marker.
 - Script failure leaves checkpoint publication as the marker-retirement owner.
-- Proof: `crates/execution/src/durable/tests/revalidation.rs` tests script-invalid AssumeValid commits rejected in cold recovery.
+- Proof: `crates/chain/src/durable/tests/revalidation.rs` tests script-invalid AssumeValid commits rejected in cold recovery.
 - A `Full` start over such a head rebuilds cold.
 - A completed rebuild attests `Full`.
 - The tests verify valid-spend receipt reuse and corrupt-undo refusal.
@@ -396,7 +396,7 @@ The crash and error points produce exactly these results:
 - Publication acquires the exclusive apply fence, then admission's publication mutex, and checks recovery closure before writing artifacts.
 - Recovery closure takes only the publication mutex, so it can run while its caller holds an apply permit. A publication admitted first completes before closure; closure that wins first refuses later publication.
 - Recovery closure triggers its latch and wakes waiters under the publication mutex. It releases that mutex before it runs cancellation hooks. A hook can call recovery closure again without a lock cycle.
-- Proof: `crates/execution/src/tests/checkpoint_debt_tests.rs::recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication` (paused body sync), `checkpoint_refuses_a_closed_for_recovery_chainstate` (closure first), and `crates/execution/src/tests/admission_tests.rs::recovery_closure_does_not_upgrade_an_apply_permit` (lock order) and `recovery_closure_hooks_can_reenter_after_publication_unlocks` (cancellation hooks). The interleaving proof does not inject marker-retirement faults.
+- Proof: `crates/chain/src/tests/checkpoint_debt_tests.rs::recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication` (paused body sync), `checkpoint_refuses_a_closed_for_recovery_chainstate` (closure first), and `crates/chain/src/tests/admission_tests.rs::recovery_closure_does_not_upgrade_an_apply_permit` (lock order) and `recovery_closure_hooks_can_reenter_after_publication_unlocks` (cancellation hooks). The interleaving proof does not inject marker-retirement faults.
 - The checkpoint publisher freezes the published state.
 - The published state always trails or meets the durable head, because publication follows the batch.
 - Before writing, the publisher loads the head.
@@ -436,7 +436,7 @@ The crash and error points produce exactly these results:
 ### Checkpoint header artifact and side branches
 
 - The checkpoint header artifact restores the block tree, not only the active chain.
-- `crates/execution/src/checkpoint/headers.rs` owns its layout.
+- `crates/chain/src/checkpoint/headers.rs` owns its layout.
 - The manifest-bound artifact SHA-256 authenticates every byte.
 - No other file persists branch state.
 - Version 2 is written: the active ancestry of the selected best tip, then non-`Invalid` tree nodes off that ancestry.

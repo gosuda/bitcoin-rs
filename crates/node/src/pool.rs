@@ -1,13 +1,13 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_serving::mining::pool::ledger as pool_ledger;
-use bitcoin_rs_serving::mining::pool::stratum::sv1::{
+use bitcoin_rs_rpc::mining::pool::ledger as pool_ledger;
+use bitcoin_rs_rpc::mining::pool::stratum::sv1::{
     ConnectionLimiter, DifficultyPolicy, Server, ServerConfig, ServerDeps,
 };
-use bitcoin_rs_serving::mining::pool::{ExtranonceLayout, JobBookConfig, PoolCore};
-use bitcoin_rs_serving::mining::{CoinbaseBudget, MiningControl};
+use bitcoin_rs_rpc::mining::pool::{ExtranonceLayout, JobBookConfig, PoolCore};
+use bitcoin_rs_rpc::mining::{CoinbaseBudget, MiningControl};
 use bitcoin_rs_storage::KvStore;
 
 use crate::run::RunError;
@@ -78,8 +78,8 @@ fn composed_core_config(max_connections: u32) -> Result<ComposedCore, RunError> 
             },
             extranonce: ExtranonceLayout::new(4, 4),
             coinbase_tag: b"/btcrs/".to_vec(),
-            version_mask: bitcoin_rs_serving::mining::pool::BIP320_VERSION_MASK,
-            ntime_forward_secs: bitcoin_rs_serving::mining::pool::MAX_NTIME_FORWARD_SECS,
+            version_mask: bitcoin_rs_rpc::mining::pool::BIP320_VERSION_MASK,
+            ntime_forward_secs: bitcoin_rs_rpc::mining::pool::MAX_NTIME_FORWARD_SECS,
             max_jobs: MAX_RETAINED_JOBS,
             max_sessions: sessions,
             max_shares_per_job: MAX_SHARES_PER_JOB,
@@ -145,8 +145,8 @@ impl PoolService {
         }))
     }
 
-    pub(crate) fn handles(&self) -> bitcoin_rs_serving::context::PoolHandles {
-        bitcoin_rs_serving::context::PoolHandles {
+    pub(crate) fn handles(&self) -> bitcoin_rs_rpc::context::PoolHandles {
+        bitcoin_rs_rpc::context::PoolHandles {
             operator: Some(self.host.clone()),
         }
     }

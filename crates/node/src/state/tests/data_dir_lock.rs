@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 use crate::test_support::TestError;
 
@@ -197,7 +197,7 @@ fn idle_keepalive_rpc_connection_releases_the_directory_lock_at_shutdown() -> Re
         .services
         .as_ref()
         .ok_or(TestError::Missing("node services"))?
-        .rpc_address(bitcoin_rs_serving::RpcSurface::Shared)
+        .rpc_address(bitcoin_rs_rpc::RpcSurface::Shared)
         .ok_or(TestError::Missing("shared rpc address"))?;
     let client = idle_keepalive_rpc_connection(address)?;
 

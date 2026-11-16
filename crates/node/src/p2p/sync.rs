@@ -13,9 +13,9 @@ mod telemetry;
 
 #[cfg(test)]
 use bitcoin::p2p::message_blockdata::Inventory;
+use bitcoin_rs_chain::chain::BlockTree;
+use bitcoin_rs_chain::chain::NodeId;
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_execution::chain::BlockTree;
-use bitcoin_rs_execution::chain::NodeId;
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
@@ -40,7 +40,7 @@ use crate::p2p::download_window::PENDING_BUDGET;
 use crate::p2p::download_window::RECEIVED_BLOCK_BUDGET;
 #[cfg(test)]
 use crate::p2p::download_window::RECEIVED_BLOCK_TIMEOUT;
-use bitcoin_rs_wire::{InboundBlock, InboundHeaders, PeerSource, PeerTable};
+use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, PeerSource, PeerTable};
 #[cfg(test)]
 use commit::restore_split;
 
@@ -120,7 +120,7 @@ pub struct BlockSync {
     historical_work: Mutex<()>,
     pub(crate) chain: Arc<dyn SyncChain>,
     peer_table: Arc<PeerTable>,
-    ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
+    ibd: Arc<bitcoin_rs_chain::chain::InitialBlockDownload>,
     inbound_headers_rx: Receiver<InboundHeaders>,
     inbound_blocks_rx: Receiver<InboundBlock>,
     scheduler: Mutex<SchedulerState>,
@@ -274,7 +274,7 @@ impl BlockSync {
         peer_table: Arc<PeerTable>,
         inbound_headers_rx: Receiver<InboundHeaders>,
         inbound_blocks_rx: Receiver<InboundBlock>,
-        ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
+        ibd: Arc<bitcoin_rs_chain::chain::InitialBlockDownload>,
     ) -> Self {
         let budget = default_sync_budget(chain.network());
         let stale_tips = Arc::new(StaleTipRetainer::seed(&chain.block_tree()));
@@ -367,15 +367,14 @@ impl BlockSync {
     ) -> bool {
         let hash = Hash256::from(header.compute_hash());
         let network = self.chain.network();
-        if bitcoin_rs_execution::chain::validate_pow(header, hash, network).is_err() {
+        if bitcoin_rs_chain::chain::validate_pow(header, hash, network).is_err() {
             return false;
         }
         let (candidate_work, candidate_height) = {
             let tree = self.chain.block_tree();
             let invalid = |id: NodeId| {
-                tree.node(id).is_ok_and(|node| {
-                    node.status == bitcoin_rs_execution::chain::NodeStatus::Invalid
-                })
+                tree.node(id)
+                    .is_ok_and(|node| node.status == bitcoin_rs_chain::chain::NodeStatus::Invalid)
             };
             let known = tree.lookup(hash);
             if known.is_some_and(invalid) {
@@ -388,13 +387,13 @@ impl BlockSync {
                 return false;
             };
             if known.is_none()
-                && bitcoin_rs_execution::chain::validate_contextual_header(
+                && bitcoin_rs_chain::chain::validate_contextual_header(
                     &tree,
                     parent_id,
                     header,
                     network,
-                    bitcoin_rs_execution::chain::current_unix_seconds(),
-                    bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
+                    bitcoin_rs_chain::chain::current_unix_seconds(),
+                    bitcoin_rs_chain::chain::HeaderValidationMode::LiveAdmission,
                 )
                 .is_err()
             {
@@ -404,7 +403,7 @@ impl BlockSync {
                 return false;
             };
             (
-                parent.chainwork + bitcoin_rs_execution::chain::block_work(header),
+                parent.chainwork + bitcoin_rs_chain::chain::block_work(header),
                 parent.height.saturating_add(1),
             )
         };
@@ -684,10 +683,10 @@ pub(crate) mod test_support;
 
 #[cfg(test)]
 #[must_use]
-pub(crate) fn syncing_ibd_latch() -> Arc<bitcoin_rs_execution::chain::InitialBlockDownload> {
-    Arc::new(bitcoin_rs_execution::chain::InitialBlockDownload::new(
-        bitcoin_rs_execution::chain::TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty())),
-        bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(
+pub(crate) fn syncing_ibd_latch() -> Arc<bitcoin_rs_chain::chain::InitialBlockDownload> {
+    Arc::new(bitcoin_rs_chain::chain::InitialBlockDownload::new(
+        bitcoin_rs_chain::chain::TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty())),
+        bitcoin_rs_chain::chain::BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(
             BlockTree::new(),
         ))),
     ))

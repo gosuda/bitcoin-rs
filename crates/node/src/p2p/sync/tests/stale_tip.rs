@@ -6,8 +6,8 @@ use super::super::stale_tips::{MAX_ADVERTISED_STALETIPS, StaleTipRetainer};
 use super::super::{StaleTipState, tip_may_be_stale};
 use super::*;
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_wire::listener::ListenerExtras;
-use bitcoin_rs_wire::service::{P2pService, P2pServiceConfig};
+use bitcoin_rs_p2p::listener::ListenerExtras;
+use bitcoin_rs_p2p::service::{P2pService, P2pServiceConfig};
 
 const SPACING: Duration = Duration::from_mins(10);
 
@@ -64,8 +64,7 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
     let ready: Arc<dyn Fn(PeerSource) + Send + Sync> = Arc::new(|_| {});
     service
         .start(None, None, &ready, {
-            let block_sync_obs: Arc<dyn bitcoin_rs_wire::listener::BlockSyncObserver> =
-                sync.clone();
+            let block_sync_obs: Arc<dyn bitcoin_rs_p2p::listener::BlockSyncObserver> = sync.clone();
             ListenerExtras {
                 block_sync: Some(block_sync_obs),
                 ..ListenerExtras::default()

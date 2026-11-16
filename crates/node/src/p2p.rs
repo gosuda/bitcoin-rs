@@ -1,4 +1,4 @@
-pub mod block_announce;
+﻿pub mod block_announce;
 pub mod block_stager;
 pub mod chain_query;
 pub mod download_window;
@@ -63,14 +63,14 @@ pub use tx_relay::{
 
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_consensus::primitives::{Hash256, Header, Network, Tx, Txid, Wtxid};
-use bitcoin_rs_wire::compact_blocks::CompactBlockHints;
-use bitcoin_rs_wire::connection::{PeerRemote, PeerSource};
-use bitcoin_rs_wire::dispatch::TxInventory;
-use bitcoin_rs_wire::inbound::{BlockMemoryCredit, InboundBlock};
-use bitcoin_rs_wire::listener::{
+use bitcoin_rs_p2p::compact_blocks::CompactBlockHints;
+use bitcoin_rs_p2p::connection::{PeerRemote, PeerSource};
+use bitcoin_rs_p2p::dispatch::TxInventory;
+use bitcoin_rs_p2p::inbound::{BlockMemoryCredit, InboundBlock};
+use bitcoin_rs_p2p::listener::{
     BlockAnnounceObserver, BlockSyncObserver, IbdState, TxIngressObserver, TxPolicyObserver,
 };
-use bitcoin_rs_wire::wire::{Message, PeerError};
+use bitcoin_rs_p2p::wire::{Message, PeerError};
 use crossbeam_channel::Sender;
 use std::sync::Arc;
 pub fn peer_token(source: PeerSource) -> bitcoin_rs_mempool::PeerToken {
@@ -85,7 +85,7 @@ pub fn peer_source(token: bitcoin_rs_mempool::PeerToken) -> PeerSource {
     PeerSource::from_raw(token.endpoint, token.connection_id)
 }
 
-pub struct NodeIbd(pub Arc<bitcoin_rs_execution::chain::InitialBlockDownload>);
+pub struct NodeIbd(pub Arc<bitcoin_rs_chain::chain::InitialBlockDownload>);
 
 impl IbdState for NodeIbd {
     fn is_ibd(&self, now: u64, network: Network) -> bool {
@@ -204,7 +204,7 @@ impl NodeTxIngress {
 impl TxIngressObserver for NodeTxIngress {
     fn on_inbound_tx(&self, source: PeerSource, tx: Tx, memory_credit: Option<BlockMemoryCredit>) {
         let body = InboundBody::from(
-            bitcoin_rs_wire::InboundTx::new(tx, source).with_memory_credit(memory_credit),
+            bitcoin_rs_p2p::InboundTx::new(tx, source).with_memory_credit(memory_credit),
         );
         if self.cancel.is_triggered() {
             return;

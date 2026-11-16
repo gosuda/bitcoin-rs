@@ -1,6 +1,6 @@
-use super::*;
+﻿use super::*;
 use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
-use bitcoin_rs_wire::InboundBlock;
+use bitcoin_rs_p2p::InboundBlock;
 
 const WITNESS_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
@@ -147,7 +147,7 @@ fn malformed_pending_owner_is_disconnected_and_other_peer_gets_same_hash() -> Te
     );
     assert!(!sync.peer_table.is_current(source_a));
     assert!(sync.scheduler.lock().window.peer_in_staller_cooldown(
-        bitcoin_rs_wire::PeerSource::for_test(peer_a),
+        bitcoin_rs_p2p::PeerSource::for_test(peer_a),
         std::time::Instant::now()
     ));
 

@@ -1,4 +1,4 @@
-use std::str::FromStr as _;
+﻿use std::str::FromStr as _;
 
 use bitcoin_rs_node::test_support::TestError;
 
@@ -8,7 +8,7 @@ use bitcoin_rs_node::{
     NetworkSelection, NodeConfig, NotificationConfig, P2pOverrides, ScriptIndexMode, UserConfig,
     ValidationOverrides, ZmqEndpointConfig, resolve,
 };
-use bitcoin_rs_serving::zmq::ZmqTopic;
+use bitcoin_rs_rpc::zmq::ZmqTopic;
 
 #[test]
 fn public_listener_is_opt_in_and_budgets_resolve_independently() -> Result<()> {
@@ -290,7 +290,7 @@ fn scriptindex_utxo_mode_is_live_only() -> Result<()> {
             .indexes
             .script_index
             .enabled_capabilities(config.indexes.txindex),
-        bitcoin_rs_projection::IndexCapabilities::SCRIPT_LIVE
+        bitcoin_rs_index::IndexCapabilities::SCRIPT_LIVE
     );
     Ok(())
 }
@@ -535,7 +535,7 @@ fn operator_noban_defaults_empty_and_uses_the_subnet_owner() -> Result<()> {
         NodeConfig::default_for_network(Network::Regtest)
             .p2p
             .noban_subnets,
-        Vec::<bitcoin_rs_wire::IpSubnet>::new()
+        Vec::<bitcoin_rs_p2p::IpSubnet>::new()
     );
     let layer: UserConfig = toml::from_str(
         r#"network = "regtest"
@@ -558,7 +558,7 @@ p2p_noban = ["192.0.2.99/24", "::1"]
     environment.apply_env("BITCOIN_RS_P2P_NOBAN", std::ffi::OsStr::new(""))?;
     assert_eq!(
         resolve(&[&layer, &environment])?.p2p.noban_subnets,
-        Vec::<bitcoin_rs_wire::IpSubnet>::new()
+        Vec::<bitcoin_rs_p2p::IpSubnet>::new()
     );
     assert!(
         environment

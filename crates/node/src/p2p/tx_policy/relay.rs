@@ -1,4 +1,4 @@
-#[cfg(test)]
+﻿#[cfg(test)]
 use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
@@ -14,8 +14,8 @@ use hashbrown::{HashMap, HashSet};
 
 use super::{Identity, TxPolicy};
 use crate::p2p::{RelayOutcome, RelayRequest};
-use bitcoin_rs_wire::netgroup::{NetworkClass, canonical_ip, network_class};
-use bitcoin_rs_wire::{Message, OutboundRefusal, PeerSource};
+use bitcoin_rs_p2p::netgroup::{NetworkClass, canonical_ip, network_class};
+use bitcoin_rs_p2p::{Message, OutboundRefusal, PeerSource};
 
 const MAX_PENDING_PER_PEER: usize = 5_000;
 const MAX_PENDING: usize = 100_000;
@@ -31,7 +31,7 @@ pub(super) struct InboundClockKey {
 }
 
 impl InboundClockKey {
-    fn new(remote: bitcoin_rs_wire::PeerRemote, bind: std::net::SocketAddr) -> Self {
+    fn new(remote: bitcoin_rs_p2p::PeerRemote, bind: std::net::SocketAddr) -> Self {
         Self {
             network: remote.endpoint().map_or(NetworkClass::Onion, |endpoint| {
                 network_class(endpoint.address())
@@ -584,7 +584,7 @@ impl NodeTxPolicy {
                     peer.note_known(identity);
                 }
             }
-            Err(bitcoin_rs_wire::OutboundRefusal::Saturated(_)) => {
+            Err(bitcoin_rs_p2p::OutboundRefusal::Saturated(_)) => {
                 for request in offered {
                     if peer.pending.len() < MAX_PENDING_PER_PEER
                         && total < MAX_PENDING
@@ -595,7 +595,7 @@ impl NodeTxPolicy {
                     }
                 }
             }
-            Err(bitcoin_rs_wire::OutboundRefusal::Closed(_)) => {
+            Err(bitcoin_rs_p2p::OutboundRefusal::Closed(_)) => {
                 tracing::debug!(peer_addr = ?source.endpoint, "relay inventory queue closed; connection cancelled");
             }
         }

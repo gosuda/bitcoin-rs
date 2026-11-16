@@ -1,4 +1,4 @@
-use std::io::IsTerminal as _;
+﻿use std::io::IsTerminal as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
@@ -30,13 +30,13 @@ pub enum RunError {
     #[error(transparent)]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
-    P2pStart(#[from] bitcoin_rs_wire::P2pServiceError),
+    P2pStart(#[from] bitcoin_rs_p2p::P2pServiceError),
     #[error(transparent)]
-    P2pJoin(#[from] bitcoin_rs_wire::P2pJoinError),
+    P2pJoin(#[from] bitcoin_rs_p2p::P2pJoinError),
     #[error(transparent)]
-    Maintenance(#[from] bitcoin_rs_execution::MaintenanceError),
+    Maintenance(#[from] bitcoin_rs_chain::MaintenanceError),
     #[error(transparent)]
-    Checkpoint(Box<bitcoin_rs_execution::CheckpointError>),
+    Checkpoint(Box<bitcoin_rs_chain::CheckpointError>),
     #[error("{0}")]
     Node(crate::embed::NodeError),
     #[error("failed to bind RPC listener at {address}")]
@@ -110,22 +110,22 @@ pub enum RunError {
     PoolDirLock(#[from] crate::state::DataDirLockError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolLedger(#[from] bitcoin_rs_serving::mining::pool::ledger::LedgerError),
+    PoolLedger(#[from] bitcoin_rs_rpc::mining::pool::ledger::LedgerError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolCore(#[from] bitcoin_rs_serving::mining::pool::JobError),
+    PoolCore(#[from] bitcoin_rs_rpc::mining::pool::JobError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolChainView(#[from] bitcoin_rs_serving::mining::pool::ledger::ChainViewError),
+    PoolChainView(#[from] bitcoin_rs_rpc::mining::pool::ledger::ChainViewError),
     #[cfg(feature = "pool")]
     #[error("initial pool template")]
     PoolInitialTemplate {
         #[source]
-        source: bitcoin_rs_serving::mining::pool::RefreshError,
+        source: bitcoin_rs_rpc::mining::pool::RefreshError,
     },
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolLimiter(#[from] bitcoin_rs_serving::mining::pool::stratum::sv1::ConfigError),
+    PoolLimiter(#[from] bitcoin_rs_rpc::mining::pool::stratum::sv1::ConfigError),
     #[cfg(feature = "pool")]
     #[error("invalid pool difficulty: {difficulty_debug}")]
     PoolDifficulty { difficulty_debug: String },
@@ -180,12 +180,12 @@ pub enum RunError {
     PoolSv2BufferedInputMissing,
     #[cfg(feature = "pool-sv2")]
     #[error(transparent)]
-    PoolSv2Protocol(#[from] bitcoin_rs_serving::mining::pool::stratum::sv2::Error),
+    PoolSv2Protocol(#[from] bitcoin_rs_rpc::mining::pool::stratum::sv2::Error),
     #[cfg(feature = "pool-sv2")]
     #[error("creating authenticated SV2 connection")]
     PoolSv2ConnectionAccept {
         #[source]
-        source: bitcoin_rs_serving::mining::pool::stratum::sv2::ConfigError,
+        source: bitcoin_rs_rpc::mining::pool::stratum::sv2::ConfigError,
     },
     #[cfg(feature = "pool")]
     #[error("SV2 block channel has no admitted ledger account")]
@@ -209,7 +209,7 @@ pub enum RunError {
     #[error("SV2 block submission failed")]
     PoolSv2BlockSubmissionFailed {
         #[source]
-        source: bitcoin_rs_serving::mining::MiningControlError,
+        source: bitcoin_rs_rpc::mining::MiningControlError,
     },
     #[cfg(feature = "pool")]
     #[error("SV2 Undetermined block lost its reservation")]
@@ -247,8 +247,8 @@ impl From<crate::state::open::NodeOpenError> for RunError {
     }
 }
 
-impl From<bitcoin_rs_execution::CheckpointError> for RunError {
-    fn from(error: bitcoin_rs_execution::CheckpointError) -> Self {
+impl From<bitcoin_rs_chain::CheckpointError> for RunError {
+    fn from(error: bitcoin_rs_chain::CheckpointError) -> Self {
         Self::Checkpoint(Box::new(error))
     }
 }
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn explicit_directive_is_respected_as_is() {
-        let level = "debug,bitcoin_rs_wire=trace";
+        let level = "debug,bitcoin_rs_p2p=trace";
         let directive = build_filter_directive(level);
         assert_eq!(directive, level);
     }

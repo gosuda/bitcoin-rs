@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -11,12 +11,12 @@ use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, Hash256, Header, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid,
     Witness, Wtxid, consensus_bytes, unix_time_secs,
 };
-use bitcoin_rs_wire::compact_blocks::{
+use bitcoin_rs_p2p::compact_blocks::{
     CompactBlockHints, MAX_BLOCK_TX_COUNT, MAX_PENDING_RETAINED_BYTES, Outcome, PENDING_DEADLINE,
     Reconstruction,
 };
-use bitcoin_rs_wire::inv::wire_block_hash;
-use bitcoin_rs_wire::peer::COMPACT_BLOCK_VERSION;
+use bitcoin_rs_p2p::inv::wire_block_hash;
+use bitcoin_rs_p2p::peer::COMPACT_BLOCK_VERSION;
 
 struct SetHints {
     txs: Vec<Tx>,
@@ -103,7 +103,7 @@ fn conforming_block(txs: Vec<Tx>) -> Block {
             merkle_root: Hash256::default(),
             time: 7,
             bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(
-                bitcoin_rs_execution::chain::regtest_fixture::REGTEST_BITS,
+                bitcoin_rs_chain::chain::regtest_fixture::REGTEST_BITS,
             ),
             nonce: 9,
         },

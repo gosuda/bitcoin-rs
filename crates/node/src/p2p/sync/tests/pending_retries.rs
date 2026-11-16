@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 #[test]
 fn tick_retries_expired_pending_before_new_heights() -> TestResult {
@@ -12,7 +12,7 @@ fn tick_retries_expired_pending_before_new_heights() -> TestResult {
         }
         .with_pending_timeout_override(Duration::ZERO),
     );
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -50,7 +50,7 @@ fn tick_fills_mixed_retry_and_new_height_batch() -> TestResult {
         }
         .with_pending_timeout_override(Duration::ZERO),
     );
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -96,12 +96,12 @@ fn tick_applies_contiguous_blocks_before_requesting_more() -> TestResult {
         inbound_headers_tx: _inbound_headers_tx,
         inbound_blocks_tx,
     } = SyncHarness::new(tree);
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(genesis))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(genesis))?;
 
     sync.tick();
 
@@ -144,7 +144,7 @@ fn oversized_received_block_releases_pending_budget_for_retry() -> TestResult {
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -163,7 +163,7 @@ fn oversized_received_block_releases_pending_budget_for_retry() -> TestResult {
     let _headers = rx.try_recv()?;
     assert_eq!(sync.scheduler.lock().window.pending_len(), 1);
 
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(block))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block))?;
     sync.drain_inbound_blocks();
 
     {
@@ -228,7 +228,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers() -> TestResult 
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -246,7 +246,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers() -> TestResult 
     );
     let _headers = rx.try_recv()?;
 
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(block2.clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block2.clone()))?;
     sync.drain_inbound_blocks();
     assert_eq!(
         sync.scheduler.lock().stager.received_bytes(),
@@ -257,7 +257,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers() -> TestResult 
     assert!(rx.try_recv().is_err());
     assert_eq!(sync.scheduler.lock().stager.received_len(), 1);
 
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(block1))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block1))?;
     sync.tick();
 
     let applied_height = applied_tip
@@ -375,7 +375,7 @@ fn deterministic_initial_sync_proxy_reports_pipeline_budgets() -> TestResult {
         let _headers = outbound_rx.try_recv()?;
 
         for block in blocks[1..].iter().rev() {
-            inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(block.clone()))?;
+            inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))?;
         }
         sync.drain_inbound_blocks();
         let (received_count, peak_staged_bytes) = {
@@ -388,7 +388,7 @@ fn deterministic_initial_sync_proxy_reports_pipeline_budgets() -> TestResult {
         assert_gauge(&recorder, "node.sync.received_blocks", received_count);
         assert_gauge(&recorder, "node.sync.received_bytes", peak_staged_bytes);
 
-        inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
         let apply_started = Instant::now();
         sync.drain_inbound_blocks();
         let apply_elapsed = apply_started.elapsed();

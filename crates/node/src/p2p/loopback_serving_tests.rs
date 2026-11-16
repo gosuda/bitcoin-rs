@@ -9,11 +9,11 @@ use bitcoin::bip152::ShortId;
 use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
+use bitcoin_rs_chain::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, LockTime, Network,
     OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
-use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
 use bitcoin_rs_storage::{
     block_body::{BlockBodyReadError, BlockBodySource},
     split_chainstate_cache_budget,
@@ -21,10 +21,10 @@ use bitcoin_rs_storage::{
 use parking_lot::RwLock;
 
 use crate::p2p::chain_query::{ActiveChainQuery, RecentBlockSlot};
-use bitcoin_rs_wire::listener::{
+use bitcoin_rs_p2p::listener::{
     ListenerError, bind_listener, configure_peer_stream, run_outbound_handshake, serve, test_shared,
 };
-use bitcoin_rs_wire::{
+use bitcoin_rs_p2p::{
     ChainQuery, Message, Peer, PeerCounters, PeerError, PeerLease, PeerSession, PeerTable,
 };
 
@@ -32,7 +32,7 @@ const MAGIC: bitcoin::p2p::Magic = bitcoin::p2p::Magic::BITCOIN;
 const FAILSAFE: Duration = Duration::from_secs(20);
 
 fn wire_len_of(message: &Message) -> Result<usize, PeerError> {
-    bitcoin_rs_wire::wire::wire_len(message)
+    bitcoin_rs_p2p::wire::wire_len(message)
 }
 
 fn wait_until(what: &str, mut condition: impl FnMut() -> bool) -> Result<(), TestError> {
@@ -45,10 +45,10 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) -> Result<(), Tes
     }
     Ok(())
 }
-use bitcoin_rs_wire::connection::{
+use bitcoin_rs_p2p::connection::{
     OUTBOUND_QUEUE_MAX_BYTES, Refusal, SHARED_OUTBOUND_QUEUE_MAX_BYTES, SharedOutboundBudget,
 };
-use bitcoin_rs_wire::inv::{MAX_INV_PER_MSG, wire_block_hash};
+use bitcoin_rs_p2p::inv::{MAX_INV_PER_MSG, wire_block_hash};
 
 #[derive(Debug, thiserror::Error)]
 enum TestError {
@@ -59,7 +59,7 @@ enum TestError {
     #[error(transparent)]
     TryFromInt(#[from] std::num::TryFromIntError),
     #[error(transparent)]
-    Chain(#[from] bitcoin_rs_execution::chain::ChainError),
+    Chain(#[from] bitcoin_rs_chain::chain::ChainError),
     #[error(transparent)]
     Primitives(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
@@ -149,7 +149,7 @@ fn child_block(prev_blockhash: BlockHash, nonce: u32, txs: Vec<Tx>) -> Fallible<
             merkle_root: Hash256::from_le_bytes(&root),
             time: nonce,
             bits: CompactTarget::from_consensus(
-                bitcoin_rs_execution::chain::regtest_fixture::REGTEST_BITS,
+                bitcoin_rs_chain::chain::regtest_fixture::REGTEST_BITS,
             ),
             nonce,
         },
@@ -385,7 +385,7 @@ fn session_of(node: &Node, client: &Client) -> Fallible<PeerSession> {
     let mut found = None;
     wait_until("the node to publish the client's session", || {
         found = node.table.sessions().into_iter().find(|session| {
-            session.addr == bitcoin_rs_wire::PeerRemote::Endpoint(client.local)
+            session.addr == bitcoin_rs_p2p::PeerRemote::Endpoint(client.local)
                 && session.info.is_some()
         });
         found.is_some()
@@ -651,7 +651,7 @@ fn the_saturated_aggregate_refuses_a_second_connection_until_the_first_closes() 
     assert!(hog_messages > 1, "the aggregate holds several real frames");
 
     let reserve =
-        bitcoin_rs_wire::wire::HEADER_LEN + bitcoin_rs_wire::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
+        bitcoin_rs_p2p::wire::HEADER_LEN + bitcoin_rs_p2p::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
     let bulk_limit = SHARED_OUTBOUND_QUEUE_MAX_BYTES - reserve;
     let refusal_point = bulk_limit - reserve;
     assert!(

@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 #[test]
 fn non_witness_peer_not_counted_toward_fanout_threshold() -> TestResult {
@@ -22,7 +22,7 @@ fn far_behind_duplicate_of_applied_block_is_not_staged() -> TestResult {
         blocks.iter().map(Block::block_hash).collect::<Vec<_>>()
     );
     for block in &blocks {
-        blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(block.clone()))?;
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))?;
     }
     sync.tick();
     assert_eq!(
@@ -38,7 +38,7 @@ fn far_behind_duplicate_of_applied_block_is_not_staged() -> TestResult {
         "the replay must be unsolicited after its request was applied"
     );
 
-    blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
 
     assert!(!sync.scheduler.lock().stager.contains(&stale_hash));
@@ -54,7 +54,7 @@ fn received_only_state_uses_scan_path_without_duplicate_request() -> TestResult 
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(3)?;
     let (_, blocks) = mined_chain(3, 0)?;
     stage_body(&sync, &blocks[1]);
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));

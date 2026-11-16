@@ -3,14 +3,14 @@ use arc_swap::ArcSwapOption;
 use bitcoin::bip152::HeaderAndShortIds;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_compact_blocks::CmpctBlock;
+use bitcoin_rs_chain::chain::{
+    BlockTree, BlockTreeReader, InitialBlockDownload, NodeStatus, TipReader,
+};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, CompactTarget, Header, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Witness,
 };
-use bitcoin_rs_execution::chain::{
-    BlockTree, BlockTreeReader, InitialBlockDownload, NodeStatus, TipReader,
-};
-use bitcoin_rs_wire::dispatch::InventoryServing;
+use bitcoin_rs_p2p::dispatch::InventoryServing;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -19,7 +19,7 @@ struct MockAnnounceChain {
     active_len: usize,
     committed_height: AtomicU32,
     orphan_hashes: Vec<BlockHash>,
-    stale_announcement: Mutex<Option<bitcoin_rs_wire::staletip::StaleTipAnnouncement>>,
+    stale_announcement: Mutex<Option<bitcoin_rs_p2p::staletip::StaleTipAnnouncement>>,
 }
 
 impl MockAnnounceChain {
@@ -67,19 +67,19 @@ impl ChainQuery for MockAnnounceChain {
         &self,
         _tip: Hash256,
         _peer_tips: &[Hash256],
-    ) -> Option<bitcoin_rs_wire::dispatch::StaleTipHeaders> {
+    ) -> Option<bitcoin_rs_p2p::dispatch::StaleTipHeaders> {
         self.stale_announcement
             .lock()
             .clone()
-            .map(bitcoin_rs_wire::dispatch::StaleTipHeaders::Headers)
+            .map(bitcoin_rs_p2p::dispatch::StaleTipHeaders::Headers)
     }
     fn serve_inventory_blocks(
         &self,
         _items: &[Inventory],
         _compact_version: Option<u64>,
         _headroom: &dyn Fn() -> bool,
-        _serve: &mut dyn FnMut(Message) -> Result<(), bitcoin_rs_wire::wire::PeerError>,
-    ) -> Result<InventoryServing, bitcoin_rs_wire::wire::PeerError> {
+        _serve: &mut dyn FnMut(Message) -> Result<(), bitcoin_rs_p2p::wire::PeerError>,
+    ) -> Result<InventoryServing, bitcoin_rs_p2p::wire::PeerError> {
         Ok(InventoryServing::default())
     }
 
@@ -88,7 +88,7 @@ impl ChainQuery for MockAnnounceChain {
         _request: &bitcoin::bip152::BlockTransactionsRequest,
         _compact_version: Option<u64>,
         _headroom: &dyn Fn() -> bool,
-    ) -> Result<Option<Message>, bitcoin_rs_wire::wire::PeerError> {
+    ) -> Result<Option<Message>, bitcoin_rs_p2p::wire::PeerError> {
         Ok(None)
     }
 
@@ -167,11 +167,11 @@ impl ChainQuery for MockAnnounceChain {
     }
 }
 
-fn test_addr(port: u16) -> bitcoin_rs_wire::PeerEndpoint {
-    bitcoin_rs_wire::PeerEndpoint::Ip(SocketAddr::from(([127, 0, 0, 1], port)))
+fn test_addr(port: u16) -> bitcoin_rs_p2p::PeerEndpoint {
+    bitcoin_rs_p2p::PeerEndpoint::Ip(SocketAddr::from(([127, 0, 0, 1], port)))
 }
 
-fn test_peer_info(addr: bitcoin_rs_wire::PeerEndpoint, send_headers: bool) -> PeerInfo {
+fn test_peer_info(addr: bitcoin_rs_p2p::PeerEndpoint, send_headers: bool) -> PeerInfo {
     PeerInfo {
         addr: addr.into(),
         endpoint: Some(addr),
@@ -187,22 +187,22 @@ fn test_peer_info(addr: bitcoin_rs_wire::PeerEndpoint, send_headers: bool) -> Pe
         best_known_height: 0,
         conn_time: 0,
         inbound: false,
-        addr_bind: bitcoin_rs_wire::endpoint::TransportRemote::new(
+        addr_bind: bitcoin_rs_p2p::endpoint::TransportRemote::new(
             addr.as_ip().expect("ip test peer"),
         ),
         time_offset: 0,
-        counters: Arc::new(bitcoin_rs_wire::counters::PeerCounters::default()),
-        transport: bitcoin_rs_wire::transport::TransportProtocol::V1,
+        counters: Arc::new(bitcoin_rs_p2p::counters::PeerCounters::default()),
+        transport: bitcoin_rs_p2p::transport::TransportProtocol::V1,
     }
 }
 
 fn setup_peer(
     table: &Arc<PeerTable>,
     announcer: &BlockAnnouncer,
-    addr: bitcoin_rs_wire::PeerEndpoint,
+    addr: bitcoin_rs_p2p::PeerEndpoint,
     send_headers: bool,
-) -> (PeerLease, bitcoin_rs_wire::test_support::MessageReceiver) {
-    let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+) -> (PeerLease, bitcoin_rs_p2p::test_support::MessageReceiver) {
+    let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(tx);
     table.register(addr, lease.clone());
     let info = test_peer_info(addr, send_headers);
@@ -212,7 +212,7 @@ fn setup_peer(
     (lease, rx)
 }
 
-fn source(table: &PeerTable, addr: bitcoin_rs_wire::PeerEndpoint) -> PeerSource {
+fn source(table: &PeerTable, addr: bitcoin_rs_p2p::PeerEndpoint) -> PeerSource {
     table
         .lease(addr)
         .expect("live test peer")
@@ -222,7 +222,7 @@ fn source(table: &PeerTable, addr: bitcoin_rs_wire::PeerEndpoint) -> PeerSource 
 fn mark_known(
     table: &PeerTable,
     _announcer: &BlockAnnouncer,
-    addr: bitcoin_rs_wire::PeerEndpoint,
+    addr: bitcoin_rs_p2p::PeerEndpoint,
     hash: Hash256,
 ) {
     table.note_announced_block(source(table, addr), hash);
@@ -230,11 +230,11 @@ fn mark_known(
 
 fn note_compact_preference(
     table: &PeerTable,
-    addr: bitcoin_rs_wire::PeerEndpoint,
+    addr: bitcoin_rs_p2p::PeerEndpoint,
     high_bandwidth: bool,
     version: u64,
 ) {
-    let mut negotiation = bitcoin_rs_wire::peer::CompactBlockNegotiation::default();
+    let mut negotiation = bitcoin_rs_p2p::peer::CompactBlockNegotiation::default();
     negotiation.record_remote_preference(&SendCmpct {
         send_compact: high_bandwidth,
         version,
@@ -254,17 +254,16 @@ fn announcement_saturated_retried() {
         Arc::clone(&chain) as Arc<dyn ChainQuery>,
         BlockAnnounceConfig::default(),
     );
-    let aggregate =
-        Arc::new(bitcoin_rs_wire::connection::SharedOutboundBudget::with_limits(512, 0));
+    let aggregate = Arc::new(bitcoin_rs_p2p::connection::SharedOutboundBudget::with_limits(512, 0));
     let addr = test_addr(1020);
-    let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(tx).with_shared_budget(&aggregate);
     table.register(addr, lease.clone());
     table.publish_info(addr, &lease, test_peer_info(addr, true));
     announcer.on_peer_ready();
     while rx.try_recv().is_ok() {}
     mark_known(&table, &announcer, addr, chain.hash_at(0));
-    let hold = bitcoin_rs_wire::test_support::hog(&aggregate, 512);
+    let hold = bitcoin_rs_p2p::test_support::hog(&aggregate, 512);
 
     assert!(announcer.process_tip().is_empty(), "nothing was queued");
     assert!(!lease.is_cancelled(), "a full aggregate is not a dead peer");
@@ -300,10 +299,9 @@ fn demotion_saturated_keeps_the_selection_and_retries() {
         Arc::clone(&chain) as Arc<dyn ChainQuery>,
         BlockAnnounceConfig::default(),
     );
-    let aggregate =
-        Arc::new(bitcoin_rs_wire::connection::SharedOutboundBudget::with_limits(256, 0));
+    let aggregate = Arc::new(bitcoin_rs_p2p::connection::SharedOutboundBudget::with_limits(256, 0));
     let addr = test_addr(1021);
-    let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(tx).with_shared_budget(&aggregate);
     table.register(addr, lease.clone());
     table.publish_info(addr, &lease, test_peer_info(addr, true));
@@ -315,7 +313,7 @@ fn demotion_saturated_keeps_the_selection_and_retries() {
     let mut info = test_peer_info(addr, true);
     info.compact_block_relay = false;
     table.publish_info(addr, &lease, info);
-    let hold = bitcoin_rs_wire::test_support::hog(&aggregate, 256);
+    let hold = bitcoin_rs_p2p::test_support::hog(&aggregate, 256);
     assert_eq!(announcer.reconcile_high_bandwidth_peers(), Vec::new());
     assert_eq!(
         announcer.high_bandwidth_requested_peers(),
@@ -347,8 +345,7 @@ fn rotation_saturated_restores_full_selection_in_place_and_retries() {
         Arc::clone(&chain) as Arc<dyn ChainQuery>,
         BlockAnnounceConfig::default(),
     );
-    let aggregate =
-        Arc::new(bitcoin_rs_wire::connection::SharedOutboundBudget::with_limits(256, 0));
+    let aggregate = Arc::new(bitcoin_rs_p2p::connection::SharedOutboundBudget::with_limits(256, 0));
     let a1 = test_addr(1061);
     let a2 = test_addr(1062);
     let a3 = test_addr(1063);
@@ -356,7 +353,7 @@ fn rotation_saturated_restores_full_selection_in_place_and_retries() {
     let mut leases = Vec::new();
     let mut rxs = Vec::new();
     for addr in [a1, a2, a3] {
-        let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+        let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
         let lease = PeerLease::new(tx).with_shared_budget(&aggregate);
         table.register(addr, lease.clone());
         table.publish_info(addr, &lease, test_peer_info(addr, true));
@@ -369,7 +366,7 @@ fn rotation_saturated_restores_full_selection_in_place_and_retries() {
     for rx in &rxs {
         while rx.try_recv().is_ok() {}
     }
-    let (tx4, rx4) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx4, rx4) = bitcoin_rs_p2p::test_support::message_channel();
     let lease4 = PeerLease::new(tx4).with_shared_budget(&aggregate);
     table.register(a4, lease4.clone());
     table.publish_info(a4, &lease4, test_peer_info(a4, true));
@@ -379,7 +376,7 @@ fn rotation_saturated_restores_full_selection_in_place_and_retries() {
     assert!(table.note_useful_block(leases[1].source(Some(a2))));
     assert!(table.note_useful_block(leases[2].source(Some(a3))));
     assert!(table.note_useful_block(lease4.source(Some(a4))));
-    let hold = bitcoin_rs_wire::test_support::hog(&aggregate, 256);
+    let hold = bitcoin_rs_p2p::test_support::hog(&aggregate, 256);
     assert_eq!(announcer.reconcile_high_bandwidth_peers(), Vec::new());
     assert_eq!(
         announcer.high_bandwidth_requested_peers(),
@@ -466,17 +463,16 @@ fn worker_timeout_retries_saturated_announcement_without_new_wake() {
         Arc::clone(&chain) as Arc<dyn ChainQuery>,
         BlockAnnounceConfig::default(),
     ));
-    let aggregate =
-        Arc::new(bitcoin_rs_wire::connection::SharedOutboundBudget::with_limits(512, 0));
+    let aggregate = Arc::new(bitcoin_rs_p2p::connection::SharedOutboundBudget::with_limits(512, 0));
     let addr = test_addr(1071);
-    let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(tx).with_shared_budget(&aggregate);
     table.register(addr, lease.clone());
     table.publish_info(addr, &lease, test_peer_info(addr, true));
     announcer.on_peer_ready();
     while rx.try_recv().is_ok() {}
     mark_known(&table, announcer.as_ref(), addr, chain.hash_at(0));
-    let hold = bitcoin_rs_wire::test_support::hog(&aggregate, 512);
+    let hold = bitcoin_rs_p2p::test_support::hog(&aggregate, 512);
     let (queue, worker_rx) = BlockAnnounceQueue::new();
     assert!(queue.wake(), "the wake enqueued the tip");
     let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
@@ -1037,7 +1033,7 @@ fn test_bip152_promotion_sends_sendcmpct_true() {
     );
 
     let addr = test_addr(1008);
-    let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(tx);
     table.register(addr, lease.clone());
     table.publish_info(addr, &lease, test_peer_info(addr, true));
@@ -1073,7 +1069,7 @@ fn high_bandwidth_selection_ignores_relay_role_but_requires_compact_v2() {
     note_compact_preference(&table, v1_addr, false, 1);
 
     let block_only_addr = test_addr(1007);
-    let (block_only_tx, block_only_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (block_only_tx, block_only_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let block_only = PeerLease::new_block_relay(block_only_tx);
     table.register(block_only_addr, block_only.clone());
     table.publish_info(
@@ -1111,7 +1107,7 @@ fn block_relay_only_peer_with_high_bandwidth_receives_compact_push() {
     );
 
     let addr = test_addr(1042);
-    let (tx, _rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, _rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new_block_relay(tx);
     table.register(addr, lease.clone());
     table.publish_info(addr, &lease, test_peer_info(addr, true));
@@ -1139,7 +1135,7 @@ fn ready_peer_waits_for_compact_v2_support_before_promotion() {
         BlockAnnounceConfig::default(),
     );
     let addr = test_addr(1011);
-    let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(tx);
     table.register(addr, lease.clone());
     let info = test_peer_info(addr, false);
@@ -1175,7 +1171,7 @@ fn stale_disconnect_keeps_replacement_announcement_state() {
     let (old, _old_rx) = setup_peer(&table, &announcer, addr, true);
     let old_source = old.source(Some(addr));
 
-    let (replacement_tx, _replacement_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (replacement_tx, _replacement_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let replacement = PeerLease::new(replacement_tx);
     table.register(addr, replacement.clone());
     assert!(table.publish_info(addr, &replacement, test_peer_info(addr, true),));
@@ -1232,7 +1228,7 @@ fn useful_compact_v2_peer_rotates_the_bounded_selection() {
     note_compact_preference(&table, a3, false, 2);
     announcer.reconcile_high_bandwidth_peers();
 
-    let (tx4, rx4) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx4, rx4) = bitcoin_rs_p2p::test_support::message_channel();
     let lease4 = PeerLease::new(tx4);
     table.register(a4, lease4.clone());
     table.publish_info(a4, &lease4, test_peer_info(a4, true));
@@ -1705,8 +1701,8 @@ fn post_commit_process_tip_sends_no_second_cmpctblock() {
 
 #[test]
 fn stale_tip_relayed_to_bip332_peer_and_suppressed_on_repeat() {
-    use bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header;
-    use bitcoin_rs_wire::staletip::{CompressedHeader, StaleTipAnnouncement};
+    use bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_header;
+    use bitcoin_rs_p2p::staletip::{CompressedHeader, StaleTipAnnouncement};
     let table = Arc::new(PeerTable::new());
     let chain = Arc::new(MockAnnounceChain::new(5));
     let addr = test_addr(1401);
@@ -1800,8 +1796,8 @@ fn stale_tip_relayed_to_bip332_peer_and_suppressed_on_repeat() {
 
 #[test]
 fn prefers_blocks_peer_gets_same_retained_tip_once_body_available() {
-    use bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header;
-    use bitcoin_rs_wire::staletip::{CompressedHeader, StaleTipAnnouncement};
+    use bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_header;
+    use bitcoin_rs_p2p::staletip::{CompressedHeader, StaleTipAnnouncement};
     let table = Arc::new(PeerTable::new());
     let chain = Arc::new(MockAnnounceChain::new(5));
     let addr = test_addr(1403);

@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use bitcoin_rs_chain::recovery::{ResumeSource, prepare_initial_state_with_engine};
 use bitcoin_rs_consensus::primitives::{Hash256, Network, OutPoint, Txid};
-use bitcoin_rs_execution::recovery::{ResumeSource, prepare_initial_state_with_engine};
 use bitcoin_rs_storage::checkpoint::{CHECKPOINT_ROOT, CheckpointManifestV1, MANIFEST_FILE};
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::utxo::record::UtxoRecord;

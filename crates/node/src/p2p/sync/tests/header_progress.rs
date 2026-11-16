@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 // SYNC-06
 #[test]
@@ -25,7 +25,7 @@ fn tick_sends_getdata_for_headers_above_applied_tip() -> TestResult {
         inbound_headers_tx: _inbound_headers_tx,
         inbound_blocks_tx: _inbound_blocks_tx,
     } = SyncHarness::new(tree);
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -94,7 +94,7 @@ fn tick_fetches_new_tip_headers_from_at_tip_peers() -> TestResult {
         ..
     } = SyncHarness::new(tree);
     applied_tip.store(Some(Arc::new(applied)));
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -174,7 +174,7 @@ fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> TestResult {
         ..
     } = SyncHarness::new(tree);
     applied_tip.store(Some(Arc::new(applied)));
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));

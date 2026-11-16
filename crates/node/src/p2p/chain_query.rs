@@ -1,4 +1,4 @@
-use bitcoin_rs_wire::inv::native_block_hash;
+use bitcoin_rs_p2p::inv::native_block_hash;
 
 use std::sync::Arc;
 
@@ -7,24 +7,24 @@ use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
+use bitcoin_rs_chain::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
 use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::layout::{ParsedBlock, ParsedTransaction};
 use bitcoin_rs_consensus::primitives::{
     BlockHash, BlockImage, Hash256, Header, Network, deserialize,
 };
-use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use parking_lot::Mutex;
 #[cfg(test)]
 use parking_lot::RwLock;
 
-use bitcoin_rs_wire::dispatch::{
+use bitcoin_rs_p2p::dispatch::{
     ChainQuery, CommittedTip, FilterRequest, FilterServing, InventoryServing, StaleTipHeaders,
 };
-use bitcoin_rs_wire::staletip::{
+use bitcoin_rs_p2p::staletip::{
     CompressedHeader, MAX_STALETIP_HEADERS, STALETIP_RECENT_WINDOW, StaleTipAnnouncement,
 };
-use bitcoin_rs_wire::wire::{Message, PeerError};
+use bitcoin_rs_p2p::wire::{Message, PeerError};
 
 const MAX_CMPCTBLOCK_DEPTH: u32 = 5;
 
@@ -63,7 +63,7 @@ pub struct ActiveChainQuery {
     applied_tip: TipReader,
     block_body_source: Option<Arc<dyn BlockBodySource>>,
     network: Network,
-    compact_filters: Option<Arc<dyn bitcoin_rs_projection::CompactFilterQuery>>,
+    compact_filters: Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>>,
     recent: RecentBlockSlot,
 }
 
@@ -89,7 +89,7 @@ impl ActiveChainQuery {
     #[must_use]
     pub fn with_compact_filters(
         mut self,
-        filters: Option<Arc<dyn bitcoin_rs_projection::CompactFilterQuery>>,
+        filters: Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>>,
     ) -> Self {
         self.compact_filters = filters;
         self
@@ -437,7 +437,7 @@ impl ChainQuery for ActiveChainQuery {
         let progress = StreamProgress {
             emitted,
             halted,
-            retry: matches!(result, Err(bitcoin_rs_projection::TxQueryError::Retry(_))),
+            retry: matches!(result, Err(bitcoin_rs_index::TxQueryError::Retry(_))),
         };
         if let Some(serving) = evaluate_stream_progress(pending, &bounds, end, progress)? {
             return Ok(serving);
@@ -782,7 +782,7 @@ impl ActiveChainQuery {
 
 fn stale_block_is_recent(
     tree: &BlockTree,
-    node: &bitcoin_rs_execution::chain::BlockTreeNode,
+    node: &bitcoin_rs_chain::chain::BlockTreeNode,
     network: Network,
 ) -> bool {
     let Some(best_tip) = tree.tip() else {
@@ -797,7 +797,7 @@ fn stale_block_is_recent(
     if node.chainwork >= best.chainwork {
         return true;
     }
-    let work = bitcoin_rs_execution::chain::block_work(&best.header);
+    let work = bitcoin_rs_chain::chain::block_work(&best.header);
     work != ChainWork::ZERO
         && (best.chainwork - node.chainwork)
             .checked_mul(ChainWork::from(network.target_spacing_seconds()))
@@ -861,7 +861,7 @@ pub(crate) fn cmpct_message_from_image(image: &BlockImage, version: u64) -> Opti
 
 fn header_for_active_stop(
     tree: &BlockTree,
-    tip_id: bitcoin_rs_execution::chain::NodeId,
+    tip_id: bitcoin_rs_chain::chain::NodeId,
     stop_hash: BlockHash,
 ) -> Option<Header> {
     if stop_hash == BlockHash::default() {

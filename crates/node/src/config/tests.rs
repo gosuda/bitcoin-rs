@@ -1,4 +1,4 @@
-use crate::test_support::TestError;
+﻿use crate::test_support::TestError;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -138,7 +138,7 @@ fn pool_layers_preserve_explicit_fields_and_override_policy() -> Result<(), Test
     share_target_bytes[27] = 0x66;
     assert_eq!(
         pool.share_target,
-        bitcoin_rs_serving::mining::pool::ShareTarget::from_le_bytes(share_target_bytes)?
+        bitcoin_rs_rpc::mining::pool::ShareTarget::from_le_bytes(share_target_bytes)?
     );
     assert_eq!(pool.ledger_config().window_work, 1000);
     assert_eq!(pool.ledger_config().pool_fee_bps, 125);
@@ -443,7 +443,7 @@ fn generated_rpc_cookie_is_private_and_rotates() -> Result<(), TestError> {
 fn overlay_targets_without_routes_are_rejected() -> Result<(), TestError> {
     let onlynet_onion = UserConfig {
         p2p: P2pOverrides {
-            onlynet: Some(vec![bitcoin_rs_wire::PeerNetwork::Onion]),
+            onlynet: Some(vec![bitcoin_rs_p2p::PeerNetwork::Onion]),
             ..P2pOverrides::default()
         },
         ..UserConfig::default()
@@ -452,7 +452,7 @@ fn overlay_targets_without_routes_are_rejected() -> Result<(), TestError> {
 
     let onlynet_i2p = UserConfig {
         p2p: P2pOverrides {
-            onlynet: Some(vec![bitcoin_rs_wire::PeerNetwork::I2p]),
+            onlynet: Some(vec![bitcoin_rs_p2p::PeerNetwork::I2p]),
             ..P2pOverrides::default()
         },
         ..UserConfig::default()
@@ -475,8 +475,8 @@ fn overlay_targets_without_routes_are_rejected() -> Result<(), TestError> {
             i2p_sam: Some(SocketAddr::from(([127, 0, 0, 1], 7656))),
             i2p_accept: Some(true),
             onlynet: Some(vec![
-                bitcoin_rs_wire::PeerNetwork::Onion,
-                bitcoin_rs_wire::PeerNetwork::I2p,
+                bitcoin_rs_p2p::PeerNetwork::Onion,
+                bitcoin_rs_p2p::PeerNetwork::I2p,
             ]),
             ..P2pOverrides::default()
         },
@@ -504,7 +504,7 @@ fn overlay_targets_without_routes_are_rejected() -> Result<(), TestError> {
 
 #[test]
 fn malformed_overlay_connect_targets_are_rejected() -> Result<(), TestError> {
-    let good_tor = bitcoin_rs_wire::endpoint::format_endpoint(
+    let good_tor = bitcoin_rs_p2p::endpoint::format_endpoint(
         bitcoin_rs_consensus::primitives::PeerEndpoint::TorV3 {
             key: [3u8; 32],
             port: 8333,
@@ -600,8 +600,8 @@ fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> Re
     let zero_port_config = super::resolve(&[&routes_layer, &zero_port_user_config])?;
     assert_eq!(zero_port_config.p2p.connect, vec![zero_port_i2p.clone()]);
     assert_eq!(
-        bitcoin_rs_wire::endpoint::classify_endpoint(&zero_port_i2p),
-        bitcoin_rs_wire::endpoint::ClassifiedEndpoint::Valid(
+        bitcoin_rs_p2p::endpoint::classify_endpoint(&zero_port_i2p),
+        bitcoin_rs_p2p::endpoint::ClassifiedEndpoint::Valid(
             bitcoin_rs_consensus::primitives::PeerEndpoint::I2p {
                 hash: [0u8; 32],
                 port: 0,
@@ -653,7 +653,7 @@ fn ordinary_hostname_connect_targets_remain_accepted_at_startup() -> Result<(), 
 
 #[test]
 fn valid_overlay_connect_targets_enforce_routes() -> Result<(), TestError> {
-    let good_tor = bitcoin_rs_wire::endpoint::format_endpoint(
+    let good_tor = bitcoin_rs_p2p::endpoint::format_endpoint(
         bitcoin_rs_consensus::primitives::PeerEndpoint::TorV3 {
             key: [3u8; 32],
             port: 8333,
@@ -793,7 +793,7 @@ fn hostname_connect_targets_are_rejected_with_privacy_route() {
 
 #[test]
 fn typed_overlay_connect_targets_are_accepted_with_dns_disabled() -> Result<(), TestError> {
-    let good_tor = bitcoin_rs_wire::endpoint::format_endpoint(
+    let good_tor = bitcoin_rs_p2p::endpoint::format_endpoint(
         bitcoin_rs_consensus::primitives::PeerEndpoint::TorV3 {
             key: [9u8; 32],
             port: 8333,

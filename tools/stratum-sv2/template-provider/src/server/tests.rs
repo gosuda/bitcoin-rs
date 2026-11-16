@@ -1,8 +1,8 @@
-use super::*;
+﻿use super::*;
 
 use crate::{EXAMPLE_PRIVATE_KEY_HEX, Network, NodeConfig, RETAINED_TEMPLATES, RuntimeInputs};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolObserver, MutationEnvelope};
-use bitcoin_rs_serving::mining::{GenerateRequest, GenerateSelection, GeneratedBlock, solve_block};
+use bitcoin_rs_rpc::mining::{GenerateRequest, GenerateSelection, GeneratedBlock, solve_block};
 use bitcoin_rs_consensus::primitives::{
     Amount, BlockHash, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, consensus_bytes,
 };

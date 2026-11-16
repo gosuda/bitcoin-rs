@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-use bitcoin_rs_consensus::primitives::Network;
-use bitcoin_rs_execution::recovery::{
+use bitcoin_rs_chain::recovery::{
     ResumeSource, prepare_initial_state_with_engine, requires_full_revalidation,
 };
+use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER;
 use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore};

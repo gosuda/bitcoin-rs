@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arc_swap::ArcSwapOption;
@@ -11,11 +11,11 @@ use crate::p2p::sync::BlockSync;
 use crate::p2p::sync::chain::SyncChain;
 use crate::p2p::sync::test_support::{TestChain, mined_chain};
 use crate::test_support::{TestError, TestResult};
-use bitcoin_rs_execution::chain::regtest_fixture;
-use bitcoin_rs_wire::PeerSource;
-use bitcoin_rs_wire::connection::MAX_UNSOLICITED_BLOCK_FORWARDS;
-use bitcoin_rs_wire::listener::{ConnectionShared, test_shared};
-use bitcoin_rs_wire::test_support::{connect_peer, current_source, synthetic_peer, test_addr};
+use bitcoin_rs_chain::chain::regtest_fixture;
+use bitcoin_rs_p2p::PeerSource;
+use bitcoin_rs_p2p::connection::MAX_UNSOLICITED_BLOCK_FORWARDS;
+use bitcoin_rs_p2p::listener::{ConnectionShared, test_shared};
+use bitcoin_rs_p2p::test_support::{connect_peer, current_source, synthetic_peer, test_addr};
 
 fn genesis_body() -> bitcoin_rs_consensus::primitives::Block {
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -27,11 +27,11 @@ fn genesis_body() -> bitcoin_rs_consensus::primitives::Block {
 struct MinedSyncFixture {
     sync: Arc<BlockSync>,
     blocks: Vec<bitcoin_rs_consensus::primitives::Block>,
-    sync_headers_tx: crossbeam_channel::Sender<bitcoin_rs_wire::InboundHeaders>,
+    sync_headers_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundHeaders>,
 }
 
 fn test_sync_with_mined_chain(
-    peers: &Arc<bitcoin_rs_wire::PeerTable>,
+    peers: &Arc<bitcoin_rs_p2p::PeerTable>,
 ) -> Result<MinedSyncFixture, TestError> {
     let (mut tree, blocks) = mined_chain(1, 0)?;
     let chain_tip = tree.tip_handle();
@@ -50,7 +50,7 @@ fn test_sync_with_mined_chain(
         sync_blocks_rx,
         crate::p2p::sync::syncing_ibd_latch(),
     ));
-    sync_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    sync_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     Ok(MinedSyncFixture {
         sync,
@@ -61,7 +61,7 @@ fn test_sync_with_mined_chain(
 
 #[test]
 fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
-    let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
+    let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
     let MinedSyncFixture {
         sync,
         blocks,
@@ -77,7 +77,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
         vec![regtest_fixture::coinbase(2)],
     )
     .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
-    sync_headers_tx.send(bitcoin_rs_wire::InboundHeaders {
+    sync_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
         headers: vec![block2.header],
         source: Some(source),
         wire_response: true,
@@ -91,7 +91,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
     let mut shared = test_shared(Arc::clone(&peers), headers_tx, blocks_tx);
-    shared.block_sync = Some(sync.clone() as Arc<dyn bitcoin_rs_wire::listener::BlockSyncObserver>);
+    shared.block_sync = Some(sync.clone() as Arc<dyn bitcoin_rs_p2p::listener::BlockSyncObserver>);
     let lease = peers
         .lease(flooded)
         .ok_or("flood connection must be registered")?;
@@ -123,7 +123,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
         "a delivery the window owns is never dropped for the unsolicited bound"
     );
 
-    let other: bitcoin_rs_wire::PeerRemote = test_addr(9781, 0)?;
+    let other: bitcoin_rs_p2p::PeerRemote = test_addr(9781, 0)?;
     let _other_rx = connect_peer(&peers, synthetic_peer(other, 3));
     let other_lease = peers
         .lease(other)
@@ -157,7 +157,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
 
 struct ScanCounter(std::sync::atomic::AtomicUsize);
 
-impl bitcoin_rs_wire::compact_blocks::CompactBlockHints for ScanCounter {
+impl bitcoin_rs_p2p::compact_blocks::CompactBlockHints for ScanCounter {
     fn for_each_identity(
         &self,
         _f: &mut dyn FnMut(
@@ -186,17 +186,17 @@ impl bitcoin_rs_wire::compact_blocks::CompactBlockHints for ScanCounter {
 struct CompactTestFixture {
     sync: Arc<BlockSync>,
     blocks: Vec<bitcoin_rs_consensus::primitives::Block>,
-    addr: bitcoin_rs_wire::PeerRemote,
-    lease: bitcoin_rs_wire::PeerLease,
+    addr: bitcoin_rs_p2p::PeerRemote,
+    lease: bitcoin_rs_p2p::PeerLease,
     source: PeerSource,
     other_source: PeerSource,
-    headers_rx: crossbeam_channel::Receiver<bitcoin_rs_wire::InboundHeaders>,
-    blocks_rx: crossbeam_channel::Receiver<bitcoin_rs_wire::InboundBlock>,
+    headers_rx: crossbeam_channel::Receiver<bitcoin_rs_p2p::InboundHeaders>,
+    blocks_rx: crossbeam_channel::Receiver<bitcoin_rs_p2p::InboundBlock>,
     shared: ConnectionShared,
 }
 
 fn test_sync_with_applied_chain(
-    peers: &Arc<bitcoin_rs_wire::PeerTable>,
+    peers: &Arc<bitcoin_rs_p2p::PeerTable>,
 ) -> Result<CompactTestFixture, TestError> {
     let (mut tree, blocks) = mined_chain(2, 0)?;
     let chain_tip = tree.tip_handle();
@@ -226,7 +226,7 @@ fn test_sync_with_applied_chain(
     let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
     let mut shared = test_shared(Arc::clone(peers), headers_tx, blocks_tx);
-    shared.block_sync = Some(sync.clone() as Arc<dyn bitcoin_rs_wire::listener::BlockSyncObserver>);
+    shared.block_sync = Some(sync.clone() as Arc<dyn bitcoin_rs_p2p::listener::BlockSyncObserver>);
     Ok(CompactTestFixture {
         sync,
         blocks,
@@ -242,20 +242,20 @@ fn test_sync_with_applied_chain(
 
 fn deliver_compact_block(
     block: &bitcoin_rs_consensus::primitives::Block,
-    reconstruction: &mut bitcoin_rs_wire::compact_blocks::Reconstruction,
+    reconstruction: &mut bitcoin_rs_p2p::compact_blocks::Reconstruction,
     hints: &ScanCounter,
-    lease: &bitcoin_rs_wire::PeerLease,
-    addr: bitcoin_rs_wire::PeerRemote,
+    lease: &bitcoin_rs_p2p::PeerLease,
+    addr: bitcoin_rs_p2p::PeerRemote,
     shared: &ConnectionShared,
 ) -> Result<(), TestError> {
     let block: bitcoin::Block = bitcoin::consensus::encode::deserialize(&consensus_bytes(block))?;
     let message = crate::p2p::Message::CmpctBlock(CmpctBlock {
         compact_block: HeaderAndShortIds::from_block(&block, 7, 2, &[]).expect("compact block"),
     });
-    let reply = bitcoin_rs_wire::listener::reply_bound(&message, false)
+    let reply = bitcoin_rs_p2p::listener::reply_bound(&message, false)
         .and_then(|bound| lease.try_reserve_reply(bound).ok());
-    let sink = bitcoin_rs_wire::listener::ProductionSink::new(lease, reply);
-    bitcoin_rs_wire::listener::process_compact_wire_message(
+    let sink = bitcoin_rs_p2p::listener::ProductionSink::new(lease, reply);
+    bitcoin_rs_p2p::listener::process_compact_wire_message(
         &message,
         reconstruction,
         Some(2),
@@ -270,7 +270,7 @@ fn deliver_compact_block(
 
 #[test]
 fn compact_reconstruction_requires_an_earning_header() -> TestResult {
-    let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
+    let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
     let fixture = test_sync_with_applied_chain(&peers)?;
     let sync = fixture.sync;
     let blocks = fixture.blocks;
@@ -283,7 +283,7 @@ fn compact_reconstruction_requires_an_earning_header() -> TestResult {
     let shared = fixture.shared;
 
     let hints = ScanCounter(AtomicUsize::new(0));
-    let mut reconstruction = bitcoin_rs_wire::compact_blocks::Reconstruction::new();
+    let mut reconstruction = bitcoin_rs_p2p::compact_blocks::Reconstruction::new();
     let mut deliver = |block: &bitcoin_rs_consensus::primitives::Block| {
         deliver_compact_block(block, &mut reconstruction, &hints, &lease, addr, &shared)
     };

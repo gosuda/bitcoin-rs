@@ -3,8 +3,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bitcoin_rs_chain::chain::{BlockTree, NodeStatus, regtest_fixture};
 use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network};
-use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, regtest_fixture};
 use bitcoin_rs_storage::memory_kv::MemoryKvStore;
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
 use bitcoin_rs_storage::utxo::UtxoSet;
@@ -19,8 +19,8 @@ use crate::test_support::TestError;
 
 fn failing_commit_chain(
     depth: u32,
-) -> Result<(Arc<bitcoin_rs_execution::Chainstate>, Vec<Block>), TestError> {
-    use bitcoin_rs_execution::{Chainstate, ChainstateParts, ChainstateRole, ValidationMode};
+) -> Result<(Arc<bitcoin_rs_chain::Chainstate>, Vec<Block>), TestError> {
+    use bitcoin_rs_chain::{Chainstate, ChainstateParts, ChainstateRole, ValidationMode};
 
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
@@ -52,15 +52,13 @@ fn failing_commit_chain(
         coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
             bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         )),
-        chain_events: Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
-            0,
-        )),
+        chain_events: Arc::new(bitcoin_rs_chain::events::ChainEventPublisher::detached(0)),
         block_body_store: None,
         undo_store,
         durable_head,
         coins,
         commit_authority,
-        chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new().authority(),
+        chain_transition: bitcoin_rs_chain::chain::TransitionDomain::new().authority(),
         assume_valid_height: 0,
         validation_mode: ValidationMode::AssumeValid,
         validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
@@ -68,7 +66,7 @@ fn failing_commit_chain(
         capture_rawtx: false,
         capture_block_bytes: false,
         retention: MandatoryRetention::new(Arc::clone(&retention)),
-        window_limits: bitcoin_rs_execution::default_window_limits_source(),
+        window_limits: bitcoin_rs_chain::default_window_limits_source(),
         history: HistoryAccess::new(retention, RetentionBudget::from_blocks(288)),
         role: ChainstateRole::Ordinary,
     }));
@@ -84,10 +82,10 @@ fn failing_commit_chain(
 fn failed_durable_commit_halts_apply_and_trips_the_shutdown_latch() -> Result<(), TestError> {
     let (handles, blocks) = failing_commit_chain(2)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
-    let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
+    let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx) = unbounded();
     let (inbound_blocks_tx, inbound_blocks_rx) = unbounded();
-    let ibd = Arc::new(bitcoin_rs_execution::chain::InitialBlockDownload::new(
+    let ibd = Arc::new(bitcoin_rs_chain::chain::InitialBlockDownload::new(
         handles.applied_tip_reader(),
         handles.block_tree_reader(),
     ));
@@ -103,7 +101,7 @@ fn failed_durable_commit_halts_apply_and_trips_the_shutdown_latch() -> Result<()
     }));
 
     inbound_blocks_tx
-        .send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))
+        .send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))
         .map_err(|_| TestError::Missing("inbound block channel closed"))?;
     sync.tick();
     assert!(
@@ -118,7 +116,7 @@ fn failed_durable_commit_halts_apply_and_trips_the_shutdown_latch() -> Result<()
 
     for block in [&blocks[1], &blocks[0]] {
         inbound_blocks_tx
-            .send(bitcoin_rs_wire::InboundBlock::from_local(block.clone()))
+            .send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
             .map_err(|_| TestError::Missing("inbound block channel closed"))?;
     }
     sync.tick();

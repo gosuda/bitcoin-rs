@@ -1,9 +1,9 @@
-use std::cell::RefCell;
+﻿use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use bitcoin_rs_node::pool::ledger::*;
-use bitcoin_rs_serving::mining::pool::ledger::*;
+use bitcoin_rs_rpc::mining::pool::ledger::*;
 use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore};
 use std::sync::Arc;
 use tempfile::TempDir;

@@ -3,12 +3,12 @@ use super::chain::{
     WindowApplyDisposition, WindowCommitError,
 };
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_consensus::header_rules::ChainWork;
-use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256, Header, Network, Txid};
-use bitcoin_rs_execution::chain::{
+use bitcoin_rs_chain::chain::{
     BlockTree, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot, regtest_fixture,
 };
-use bitcoin_rs_wire::test_support::OrFail;
+use bitcoin_rs_consensus::header_rules::ChainWork;
+use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256, Header, Network, Txid};
+use bitcoin_rs_p2p::test_support::OrFail;
 use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
 
@@ -67,7 +67,7 @@ impl TestChain {
             .lookup(hash)
             .and_then(|node_id| tree.node(node_id).ok())
             .is_none_or(|node| {
-                bitcoin_rs_execution::chain::softfork_state(
+                bitcoin_rs_chain::chain::softfork_state(
                     tree,
                     self.network,
                     node.parent,
@@ -176,12 +176,12 @@ impl SyncChain for TestChain {
 
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission {
         let mut tree = self.block_tree.write();
-        match bitcoin_rs_execution::chain::accept_headers(
+        match bitcoin_rs_chain::chain::accept_headers(
             &mut tree,
             headers,
             self.network,
-            bitcoin_rs_execution::chain::current_unix_seconds(),
-            bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
+            bitcoin_rs_chain::chain::current_unix_seconds(),
+            bitcoin_rs_chain::chain::HeaderValidationMode::LiveAdmission,
         ) {
             Ok(admitted) => {
                 let announced_tip = admitted
@@ -383,8 +383,8 @@ pub(crate) fn synced_ibd_latch() -> Arc<InitialBlockDownload> {
         .unwrap_or_else(|| unreachable!("the chain has a tip"));
     applied_tip.store(Some(Arc::clone(&tip)));
     Arc::new(InitialBlockDownload::new(
-        bitcoin_rs_execution::chain::TipReader::new(applied_tip),
-        bitcoin_rs_execution::chain::BlockTreeReader::new(block_tree),
+        bitcoin_rs_chain::chain::TipReader::new(applied_tip),
+        bitcoin_rs_chain::chain::BlockTreeReader::new(block_tree),
     ))
 }
 

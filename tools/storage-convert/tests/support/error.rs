@@ -1,4 +1,4 @@
-use std::io;
+﻿use std::io;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -10,7 +10,7 @@ pub(crate) enum TestError {
     Storage(#[from] bitcoin_rs_storage::StorageError),
 
     #[error("index error: {0}")]
-    Index(#[from] bitcoin_rs_projection::IndexError),
+    Index(#[from] bitcoin_rs_index::IndexError),
 
     #[error("fjall error: {0}")]
     Fjall(#[from] fjall::Error),

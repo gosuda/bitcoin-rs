@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # Gate commands shared by CI, pre-commit, and CONTRIBUTING.md.
 # PR lanes fail fast; deep collects every failure. Build/test lanes are
 # kernel-free; deny resolves the kernel graph without compiling it.
@@ -54,23 +54,23 @@ cargo_test() {
 clippy_lane_services() {
   profile "clippy: services and tools (kernel-free)" \
     cargo clippy --locked --workspace --all-targets \
-      --features bitcoin-rs-serving/silent-payments,bitcoin-rs-serving/zmq \
+      --features bitcoin-rs-rpc/silent-payments,bitcoin-rs-rpc/zmq \
       --exclude bitcoin-rs --exclude bitcoin-rs-node \
-      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-execution \
-      --exclude bitcoin-rs-e2e --exclude bitcoin-rs-wire \
+      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chain \
+      --exclude bitcoin-rs-e2e --exclude bitcoin-rs-p2p \
       -- -D warnings
 }
 
 clippy_lane_node_runtime() {
-  profile "clippy: node runtime and wire" \
-    cargo clippy --locked -p bitcoin-rs -p bitcoin-rs-e2e -p bitcoin-rs-wire \
-      --features bitcoin-rs/silent-payments,bitcoin-rs-wire/test-seam \
+  profile "clippy: node runtime and p2p" \
+    cargo clippy --locked -p bitcoin-rs -p bitcoin-rs-e2e -p bitcoin-rs-p2p \
+      --features bitcoin-rs/silent-payments,bitcoin-rs-p2p/test-seam \
       --all-targets -- -D warnings
   profile "clippy: bitcoin-rs-consensus (native)" \
     cargo clippy --locked -p bitcoin-rs-consensus \
       --no-default-features --all-targets -- -D warnings
-  profile "clippy: bitcoin-rs-execution (native)" \
-    cargo clippy --locked -p bitcoin-rs-execution \
+  profile "clippy: bitcoin-rs-chain (native)" \
+    cargo clippy --locked -p bitcoin-rs-chain \
       --all-targets -- -D warnings
   profile "clippy: bitcoin-rs-node (zmq,silent-payments)" \
     cargo clippy --locked -p bitcoin-rs-node \
@@ -103,14 +103,14 @@ clippy_profiles() {
 }
 
 test_crates_silent_payments() {
-  profile "test: bitcoin-rs-serving (silent-payments adapter)" \
-    cargo_test -p bitcoin-rs-serving --features silent-payments --lib handlers::silent_payments
+  profile "test: bitcoin-rs-rpc (silent-payments adapter)" \
+    cargo_test -p bitcoin-rs-rpc --features silent-payments --lib handlers::silent_payments
   profile "test: bitcoin-rs (silent-payments process)" \
     cargo_test -p bitcoin-rs --no-default-features --features silent-payments --test suite silent_payments::
   profile "test: bitcoin-rs (certified inputs process)" \
     cargo_test -p bitcoin-rs --no-default-features --features silent-payments --test suite block_inputs::
-  profile "test: bitcoin-rs-projection (silent-payments codec)" \
-    cargo_test -p bitcoin-rs-projection --features silent-payments --test suite silent_payments::
+  profile "test: bitcoin-rs-index (silent-payments codec)" \
+    cargo_test -p bitcoin-rs-index --features silent-payments --test suite silent_payments::
 }
 
 test_crates_storage() {
@@ -137,10 +137,10 @@ test_crates_consensus_execution() {
   # The offline CLI uses the checked-in Core snapshot, not a running daemon.
   profile "test: bitcoin-rs-snapshot" \
     cargo_test -p bitcoin-rs-snapshot
-  profile "test: bitcoin-rs-execution (native)" \
-    cargo_test -p bitcoin-rs-execution
-  profile "test: bitcoin-rs-wire" \
-    cargo_test -p bitcoin-rs-wire
+  profile "test: bitcoin-rs-chain (native)" \
+    cargo_test -p bitcoin-rs-chain
+  profile "test: bitcoin-rs-p2p" \
+    cargo_test -p bitcoin-rs-p2p
 }
 
 test_crates_node_serving() {
@@ -148,10 +148,10 @@ test_crates_node_serving() {
     cargo_test -p bitcoin-rs-node \
       --no-default-features --features zmq
   # Isolated so node's default zmq feature cannot unify this package on.
-  profile "test: bitcoin-rs-serving (no default features)" \
-    cargo_test -p bitcoin-rs-serving --no-default-features
-  profile "test: bitcoin-rs-serving (pool, pool-sv2)" \
-    cargo_test -p bitcoin-rs-serving --features pool,pool-sv2
+  profile "test: bitcoin-rs-rpc (no default features)" \
+    cargo_test -p bitcoin-rs-rpc --no-default-features
+  profile "test: bitcoin-rs-rpc (pool, pool-sv2)" \
+    cargo_test -p bitcoin-rs-rpc --features pool,pool-sv2
 }
 
 test_crates_profiles() {
@@ -169,10 +169,10 @@ test_crates_profiles() {
     storage)
       test_crates_storage
       ;;
-    consensus-execution)
+    consensus-chain | consensus-execution)
       test_crates_consensus_execution
       ;;
-    node-serving)
+    node-rpc | node-serving)
       test_crates_node_serving
       ;;
     *)
@@ -194,14 +194,14 @@ test_workspace_profiles() {
   # including the process-harness suite that launches the pinned bitcoind.
   profile "test: workspace (kernel-free)" \
     cargo_test --workspace \
-      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-execution \
-      --exclude bitcoin-rs-wire \
-      --exclude bitcoin-rs-node --exclude bitcoin-rs-serving \
+      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chain \
+      --exclude bitcoin-rs-p2p \
+      --exclude bitcoin-rs-node --exclude bitcoin-rs-rpc \
       --exclude bitcoin-rs-snapshot
   # The serving package owns libzmq. Its feature-gated process subscriber must
   # run explicitly so feature resolution cannot turn it into a zero-test
   # binary. Build and identify the daemon with the same default zmq profile.
-  profile "test: bitcoin-rs-serving (zmq, process notifications)" test_rpc_reorg_notifications
+  profile "test: bitcoin-rs-rpc (zmq, process notifications)" test_rpc_reorg_notifications
 }
 
 test_rpc_reorg_notifications() {
@@ -211,7 +211,7 @@ test_rpc_reorg_notifications() {
     target_dir="$PWD/$target_dir"
   fi
   BITCOIN_RS_NODE="$target_dir/debug/bitcoin-rs" \
-    cargo_test -p bitcoin-rs-serving --features zmq
+    cargo_test -p bitcoin-rs-rpc --features zmq
 }
 
 # Proof lanes. `all` does not call this stage: CI runners carry no Kani,

@@ -1,4 +1,4 @@
-#![no_main]
+﻿#![no_main]
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -9,7 +9,7 @@ use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin::merkle_tree::calculate_root;
-use bitcoin_rs_wire::compact_blocks::{CompactBlockHints, Outcome, Reconstruction};
+use bitcoin_rs_p2p::compact_blocks::{CompactBlockHints, Outcome, Reconstruction};
 use bitcoin_rs_consensus::primitives::{BlockImage, Tx, Txid, Wtxid, deserialize};
 use libfuzzer_sys::arbitrary::Unstructured;
 use libfuzzer_sys::fuzz_target;

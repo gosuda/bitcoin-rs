@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     collections::VecDeque,
     time::{Duration, Instant},
 };
@@ -7,8 +7,8 @@ use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Header};
 use hashbrown::{HashMap, hash_map::Entry};
 
 use crate::p2p::download_window::SyncBudget;
-use bitcoin_rs_wire::connection::PeerSource;
-use bitcoin_rs_wire::inbound::block_memory::BlockMemoryCredit;
+use bitcoin_rs_p2p::connection::PeerSource;
+use bitcoin_rs_p2p::inbound::block_memory::BlockMemoryCredit;
 
 #[derive(Debug)]
 pub(crate) struct BlockStager {

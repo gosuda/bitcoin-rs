@@ -6,18 +6,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bitcoin_rs_consensus::latch::LatchReader;
-use bitcoin_rs_consensus::primitives::{Hash256, Network};
-use bitcoin_rs_execution::ActivatedSnapshot;
-use bitcoin_rs_execution::{
+use bitcoin_rs_chain::ActivatedSnapshot;
+use bitcoin_rs_chain::{
     ApplyError, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, Chainstate,
     ChainstateRole,
 };
-use bitcoin_rs_projection::IndexError;
-use bitcoin_rs_projection::IndexWatermark;
-use bitcoin_rs_projection::snapshot_seed::{ScriptLiveSeedObserver, ScriptLiveSeedSession};
-pub use bitcoin_rs_serving::context::SnapshotImport;
-use bitcoin_rs_serving::context::{
+use bitcoin_rs_consensus::latch::LatchReader;
+use bitcoin_rs_consensus::primitives::{Hash256, Network};
+use bitcoin_rs_index::IndexError;
+use bitcoin_rs_index::IndexWatermark;
+use bitcoin_rs_index::snapshot_seed::{ScriptLiveSeedObserver, ScriptLiveSeedSession};
+pub use bitcoin_rs_rpc::context::SnapshotImport;
+use bitcoin_rs_rpc::context::{
     ChainstateInfo, ChainstatesInfo, SnapshotControlError, SnapshotExport,
 };
 use bitcoin_rs_storage::checkpoint::fs::{HAS_ATOMIC_NOREPLACE_RENAME, rename_noreplace};
@@ -56,9 +56,9 @@ pub(crate) struct SnapshotControl {
     followers: ChainFollowers,
     data_dir: PathBuf,
     network: Network,
-    script_live_seed: Option<Arc<bitcoin_rs_projection::snapshot_seed::ScriptLiveSeedState>>,
-    derived_index_runtime: Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexRuntime>>,
-    derived_index_status: Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexCapability>>,
+    script_live_seed: Option<Arc<bitcoin_rs_index::snapshot_seed::ScriptLiveSeedState>>,
+    derived_index_runtime: Option<Arc<bitcoin_rs_index::runtime::DerivedIndexRuntime>>,
+    derived_index_status: Option<Arc<bitcoin_rs_index::runtime::DerivedIndexCapability>>,
     import: Mutex<()>,
     export: Mutex<()>,
 }
@@ -184,11 +184,11 @@ pub enum SnapshotImportError {
     #[error("invalid Core snapshot: {0}")]
     Codec(#[from] bitcoin_rs_storage::utxo::core_snapshot::SnapshotError),
     #[error("ScriptLive snapshot seed staging failed: {0}")]
-    Seed(#[from] bitcoin_rs_projection::IndexError),
+    Seed(#[from] bitcoin_rs_index::IndexError),
     #[error("snapshot activation failed: {0}")]
     Activation(#[from] AssumeUtxoError),
     #[error("snapshot admission failed: {0}")]
-    Admission(#[from] bitcoin_rs_execution::ApplyError),
+    Admission(#[from] bitcoin_rs_chain::ApplyError),
     #[error("snapshot consumer reconciliation failed: {0}")]
     Settlement(#[from] bitcoin_rs_mempool::ChainChangeError),
     #[error("snapshot activation failed: {activation}; consumer settlement failed: {settlement}")]
@@ -197,9 +197,9 @@ pub enum SnapshotImportError {
         settlement: bitcoin_rs_mempool::ChainChangeError,
     },
     #[error("snapshot manifest invalid: {0}")]
-    Manifest(#[from] bitcoin_rs_execution::manifest::ManifestError),
+    Manifest(#[from] bitcoin_rs_chain::manifest::ManifestError),
     #[error("index bundle error: {0}")]
-    Bundle(#[from] bitcoin_rs_projection::portable::IndexBundleError),
+    Bundle(#[from] bitcoin_rs_index::portable::IndexBundleError),
 }
 
 impl From<SnapshotImportError> for SnapshotControlError {
@@ -236,7 +236,7 @@ pub(crate) fn read_bounded_manifest(path: &Path) -> Result<Vec<u8>, SnapshotImpo
         .read_to_end(&mut bytes)?;
     if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_MANIFEST_BYTES) {
         return Err(SnapshotImportError::Manifest(
-            bitcoin_rs_execution::manifest::ManifestError::Format("manifest is larger than 1 MiB"),
+            bitcoin_rs_chain::manifest::ManifestError::Format("manifest is larger than 1 MiB"),
         ));
     }
     Ok(bytes)
@@ -270,9 +270,9 @@ impl SnapshotControl {
         followers: ChainFollowers,
         data_dir: PathBuf,
         network: Network,
-        script_live_seed: Option<Arc<bitcoin_rs_projection::snapshot_seed::ScriptLiveSeedState>>,
-        derived_index_runtime: Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexRuntime>>,
-        derived_index_status: Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexCapability>>,
+        script_live_seed: Option<Arc<bitcoin_rs_index::snapshot_seed::ScriptLiveSeedState>>,
+        derived_index_runtime: Option<Arc<bitcoin_rs_index::runtime::DerivedIndexRuntime>>,
+        derived_index_status: Option<Arc<bitcoin_rs_index::runtime::DerivedIndexCapability>>,
     ) -> Self {
         Self {
             manager,
@@ -522,10 +522,8 @@ impl SnapshotControl {
 
     fn begin_decode_seed(
         &self,
-    ) -> Result<
-        Option<bitcoin_rs_projection::snapshot_seed::ScriptLiveSeedSession>,
-        SnapshotImportError,
-    > {
+    ) -> Result<Option<bitcoin_rs_index::snapshot_seed::ScriptLiveSeedSession>, SnapshotImportError>
+    {
         match self.script_live_seed.as_ref() {
             Some(seed) => seed.begin_session().map(Some).map_err(|error| {
                 tracing::warn!(%error, "ScriptLive decode seed session unavailable");
@@ -629,11 +627,11 @@ impl SnapshotControl {
             return Err(SnapshotImportError::NotRegular);
         }
         let bytes = read_bounded_manifest(&path)?;
-        let manifest = bitcoin_rs_execution::manifest::SnapshotManifest::parse(&bytes)?;
-        if manifest.schema != bitcoin_rs_projection::index_format_version() {
+        let manifest = bitcoin_rs_chain::manifest::SnapshotManifest::parse(&bytes)?;
+        if manifest.schema != bitcoin_rs_index::index_format_version() {
             return Err(SnapshotImportError::Manifest(
-                bitcoin_rs_execution::manifest::ManifestError::SchemaMismatch {
-                    expected: bitcoin_rs_projection::index_format_version(),
+                bitcoin_rs_chain::manifest::ManifestError::SchemaMismatch {
+                    expected: bitcoin_rs_index::index_format_version(),
                     found: manifest.schema,
                 },
             ));
@@ -642,7 +640,7 @@ impl SnapshotControl {
             .network
             .assume_utxo_for_height(manifest.base_height)
             .ok_or_else(
-                || bitcoin_rs_execution::manifest::ManifestError::UnknownAnchor {
+                || bitcoin_rs_chain::manifest::ManifestError::UnknownAnchor {
                     found: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
                         &manifest.base_hash,
                     ),
@@ -653,7 +651,7 @@ impl SnapshotControl {
         let trust = manifest.verify_against_anchor(self.network, genesis, anchor)?;
         let dir = path.parent().unwrap_or(&path);
 
-        let utxo_path = manifest.artifact_path(dir, bitcoin_rs_execution::manifest::UTXO_SLOT)?;
+        let utxo_path = manifest.artifact_path(dir, bitcoin_rs_chain::manifest::UTXO_SLOT)?;
         let mut file = BufReader::new(open_regular_input(&utxo_path)?);
         let file_bytes = utxo_path.metadata()?.len();
         let session = self.begin_decode_seed()?;
@@ -673,7 +671,7 @@ impl SnapshotControl {
                     session.abort();
                 }
                 return Err(SnapshotImportError::Manifest(
-                    bitcoin_rs_execution::manifest::ManifestError::SnapshotBaseMismatch {
+                    bitcoin_rs_chain::manifest::ManifestError::SnapshotBaseMismatch {
                         expected_height: manifest.base_height,
                         expected: Hash256::from_le_bytes(&manifest.base_hash),
                         found_height: anchor.height,
@@ -686,7 +684,7 @@ impl SnapshotControl {
                     session.abort();
                 }
                 return Err(SnapshotImportError::Manifest(
-                    bitcoin_rs_execution::manifest::ManifestError::SnapshotCommitmentMismatch {
+                    bitcoin_rs_chain::manifest::ManifestError::SnapshotCommitmentMismatch {
                         expected: Hash256::from_le_bytes(&manifest.utxo_commitment),
                         found: anchor.hash_serialized,
                     },
@@ -698,7 +696,7 @@ impl SnapshotControl {
             let mut observer = seed.map(ScriptLiveSeedSession::observer);
             manager.activate_core_snapshot(
                 &mut file,
-                Some(bitcoin_rs_execution::assumeutxo::FileAttestation {
+                Some(bitcoin_rs_chain::assumeutxo::FileAttestation {
                     sha256: manifest.utxo_sha256(),
                     size: manifest.utxo_size(),
                 }),
@@ -729,11 +727,11 @@ impl SnapshotControl {
                 continue;
             }
             let verified = match cap_trust {
-                bitcoin_rs_execution::manifest::CapabilityTrust::Trusted(_) => {
+                bitcoin_rs_chain::manifest::CapabilityTrust::Trusted(_) => {
                     manifest.verify_index_artifact(dir, slot_idx + 1)
                 }
-                bitcoin_rs_execution::manifest::CapabilityTrust::Untrusted => {
-                    Err(bitcoin_rs_execution::manifest::ManifestError::Artifacts(
+                bitcoin_rs_chain::manifest::CapabilityTrust::Untrusted => {
+                    Err(bitcoin_rs_chain::manifest::ManifestError::Artifacts(
                         "the manifest index commitment is not compiled into this node",
                     ))
                 }
@@ -780,7 +778,7 @@ impl SnapshotControl {
             } => {
                 let path = self.data_dir.join(path);
                 let bytes = read_bounded_manifest(&path)?;
-                let manifest = bitcoin_rs_execution::manifest::SnapshotManifest::parse(&bytes)?;
+                let manifest = bitcoin_rs_chain::manifest::SnapshotManifest::parse(&bytes)?;
                 if manifest.base_height == base_height
                     && manifest.base_hash == base_hash.to_le_bytes()
                 {
@@ -850,7 +848,7 @@ impl SnapshotControl {
         &self,
         cap: bitcoin_rs_consensus::primitives::IndexArtifactCapability,
         base_height: u32,
-        error: &bitcoin_rs_execution::manifest::ManifestError,
+        error: &bitcoin_rs_chain::manifest::ManifestError,
     ) {
         let Some(runtime) = self.derived_index_runtime.as_ref() else {
             return;
@@ -858,14 +856,14 @@ impl SnapshotControl {
         match cap {
             bitcoin_rs_consensus::primitives::IndexArtifactCapability::TxLookup => {
                 runtime.fail_tx_lookup(
-                    &bitcoin_rs_projection::runtime::DerivedIndexWorkerError::ArtifactUnavailable(
+                    &bitcoin_rs_index::runtime::DerivedIndexWorkerError::ArtifactUnavailable(
                         error.to_string(),
                     ),
                 );
             }
             bitcoin_rs_consensus::primitives::IndexArtifactCapability::ScriptHistory => {
                 runtime.fail_script_history(
-                    &bitcoin_rs_projection::runtime::DerivedIndexWorkerError::HistoryUnavailable(
+                    &bitcoin_rs_index::runtime::DerivedIndexWorkerError::HistoryUnavailable(
                         bitcoin_rs_storage::pruning::HistoryUnavailable::Pruned {
                             below: base_height,
                         },
@@ -874,12 +872,12 @@ impl SnapshotControl {
             }
             bitcoin_rs_consensus::primitives::IndexArtifactCapability::ScriptLive => {
                 runtime.fail_script_live(
-                    &bitcoin_rs_projection::runtime::DerivedIndexWorkerError::ScriptLiveHistoryPruned,
+                    &bitcoin_rs_index::runtime::DerivedIndexWorkerError::ScriptLiveHistoryPruned,
                 );
             }
             bitcoin_rs_consensus::primitives::IndexArtifactCapability::CompactFilters => {
                 runtime.fail_compact_filters(
-                    &bitcoin_rs_projection::runtime::DerivedIndexWorkerError::HistoryUnavailable(
+                    &bitcoin_rs_index::runtime::DerivedIndexWorkerError::HistoryUnavailable(
                         bitcoin_rs_storage::pruning::HistoryUnavailable::Pruned {
                             below: base_height,
                         },
@@ -978,14 +976,14 @@ fn ingest_error(error: SnapshotImportError) -> SnapshotImportError {
             expected_size,
             found_size,
         }) => SnapshotImportError::Manifest(if expected_sha256 == found_sha256 {
-            bitcoin_rs_execution::manifest::ManifestError::ArtifactSizeMismatch {
-                slot: bitcoin_rs_execution::manifest::UTXO_SLOT,
+            bitcoin_rs_chain::manifest::ManifestError::ArtifactSizeMismatch {
+                slot: bitcoin_rs_chain::manifest::UTXO_SLOT,
                 declared: expected_size,
                 actual: found_size,
             }
         } else {
-            bitcoin_rs_execution::manifest::ManifestError::ArtifactHashMismatch {
-                slot: bitcoin_rs_execution::manifest::UTXO_SLOT,
+            bitcoin_rs_chain::manifest::ManifestError::ArtifactHashMismatch {
+                slot: bitcoin_rs_chain::manifest::UTXO_SLOT,
                 declared: expected_sha256,
                 actual: found_sha256,
             }

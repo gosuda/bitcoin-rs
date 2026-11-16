@@ -1,5 +1,5 @@
-use crate::{Config, Hub, TEMPLATE_RETRY_DELAY, template::TemplateState};
-use bitcoin_rs_serving::mining::{
+﻿use crate::{Config, Hub, TEMPLATE_RETRY_DELAY, template::TemplateState};
+use bitcoin_rs_rpc::mining::{
     BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, Candidate, CoinbaseBudget,
 };
 use bitcoin_rs_node::Node;

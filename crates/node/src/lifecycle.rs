@@ -2,12 +2,12 @@ use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin_rs_consensus::latch::LatchReader;
-use bitcoin_rs_execution::verify::{
+use bitcoin_rs_chain::verify::{
     CheckLevel, VerifyError, VerifyOutcome, VerifyRequest, verify_recent_blocks,
 };
-use bitcoin_rs_serving::mining::MiningControl;
-use bitcoin_rs_serving::{
+use bitcoin_rs_consensus::latch::LatchReader;
+use bitcoin_rs_rpc::mining::MiningControl;
+use bitcoin_rs_rpc::{
     RpcServer, RpcSurface,
     context::{
         ChainControl, ChainControlError, ChainHandles, Context, ContextHandles, IndexHandles,
@@ -50,7 +50,7 @@ const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct RpcChainControl {
-    handles: Arc<bitcoin_rs_execution::Chainstate>,
+    handles: Arc<bitcoin_rs_chain::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
     sync: Arc<crate::p2p::sync::BlockSync>,
     snapshots: Arc<crate::snapshot::SnapshotControl>,
@@ -72,8 +72,8 @@ impl ChainControl for RpcChainControl {
         &self,
         path: &std::path::Path,
     ) -> core::result::Result<
-        bitcoin_rs_serving::context::SnapshotImport,
-        bitcoin_rs_serving::context::SnapshotControlError,
+        bitcoin_rs_rpc::context::SnapshotImport,
+        bitcoin_rs_rpc::context::SnapshotControlError,
     > {
         self.snapshots.import(path).map_err(Into::into)
     }
@@ -83,8 +83,8 @@ impl ChainControl for RpcChainControl {
         path: &std::path::Path,
         cancellation: &LatchReader,
     ) -> core::result::Result<
-        bitcoin_rs_serving::context::SnapshotExport,
-        bitcoin_rs_serving::context::SnapshotControlError,
+        bitcoin_rs_rpc::context::SnapshotExport,
+        bitcoin_rs_rpc::context::SnapshotControlError,
     > {
         self.snapshots
             .export(path, cancellation)
@@ -94,8 +94,8 @@ impl ChainControl for RpcChainControl {
     fn chainstates(
         &self,
     ) -> core::result::Result<
-        bitcoin_rs_serving::context::ChainstatesInfo,
-        bitcoin_rs_serving::context::SnapshotControlError,
+        bitcoin_rs_rpc::context::ChainstatesInfo,
+        bitcoin_rs_rpc::context::SnapshotControlError,
     > {
         self.snapshots.chainstates()
     }
@@ -172,7 +172,7 @@ fn bind_rpc(
         state,
         mining_control,
         block_body_source,
-        bitcoin_rs_serving::context::PoolHandles::default(),
+        bitcoin_rs_rpc::context::PoolHandles::default(),
     )
 }
 
@@ -180,7 +180,7 @@ fn rpc_context_handles(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
-    pool: bitcoin_rs_serving::context::PoolHandles,
+    pool: bitcoin_rs_rpc::context::PoolHandles,
 ) -> ContextHandles {
     let config = state.config();
     let chainstate = state.chainstate();
@@ -239,7 +239,7 @@ fn bind_rpc_with_pool(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
-    pool: bitcoin_rs_serving::context::PoolHandles,
+    pool: bitcoin_rs_rpc::context::PoolHandles,
 ) -> Result<RpcBindings, RunError> {
     let config = state.config();
     let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
@@ -251,7 +251,7 @@ fn bind_rpc_with_pool(
                 .ok_or(ConfigError::EsploraMaxQueries)?,
         );
     let context = Arc::new(context);
-    let handler = Arc::new(bitcoin_rs_serving::Handler::new(Arc::clone(&context)));
+    let handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
     let server = RpcServer::bind(
         state.config().rpc.bind,
         Arc::clone(&rpc_auth),
@@ -646,7 +646,7 @@ struct StartupGuard {
 }
 
 impl StartupGuard {
-    fn finish(mut self, context: Arc<bitcoin_rs_serving::context::Context>) -> crate::embed::Node {
+    fn finish(mut self, context: Arc<bitcoin_rs_rpc::context::Context>) -> crate::embed::Node {
         let Some(state) = self.state.take() else {
             panic!("completed startup owns state");
         };
@@ -732,7 +732,7 @@ pub(crate) fn start_node(
     let block_body_source = state.block_body_source()?;
     let chainstate = state.chainstate();
     let recent_block = crate::p2p::RecentBlockSlot::default();
-    let p2p_chain_query: Arc<dyn bitcoin_rs_wire::ChainQuery> = Arc::new(
+    let p2p_chain_query: Arc<dyn bitcoin_rs_p2p::ChainQuery> = Arc::new(
         crate::p2p::ActiveChainQuery::new(
             chainstate.block_tree_reader(),
             chainstate.applied_tip_reader(),
@@ -754,17 +754,16 @@ pub(crate) fn start_node(
         state.chain_followers(),
         final_payout_script(state.config()),
     ));
-    let sequence_wake: Arc<dyn bitcoin_rs_serving::mining::MempoolSequenceWake> =
-        coordinator.clone();
-    let mining_control: Arc<dyn bitcoin_rs_serving::mining::MiningControl> = coordinator;
+    let sequence_wake: Arc<dyn bitcoin_rs_rpc::mining::MempoolSequenceWake> = coordinator.clone();
+    let mining_control: Arc<dyn bitcoin_rs_rpc::mining::MiningControl> = coordinator;
     let signal = state.mining_generation_signal();
     signal.attach(&mining_control);
     signal.attach_sequence_wake(&sequence_wake);
     let gateway = state.mempool_gateway();
     let node_tx_inv = Arc::new(crate::p2p::NodeTxInventory(gateway.clone()));
-    let tx_inventory: Arc<dyn bitcoin_rs_wire::TxInventory> =
+    let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> =
         Arc::new(crate::p2p::NodeTxInventory(gateway.clone()));
-    let compact_hints: Arc<dyn bitcoin_rs_wire::CompactBlockHints> =
+    let compact_hints: Arc<dyn bitcoin_rs_p2p::CompactBlockHints> =
         Arc::new(crate::p2p::NodeTxInventory(gateway.clone()));
     let block_announcer = Arc::new(
         crate::p2p::BlockAnnouncer::new(
@@ -777,7 +776,7 @@ pub(crate) fn start_node(
         .with_stale_tips(peer_ready_sync.stale_tips(), chainstate.block_tree_reader()),
     );
     let announcer_for_hook = Arc::clone(&block_announcer);
-    let pow_valid_hook: bitcoin_rs_execution::PowValidBlockHook =
+    let pow_valid_hook: bitcoin_rs_chain::PowValidBlockHook =
         Arc::new(move |block, hash, height| {
             announcer_for_hook.announce_pow_valid(block, hash, height);
         });
@@ -791,7 +790,7 @@ pub(crate) fn start_node(
             state.shutdown_reader(),
         )?);
     }
-    let tx_ingress: Arc<dyn bitcoin_rs_wire::listener::TxIngressObserver> =
+    let tx_ingress: Arc<dyn bitcoin_rs_p2p::listener::TxIngressObserver> =
         Arc::new(crate::p2p::NodeTxIngress::new(
             state.inbound_tx_sender(),
             state.package_capacity(),
@@ -800,11 +799,11 @@ pub(crate) fn start_node(
             state.shutdown_reader(),
         ));
     let tx_policy = unsize_tx_policy(Arc::clone(&state.tx_policy));
-    let node_ibd: Arc<dyn bitcoin_rs_wire::listener::IbdState> =
+    let node_ibd: Arc<dyn bitcoin_rs_p2p::listener::IbdState> =
         Arc::new(crate::p2p::NodeIbd(state.ibd()));
     let block_sync_obs = unsize_block_sync(Arc::clone(&peer_ready_sync));
     let block_announcer_obs = unsize_block_announcer(Arc::clone(&block_announcer));
-    let listener_extras = bitcoin_rs_wire::ListenerExtras {
+    let listener_extras = bitcoin_rs_p2p::ListenerExtras {
         tx_inventory: Some(tx_inventory),
         compact_hints: Some(compact_hints),
         tx_ingress: Some(tx_ingress),
@@ -856,11 +855,11 @@ pub(crate) fn start_node(
     }
     #[cfg(feature = "pool")]
     let pool_handles = guard.services.pool.as_ref().map_or_else(
-        bitcoin_rs_serving::context::PoolHandles::default,
+        bitcoin_rs_rpc::context::PoolHandles::default,
         crate::pool::PoolService::handles,
     );
     #[cfg(not(feature = "pool"))]
-    let pool_handles = bitcoin_rs_serving::context::PoolHandles::default();
+    let pool_handles = bitcoin_rs_rpc::context::PoolHandles::default();
     let RpcBindings { context, listeners } =
         bind_rpc_with_pool(state, &mining_control, block_body_source, pool_handles)?;
     start_rpc_listeners(state, listeners, &mut guard.services)?;
@@ -868,8 +867,8 @@ pub(crate) fn start_node(
     if let Some(pool) = guard.services.pool.as_mut() {
         pool.start()?;
     }
-    let peer_ready: Arc<dyn Fn(bitcoin_rs_wire::PeerSource) + Send + Sync> =
-        Arc::new(move |source: bitcoin_rs_wire::PeerSource| {
+    let peer_ready: Arc<dyn Fn(bitcoin_rs_p2p::PeerSource) + Send + Sync> =
+        Arc::new(move |source: bitcoin_rs_p2p::PeerSource| {
             peer_ready_sync.on_peer_ready(source);
         });
     state
@@ -926,7 +925,7 @@ fn start_rpc_listeners(
         tracing::info!(addr = %rpc_local_addr, ?surface, "rpc listener bound");
         let rpc_shutdown = state.shutdown_reader();
         let worker = std::thread::Builder::new()
-            .name("bitcoin-rs-serving".into())
+            .name("bitcoin-rs-rpc".into())
             .spawn(move || {
                 let result = rpc_server.serve_surface_with_shutdown(rpc_shutdown.clone(), surface);
                 if !rpc_shutdown.is_triggered() {
@@ -965,19 +964,19 @@ fn cap_global_thread_pool() {
 
 fn unsize_tx_policy(
     policy: Arc<crate::p2p::tx_policy::NodeTxPolicy>,
-) -> Arc<dyn bitcoin_rs_wire::listener::TxPolicyObserver> {
+) -> Arc<dyn bitcoin_rs_p2p::listener::TxPolicyObserver> {
     policy
 }
 
 fn unsize_block_sync(
     sync: Arc<crate::p2p::sync::BlockSync>,
-) -> Arc<dyn bitcoin_rs_wire::listener::BlockSyncObserver> {
+) -> Arc<dyn bitcoin_rs_p2p::listener::BlockSyncObserver> {
     sync
 }
 
 fn unsize_block_announcer(
     announcer: Arc<crate::p2p::BlockAnnouncer>,
-) -> Arc<dyn bitcoin_rs_wire::listener::BlockAnnounceObserver> {
+) -> Arc<dyn bitcoin_rs_p2p::listener::BlockAnnounceObserver> {
     announcer
 }
 #[cfg(test)]

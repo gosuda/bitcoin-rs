@@ -1,9 +1,9 @@
 use super::*;
 use bitcoin::{BlockHash as WireBlockHash, Txid as WireTxid};
+use bitcoin_rs_chain::chain::NodeStatus;
 use bitcoin_rs_consensus::primitives::consensus_bytes;
 use bitcoin_rs_consensus::primitives::{Block, CompactTarget, Tx};
-use bitcoin_rs_execution::chain::NodeStatus;
-use bitcoin_rs_wire::inv::wire_block_hash;
+use bitcoin_rs_p2p::inv::wire_block_hash;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -12,7 +12,7 @@ enum TestError {
     #[error(transparent)]
     Peer(#[from] crate::p2p::PeerError),
     #[error(transparent)]
-    Chain(#[from] bitcoin_rs_execution::chain::ChainError),
+    Chain(#[from] bitcoin_rs_chain::chain::ChainError),
     #[error(transparent)]
     TryFromInt(#[from] std::num::TryFromIntError),
     #[error(transparent)]
@@ -20,7 +20,7 @@ enum TestError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    RegtestFixture(#[from] bitcoin_rs_execution::chain::regtest_fixture::RegtestFixtureError),
+    RegtestFixture(#[from] bitcoin_rs_chain::chain::regtest_fixture::RegtestFixtureError),
     #[error("missing: {0}")]
     Missing(&'static str),
 }
@@ -91,8 +91,8 @@ fn serve_collect(
     Ok((outcome, blocks.into_inner()))
 }
 
-fn canned_filter() -> bitcoin_rs_projection::BasicFilter {
-    bitcoin_rs_projection::BasicFilter {
+fn canned_filter() -> bitcoin_rs_index::BasicFilter {
+    bitcoin_rs_index::BasicFilter {
         filter: vec![0],
         hash: [1; 32],
         header: [2; 32],
@@ -174,7 +174,7 @@ fn assert_complete_filter_range(request: &Message, responses: &[Message]) {
 #[test]
 fn invalid_compact_filter_requests_are_ignored_without_querying_the_index() -> TestResult {
     use bitcoin::p2p::message_filter::{GetCFCheckpt, GetCFHeaders, GetCFilters};
-    use bitcoin_rs_projection::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
+    use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
 
     struct Filters;
     impl CompactFilterQuery for Filters {
@@ -239,7 +239,7 @@ fn invalid_compact_filter_requests_are_ignored_without_querying_the_index() -> T
 
 #[test]
 fn compact_filters_wait_for_publication_without_replaying_sent_payloads() -> TestResult {
-    use bitcoin_rs_projection::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
+    use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct Filters {
@@ -269,7 +269,7 @@ fn compact_filters_wait_for_publication_without_replaying_sent_payloads() -> Tes
         ) -> Result<Option<[u8; 32]>, TxQueryError> {
             if !self.ready.load(Ordering::Acquire) {
                 return Err(TxQueryError::Retry(
-                    bitcoin_rs_projection::RetryReason::TipMoved {
+                    bitcoin_rs_index::RetryReason::TipMoved {
                         expected_revision: 0,
                         current_revision: 1,
                     },
@@ -280,7 +280,7 @@ fn compact_filters_wait_for_publication_without_replaying_sent_payloads() -> Tes
             }
             if self.moves_after_delivery {
                 Err(TxQueryError::Retry(
-                    bitcoin_rs_projection::RetryReason::TipMoved {
+                    bitcoin_rs_index::RetryReason::TipMoved {
                         expected_revision: 0,
                         current_revision: 1,
                     },
@@ -337,7 +337,7 @@ fn compact_filters_wait_for_publication_without_replaying_sent_payloads() -> Tes
 #[test]
 fn filter_backpressure_defers_unsent_responses_and_parks_the_remainder_of_a_partial_stream()
 -> TestResult {
-    use bitcoin_rs_projection::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
+    use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
     use std::cell::Cell;
 
     struct Filters;
@@ -424,7 +424,7 @@ fn filter_backpressure_defers_unsent_responses_and_parks_the_remainder_of_a_part
 
 #[test]
 fn compact_filters_follow_applied_chain_when_competing_headers_lead() -> TestResult {
-    use bitcoin_rs_projection::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
+    use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
 
     struct Filters(Hash256);
     impl CompactFilterQuery for Filters {
@@ -506,7 +506,7 @@ fn compact_filters_follow_applied_chain_when_competing_headers_lead() -> TestRes
 #[test]
 fn compact_filter_interruptions_that_are_not_backpressure_stay_errors() -> TestResult {
     use bitcoin::p2p::message_filter::GetCFilters;
-    use bitcoin_rs_projection::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
+    use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
 
     struct ShortIndex;
     impl CompactFilterQuery for ShortIndex {
@@ -594,7 +594,7 @@ fn compact_filter_interruptions_that_are_not_backpressure_stay_errors() -> TestR
 #[test]
 fn a_resumed_filter_range_that_stops_before_its_first_filter_is_interrupted() -> TestResult {
     use bitcoin::p2p::message_filter::GetCFilters;
-    use bitcoin_rs_projection::{
+    use bitcoin_rs_index::{
         BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError, TxUnavailableCause,
     };
 
@@ -676,7 +676,7 @@ fn a_resumed_filter_range_that_stops_before_its_first_filter_is_interrupted() ->
     assert_eq!(
         serve(
             Err(TxQueryError::Retry(
-                bitcoin_rs_projection::RetryReason::TipMoved {
+                bitcoin_rs_index::RetryReason::TipMoved {
                     expected_revision: 0,
                     current_revision: 1,
                 }
@@ -960,7 +960,7 @@ fn low_work_chain_serves_no_headers() -> TestResult {
     let genesis = test_header(BlockHash::default(), 0);
     let first = test_header(genesis.compute_hash(), 1);
     let second = test_header(first.compute_hash(), 2);
-    let low_work_tree = || -> Result<BlockTree, bitcoin_rs_execution::chain::ChainError> {
+    let low_work_tree = || -> Result<BlockTree, bitcoin_rs_chain::chain::ChainError> {
         let mut tree = BlockTree::new();
         let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
         let first_id = tree.insert_node(Some(genesis_id), first, NodeStatus::Active)?;
@@ -1069,7 +1069,7 @@ fn getdata_block_encoding_matches_requested_inventory_on_wire() -> TestResult {
             batch.insert(1, missing);
             let outcome = query.serve_inventory_blocks(&batch, None, &|| true, &mut |message| {
                 let mut bytes = Vec::new();
-                bitcoin_rs_wire::wire::write_message(&mut bytes, Magic::REGTEST, &message)?;
+                bitcoin_rs_p2p::wire::write_message(&mut bytes, Magic::REGTEST, &message)?;
                 served.push(bytes);
                 Ok(())
             })?;
@@ -1463,7 +1463,7 @@ fn chain_at(
     headers: &[Header],
     height: u32,
     block: &Block,
-) -> Result<ActiveChainQuery, bitcoin_rs_execution::chain::ChainError> {
+) -> Result<ActiveChainQuery, bitcoin_rs_chain::chain::ChainError> {
     let source = SingleBlockSource {
         height,
         hash: block.block_hash(),
@@ -1627,8 +1627,8 @@ fn compact_exchange_keeps_the_mutually_supported_version() -> TestResult {
     use bitcoin::p2p::Magic;
     use bitcoin::p2p::message::NetworkMessage;
     use bitcoin::p2p::message_compact_blocks::{GetBlockTxn, SendCmpct};
-    use bitcoin_rs_wire::dispatch::dispatch_inbound_full;
-    use bitcoin_rs_wire::peer::{Peer, PeerState};
+    use bitcoin_rs_p2p::dispatch::dispatch_inbound_full;
+    use bitcoin_rs_p2p::peer::{Peer, PeerState};
 
     let headers = seed_headers(2);
     let mut block = Block {
@@ -1668,7 +1668,7 @@ fn compact_exchange_keeps_the_mutually_supported_version() -> TestResult {
                     &mut |_| {},
                     &mut |_| {},
                 )?;
-                if version == bitcoin_rs_wire::peer::COMPACT_BLOCK_VERSION {
+                if version == bitcoin_rs_p2p::peer::COMPACT_BLOCK_VERSION {
                     negotiated = Some(version);
                 }
             }
@@ -1721,8 +1721,8 @@ fn compact_exchange_keeps_the_mutually_supported_version() -> TestResult {
 fn getblocktxn_versions_preserve_missing_body_and_invalid_index_outcomes() -> TestResult {
     use bitcoin::p2p::Magic;
     use bitcoin::p2p::message_compact_blocks::{GetBlockTxn, SendCmpct};
-    use bitcoin_rs_wire::dispatch::dispatch_inbound_full;
-    use bitcoin_rs_wire::peer::{Peer, PeerState};
+    use bitcoin_rs_p2p::dispatch::dispatch_inbound_full;
+    use bitcoin_rs_p2p::peer::{Peer, PeerState};
 
     let headers = seed_headers(2);
     let block = Block {
@@ -1825,12 +1825,12 @@ fn assert_blocktxn_profile(
 }
 
 fn dispatched_wire_response(
-    peer: &mut bitcoin_rs_wire::peer::Peer<std::io::Cursor<Vec<u8>>>,
+    peer: &mut bitcoin_rs_p2p::peer::Peer<std::io::Cursor<Vec<u8>>>,
     query: &ActiveChainQuery,
     request: &Message,
 ) -> Result<bitcoin::p2p::message::RawNetworkMessage, TestError> {
     let mut wire = Vec::new();
-    bitcoin_rs_wire::dispatch::dispatch_inbound_full(
+    bitcoin_rs_p2p::dispatch::dispatch_inbound_full(
         peer,
         request,
         Some(query),
@@ -1838,7 +1838,7 @@ fn dispatched_wire_response(
         &|| true,
         &|| true,
         &mut |response| {
-            bitcoin_rs_wire::wire::write_message(
+            bitcoin_rs_p2p::wire::write_message(
                 &mut wire,
                 bitcoin::p2p::Magic::REGTEST,
                 &response,
@@ -2055,7 +2055,7 @@ fn stale_inventory_requires_validation_and_core_age_bounds() -> TestResult {
             if !validated {
                 tree.restore_chain_tx_count(
                     stale_id,
-                    bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+                    bitcoin_rs_chain::chain::ChainTxCount::UNKNOWN,
                 )?;
             }
             let stale_work = tree.node(stale_id)?.chainwork;
@@ -2249,7 +2249,7 @@ fn serving_rechecks_reorg_invalidation_and_age_after_io() -> TestResult {
             let n = tree.node(id)?;
             query
                 .applied_tip
-                .store(Some(Arc::new(bitcoin_rs_execution::chain::TipSnapshot {
+                .store(Some(Arc::new(bitcoin_rs_chain::chain::TipSnapshot {
                     tip_id: id,
                     height: n.height,
                     hash: n.hash,
@@ -2333,7 +2333,7 @@ fn getblocktxn_rechecks_inventory_policy_when_io_crosses_depth_ten() -> TestResu
                 })?;
                 tree.restore_chain_tx_count(
                     stale_id,
-                    bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+                    bitcoin_rs_chain::chain::ChainTxCount::UNKNOWN,
                 )
                 .map_err(|error| {
                     bitcoin_rs_storage::block_body::BlockBodyReadError::Read(error.to_string())
@@ -2380,7 +2380,7 @@ fn getblocktxn_rechecks_inventory_policy_when_io_crosses_depth_ten() -> TestResu
 
 fn query_with(
     headers: Vec<Header>,
-) -> Result<ActiveChainQuery, bitcoin_rs_execution::chain::ChainError> {
+) -> Result<ActiveChainQuery, bitcoin_rs_chain::chain::ChainError> {
     let mut tree = BlockTree::new();
     let mut parent = None;
     for header in headers {
@@ -2406,9 +2406,7 @@ fn test_header(prev_blockhash: BlockHash, nonce: u32) -> Header {
         prev_blockhash,
         merkle_root: Hash256::default(),
         time: nonce,
-        bits: CompactTarget::from_consensus(
-            bitcoin_rs_execution::chain::regtest_fixture::REGTEST_BITS,
-        ),
+        bits: CompactTarget::from_consensus(bitcoin_rs_chain::chain::regtest_fixture::REGTEST_BITS),
         nonce,
     }
 }
@@ -2680,7 +2678,7 @@ fn held_deep_body_uses_full_block_inventory_policy() -> TestResult {
 
 #[test]
 fn stale_tip_announcement_reconstructs_demoted_fork() -> TestResult {
-    use bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header;
+    use bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_header;
     let mut tree = BlockTree::new();
     let genesis = Network::Regtest.genesis_block().header;
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -2737,7 +2735,7 @@ fn stale_tip_announcement_reconstructs_demoted_fork() -> TestResult {
 
 #[test]
 fn stale_tip_announcement_reports_too_many_above_twenty_headers() -> TestResult {
-    use bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header;
+    use bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_header;
     let mut tree = BlockTree::new();
     let genesis = Network::Regtest.genesis_block().header;
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;

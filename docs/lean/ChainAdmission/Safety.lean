@@ -1,6 +1,6 @@
-/-
+﻿/-
 Safety invariants of the chain-admission machine (Rust owner
-`crates/execution/src/admission_model.rs`). The state abstraction keeps the
+`crates/chain/src/admission_model.rs`). The state abstraction keeps the
 fields the ordered-commit rules constrain: retry and job budgets, the commit
 counter chain, the window delta extent, the writer/reader exclusion, and the observer cursor.
 Field and action names are frozen for the Rust model.

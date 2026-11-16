@@ -1,4 +1,4 @@
-# Verification: tests, fuzzing, proofs
+﻿# Verification: tests, fuzzing, proofs
 
 No layer proves the node correct. Each layer names a property it covers and a property it cannot cover. Run the smallest layer that covers your change, then read its result at the scope it claims.
 
@@ -108,7 +108,7 @@ cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- ke
 The live Core lane is a process comparison, not an in-process oracle. Its evidence test is:
 
 ```
-P2P_CORE_INTEROP_EVIDENCE=target/core-differential/evidence.json cargo test --locked -p bitcoin-rs-wire --test suite core_interop_live:: -- --ignored
+P2P_CORE_INTEROP_EVIDENCE=target/core-differential/evidence.json cargo test --locked -p bitcoin-rs-p2p --test suite core_interop_live:: -- --ignored
 ```
 
 That test reads the evidence document produced by `scripts/run-p2p-core-interop.sh`. It does not run Core by itself. [Compatibility with Bitcoin Core](core-compatibility.md) owns the lane scopes and the main-only limits.

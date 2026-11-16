@@ -1,8 +1,8 @@
-# Chain state and storage
+﻿# Chain state and storage
 
 One row decides what survives a crash: the durable head. A committed block is real only after the head row names it and the batch that wrote it returns. Persistent chain state either supports that row or can be rebuilt from the block bodies.
 
-The storage contract is owned by [`crates/storage`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/storage), the coin store by [`crates/storage/src/coins`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/storage/src/coins), and the transition order by [`crates/execution`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/execution). The normative commit protocol is [docs/contracts/recovery.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md).
+The storage contract is owned by [`crates/storage`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/storage), the coin store by [`crates/storage/src/coins`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/storage/src/coins), and the transition order by [`crates/chain`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/chain). The normative commit protocol is [docs/contracts/recovery.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md).
 
 ## What is stored
 
@@ -39,7 +39,7 @@ A connect commits in this order:
 
 Coin replacements are carried inside the head batch. The compare-and-set makes exactly one head advance win, and cache installation runs strictly after durable success.
 
-Body and undo records are retained under the head's certified extents. When a batch reaches 64 blocks or 8 MiB, the group flushes as one head commit; the limits are `DURABLE_HEAD_GROUP_BLOCKS` and `DURABLE_HEAD_GROUP_MAX_BYTES` in `crates/execution/src/window_limits.rs`.
+Body and undo records are retained under the head's certified extents. When a batch reaches 64 blocks or 8 MiB, the group flushes as one head commit; the limits are `DURABLE_HEAD_GROUP_BLOCKS` and `DURABLE_HEAD_GROUP_MAX_BYTES` in `crates/chain/src/window_limits.rs`.
 
 ## Undo and the atomic batch
 
@@ -98,9 +98,9 @@ Pruning is rejected together with `txindex`, `blockfilterindex`, or a script ind
 A regtest start and one mined block produce these storage and commit lines. `$DATA` is the data directory passed to `--data-dir`. The binary emits one JSON object per line; fields are shown as `key=value` with the timestamp and unchanged diagnostic fields removed.
 
 ```text
-INFO bitcoin_rs_execution::recovery chainstate restore selected restore_source=cold reason=no_complete_checkpoint
+INFO bitcoin_rs_chain::recovery chainstate restore selected restore_source=cold reason=no_complete_checkpoint
 INFO bitcoin_rs_node::state::open opened storage backend with effective cache capacities backend="rocksdb" chainstate_dir=$DATA/chainstate chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
-DEBUG bitcoin_rs_execution::connect apply_block: profile height=1 input.block_hash=5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24 total_us=67
+DEBUG bitcoin_rs_chain::connect apply_block: profile height=1 input.block_hash=5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24 total_us=67
 INFO bitcoin_rs_node::lifecycle published clean chainstate checkpoint generation=1
 ```
 
@@ -110,8 +110,8 @@ INFO bitcoin_rs_node::lifecycle published clean chainstate checkpoint generation
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| A matching head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/execution/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable/tests.rs) |
-| Replayed body matches the head identity | `committed_gap_body_must_hash_to_the_head_identity` | [`crates/execution/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable/tests.rs) |
+| A matching head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/chain/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/src/durable/tests.rs) |
+| Replayed body matches the head identity | `committed_gap_body_must_hash_to_the_head_identity` | [`crates/chain/src/durable/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/src/durable/tests.rs) |
 | Pruning keeps retained reorg history | `prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs` | [`crates/node/src/state/tests/recovery.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state/tests/recovery.rs) |
 | A second open is refused while the first lives | `second_open_while_first_lives_refuses_and_reopen_succeeds_after_drop` | [`crates/node/src/state/tests/data_dir_lock.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state/tests/data_dir_lock.rs) |
 

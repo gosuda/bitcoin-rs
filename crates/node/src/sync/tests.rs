@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
+use bitcoin_rs_chain::chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, BlockImage, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
 };
 use bitcoin_rs_consensus::script::push_int;
-use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
 use bitcoin_rs_storage::{split_chainstate_cache_budget, utxo::UtxoSet};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 
 use crate::p2p::sync::chain::{SyncChain, WindowApplyDisposition, WindowCommitError};
 use crate::test_support::TestError;
-use bitcoin_rs_execution::Chainstate;
+use bitcoin_rs_chain::Chainstate;
 
 fn sync_unit_test_budget() -> Arc<crate::budget::NodeBudget> {
     Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
@@ -125,9 +125,7 @@ fn apply_handles(
         Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
             bitcoin_rs_storage::utxo::stats::CoinStats::default(),
         )),
-        Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
-            0,
-        )),
+        Arc::new(bitcoin_rs_chain::events::ChainEventPublisher::detached(0)),
     )
 }
 
@@ -245,8 +243,8 @@ fn with_historical_background_permit_holds_one_permit_during_closure() {
 // SYNC-04
 #[test]
 fn fatal_window_settlement_closes_the_chain_for_recovery() -> Result<(), TestError> {
+    use bitcoin_rs_chain::{ApplyError, WindowApplyDisposition, WindowApplyError};
     use bitcoin_rs_consensus::ValidationEngine;
-    use bitcoin_rs_execution::{ApplyError, WindowApplyDisposition, WindowApplyError};
     use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
 
     let genesis = Network::Regtest.genesis_block();
@@ -264,9 +262,7 @@ fn fatal_window_settlement_closes_the_chain_for_recovery() -> Result<(), TestErr
         None,
     ));
     let followers = crate::chain_effects::ChainFollowers::new(
-        Arc::new(RwLock::new(
-            bitcoin_rs_projection::block_log::BlockLog::new(),
-        )),
+        Arc::new(RwLock::new(bitcoin_rs_index::block_log::BlockLog::new())),
         Arc::new(crate::NoOpZmqPublisher),
         None,
         None,
@@ -439,9 +435,7 @@ fn refusal_window_fixture(payload_blocks: &[Block]) -> Result<RefusalWindowFixtu
     ));
     *observer.gateway.lock() = Some(Arc::clone(&gateway));
     let followers = crate::chain_effects::ChainFollowers::new(
-        Arc::new(RwLock::new(
-            bitcoin_rs_projection::block_log::BlockLog::new(),
-        )),
+        Arc::new(RwLock::new(bitcoin_rs_index::block_log::BlockLog::new())),
         Arc::new(crate::NoOpZmqPublisher),
         None,
         None,
@@ -559,7 +553,7 @@ fn assert_refused_window_state(
     assert!(
         matches!(
             fixture.handles.begin_transition(),
-            Err(bitcoin_rs_execution::ApplyError::Shutdown)
+            Err(bitcoin_rs_chain::ApplyError::Shutdown)
         ),
         "a halted chain must refuse the next transition instead of reopening"
     );

@@ -1,4 +1,4 @@
-use super::super::headers::{MAX_HEADER_BATCHES_PER_TICK, MAX_HEADERS_PER_TICK};
+﻿use super::super::headers::{MAX_HEADER_BATCHES_PER_TICK, MAX_HEADERS_PER_TICK};
 use super::*;
 
 // P2P-07
@@ -27,7 +27,7 @@ fn header_backlog_yields_to_block_apply_and_request_scheduling() -> TestResult {
             wire_response: true,
         })?;
     }
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     let started = Instant::now();
     sync.tick();
     eprintln!(
@@ -49,7 +49,7 @@ fn header_backlog_yields_to_block_apply_and_request_scheduling() -> TestResult {
 
 #[test]
 fn header_work_budget_keeps_whole_batches_in_order() -> TestResult {
-    let page = bitcoin_rs_wire::wire::MAX_HEADERS_MESSAGE_COUNT;
+    let page = bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT;
     for lengths in [vec![page, page, 1], vec![page - 1, page, page, 0]] {
         let mut tree = BlockTree::new();
         let genesis = genesis_header();

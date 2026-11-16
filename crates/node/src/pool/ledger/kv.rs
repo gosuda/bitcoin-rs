@@ -1,4 +1,4 @@
-use bitcoin_rs_serving::mining::pool::ledger::LedgerError;
+﻿use bitcoin_rs_rpc::mining::pool::ledger::LedgerError;
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit, WriteCondition};
 
 trait StorageResultExt<T> {

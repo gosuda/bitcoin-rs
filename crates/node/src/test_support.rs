@@ -1,4 +1,4 @@
-#[cfg(any(test, feature = "test-seam"))]
+﻿#[cfg(any(test, feature = "test-seam"))]
 #[derive(Debug, thiserror::Error)]
 pub enum TestError {
     #[error(transparent)]
@@ -22,19 +22,19 @@ pub enum TestError {
     #[error(transparent)]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(transparent)]
-    Apply(Box<bitcoin_rs_execution::ApplyError>),
+    Apply(Box<bitcoin_rs_chain::ApplyError>),
     #[error(transparent)]
-    Recovery(Box<bitcoin_rs_execution::recovery::RecoveryError>),
+    Recovery(Box<bitcoin_rs_chain::recovery::RecoveryError>),
     #[error(transparent)]
-    Checkpoint(Box<bitcoin_rs_execution::CheckpointError>),
+    Checkpoint(Box<bitcoin_rs_chain::CheckpointError>),
     #[error(transparent)]
-    CheckpointSetup(#[from] bitcoin_rs_execution::CheckpointSetupError),
+    CheckpointSetup(#[from] bitcoin_rs_chain::CheckpointSetupError),
     #[error(transparent)]
-    Maintenance(#[from] bitcoin_rs_execution::MaintenanceError),
+    Maintenance(#[from] bitcoin_rs_chain::MaintenanceError),
     #[error(transparent)]
-    AssumeUtxo(Box<bitcoin_rs_execution::AssumeUtxoError>),
+    AssumeUtxo(Box<bitcoin_rs_chain::AssumeUtxoError>),
     #[error(transparent)]
-    P2pStart(#[from] bitcoin_rs_wire::P2pServiceError),
+    P2pStart(#[from] bitcoin_rs_p2p::P2pServiceError),
     #[error(transparent)]
     HexToBytes(#[from] bitcoin::hex::HexToBytesError),
     #[error(transparent)]
@@ -48,28 +48,28 @@ pub enum TestError {
     #[error(transparent)]
     Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
-    MiningControl(#[from] bitcoin_rs_serving::mining::MiningControlError),
+    MiningControl(#[from] bitcoin_rs_rpc::mining::MiningControlError),
     #[error(transparent)]
-    Mining(#[from] bitcoin_rs_serving::mining::MiningError),
+    Mining(#[from] bitcoin_rs_rpc::mining::MiningError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    Job(#[from] bitcoin_rs_serving::mining::pool::JobError),
+    Job(#[from] bitcoin_rs_rpc::mining::pool::JobError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    Ledger(#[from] bitcoin_rs_serving::mining::pool::ledger::LedgerError),
+    Ledger(#[from] bitcoin_rs_rpc::mining::pool::ledger::LedgerError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    ChainView(#[from] bitcoin_rs_serving::mining::pool::ledger::ChainViewError),
+    ChainView(#[from] bitcoin_rs_rpc::mining::pool::ledger::ChainViewError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    Sv1Config(#[from] bitcoin_rs_serving::mining::pool::stratum::sv1::ConfigError),
+    Sv1Config(#[from] bitcoin_rs_rpc::mining::pool::stratum::sv1::ConfigError),
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    LedgerUnavailable(#[from] bitcoin_rs_serving::mining::pool::LedgerUnavailable),
+    LedgerUnavailable(#[from] bitcoin_rs_rpc::mining::pool::LedgerUnavailable),
     #[error(transparent)]
-    PruneService(#[from] bitcoin_rs_serving::context::PruneServiceError),
+    PruneService(#[from] bitcoin_rs_rpc::context::PruneServiceError),
     #[error(transparent)]
-    TxQuery(#[from] bitcoin_rs_projection::query_api::TxQueryError),
+    TxQuery(#[from] bitcoin_rs_index::query_api::TxQueryError),
     #[error(transparent)]
     AddrParse(#[from] std::net::AddrParseError),
     #[error(transparent)]
@@ -77,21 +77,21 @@ pub enum TestError {
     #[error(transparent)]
     TryFromInt(#[from] std::num::TryFromIntError),
     #[error(transparent)]
-    Chain(#[from] bitcoin_rs_execution::chain::ChainError),
+    Chain(#[from] bitcoin_rs_chain::chain::ChainError),
     #[error(transparent)]
     Node(#[from] crate::embed::NodeError),
     #[error(transparent)]
-    Rpc(#[from] bitcoin_rs_serving::RpcError),
+    Rpc(#[from] bitcoin_rs_rpc::RpcError),
     #[error(transparent)]
     ChainChange(#[from] bitcoin_rs_mempool::ChainChangeError),
     #[error(transparent)]
-    Peer(#[from] bitcoin_rs_wire::PeerError),
+    Peer(#[from] bitcoin_rs_p2p::PeerError),
     #[error(transparent)]
     Mempool(#[from] bitcoin_rs_mempool::MempoolError),
     #[error(transparent)]
     AddressParse(#[from] bitcoin::address::ParseError),
     #[error(transparent)]
-    Disconnect(#[from] bitcoin_rs_execution::DisconnectError),
+    Disconnect(#[from] bitcoin_rs_chain::DisconnectError),
     #[error(transparent)]
     Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
     #[error(transparent)]
@@ -109,23 +109,23 @@ pub enum TestError {
     #[error("thread panicked")]
     ThreadPanicked,
     #[error(transparent)]
-    RegtestFixture(#[from] bitcoin_rs_execution::chain::regtest_fixture::RegtestFixtureError),
+    RegtestFixture(#[from] bitcoin_rs_chain::chain::regtest_fixture::RegtestFixtureError),
     #[error(transparent)]
     Prune(#[from] bitcoin_rs_storage::pruning::PruneError),
     #[error(transparent)]
     SnapshotUtxo(#[from] bitcoin_rs_storage::utxo::core_snapshot::SnapshotError),
     #[error(transparent)]
-    DerivedIndexWorker(#[from] bitcoin_rs_projection::runtime::DerivedIndexWorkerError),
+    DerivedIndexWorker(#[from] bitcoin_rs_index::runtime::DerivedIndexWorkerError),
     #[error(transparent)]
     Prioritise(#[from] bitcoin_rs_mempool::PrioritiseError),
     #[error(transparent)]
-    Reorg(#[from] bitcoin_rs_execution::reorg::ReorgError),
+    Reorg(#[from] bitcoin_rs_chain::reorg::ReorgError),
     #[error(transparent)]
-    DataDir(#[from] bitcoin_rs_execution::events::DataDirError),
+    DataDir(#[from] bitcoin_rs_chain::events::DataDirError),
     #[error(transparent)]
     StdRecvTimeout(#[from] std::sync::mpsc::RecvTimeoutError),
     #[error(transparent)]
-    HeaderAdmission(#[from] bitcoin_rs_execution::HeaderAdmissionError),
+    HeaderAdmission(#[from] bitcoin_rs_chain::HeaderAdmissionError),
     #[error(transparent)]
     Evidence(#[from] bitcoin_rs_storage::recovery_evidence::EvidenceError),
     #[error(transparent)]
@@ -145,7 +145,7 @@ pub enum TestError {
     #[error("panic: {0}")]
     Panicked(&'static str),
     #[error(transparent)]
-    Listener(#[from] bitcoin_rs_wire::listener::ListenerError),
+    Listener(#[from] bitcoin_rs_p2p::listener::ListenerError),
     #[error(transparent)]
     Recv(#[from] crossbeam_channel::RecvError),
     #[error(transparent)]
@@ -192,29 +192,29 @@ impl From<crate::ConnectMutationError> for TestError {
 }
 
 #[cfg(any(test, feature = "test-seam"))]
-impl From<bitcoin_rs_execution::ApplyError> for TestError {
-    fn from(error: bitcoin_rs_execution::ApplyError) -> Self {
+impl From<bitcoin_rs_chain::ApplyError> for TestError {
+    fn from(error: bitcoin_rs_chain::ApplyError) -> Self {
         Self::Apply(Box::new(error))
     }
 }
 
 #[cfg(any(test, feature = "test-seam"))]
-impl From<bitcoin_rs_execution::recovery::RecoveryError> for TestError {
-    fn from(error: bitcoin_rs_execution::recovery::RecoveryError) -> Self {
+impl From<bitcoin_rs_chain::recovery::RecoveryError> for TestError {
+    fn from(error: bitcoin_rs_chain::recovery::RecoveryError) -> Self {
         Self::Recovery(Box::new(error))
     }
 }
 
 #[cfg(any(test, feature = "test-seam"))]
-impl From<bitcoin_rs_execution::CheckpointError> for TestError {
-    fn from(error: bitcoin_rs_execution::CheckpointError) -> Self {
+impl From<bitcoin_rs_chain::CheckpointError> for TestError {
+    fn from(error: bitcoin_rs_chain::CheckpointError) -> Self {
         Self::Checkpoint(Box::new(error))
     }
 }
 
 #[cfg(any(test, feature = "test-seam"))]
-impl From<bitcoin_rs_execution::AssumeUtxoError> for TestError {
-    fn from(error: bitcoin_rs_execution::AssumeUtxoError) -> Self {
+impl From<bitcoin_rs_chain::AssumeUtxoError> for TestError {
+    fn from(error: bitcoin_rs_chain::AssumeUtxoError) -> Self {
         Self::AssumeUtxo(Box::new(error))
     }
 }

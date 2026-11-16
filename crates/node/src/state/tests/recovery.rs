@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use crate::state::open::NodeOpenError;
 use crate::test_support::TestError;
 use sonic_rs::JsonValueTrait as _;
@@ -251,7 +251,7 @@ fn invalidate_preflights_first_replacement_body_before_disconnect() -> Result<()
         &state.chainstate(),
         genesis_id,
         replacement.header,
-        bitcoin_rs_execution::chain::node::NodeStatus::HeaderValid,
+        bitcoin_rs_chain::chain::node::NodeStatus::HeaderValid,
     )?;
 
     let result = crate::reorg::invalidate_block(
@@ -321,7 +321,7 @@ fn switch_to_branch_settles_disconnect_debt() -> Result<(), TestError> {
             &state.chainstate(),
             parent,
             block.header,
-            bitcoin_rs_execution::chain::node::NodeStatus::HeaderValid,
+            bitcoin_rs_chain::chain::node::NodeStatus::HeaderValid,
         )?;
         fork_bodies.insert(
             Hash256::from(block.block_hash()),
@@ -449,7 +449,7 @@ fn stale_checkpoint_restore_surfaces_warning_not_silence() -> Result<(), TestErr
 type ForkFixture = (
     tempfile::TempDir,
     NodeState,
-    bitcoin_rs_execution::chain::NodeId,
+    bitcoin_rs_chain::chain::NodeId,
     HashMap<
         bitcoin_rs_consensus::primitives::Hash256,
         bitcoin_rs_consensus::primitives::BlockImage,
@@ -497,7 +497,7 @@ fn forked_regtest_state() -> Result<ForkFixture, TestError> {
             &state.chainstate(),
             parent,
             block.header,
-            bitcoin_rs_execution::chain::node::NodeStatus::HeaderValid,
+            bitcoin_rs_chain::chain::node::NodeStatus::HeaderValid,
         )?;
         fork_bodies.insert(
             Hash256::from(block.block_hash()),
@@ -623,7 +623,7 @@ fn missing_checkpoint_replays_durable_head_chain_at_startup() -> Result<(), Test
             NodeOpenError::Recovery(source)
                 if matches!(
                     source.as_ref(),
-                    bitcoin_rs_execution::recovery::RecoveryError::CheckpointEngineImageMissing
+                    bitcoin_rs_chain::recovery::RecoveryError::CheckpointEngineImageMissing
                 )
         ),
         "unexpected missing-image refusal: {error:#}"
@@ -693,7 +693,7 @@ fn committed_frame_corruption_refuses_startup_and_preserves_all_bytes() -> Resul
 
 #[test]
 fn startup_verification_refuses_a_corrupt_tip_body() -> Result<(), TestError> {
-    use bitcoin_rs_execution::verify::VerifyError;
+    use bitcoin_rs_chain::verify::VerifyError;
 
     let (_dir, state, config) = applied_regtest_chain(2, 2)?;
     drop(state);
@@ -841,7 +841,7 @@ fn full_revalidation_cold_open_wipes_stale_engine_coins() -> Result<(), TestErro
 }
 
 type ForkPlan = (
-    bitcoin_rs_execution::chain::NodeId,
+    bitcoin_rs_chain::chain::NodeId,
     HashMap<
         bitcoin_rs_consensus::primitives::Hash256,
         bitcoin_rs_consensus::primitives::BlockImage,
@@ -878,7 +878,7 @@ fn plan_fork(
             &state.chainstate(),
             parent,
             block.header,
-            bitcoin_rs_execution::chain::node::NodeStatus::HeaderValid,
+            bitcoin_rs_chain::chain::node::NodeStatus::HeaderValid,
         )?;
         bodies.insert(
             hash,

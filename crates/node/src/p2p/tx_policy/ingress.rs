@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bitcoin_rs_consensus::primitives::encode::double_sha256;
@@ -11,8 +11,8 @@ use bitcoin_rs_mempool::standardness::{MAX_PACKAGE_COUNT, MAX_PACKAGE_WEIGHT};
 use hashbrown::HashSet;
 use parking_lot::Mutex;
 
-use bitcoin_rs_wire::packages::{MAX_GETPKGTXNS, combined_package_hash};
-use bitcoin_rs_wire::{InboundTx, PeerSource, TxInventory};
+use bitcoin_rs_p2p::packages::{MAX_GETPKGTXNS, combined_package_hash};
+use bitcoin_rs_p2p::{InboundTx, PeerSource, TxInventory};
 
 pub const MAX_DECODED_PACKAGES_PER_PEER: usize = 1;
 

@@ -1,4 +1,4 @@
-# Atomic ownership contract
+﻿# Atomic ownership contract
 
 This contract defines atomic ownerships, single-owner representations, window execution, durability boundaries, and snapshot qualification for bitcoin-rs.
 Writing standard: ASD-STE100 (Simplified Technical English).
@@ -7,12 +7,12 @@ Applies to: `gosuda/bitcoin-rs`.
 Owners:
 - Block image and layout: `crates/consensus/`
 - Script and witness execution: `crates/consensus/src/script/`
-- Window execution: `crates/execution/`
+- Window execution: `crates/chain/`
 - Commit authority and coin storage: `crates/storage/`
-- Projections and generation segments: `crates/projection/`
-- Query views and serving: `crates/serving/`
+- Projections and generation segments: `crates/index/`
+- Query views and serving: `crates/rpc/`
 - Resource budgets: `crates/node/`
-- Mempool and mining views: `crates/mempool/`, `crates/serving/src/mining/`
+- Mempool and mining views: `crates/mempool/`, `crates/rpc/src/mining/`
 
 ## 1. Terms
 

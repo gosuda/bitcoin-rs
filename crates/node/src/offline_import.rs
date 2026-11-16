@@ -1,4 +1,4 @@
-use std::fs::File;
+﻿use std::fs::File;
 use std::io::{Read, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -314,7 +314,7 @@ pub enum OfflineImportError {
     VerificationSkippedData { height: u32 },
     #[error("verification of the applied tip failed: {verify_error}")]
     VerificationFailed {
-        verify_error: Box<bitcoin_rs_execution::verify::VerifyError>,
+        verify_error: Box<bitcoin_rs_chain::verify::VerifyError>,
     },
     #[error("stable UTXO view rebuild failed: {source}")]
     StableViewRebuild {
@@ -335,7 +335,7 @@ pub enum OfflineImportError {
     },
     #[error("clean checkpoint publication failed: {checkpoint_error}")]
     CheckpointPublicationFailed {
-        checkpoint_error: Box<bitcoin_rs_execution::CheckpointError>,
+        checkpoint_error: Box<bitcoin_rs_chain::CheckpointError>,
     },
     #[error("clean checkpoint publication skipped: no applied tip")]
     CheckpointPublicationSkipped,
@@ -440,7 +440,7 @@ fn validate_offline_import_config_and_manifest(
 
 fn determine_resume_skip(
     manifest_doc: &Manifest,
-    chainstate: &bitcoin_rs_execution::Chainstate,
+    chainstate: &bitcoin_rs_chain::Chainstate,
     data_dir: &Path,
 ) -> Result<usize, OfflineImportError> {
     let already = chainstate.applied_tip_snapshot();
@@ -742,7 +742,7 @@ fn block_index_for_height(start_height: u32, height: u32) -> Result<usize, Offli
 
 fn require_full_validation_provenance(
     data_dir: &Path,
-    tip: &bitcoin_rs_execution::chain::TipSnapshot,
+    tip: &bitcoin_rs_chain::chain::TipSnapshot,
 ) -> Result<(), OfflineImportError> {
     match read_full_validation_provenance(data_dir) {
         Ok(record)
@@ -790,7 +790,7 @@ fn read_full_validation_provenance(
 
 fn write_full_validation_provenance(
     data_dir: &Path,
-    tip: &bitcoin_rs_execution::chain::TipSnapshot,
+    tip: &bitcoin_rs_chain::chain::TipSnapshot,
 ) -> Result<(), OfflineImportError> {
     let doc = FullValidationProvenance {
         schema: FULL_VALIDATION_PROVENANCE_SCHEMA.to_owned(),
@@ -831,9 +831,9 @@ fn write_full_validation_provenance(
 }
 
 fn resolve_offline_validation_mode(
-    _inherited: bitcoin_rs_execution::ValidationMode,
-) -> bitcoin_rs_execution::ValidationMode {
-    bitcoin_rs_execution::ValidationMode::Full
+    _inherited: bitcoin_rs_chain::ValidationMode,
+) -> bitcoin_rs_chain::ValidationMode {
+    bitcoin_rs_chain::ValidationMode::Full
 }
 
 fn check_payload_against_entry(
@@ -963,14 +963,14 @@ fn verify_and_certify(
     if body.is_none() {
         return Err(OfflineImportError::TipBodyUnavailable);
     }
-    let request = bitcoin_rs_execution::verify::VerifyRequest {
-        level: bitcoin_rs_execution::verify::CheckLevel::CheckUndoAndCommitments,
+    let request = bitcoin_rs_chain::verify::VerifyRequest {
+        level: bitcoin_rs_chain::verify::CheckLevel::CheckUndoAndCommitments,
         depth: NonZeroU32::new(1),
         cancellation: None,
     };
-    match bitcoin_rs_execution::verify::verify_recent_blocks(&chainstate, request) {
-        Ok(bitcoin_rs_execution::verify::VerifyOutcome::Passed { .. }) => {}
-        Ok(bitcoin_rs_execution::verify::VerifyOutcome::SkippedNoBlockData { height }) => {
+    match bitcoin_rs_chain::verify::verify_recent_blocks(&chainstate, request) {
+        Ok(bitcoin_rs_chain::verify::VerifyOutcome::Passed { .. }) => {}
+        Ok(bitcoin_rs_chain::verify::VerifyOutcome::SkippedNoBlockData { height }) => {
             return Err(OfflineImportError::VerificationSkippedData { height });
         }
         Err(verify_error) => {

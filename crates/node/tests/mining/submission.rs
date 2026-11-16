@@ -3,14 +3,14 @@ use std::thread;
 use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
+use bitcoin_rs_chain::chain::regtest_fixture;
+use bitcoin_rs_chain::chain::{NodeStatus, compact_is_met_by};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, LockTime, OutPoint,
     Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_execution::chain::regtest_fixture;
-use bitcoin_rs_execution::chain::{NodeStatus, compact_is_met_by};
 use bitcoin_rs_node::Network;
-use bitcoin_rs_serving::mining::{
+use bitcoin_rs_rpc::mining::{
     BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult,
     MiningControl, MiningControlError,
 };
@@ -527,7 +527,7 @@ fn submit_header_rejects_an_invalid_parent_without_inserting_child() -> Result<(
         tree.insert_node(
             Some(genesis_id),
             invalid.header,
-            bitcoin_rs_execution::chain::NodeStatus::Invalid,
+            bitcoin_rs_chain::chain::NodeStatus::Invalid,
         )?;
     }
 
@@ -907,10 +907,7 @@ fn applied_ancestor_with_unset_chain_tx_count_is_duplicate() -> Result<()> {
         let genesis_id = tree
             .lookup(genesis_hash)
             .ok_or_else(|| TestError::message("missing genesis"))?;
-        tree.restore_chain_tx_count(
-            genesis_id,
-            bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
-        )?;
+        tree.restore_chain_tx_count(genesis_id, bitcoin_rs_chain::chain::ChainTxCount::UNKNOWN)?;
     }
     assert_eq!(
         propose_block(&mining, genesis.clone())?,

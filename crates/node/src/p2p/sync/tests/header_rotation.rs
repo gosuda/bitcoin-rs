@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 #[test]
 fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult {
@@ -8,18 +8,18 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult
         inbound_headers_tx,
         peers,
     } = header_sync_with_genesis()?;
-    let invalid_peer = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let invalid_peer = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
-    let other_peer = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let other_peer = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8334,
     ));
-    let (invalid_tx, invalid_rx) = bitcoin_rs_wire::test_support::message_channel();
-    let (other_tx, other_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (invalid_tx, invalid_rx) = bitcoin_rs_p2p::test_support::message_channel();
+    let (other_tx, other_rx) = bitcoin_rs_p2p::test_support::message_channel();
 
-    let invalid_lease = bitcoin_rs_wire::PeerLease::new(invalid_tx);
+    let invalid_lease = bitcoin_rs_p2p::PeerLease::new(invalid_tx);
     peers.register(invalid_peer, invalid_lease.clone());
     peers.publish_info(
         invalid_peer,
@@ -61,7 +61,7 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult
         "invalid header source must lose its outbound lease"
     );
 
-    let other_lease = bitcoin_rs_wire::PeerLease::new(other_tx);
+    let other_lease = bitcoin_rs_p2p::PeerLease::new(other_tx);
     peers.register(other_peer, other_lease.clone());
     peers.publish_info(other_peer, &other_lease, synthetic_peer(other_peer, 8));
     sync.tick();
@@ -92,7 +92,7 @@ fn unattributed_invalid_headers_do_not_disconnect_any_peer() -> TestResult {
         inbound_headers_tx,
         peers,
     } = header_sync_with_genesis()?;
-    let peer_addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let peer_addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -120,14 +120,14 @@ fn unattributed_invalid_headers_do_not_disconnect_any_peer() -> TestResult {
 #[test]
 fn disconnected_outbound_channel_does_not_mark_blocks_pending() -> TestResult {
     let (sync, peers, block_tree, applied_tip, _expected) = sync_with_header_chain(3)?;
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
     register_info(&peers, synthetic_peer(addr, 100));
-    let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
     drop(rx);
-    peers.register(addr, bitcoin_rs_wire::PeerLease::new(tx));
+    peers.register(addr, bitcoin_rs_p2p::PeerLease::new(tx));
 
     sync.tick();
 
@@ -247,7 +247,7 @@ fn common_prefix_winner_takes_over_deep_window() -> TestResult {
     );
 
     for block in &blocks[..4] {
-        let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block.clone());
+        let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block.clone());
         inbound.source = Some(current_source(&peers, alternate));
         blocks_tx.send(inbound)?;
     }
@@ -261,7 +261,7 @@ fn common_prefix_winner_takes_over_deep_window() -> TestResult {
         sync.scheduler
             .lock()
             .window
-            .peer_in_staller_cooldown(bitcoin_rs_wire::PeerSource::for_test(owner), Instant::now())
+            .peer_in_staller_cooldown(bitcoin_rs_p2p::PeerSource::for_test(owner), Instant::now())
     );
     assert_eq!(
         witness_block_inventory(next_getdata(&alternate_rx)?)?,
@@ -272,7 +272,7 @@ fn common_prefix_winner_takes_over_deep_window() -> TestResult {
     );
     assert!(peers.is_connected(owner));
     sync.scheduler.lock().window.mark_peer_unresponsive(
-        bitcoin_rs_wire::PeerSource::for_test(alternate),
+        bitcoin_rs_p2p::PeerSource::for_test(alternate),
         Instant::now(),
     );
     sync.tick();
@@ -296,7 +296,7 @@ fn same_address_reconnect_does_not_inherit_stalled_inflight() -> TestResult {
     let _ = next_getdata(&winner_rx)?;
     let predecessor = current_source(&peers, winner);
     for block in &blocks[..4] {
-        let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block.clone());
+        let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block.clone());
         inbound.source = Some(predecessor);
         blocks_tx.send(inbound)?;
     }
@@ -316,7 +316,7 @@ fn same_address_reconnect_does_not_inherit_stalled_inflight() -> TestResult {
         "the elected winner must hold the deep window in flight"
     );
 
-    let (replacement_tx, replacement_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (replacement_tx, replacement_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(replacement_tx);
     peers.register(winner, lease.clone());
     peers.publish_info(winner, &lease, synthetic_peer(winner, 100));
@@ -393,7 +393,7 @@ fn stall_eviction_does_not_disconnect_replacement_connection() -> TestResult {
             _ => None,
         }
     };
-    let (replacement_tx, _replacement_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (replacement_tx, _replacement_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let replacement = PeerLease::new(replacement_tx);
     peers.register(staller, replacement.clone());
     peers.publish_info(staller, &replacement, synthetic_peer(staller, 200));
@@ -438,7 +438,7 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout() 
         std::vec![blocks[0].block_hash(), blocks[1].block_hash()]
     );
 
-    blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[1].clone()))?;
+    blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[1].clone()))?;
     sync.tick();
     {
         let scheduler = sync.scheduler.lock();
@@ -469,7 +469,7 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout() 
         std::vec![blocks[0].block_hash()]
     );
 
-    blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     sync.tick();
     let applied_height = applied_tip

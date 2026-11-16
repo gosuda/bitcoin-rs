@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 autotests = false
 name = "bitcoin-rs"
 edition.workspace = true
@@ -24,8 +24,8 @@ toml.workspace = true
 bitcoin-rs-node.workspace = true
 bitcoin-rs-storage.workspace = true
 bitcoin-rs-consensus.workspace = true
-bitcoin-rs-execution.workspace = true
-bitcoin-rs-wire.workspace = true
+bitcoin-rs-chain.workspace = true
+bitcoin-rs-p2p.workspace = true
 
 [dev-dependencies]
 parking_lot.workspace = true
@@ -33,7 +33,7 @@ rustix.workspace = true
 sonic-rs.workspace = true
 tempfile.workspace = true
 bitcoin.workspace = true
-bitcoin-rs-serving = { workspace = true }
+bitcoin-rs-rpc = { workspace = true }
 bitcoin-rs-e2e.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]

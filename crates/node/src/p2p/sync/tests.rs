@@ -1,7 +1,7 @@
 use super::test_support::{ScriptedBranchSwitch, TestChain, mined_chain, synced_ibd_latch};
 use crate::test_support::{TestError, TestResult};
-use bitcoin_rs_wire::PeerRemote;
-use bitcoin_rs_wire::test_support::{
+use bitcoin_rs_p2p::PeerRemote;
+use bitcoin_rs_p2p::test_support::{
     OrFail, connect_peer, current_source, synthetic_peer, test_addr,
 };
 use std::net::IpAddr;
@@ -13,14 +13,14 @@ use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash;
+use bitcoin_rs_chain::chain::{
+    BlockTree, HeaderRefusal, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
+    regtest_fixture,
+};
 use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, BlockImage, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
     consensus_bytes,
-};
-use bitcoin_rs_execution::chain::{
-    BlockTree, HeaderRefusal, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
-    regtest_fixture,
 };
 use bitcoin_rs_storage::split_chainstate_cache_budget;
 use crossbeam_channel::unbounded;
@@ -50,7 +50,7 @@ use super::receive::unrequested_body_admissible;
 use super::requests::BODY_UNAVAILABLE_RETRY;
 use super::{BlockSync, Inventory};
 use crate::p2p::block_stager::StagedBlock;
-use bitcoin_rs_wire::{InboundHeaders, Message, PeerInfo, PeerLease, PeerSource, PeerTable};
+use bitcoin_rs_p2p::{InboundHeaders, Message, PeerInfo, PeerLease, PeerSource, PeerTable};
 
 struct RefusingChain(Arc<TestChain>);
 
@@ -220,7 +220,7 @@ fn tick_allows_demoted_peer_when_it_is_the_only_eligible_peer() -> TestResult {
         }
         .with_pending_timeout_override(Duration::ZERO),
     );
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -306,7 +306,7 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip() -> TestResult 
             }
         }
     };
-    let first_getdata = |rx: &bitcoin_rs_wire::test_support::MessageReceiver| -> Vec<Inventory> {
+    let first_getdata = |rx: &bitcoin_rs_p2p::test_support::MessageReceiver| -> Vec<Inventory> {
         loop {
             match rx.try_recv() {
                 Ok(Message::GetData(inventory)) => return inventory,
@@ -318,7 +318,7 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip() -> TestResult 
 
     let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(4)?;
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         9_101,
     ));
@@ -330,7 +330,7 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip() -> TestResult 
 
     let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(4)?;
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         9_102,
     ));
@@ -348,7 +348,7 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip() -> TestResult 
             ..super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         9_103,
     ));
@@ -397,7 +397,7 @@ fn unsolicited_stale_block_retries_from_resolved_header_height() -> TestResult {
             ..super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -429,7 +429,7 @@ fn unsolicited_stale_block_retries_from_resolved_header_height() -> TestResult {
             .requeue_for_retry(&hash, height, Instant::now());
     }
 
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(block2))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block2))?;
     sync.drain_inbound_blocks();
 
     assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
@@ -464,7 +464,7 @@ fn inv_delivered_block_admits_carried_header_and_applies() -> TestResult {
         inbound_headers_tx: _inbound_headers_tx,
     } = SyncHarness::new(tree);
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -478,7 +478,7 @@ fn inv_delivered_block_admits_carried_header_and_applies() -> TestResult {
     );
 
     let source = current_source(&peers, addr);
-    let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block);
+    let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block);
     inbound.source = Some(source);
     inbound_blocks_tx.send(inbound)?;
     sync.tick();
@@ -532,7 +532,7 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> TestResult {
         inbound_headers_tx: _inbound_headers_tx,
     } = SyncHarness::new(tree);
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -543,7 +543,7 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> TestResult {
     assert_applied_genesis(&applied_tip, &block_tree)?;
 
     for block in [block2, block1] {
-        let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block);
+        let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block);
         inbound.source = Some(source);
         inbound_blocks_tx.send(inbound)?;
     }
@@ -591,7 +591,7 @@ fn staged_images_charge_follows_retained_images() -> TestResult {
         inbound_headers_tx: _inbound_headers_tx,
     } = SyncHarness::new(tree);
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8_334,
     ));
@@ -607,11 +607,11 @@ fn staged_images_charge_follows_retained_images() -> TestResult {
     let ledger = Arc::new(crate::budget::BudgetedIngressLedger::new(Arc::clone(
         &budget,
     )));
-    let block_memory = Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
+    let block_memory = Arc::new(bitcoin_rs_p2p::inbound::block_memory::BlockMemory::new(
         ledger,
     ));
 
-    let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block2);
+    let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block2);
     inbound.source = Some(source);
     let retained = inbound
         .payload()
@@ -668,7 +668,7 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
         inbound_headers_tx,
     } = SyncHarness::new(tree);
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -678,7 +678,7 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
 
-    let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block2.clone());
+    let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block2.clone());
     inbound.source = Some(source);
     inbound_blocks_tx.send(inbound)?;
     sync.tick();
@@ -715,7 +715,7 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
         "header admission must reconcile the staged child's height"
     );
 
-    let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block1);
+    let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block1);
     inbound.source = Some(source);
     inbound_blocks_tx.send(inbound)?;
     sync.tick();
@@ -869,7 +869,7 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
     );
     assert!(
         sync.scheduler.lock().window.peer_in_staller_cooldown(
-            bitcoin_rs_wire::PeerSource::for_test(staller),
+            bitcoin_rs_p2p::PeerSource::for_test(staller),
             Instant::now()
         ),
         "disconnected staller must enter the cooldown"
@@ -916,7 +916,7 @@ fn clean_fast_path_caps_request_at_peer_height() -> TestResult {
             ..super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -939,8 +939,8 @@ fn clean_fast_path_caps_request_at_peer_height() -> TestResult {
 
 struct ExhaustionFixture {
     sync: BlockSync,
-    stalled_rx: bitcoin_rs_wire::test_support::MessageReceiver,
-    healthy_rx: bitcoin_rs_wire::test_support::MessageReceiver,
+    stalled_rx: bitcoin_rs_p2p::test_support::MessageReceiver,
+    healthy_rx: bitcoin_rs_p2p::test_support::MessageReceiver,
     block1_hash: BlockHash,
     block2_hash: BlockHash,
 }
@@ -992,11 +992,11 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, TestError> {
         }
         .with_pending_timeout_override(Duration::ZERO),
     );
-    let stalled_addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let stalled_addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
-    let healthy_addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let healthy_addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8334,
     ));
@@ -1014,7 +1014,7 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, TestError> {
     );
     let _headers = stalled_rx.try_recv()?;
 
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(block2))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block2))?;
     sync.drain_inbound_blocks();
     assert!(!{
         let scheduler = sync.scheduler.lock();
@@ -1040,8 +1040,8 @@ struct DeterministicProxyFixture {
     sync: BlockSync,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-    inbound_blocks_tx: crossbeam_channel::Sender<bitcoin_rs_wire::InboundBlock>,
-    outbound_rx: bitcoin_rs_wire::test_support::MessageReceiver,
+    inbound_blocks_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>,
+    outbound_rx: bitcoin_rs_p2p::test_support::MessageReceiver,
     blocks: Vec<Block>,
 }
 
@@ -1071,7 +1071,7 @@ fn deterministic_proxy_fixture() -> Result<DeterministicProxyFixture, TestError>
         },
     );
 
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -1139,7 +1139,7 @@ fn cache_snapshot(sync: &BlockSync) -> Option<super::ExpectedApplyCache> {
 fn apply_fixture_block(sync: &BlockSync, block: Block) -> TestResult {
     let hash = Hash256::from(block.block_hash());
     sync.buffer_received_block_chunk(
-        &mut vec![bitcoin_rs_wire::InboundBlock::from_local(block)],
+        &mut vec![bitcoin_rs_p2p::InboundBlock::from_local(block)],
         Some(hash),
     );
     assert_eq!(sync.apply_buffered_blocks(Some(hash)), (1, 0));
@@ -1183,9 +1183,9 @@ fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block() -> T
 
     let staged = sync.buffer_received_block_chunk(
         &mut vec![
-            bitcoin_rs_wire::InboundBlock::from_local(blocks.remove(0)),
-            bitcoin_rs_wire::InboundBlock::from_local(extra_coinbase),
-            bitcoin_rs_wire::InboundBlock::from_local(follower),
+            bitcoin_rs_p2p::InboundBlock::from_local(blocks.remove(0)),
+            bitcoin_rs_p2p::InboundBlock::from_local(extra_coinbase),
+            bitcoin_rs_p2p::InboundBlock::from_local(follower),
         ],
         None,
     );
@@ -1247,9 +1247,9 @@ fn unrequested_body_admission_matches_core_acceptance() -> TestResult {
     let far_hash = Hash256::from(far_body.block_hash());
     let fork_hash = Hash256::from(fork_body.block_hash());
     let mut delivery = vec![
-        bitcoin_rs_wire::InboundBlock::from_local(successor),
-        bitcoin_rs_wire::InboundBlock::from_local(far_body),
-        bitcoin_rs_wire::InboundBlock::from_local(fork_body),
+        bitcoin_rs_p2p::InboundBlock::from_local(successor),
+        bitcoin_rs_p2p::InboundBlock::from_local(far_body),
+        bitcoin_rs_p2p::InboundBlock::from_local(fork_body),
     ];
     sync.buffer_received_block_chunk(&mut delivery, None);
 
@@ -1408,7 +1408,7 @@ type SyncFixture = (
     Vec<BlockHash>,
 );
 
-type InboundBlockSender = crossbeam_channel::Sender<bitcoin_rs_wire::InboundBlock>;
+type InboundBlockSender = crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>;
 
 fn sync_with_header_chain(height: u32) -> Result<SyncFixture, TestError> {
     let (fixture, _inbound_blocks_tx) = sync_with_header_chain_and_blocks(height)?;
@@ -1492,7 +1492,7 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
     let mut corrupt = blocks[0].clone();
     corrupt.txs[0].outputs[0].value = bitcoin_rs_consensus::primitives::Amount::from_sat(1);
     for block in [corrupt, blocks[2].clone()] {
-        let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block);
+        let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block);
         inbound.source = Some(source);
         harness.inbound_blocks_tx.send(inbound)?;
     }
@@ -1517,7 +1517,7 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
             .historical
             .lock()
             .window
-            .peer_in_staller_cooldown(bitcoin_rs_wire::PeerSource::for_test(addr), Instant::now())
+            .peer_in_staller_cooldown(bitcoin_rs_p2p::PeerSource::for_test(addr), Instant::now())
     );
     let retry_addr = test_addr(28001, 0)?;
     let retry_rx = connect_peer(&harness.peers, synthetic_peer(retry_addr, 3));
@@ -1533,7 +1533,7 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
             .try_iter()
             .any(|message| matches!(message, Message::GetData(_)))
     );
-    let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone());
+    let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone());
     inbound.source = Some(retry_source);
     harness.inbound_blocks_tx.send(inbound)?;
     harness.sync.tick();
@@ -1604,7 +1604,7 @@ type WedgeFixture = (
     BlockSync,
     Arc<PeerTable>,
     Vec<BlockHash>,
-    Vec<bitcoin_rs_wire::test_support::MessageReceiver>,
+    Vec<bitcoin_rs_p2p::test_support::MessageReceiver>,
     InboundBlockSender,
 );
 
@@ -1650,7 +1650,7 @@ fn staged_count_wedge(budget: super::SyncBudget) -> Result<WedgeFixture, TestErr
         );
     }
     for height in 3..=16_u32 {
-        blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(
             header_chain_block(&expected, height)?,
         ))?;
     }
@@ -1658,7 +1658,7 @@ fn staged_count_wedge(budget: super::SyncBudget) -> Result<WedgeFixture, TestErr
 }
 
 fn next_getdata(
-    rx: &bitcoin_rs_wire::test_support::MessageReceiver,
+    rx: &bitcoin_rs_p2p::test_support::MessageReceiver,
 ) -> Result<Vec<Inventory>, TestError> {
     while let Ok(message) = rx.try_recv() {
         if let Message::GetData(inventory) = message {
@@ -1668,7 +1668,7 @@ fn next_getdata(
     Err(std::io::Error::other("expected a queued getdata").into())
 }
 
-fn assert_no_getdata(rx: &bitcoin_rs_wire::test_support::MessageReceiver) -> TestResult {
+fn assert_no_getdata(rx: &bitcoin_rs_p2p::test_support::MessageReceiver) -> TestResult {
     while let Ok(message) = rx.try_recv() {
         if matches!(message, Message::GetData(_)) {
             return Err(std::io::Error::other("unexpected getdata").into());
@@ -1881,7 +1881,7 @@ fn nbits_mismatch_header(prev_blockhash: BlockHash, height: u32) -> Header {
 
 fn far_future_header(prev_blockhash: BlockHash, height: u32) -> Result<Header, TestError> {
     let mut header = regtest_fixture::mined_regtest_header(prev_blockhash, height)?;
-    header.time = bitcoin_rs_execution::chain::current_unix_seconds().saturating_add(3 * 60 * 60);
+    header.time = bitcoin_rs_chain::chain::current_unix_seconds().saturating_add(3 * 60 * 60);
     regtest_fixture::mine_header_to_declared_target(&mut header)?;
     Ok(header)
 }
@@ -2000,7 +2000,7 @@ fn test_frontier(sync: &BlockSync) -> super::ChainFrontier {
 }
 
 fn register_info(peer_table: &Arc<PeerTable>, info: PeerInfo) {
-    let (tx, _rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, _rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(tx);
     let Some(endpoint) = info.endpoint else {
         panic!("identified peer endpoint");
@@ -2019,11 +2019,11 @@ pub(crate) fn ineligible_peer(addr: PeerRemote, start_height: i32) -> PeerInfo {
 pub(crate) fn connect_anonymous_peer(
     peer_table: &Arc<PeerTable>,
     mut info: PeerInfo,
-) -> bitcoin_rs_wire::test_support::MessageReceiver {
-    let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+) -> bitcoin_rs_p2p::test_support::MessageReceiver {
+    let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(tx);
     info.endpoint = None;
-    info.network = bitcoin_rs_wire::NetworkLabel::Onion;
+    info.network = bitcoin_rs_p2p::NetworkLabel::Onion;
     info.inbound = true;
     peer_table.register_unidentified(lease.clone());
     assert!(peer_table.publish_info_unidentified(&lease, info));
@@ -2075,7 +2075,7 @@ fn service_and_range_gate_both_request_paths() -> TestResult {
         demonstrated_tips: Vec::new(),
         active_height: None,
         headers_horizon: None,
-        role: bitcoin_rs_wire::peer_info::PeerRole::FullRelay,
+        role: bitcoin_rs_p2p::peer_info::PeerRole::FullRelay,
         manual: false,
         connected_at: Instant::now(),
     };
@@ -2152,11 +2152,10 @@ fn cold_front_hedge_skips_a_saturated_candidate_without_cancelling_it() -> TestR
     let _owner_rx = connect_peer(&peers, synthetic_peer(owner_addr, 300));
     let owner = current_source(&peers, owner_addr);
 
-    let aggregate =
-        Arc::new(bitcoin_rs_wire::connection::SharedOutboundBudget::with_limits(512, 0));
-    let hold = bitcoin_rs_wire::test_support::hog(&aggregate, 512);
+    let aggregate = Arc::new(bitcoin_rs_p2p::connection::SharedOutboundBudget::with_limits(512, 0));
+    let hold = bitcoin_rs_p2p::test_support::hog(&aggregate, 512);
     let saturated_addr = test_addr(18_910, 1)?;
-    let (saturated_tx, saturated_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (saturated_tx, saturated_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let saturated_lease = PeerLease::new(saturated_tx).with_shared_budget(&aggregate);
     peers.register(saturated_addr, saturated_lease.clone());
     peers.publish_info(
@@ -2301,7 +2300,7 @@ fn failed_branch_switch_reports_the_displaced_tip_once() -> TestResult {
             connected: 0,
             hash: invalidated[0],
             stopped_at: 0,
-            source: Box::new(bitcoin_rs_execution::ApplyError::Shutdown),
+            source: Box::new(bitcoin_rs_chain::ApplyError::Shutdown),
             disposition: WindowApplyDisposition::Permanent,
             invalidated: invalidated.into(),
             demoted_tip: Some(displaced),
@@ -2331,10 +2330,10 @@ struct PunishmentFixture {
     sync: Arc<BlockSync>,
     peers: Arc<PeerTable>,
     chain: Arc<TestChain>,
-    blocks_tx: crossbeam_channel::Sender<bitcoin_rs_wire::InboundBlock>,
+    blocks_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>,
     block2: Block,
     source: PeerSource,
-    _peer_rx: bitcoin_rs_wire::test_support::MessageReceiver,
+    _peer_rx: bitcoin_rs_p2p::test_support::MessageReceiver,
 }
 
 fn punishment_fixture() -> Result<PunishmentFixture, TestError> {
@@ -2358,7 +2357,7 @@ fn punishment_fixture() -> Result<PunishmentFixture, TestError> {
         blocks_rx,
         crate::p2p::sync::syncing_ibd_latch(),
     ));
-    blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
 
     let addr = test_addr(9770, 0)?;
@@ -2388,7 +2387,7 @@ fn punishment_fixture() -> Result<PunishmentFixture, TestError> {
 }
 
 fn deliver_attributed_body(fixture: &PunishmentFixture) -> TestResult {
-    let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(fixture.block2.clone());
+    let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(fixture.block2.clone());
     inbound.source = Some(fixture.source);
     fixture.blocks_tx.send(inbound)?;
     fixture.sync.tick();
@@ -2484,9 +2483,9 @@ struct NotFoundFixture {
     blocks: Vec<Block>,
     blocks_tx: InboundBlockSender,
     owner: PeerRemote,
-    owner_rx: bitcoin_rs_wire::test_support::MessageReceiver,
+    owner_rx: bitcoin_rs_p2p::test_support::MessageReceiver,
     alternate: PeerRemote,
-    alternate_rx: Option<bitcoin_rs_wire::test_support::MessageReceiver>,
+    alternate_rx: Option<bitcoin_rs_p2p::test_support::MessageReceiver>,
 }
 
 impl NotFoundFixture {
@@ -2535,7 +2534,7 @@ impl NotFoundFixture {
     }
 
     fn deliver(&self, source: PeerSource, index: usize) -> TestResult {
-        let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(self.blocks[index].clone());
+        let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(self.blocks[index].clone());
         inbound.source = Some(source);
         self.blocks_tx.send(inbound)?;
         Ok(())
@@ -2565,7 +2564,7 @@ fn one_request_peer_budget() -> super::SyncBudget {
     }
 }
 
-fn drain_getdata_items(rx: &bitcoin_rs_wire::test_support::MessageReceiver) -> Vec<Inventory> {
+fn drain_getdata_items(rx: &bitcoin_rs_p2p::test_support::MessageReceiver) -> Vec<Inventory> {
     let mut items = Vec::new();
     while let Ok(message) = rx.try_recv() {
         if let Message::GetData(inventory) = message {

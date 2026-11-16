@@ -2,11 +2,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::p2p::TxRelayQueue;
+use bitcoin_rs_chain::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_consensus::primitives::{Hash256, Network, Txid, Wtxid};
-use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolGateway, PeerToken, SubmitError, SubmitOutcome};
-use bitcoin_rs_serving::context::ChainAdmissionView;
-use bitcoin_rs_serving::mining::MiningControl;
+use bitcoin_rs_rpc::context::ChainAdmissionView;
+use bitcoin_rs_rpc::mining::MiningControl;
 use bitcoin_rs_storage::utxo::UtxoReader;
 use crossbeam_channel::Receiver;
 
@@ -70,7 +70,7 @@ struct TxIngressConsumer {
     applied_tip: TipReader,
     block_tree: BlockTreeReader,
     network: Network,
-    peer_table: Arc<bitcoin_rs_wire::PeerTable>,
+    peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     pub(crate) tx_policy: Arc<crate::p2p::NodeTxPolicy>,
     mempool_gateway: Arc<MempoolGateway>,
     mining_control: Arc<dyn MiningControl>,
@@ -168,7 +168,7 @@ impl TxIngressConsumer {
         subject_accepted
     }
 
-    fn process_one(&self, inbound: bitcoin_rs_wire::InboundTx) {
+    fn process_one(&self, inbound: bitcoin_rs_p2p::InboundTx) {
         let source: PeerToken = crate::p2p::peer_token(inbound.source);
         let txid = inbound.tx.txid();
         let wtxid = inbound.tx.wtxid();
@@ -221,7 +221,7 @@ impl TxIngressConsumer {
                 let package_requested = self
                     .peer_table
                     .package_relay_versions_for_endpoint(source.endpoint, source.connection_id)
-                    & bitcoin_rs_wire::packages::PKG_RELAY_ANC
+                    & bitcoin_rs_p2p::packages::PKG_RELAY_ANC
                     != 0
                     && self.tx_policy.request_package_info(
                         crate::p2p::peer_source(source),

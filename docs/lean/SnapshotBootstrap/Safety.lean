@@ -1,6 +1,6 @@
-/-
+﻿/-
 Safety invariants of the SnapshotBootstrap lifecycle machine
-(Rust owners `crates/storage`, `crates/execution`, and `crates/projection`).
+(Rust owners `crates/storage`, `crates/chain`, and `crates/index`).
 
 Anchors: Tony Hoare, Claude Shannon
 

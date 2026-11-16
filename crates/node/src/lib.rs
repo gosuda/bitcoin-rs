@@ -1,4 +1,4 @@
-#![forbid(unsafe_op_in_unsafe_fn)]
+﻿#![forbid(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
 
@@ -56,9 +56,9 @@ mod tx_ingress;
 pub mod tx_ingress;
 pub use bitcoin_rs_consensus::primitives::Network;
 
-pub(crate) use bitcoin_rs_serving::zmq::NoOpZmqPublisher;
-pub use bitcoin_rs_serving::zmq::ZmqEndpointConfig;
-pub use bitcoin_rs_serving::zmq::ZmqPublisher;
+pub(crate) use bitcoin_rs_rpc::zmq::NoOpZmqPublisher;
+pub use bitcoin_rs_rpc::zmq::ZmqEndpointConfig;
+pub use bitcoin_rs_rpc::zmq::ZmqPublisher;
 
 pub use chain_effects::{ChainFollowers, ConnectMutationError};
 
@@ -90,7 +90,7 @@ pub use run::{RunError, run};
 
 pub use p2p::BlockSync;
 
-pub use bitcoin_rs_projection::runtime::DerivedIndexRuntime;
+pub use bitcoin_rs_index::runtime::DerivedIndexRuntime;
 
 #[cfg(feature = "zmq")]
-pub(crate) use bitcoin_rs_serving::zmq::SocketZmqPublisher;
+pub(crate) use bitcoin_rs_rpc::zmq::SocketZmqPublisher;

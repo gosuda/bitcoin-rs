@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+﻿use std::cell::RefCell;
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -13,9 +13,9 @@ use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolEntry, MempoolGateway,
     MempoolLimits, PeerToken, SubmitOutcome,
 };
-use bitcoin_rs_wire::dispatch::{ChainQuery, TxInventory, dispatch_inbound_full, serve_getdata};
-use bitcoin_rs_wire::peer::{Peer, PeerState};
-use bitcoin_rs_wire::wire::{Message, PeerError};
+use bitcoin_rs_p2p::dispatch::{ChainQuery, TxInventory, dispatch_inbound_full, serve_getdata};
+use bitcoin_rs_p2p::peer::{Peer, PeerState};
+use bitcoin_rs_p2p::wire::{Message, PeerError};
 
 use crate::p2p::RefTxInventory;
 

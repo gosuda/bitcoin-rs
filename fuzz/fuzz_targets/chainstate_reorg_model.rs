@@ -1,12 +1,12 @@
-#![no_main]
+﻿#![no_main]
 
 use std::collections::HashMap;
 
-use bitcoin_rs_execution::chain::ChainTxCount;
-use bitcoin_rs_execution::chain::regtest_fixture::{
+use bitcoin_rs_chain::chain::ChainTxCount;
+use bitcoin_rs_chain::chain::regtest_fixture::{
     genesis_time, mined_block_with_prev_hash, mined_regtest_child_at_time, script_num_push,
 };
-use bitcoin_rs_execution::fuzzing::{FuzzChain, FuzzCheckpoint};
+use bitcoin_rs_chain::fuzzing::{FuzzChain, FuzzCheckpoint};
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, block_subsidy};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, Hash256, Header, LockTime, Network, OutPoint, Script, Sequence, Tx,

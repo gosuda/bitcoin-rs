@@ -1,13 +1,13 @@
-use bitcoin_rs_execution::chain::NodeStatus;
+use bitcoin_rs_chain::chain::NodeStatus;
 use bitcoin_rs_node::budget::{BudgetedIngressLedger, BudgetedOutboundLedger, NodeBudget};
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, NodeConfig};
+use bitcoin_rs_p2p::connection::OutboundLedger;
+use bitcoin_rs_p2p::inbound::block_memory::BlockMemory;
 use bitcoin_rs_storage::{
     budget::{BudgetError, BudgetOwner, BudgetRefusal},
     split_chainstate_cache_budget,
 };
-use bitcoin_rs_wire::connection::OutboundLedger;
-use bitcoin_rs_wire::inbound::block_memory::BlockMemory;
 use std::sync::Arc;
 #[expect(clippy::expect_used)]
 fn open_test_node() -> (NodeState, tempfile::TempDir) {

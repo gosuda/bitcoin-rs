@@ -5,15 +5,15 @@ use super::peers::is_peer_fault;
 use crate::p2p::block_stager::StagedBlock;
 use crate::p2p::download_window::INBOUND_BLOCK_STAGE_CHUNK;
 use crate::p2p::download_window::RejectDelivery;
+use bitcoin_rs_chain::chain::BlockTree;
+use bitcoin_rs_chain::chain::ChainError;
+use bitcoin_rs_chain::chain::NodeId;
+use bitcoin_rs_chain::chain::TipSnapshot;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Header;
 use bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
-use bitcoin_rs_execution::chain::BlockTree;
-use bitcoin_rs_execution::chain::ChainError;
-use bitcoin_rs_execution::chain::NodeId;
-use bitcoin_rs_execution::chain::TipSnapshot;
-use bitcoin_rs_wire::connection::PeerSource;
-use bitcoin_rs_wire::inbound::InboundBlock;
+use bitcoin_rs_p2p::connection::PeerSource;
+use bitcoin_rs_p2p::inbound::InboundBlock;
 use smallvec::SmallVec;
 use std::time::Instant;
 use std::vec::Vec;
@@ -154,9 +154,9 @@ impl BlockSync {
 
     fn discard_inadmissible_header_bodies(
         &self,
-        invalid: &[(Hash256, Option<bitcoin_rs_wire::connection::PeerSource>)],
+        invalid: &[(Hash256, Option<bitcoin_rs_p2p::connection::PeerSource>)],
     ) {
-        let blamed: Vec<bitcoin_rs_wire::connection::PeerSource> = invalid
+        let blamed: Vec<bitcoin_rs_p2p::connection::PeerSource> = invalid
             .iter()
             .filter_map(|(_, source)| *source)
             .filter(|source| {
@@ -187,7 +187,7 @@ impl BlockSync {
         let unadmitted: Vec<(
             Hash256,
             Header,
-            Option<bitcoin_rs_wire::connection::PeerSource>,
+            Option<bitcoin_rs_p2p::connection::PeerSource>,
         )> = {
             let tree = self.chain.block_tree();
             let scheduler = self.scheduler.lock();
@@ -199,7 +199,7 @@ impl BlockSync {
         };
         let mut missing_parent = false;
         let mut credit_refresh_needed = false;
-        let mut invalid: Vec<(Hash256, Option<bitcoin_rs_wire::connection::PeerSource>)> =
+        let mut invalid: Vec<(Hash256, Option<bitcoin_rs_p2p::connection::PeerSource>)> =
             Vec::new();
         for (hash, header, source) in unadmitted {
             let Some(admission) = self.route_headers_batch(&[header], source, false, 1) else {

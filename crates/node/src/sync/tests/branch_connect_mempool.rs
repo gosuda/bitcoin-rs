@@ -79,7 +79,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     assert_eq!(connected, 0, "nothing connected before the body mutation");
     assert_eq!(
         disposition,
-        bitcoin_rs_execution::WindowApplyDisposition::BodyMutated
+        bitcoin_rs_chain::WindowApplyDisposition::BodyMutated
     );
     assert!(
         invalidated.is_empty(),
@@ -163,9 +163,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         None,
     ));
     let followers = crate::chain_effects::ChainFollowers::new(
-        Arc::new(RwLock::new(
-            bitcoin_rs_projection::block_log::BlockLog::new(),
-        )),
+        Arc::new(RwLock::new(bitcoin_rs_index::block_log::BlockLog::new())),
         Arc::new(crate::NoOpZmqPublisher),
         None,
         None,
@@ -258,38 +256,35 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         dyn_store,
         Arc::clone(&coins),
     ));
-    let handles =
-        bitcoin_rs_execution::Chainstate::from_parts(bitcoin_rs_execution::ChainstateParts {
-            network: Network::Regtest,
-            block_tree: tree,
-            restored_applied_tip: None,
-            utxo: Arc::new(UtxoSet::new()),
-            coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
-                bitcoin_rs_storage::utxo::stats::CoinStats::default(),
-            )),
-            chain_events: Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
-                0,
-            )),
-            block_body_store: Some(Arc::new(Bodies::default())),
-            undo_store,
-            durable_head,
-            coins,
-            commit_authority,
-            chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new().authority(),
-            assume_valid_height: 0,
-            validation_mode: bitcoin_rs_execution::ValidationMode::AssumeValid,
-            validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
-            script_cache: None,
-            capture_rawtx: false,
-            capture_block_bytes: true,
-            retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
-            window_limits: bitcoin_rs_execution::default_window_limits_source(),
-            history: bitcoin_rs_storage::pruning::HistoryAccess::new(
-                retention,
-                bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
-            ),
-            role: bitcoin_rs_execution::ChainstateRole::Ordinary,
-        });
+    let handles = bitcoin_rs_chain::Chainstate::from_parts(bitcoin_rs_chain::ChainstateParts {
+        network: Network::Regtest,
+        block_tree: tree,
+        restored_applied_tip: None,
+        utxo: Arc::new(UtxoSet::new()),
+        coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
+            bitcoin_rs_storage::utxo::stats::CoinStats::default(),
+        )),
+        chain_events: Arc::new(bitcoin_rs_chain::events::ChainEventPublisher::detached(0)),
+        block_body_store: Some(Arc::new(Bodies::default())),
+        undo_store,
+        durable_head,
+        coins,
+        commit_authority,
+        chain_transition: bitcoin_rs_chain::chain::TransitionDomain::new().authority(),
+        assume_valid_height: 0,
+        validation_mode: bitcoin_rs_chain::ValidationMode::AssumeValid,
+        validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
+        script_cache: None,
+        capture_rawtx: false,
+        capture_block_bytes: true,
+        retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
+        window_limits: bitcoin_rs_chain::default_window_limits_source(),
+        history: bitcoin_rs_storage::pruning::HistoryAccess::new(
+            retention,
+            bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
+        ),
+        role: bitcoin_rs_chain::ChainstateRole::Ordinary,
+    });
     handles.apply_block(&BlockImage::from_local(genesis))?;
     for block in &blocks {
         handles.apply_block(&BlockImage::from_local(block.clone()))?;
@@ -314,7 +309,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         lock_time: LockTime::from_consensus(GENESIS_TIME + 95),
     };
     let nonfinal_txid = nonfinal.txid();
-    let view = bitcoin_rs_serving::context::ChainAdmissionView::new(
+    let view = bitcoin_rs_rpc::context::ChainAdmissionView::new(
         handles.utxo_reader(),
         handles.applied_tip_reader(),
         handles.block_tree_reader(),

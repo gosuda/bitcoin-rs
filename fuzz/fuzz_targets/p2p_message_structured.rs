@@ -1,4 +1,4 @@
-#![no_main]
+﻿#![no_main]
 
 use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -17,7 +17,7 @@ use bitcoin::p2p::message_filter::{
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::{Address, Magic, ServiceFlags};
 use bitcoin::{BlockHash, FilterHash, Txid, merkle_tree::MerkleBlock};
-use bitcoin_rs_wire::wire::{
+use bitcoin_rs_p2p::wire::{
     MAX_MESSAGE_PAYLOAD, Message, encode_payload, read_message, write_message,
 };
 use bitcoin_rs_consensus::primitives::layout::decode_reservation;

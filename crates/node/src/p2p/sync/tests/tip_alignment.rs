@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 #[test]
 fn tick_skips_getheaders_when_header_tip_matches_peer_height() -> TestResult {
@@ -22,7 +22,7 @@ fn tick_skips_getheaders_when_header_tip_matches_peer_height() -> TestResult {
         }
     };
     applied_tip.store(Some(Arc::new(applied_snapshot)));
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));

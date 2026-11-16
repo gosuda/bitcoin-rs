@@ -41,10 +41,10 @@ fn split_rpc_listeners_start_and_join_through_node_services() -> Result<(), Test
         .ok_or(TestError::Missing("node services"))?;
     assert_eq!(services.rpc_threads.len(), 2);
     let management_address = services
-        .rpc_address(bitcoin_rs_serving::RpcSurface::Management)
+        .rpc_address(bitcoin_rs_rpc::RpcSurface::Management)
         .ok_or(TestError::Missing("management address"))?;
     let public_address = services
-        .rpc_address(bitcoin_rs_serving::RpcSurface::Public)
+        .rpc_address(bitcoin_rs_rpc::RpcSurface::Public)
         .ok_or(TestError::Missing("public address"))?;
     for (address, request, expected) in [
         (
@@ -201,7 +201,7 @@ fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> Re
     let mut previous = genesis.block_hash();
     for height in 1..=3 {
         let block = BlockImage::from_local(
-            bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
+            bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
         );
         state.apply_block(&block)?;
         previous = block.block_hash();
@@ -229,7 +229,7 @@ fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> Re
 
 #[test]
 fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> Result<(), TestError> {
-    use bitcoin_rs_serving::context::ChainControlError;
+    use bitcoin_rs_rpc::context::ChainControlError;
 
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
@@ -269,7 +269,7 @@ fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> Resul
 
 #[test]
 fn verify_chain_reports_cancellation_and_recovery_closure() -> Result<(), TestError> {
-    use bitcoin_rs_serving::context::ChainControlError;
+    use bitcoin_rs_rpc::context::ChainControlError;
 
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
@@ -310,7 +310,7 @@ fn verify_chain_reports_cancellation_and_recovery_closure() -> Result<(), TestEr
 #[test]
 fn rpc_load_txoutset_follows_core_import_behavior_independent_of_filename() -> Result<(), TestError>
 {
-    use bitcoin_rs_execution::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
+    use bitcoin_rs_chain::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
     use sha2::Digest;
 
     let pinned = bitcoin_rs_consensus::primitives::Network::Regtest
@@ -364,7 +364,7 @@ fn rpc_load_txoutset_follows_core_import_behavior_independent_of_filename() -> R
             .to_le_bytes(),
         base_hash: pinned.block_hash.to_le_bytes(),
         base_height: pinned.height,
-        schema: bitcoin_rs_projection::index_format_version(),
+        schema: bitcoin_rs_index::index_format_version(),
         utxo_commitment: pinned.hash_serialized.to_le_bytes(),
         index_commitments: [None; 4],
         coverage: [None; 4],
@@ -555,7 +555,7 @@ fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> Result<(), TestEr
     let (_gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
     let (exited_tx, exited_rx) = std::sync::mpsc::channel();
     let worker = std::thread::Builder::new()
-        .name("bitcoin-rs-wire-bootstrap".to_owned())
+        .name("bitcoin-rs-p2p-bootstrap".to_owned())
         .spawn(move || {
             let _ = gate_rx.recv_timeout(std::time::Duration::from_secs(2));
             let _ = exited_tx.send(());
@@ -693,7 +693,7 @@ fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> Result<(), 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while matches!(
         node.state.derived_index_status().capability().state,
-        bitcoin_rs_projection::CapabilityState::Opening
+        bitcoin_rs_index::CapabilityState::Opening
     ) {
         assert!(
             std::time::Instant::now() < deadline,
@@ -778,15 +778,15 @@ fn recovery_closure_stops_the_node_run_loop() -> Result<(), TestError> {
 // SYNC-04
 #[test]
 fn fatal_settlement_teardown_skips_the_checkpoint_and_answers_an_error() -> Result<(), TestError> {
-    type CloseChain = Box<dyn Fn(&bitcoin_rs_execution::Chainstate)>;
+    type CloseChain = Box<dyn Fn(&bitcoin_rs_chain::Chainstate)>;
     let variants: Vec<(&str, CloseChain)> = vec![
         (
             "fatal-settlement",
-            Box::new(|chain: &bitcoin_rs_execution::Chainstate| chain.fail_closed_for_recovery()),
+            Box::new(|chain: &bitcoin_rs_chain::Chainstate| chain.fail_closed_for_recovery()),
         ),
         (
             "graceful-close",
-            Box::new(|chain: &bitcoin_rs_execution::Chainstate| {
+            Box::new(|chain: &bitcoin_rs_chain::Chainstate| {
                 drop(chain.close());
             }),
         ),
@@ -1255,7 +1255,7 @@ fn apply_regtest_chain(state: &NodeState) -> Result<(), TestError> {
     let mut previous = genesis.block_hash();
     for height in 1..=3 {
         let block = BlockImage::from_local(
-            bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
+            bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
         );
         state.apply_block(&block)?;
         previous = block.block_hash();
@@ -1271,7 +1271,7 @@ fn bind_test_rpc(state: &NodeState) -> Result<RpcServer, TestError> {
         state.chain_followers(),
         super::final_payout_script(state.config()),
     ));
-    let mining_control: Arc<dyn bitcoin_rs_serving::mining::MiningControl> = coordinator;
+    let mining_control: Arc<dyn bitcoin_rs_rpc::mining::MiningControl> = coordinator;
     let mut bindings = bind_rpc(state, &mining_control, state.block_body_source()?)?;
     assert_eq!(bindings.listeners.len(), 1);
     Ok(bindings.listeners.remove(0).0)
@@ -1292,10 +1292,8 @@ fn final_payout_script_prefers_pool_when_values_differ() {
         max_connections: 1,
         max_connections_per_ip: 1,
         share_difficulty: String::from("1"),
-        share_target: bitcoin_rs_serving::mining::pool::ShareTarget::from_pool_difficulty_decimal(
-            "1",
-        )
-        .unwrap_or_else(|error| panic!("fixed test difficulty parses: {error}")),
+        share_target: bitcoin_rs_rpc::mining::pool::ShareTarget::from_pool_difficulty_decimal("1")
+            .unwrap_or_else(|error| panic!("fixed test difficulty parses: {error}")),
         window_work: 1,
         fee_bps: 0,
         reward_script: vec![0x52],

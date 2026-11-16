@@ -2,18 +2,18 @@ use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
 use crate::support::{block_on, p2sh_true_output, p2sh_true_spend_script_sig};
+use bitcoin_rs_chain::chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn,
     TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_consensus::script::push_int;
-use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
+use bitcoin_rs_index::ScriptHash;
+use bitcoin_rs_index::query_api::{Answer, TxQueryError};
 use bitcoin_rs_mempool::MutationOutcome;
 use bitcoin_rs_node::ScriptIndexMode;
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, Node, NodeConfig, NodeError};
-use bitcoin_rs_projection::ScriptHash;
-use bitcoin_rs_projection::query_api::{Answer, TxQueryError};
 
 const SEED_BLOCKS: u32 = 100;
 const SEED_BASE_TIME: u32 = 1_296_688_603;

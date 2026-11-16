@@ -1,4 +1,4 @@
-#[path = "../support/dependency_graph.rs"]
+﻿#[path = "../support/dependency_graph.rs"]
 mod dependency_graph;
 
 #[path = "../support/capability_compile.rs"]
@@ -8,15 +8,15 @@ use dependency_graph::WorkspaceGraph;
 
 const READ_CONTROL: &str = r"
 use std::sync::Arc;
-use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader, TipSnapshot};
-use bitcoin_rs_execution::{Chainstate, ChainstateSnapshot};
+use bitcoin_rs_chain::chain::{BlockTreeReader, TipReader, TipSnapshot};
+use bitcoin_rs_chain::{Chainstate, ChainstateSnapshot};
 use bitcoin_rs_node::p2p::sync::SyncChain;
 use bitcoin_rs_node::p2p::sync::chain::{ReorgError, HistoricalAdvance, WindowApplyDisposition};
 
 pub fn sync_outcomes(
-    branch: bitcoin_rs_execution::reorg::ReorgError,
-    historical: bitcoin_rs_execution::assumeutxo::HistoricalAdvance,
-    disposition: bitcoin_rs_execution::WindowApplyDisposition,
+    branch: bitcoin_rs_chain::reorg::ReorgError,
+    historical: bitcoin_rs_chain::assumeutxo::HistoricalAdvance,
+    disposition: bitcoin_rs_chain::WindowApplyDisposition,
 ) -> (ReorgError, HistoricalAdvance, WindowApplyDisposition) {
     (branch, historical, disposition)
 }
@@ -120,7 +120,7 @@ fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> 
         .canonicalize()?;
     let consumer = capability_compile::ProductionConsumer::with_fixture_owners(&root)?;
     consumer.allow_reads(&format!(
-        "{READ_CONTROL}\npub fn compose(handles: bitcoin_rs_serving::context::ContextHandles) -> bitcoin_rs_serving::context::Context {{ bitcoin_rs_serving::context::Context::from_handles(handles) }}"
+        "{READ_CONTROL}\npub fn compose(handles: bitcoin_rs_rpc::context::ContextHandles) -> bitcoin_rs_rpc::context::Context {{ bitcoin_rs_rpc::context::Context::from_handles(handles) }}"
     ))?;
     for (source, codes, member) in [
         (
@@ -144,17 +144,17 @@ fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> 
             "arm_persist_fault",
         ),
         (
-            "pub fn denied() { let _ = bitcoin_rs_execution::Chainstate::new; }",
+            "pub fn denied() { let _ = bitcoin_rs_chain::Chainstate::new; }",
             &["E0599"][..],
             "new",
         ),
         (
-            "pub fn denied() { let _ = bitcoin_rs_serving::context::Context::new; }",
+            "pub fn denied() { let _ = bitcoin_rs_rpc::context::Context::new; }",
             &["E0599"][..],
             "new",
         ),
         (
-            "pub fn denied() { let _ = bitcoin_rs_serving::context::ContextHandles::default; }",
+            "pub fn denied() { let _ = bitcoin_rs_rpc::context::ContextHandles::default; }",
             &["E0599"][..],
             "default",
         ),

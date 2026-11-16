@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use bitcoin_rs_consensus::primitives::BlockImage;
 
 #[test]
@@ -186,7 +186,7 @@ fn fanout_replaces_preferred_peer_when_eligible_pool_recovers() -> TestResult {
     let _ = next_getdata(&owner_rx)?;
     let _ = next_getdata(&alternate_rx)?;
     for block in &blocks[..4] {
-        let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block.clone());
+        let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block.clone());
         inbound.source = Some(current_source(&peers, alternate));
         blocks_tx.send(inbound)?;
     }
@@ -205,7 +205,7 @@ fn fanout_replaces_preferred_peer_when_eligible_pool_recovers() -> TestResult {
         ));
     }
     for block in &blocks[4..8] {
-        let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block.clone());
+        let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block.clone());
         inbound.source = Some(current_source(&peers, alternate));
         blocks_tx.send(inbound)?;
     }
@@ -540,7 +540,7 @@ fn transient_demotion_does_not_flap_fanout_mode() -> TestResult {
     }
 
     for height in 3..=16_u32 {
-        blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(
             header_chain_block(&expected, height)?,
         ))?;
     }

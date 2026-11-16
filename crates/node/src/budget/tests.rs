@@ -1,6 +1,6 @@
-use super::{BudgetCaps, NodeBudget, STAGED_IMAGE_BUDGET_BYTES};
+﻿use super::{BudgetCaps, NodeBudget, STAGED_IMAGE_BUDGET_BYTES};
 use crate::budget_model::{self, Action, AllocationOwner};
-use bitcoin_rs_execution::WindowLimits;
+use bitcoin_rs_chain::WindowLimits;
 use bitcoin_rs_storage::budget::{BudgetError, BudgetOwner, BudgetRefusal, ChargeHandle};
 use bitcoin_rs_storage::{
     CoinKey, CoinStore, MemoryKvStore, WindowDelta, split_chainstate_cache_budget,
@@ -480,7 +480,7 @@ fn repeated_owner_requests_include_charges_and_reservations() {
 // BUD-01, BUD-02, BUD-05, BUD-06, BUD-07
 #[test]
 fn saturated_ingress_preserves_execution_headroom_and_recovers_after_release() {
-    use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
+    use bitcoin_rs_p2p::inbound::block_memory::IngressLedger;
 
     let caps = BudgetCaps {
         staged_images: 4_096,
@@ -551,7 +551,7 @@ fn saturated_ingress_preserves_execution_headroom_and_recovers_after_release() {
 
 #[test]
 fn repeated_ingress_then_engine_sample_stays_within_total() {
-    use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
+    use bitcoin_rs_p2p::inbound::block_memory::IngressLedger;
 
     let caps =
         BudgetCaps::from_chainstate_cache_budget(split_chainstate_cache_budget(450 * 1024 * 1024));

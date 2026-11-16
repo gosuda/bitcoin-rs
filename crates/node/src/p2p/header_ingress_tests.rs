@@ -1,6 +1,6 @@
-use super::*;
+﻿use super::*;
 use crate::test_support::TestResult;
-use bitcoin_rs_wire::listener::{ConnectionShared, test_shared};
+use bitcoin_rs_p2p::listener::{ConnectionShared, test_shared};
 use std::time::{Duration, Instant};
 
 // P2P-07
@@ -9,13 +9,13 @@ fn full_header_ingress_preserves_responses_and_body_first_order() -> TestResult 
     let (headers_tx, headers_rx) = crossbeam_channel::bounded(1);
     let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(1);
     let shared = test_shared(
-        Arc::new(bitcoin_rs_wire::PeerTable::new()),
+        Arc::new(bitcoin_rs_p2p::PeerTable::new()),
         headers_tx,
         blocks_tx,
     );
     let (tx, _rx) = crossbeam_channel::unbounded();
-    let lease = bitcoin_rs_wire::PeerLease::new(tx);
-    let addr = bitcoin_rs_wire::PeerEndpoint::from((std::net::Ipv4Addr::LOCALHOST, 18_450));
+    let lease = bitcoin_rs_p2p::PeerLease::new(tx);
+    let addr = bitcoin_rs_p2p::PeerEndpoint::from((std::net::Ipv4Addr::LOCALHOST, 18_450));
     let source = lease.source(Some(addr));
     shared.send_headers_response(&lease, source, Vec::new());
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -55,14 +55,14 @@ fn full_header_ingress_observes_session_and_lease_cancellation() -> TestResult {
         let (headers_tx, headers_rx) = crossbeam_channel::bounded(1);
         let (blocks_tx, _blocks_rx) = crossbeam_channel::bounded(1);
         let mut shared = test_shared(
-            Arc::new(bitcoin_rs_wire::PeerTable::new()),
+            Arc::new(bitcoin_rs_p2p::PeerTable::new()),
             headers_tx,
             blocks_tx,
         );
         let session_cancel = bitcoin_rs_consensus::latch::LatchWriter::new();
         shared.session_cancel = session_cancel.reader();
         let (tx, _rx) = crossbeam_channel::unbounded();
-        let lease = bitcoin_rs_wire::PeerLease::new(tx);
+        let lease = bitcoin_rs_p2p::PeerLease::new(tx);
         let source = lease.source(None);
         shared.send_headers_response(&lease, source, Vec::new());
         let stop = lease.clone();
@@ -91,12 +91,12 @@ fn disconnected_header_ingress_releases_the_sender() -> TestResult {
     let (headers_tx, headers_rx) = crossbeam_channel::bounded(1);
     let (blocks_tx, _blocks_rx) = crossbeam_channel::bounded(1);
     let shared = test_shared(
-        Arc::new(bitcoin_rs_wire::PeerTable::new()),
+        Arc::new(bitcoin_rs_p2p::PeerTable::new()),
         headers_tx,
         blocks_tx,
     );
     let (tx, _rx) = crossbeam_channel::unbounded();
-    let lease = bitcoin_rs_wire::PeerLease::new(tx);
+    let lease = bitcoin_rs_p2p::PeerLease::new(tx);
     let source = lease.source(None);
     shared.send_headers_response(&lease, source, Vec::new());
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
@@ -130,7 +130,7 @@ enum HeaderDelivery {
 fn run_sustained_ingress_case(delivery: HeaderDelivery) -> TestResult {
     use crate::p2p::sync::test_support::{TestChain, mined_chain};
     use arc_swap::ArcSwapOption;
-    use bitcoin_rs_wire::test_support::{connect_peer, synthetic_peer, test_addr};
+    use bitcoin_rs_p2p::test_support::{connect_peer, synthetic_peer, test_addr};
     use parking_lot::RwLock;
 
     const CAPACITY: usize = 64;
@@ -139,7 +139,7 @@ fn run_sustained_ingress_case(delivery: HeaderDelivery) -> TestResult {
     let tip = tree.tip_handle();
     let tree = Arc::new(RwLock::new(tree));
     let applied = Arc::new(ArcSwapOption::empty());
-    let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
+    let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
     let (headers_tx, headers_rx) = crossbeam_channel::bounded(CAPACITY);
     let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(256);
     let sync = Arc::new(crate::p2p::sync::BlockSync::new(
@@ -158,7 +158,7 @@ fn run_sustained_ingress_case(delivery: HeaderDelivery) -> TestResult {
             "missing load-test connection",
         ))?;
     let mut shared = test_shared(peers, headers_tx, blocks_tx);
-    shared.block_sync = Some(sync.clone() as Arc<dyn bitcoin_rs_wire::listener::BlockSyncObserver>);
+    shared.block_sync = Some(sync.clone() as Arc<dyn bitcoin_rs_p2p::listener::BlockSyncObserver>);
     let stop = bitcoin_rs_consensus::latch::LatchWriter::new();
     shared.session_cancel = stop.reader();
     let (producer, filled_rx) =
@@ -192,7 +192,7 @@ fn run_sustained_ingress_case(delivery: HeaderDelivery) -> TestResult {
         );
     }
     let headers_per_batch = if delivery == HeaderDelivery::WireResponse {
-        bitcoin_rs_wire::wire::MAX_HEADERS_MESSAGE_COUNT
+        bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT
     } else {
         1
     };
@@ -218,8 +218,8 @@ struct IngressDrainMetrics {
 fn drain_sustained_ingress(
     sync: &crate::p2p::sync::BlockSync,
     producer: std::thread::JoinHandle<()>,
-    headers_rx: &crossbeam_channel::Receiver<bitcoin_rs_wire::InboundHeaders>,
-    blocks_rx: &crossbeam_channel::Receiver<bitcoin_rs_wire::InboundBlock>,
+    headers_rx: &crossbeam_channel::Receiver<bitcoin_rs_p2p::InboundHeaders>,
+    blocks_rx: &crossbeam_channel::Receiver<bitcoin_rs_p2p::InboundBlock>,
     stop: &bitcoin_rs_consensus::latch::LatchWriter,
     started: Instant,
     initial_peak: usize,
@@ -252,8 +252,8 @@ fn spawn_ingress_producer(
     blocks: Vec<bitcoin_rs_consensus::primitives::Block>,
     delivery: HeaderDelivery,
     shared: ConnectionShared,
-    lease: bitcoin_rs_wire::PeerLease,
-    addr: bitcoin_rs_wire::PeerRemote,
+    lease: bitcoin_rs_p2p::PeerLease,
+    addr: bitcoin_rs_p2p::PeerRemote,
     sync: Arc<crate::p2p::sync::BlockSync>,
 ) -> (std::thread::JoinHandle<()>, crossbeam_channel::Receiver<()>) {
     let source = lease.source(addr.endpoint());
@@ -264,7 +264,7 @@ fn spawn_ingress_producer(
                 shared.send_headers_response(
                     &lease,
                     source,
-                    vec![block.header; bitcoin_rs_wire::wire::MAX_HEADERS_MESSAGE_COUNT],
+                    vec![block.header; bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT],
                 );
             } else {
                 let hash = bitcoin_rs_consensus::primitives::Hash256::from(block.block_hash());

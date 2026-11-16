@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 #[test]
 fn apply_cache_invalidated_on_chain_tip_move() -> TestResult {
@@ -238,14 +238,14 @@ fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers() -> TestResult
 fn same_address_registration_after_window_eviction_keeps_replacement() -> TestResult {
     let (sync, peers, _tree, _applied, _expected) = sync_with_header_chain(3)?;
     let addr = test_addr(9508, 0)?;
-    let (old_tx, old_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (old_tx, old_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let old = PeerLease::new(old_tx);
     peers.register(addr, old.clone());
     peers.publish_info(addr, &old, synthetic_peer(addr, 100));
     sync.tick();
     let _ = old_rx.try_recv()?;
     let _ = old_rx.try_recv()?;
-    let (new_tx, new_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (new_tx, new_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let new = PeerLease::new(new_tx);
     peers.register(addr, new.clone());
     peers.publish_info(addr, &new, synthetic_peer(addr, 100));
@@ -268,7 +268,7 @@ fn reconcile_forgets_window_state_only_when_connection_identity_changes() -> Tes
         },
     );
     let addr = test_addr(9509, 0)?;
-    let (tx, _rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, _rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(tx);
     peers.register(addr, lease.clone());
     peers.publish_info(addr, &lease, synthetic_peer(addr, 8));
@@ -279,7 +279,7 @@ fn reconcile_forgets_window_state_only_when_connection_identity_changes() -> Tes
     sync.reconcile_peer_sessions();
     assert!(sync.scheduler.lock().header_request().is_some());
 
-    let (new_tx, _new_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (new_tx, _new_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let replacement = PeerLease::new(new_tx);
     peers.register(addr, replacement.clone());
     peers.publish_info(addr, &replacement, synthetic_peer(addr, 8));

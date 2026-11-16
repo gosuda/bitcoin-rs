@@ -1,4 +1,4 @@
-# Atomic durability
+﻿# Atomic durability
 
 The node commits a block when one atomic key-value batch writes the head, undo records, body locators, attestation, and coin replacements into the storage engine. Bodies reach disk before that batch; the published tip comes after it. A crash before the batch leaves the previous head, a crash after it leaves the new one, and the next start reads the committed head and coins directly from the engine.
 
@@ -60,7 +60,7 @@ IBD groups a verified prefix into one atomic commit. `DURABLE_HEAD_GROUP_BLOCKS`
 | Operational | `Shutdown`, `ConcurrentChainChange`, `PrevHashMismatch`, `UndoLoad`, `DisconnectNotTip`, `PruneDuringHistoricalValidation` | The caller sees an error; the node keeps running or retries under its owning mechanism |
 | Permanent | `ProofOfWork`, invalid chain or consensus outcomes | The block and its descendants are invalid; storage is untouched |
 
-The full mapping is `classify_apply_error` (`crates/execution/src/window.rs`). A failed disconnect after mutation began is separate: `DisconnectError::Fatal` and `MarkerStuck` also call `fail_closed_for_recovery`.
+The full mapping is `classify_apply_error` (`crates/chain/src/window.rs`). A failed disconnect after mutation began is separate: `DisconnectError::Fatal` and `MarkerStuck` also call `fail_closed_for_recovery`.
 ## Failure modes
 
 - Head row undecodable: open refuses with `durable head row is unreadable; refusing to treat it as absent`. Nothing is repaired in place; the [datadir policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/db-migration.md) applies.
@@ -71,14 +71,14 @@ The full mapping is `classify_apply_error` (`crates/execution/src/window.rs`). A
 ## Where the invariant is proven
 
 - `RCV-01`, `RCV-02`, `RCV-03`, `RCV-04`, `RCV-09`, `SYNC-05`, `ARCH-07`, and the datadir policy own the rules above.
-- `crates/execution/src/durable/tests.rs::committed_gap_replays_to_head_without_recommitting_it` proves replay reuses the receipt instead of recommitting.
+- `crates/chain/src/durable/tests.rs::committed_gap_replays_to_head_without_recommitting_it` proves replay reuses the receipt instead of recommitting.
 - `committed_gap_with_missing_body_fails_closed`, `committed_gap_body_must_hash_to_the_head_identity`, `committed_gap_must_descend_from_restored_tip`, `committed_gap_replay_failure_fails_closed`, and `cold_replay_attestation_failure_fails_closed` in the same module prove the refusal paths.
-- `crates/execution/src/tests/window_commit_tests.rs::failure_at_block_j_commits_prefix_before_j` proves a failed prefix commits exactly the blocks before the failure, and `crash_between_commit_and_cache_install_reloads_from_engine` proves the restarted node rebuilds the coin cache from the engine rather than from memory.
+- `crates/chain/src/tests/window_commit_tests.rs::failure_at_block_j_commits_prefix_before_j` proves a failed prefix commits exactly the blocks before the failure, and `crash_between_commit_and_cache_install_reloads_from_engine` proves the restarted node rebuilds the coin cache from the engine rather than from memory.
 - `crates/storage/tests/overhaul_atomic_durability.rs::rocksdb_injected_faults_never_mix_families` proves an injected fault at apply, sync, or flush boundaries never leaves a mixed batch.
 - `crates/node/tests/crash_recovery.rs::pruned_frontier_survives_sigkill_and_preserves_boundary` proves the process-level kill path; `run_sigkill_scenario` is the driver.
 
 ## Boundaries
 
-`SIGKILL` is not power loss. The fault matrix injects lost, failed, and partial writes around apply, sync, and flush, but it runs in one process on one filesystem; device-cache behaviour is unmeasured here. No group-commit latency measurement backs the 64-block redo bound; that bound is a constant in `crates/execution/src/window_limits.rs`, not a measured figure.
+`SIGKILL` is not power loss. The fault matrix injects lost, failed, and partial writes around apply, sync, and flush, but it runs in one process on one filesystem; device-cache behaviour is unmeasured here. No group-commit latency measurement backs the 64-block redo bound; that bound is a constant in `crates/chain/src/window_limits.rs`, not a measured figure.
 
 Pruning deletes the bodies and undo records this chapter leans on, so the next chapter is [Pruning](pruning.md).

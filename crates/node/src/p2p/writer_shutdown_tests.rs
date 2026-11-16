@@ -1,4 +1,4 @@
-use std::io;
+﻿use std::io;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,11 +10,11 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::secp256k1::rand::SeedableRng as _;
 use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use bitcoin_rs_mempool::{AdmissionOrigin, Mempool, MempoolEntry, MempoolGateway, MempoolLimits};
-use bitcoin_rs_wire::connection::PeerLease;
-use bitcoin_rs_wire::dispatch::TxInventory;
-use bitcoin_rs_wire::listener::{run_message_loop, test_shared};
-use bitcoin_rs_wire::peer::{Peer, PeerState};
-use bitcoin_rs_wire::peer_table::PeerTable;
+use bitcoin_rs_p2p::connection::PeerLease;
+use bitcoin_rs_p2p::dispatch::TxInventory;
+use bitcoin_rs_p2p::listener::{run_message_loop, test_shared};
+use bitcoin_rs_p2p::peer::{Peer, PeerState};
+use bitcoin_rs_p2p::peer_table::PeerTable;
 
 struct RelayDuringInventoryLookup {
     _table: Arc<PeerTable>,
@@ -64,11 +64,11 @@ impl TxInventory for RelayDuringInventoryLookup {
     }
 }
 
-fn peer_info(addr: PeerEndpoint, start_height: i32) -> bitcoin_rs_wire::PeerInfo {
-    bitcoin_rs_wire::PeerInfo {
+fn peer_info(addr: PeerEndpoint, start_height: i32) -> bitcoin_rs_p2p::PeerInfo {
+    bitcoin_rs_p2p::PeerInfo {
         addr: addr.into(),
         endpoint: Some(addr),
-        network: bitcoin_rs_wire::PeerRemote::from(addr).network().into(),
+        network: bitcoin_rs_p2p::PeerRemote::from(addr).network().into(),
         version: 70_016,
         wtxid_relay: false,
         relay_transactions: true,
@@ -80,12 +80,12 @@ fn peer_info(addr: PeerEndpoint, start_height: i32) -> bitcoin_rs_wire::PeerInfo
         best_known_height: start_height,
         conn_time: 0,
         inbound: false,
-        addr_bind: bitcoin_rs_wire::endpoint::TransportRemote::new(
+        addr_bind: bitcoin_rs_p2p::endpoint::TransportRemote::new(
             addr.socket_addr().expect("valid IP fixture"),
         ),
         time_offset: 0,
-        counters: Arc::new(bitcoin_rs_wire::PeerCounters::default()),
-        transport: bitcoin_rs_wire::TransportProtocol::V1,
+        counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+        transport: bitcoin_rs_p2p::TransportProtocol::V1,
     }
 }
 
@@ -170,10 +170,10 @@ fn announced_inventory_is_known_before_dispatch_gateway_callbacks() {
             [9; 32]
         };
         let mut wire = Vec::new();
-        bitcoin_rs_wire::wire::write_message(
+        bitcoin_rs_p2p::wire::write_message(
             &mut wire,
             shared.magic,
-            &bitcoin_rs_wire::Message::Inv(vec![Inventory::Transaction(
+            &bitcoin_rs_p2p::Message::Inv(vec![Inventory::Transaction(
                 bitcoin::Txid::from_byte_array(announced),
             )]),
         )
@@ -189,7 +189,7 @@ fn announced_inventory_is_known_before_dispatch_gateway_callbacks() {
         assert_eq!(inventory.calls.load(Ordering::Relaxed), 1);
         let echoed = outbound_rx
             .try_iter()
-            .any(|frame| matches!(frame.message(), bitcoin_rs_wire::Message::Inv(_)));
+            .any(|frame| matches!(frame.message(), bitcoin_rs_p2p::Message::Inv(_)));
         assert_eq!(
             echoed, !announces_pending,
             "only the announced identity suppresses the pending relay"

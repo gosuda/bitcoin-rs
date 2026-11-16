@@ -1,9 +1,9 @@
-use super::*;
+﻿use super::*;
 
 use bitcoin_rs_consensus::primitives::BlockImage;
 
 fn next_getheaders(
-    rx: &bitcoin_rs_wire::test_support::MessageReceiver,
+    rx: &bitcoin_rs_p2p::test_support::MessageReceiver,
 ) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, TestError> {
     while let Ok(message) = rx.try_recv() {
         if let Message::GetHeaders(request) = message {
@@ -23,7 +23,7 @@ fn body_delivered_without_headers_announcement_admits_and_applies() -> TestResul
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -37,7 +37,7 @@ fn body_delivered_without_headers_announcement_admits_and_applies() -> TestResul
     )
     .or_fail("regtest fixture block");
     let expected = unannounced.block_hash();
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(unannounced))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(unannounced))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -59,7 +59,7 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap() -> TestResult {
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -81,7 +81,7 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap() -> TestResult {
         vec![regtest_fixture::coinbase(3)],
     )
     .or_fail("regtest fixture block");
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(block3.clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block3.clone()))?;
     sync.drain_inbound_blocks();
     sync.drain_inbound_blocks();
     next_getheaders(&rx)?;
@@ -92,7 +92,7 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap() -> TestResult {
 
         wire_response: true,
     })?;
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(block2))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block2))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -113,7 +113,7 @@ fn queued_body_from_replaced_source_cannot_enter_staging() -> TestResult {
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     let original_tip = applied_tip.load_full().ok_or("missing applied tip")?.hash;
 
@@ -132,7 +132,7 @@ fn queued_body_from_replaced_source_cannot_enter_staging() -> TestResult {
         source: Some(old_source),
         wire_response: false,
     })?;
-    let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block.clone());
+    let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block.clone());
     inbound.source = Some(old_source);
     inbound_blocks_tx.send(inbound)?;
 
@@ -151,7 +151,7 @@ fn queued_body_from_replaced_source_cannot_enter_staging() -> TestResult {
         "a retired delivery must not enter through its body-carried header",
     );
 
-    let mut current_inbound = bitcoin_rs_wire::InboundBlock::from_local(block);
+    let mut current_inbound = bitcoin_rs_p2p::InboundBlock::from_local(block);
     current_inbound.source = Some(replacement);
     inbound_blocks_tx.send(current_inbound)?;
     sync.tick();
@@ -174,7 +174,7 @@ fn staged_body_retries_after_source_replacement_without_replacement_credit() -> 
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -198,7 +198,7 @@ fn staged_body_retries_after_source_replacement_without_replacement_credit() -> 
     .or_fail("regtest fixture block");
     let block3_hash = Hash256::from(block3.block_hash());
 
-    let mut orphan_body = bitcoin_rs_wire::InboundBlock::from_local(block3);
+    let mut orphan_body = bitcoin_rs_p2p::InboundBlock::from_local(block3);
     orphan_body.source = Some(old_source);
     inbound_blocks_tx.send(orphan_body)?;
     sync.drain_inbound_blocks();
@@ -225,7 +225,7 @@ fn staged_body_retries_after_source_replacement_without_replacement_credit() -> 
         wire_response: true,
     })?;
     sync.drain_inbound_headers();
-    let mut parent_body = bitcoin_rs_wire::InboundBlock::from_local(block2);
+    let mut parent_body = bitcoin_rs_p2p::InboundBlock::from_local(block2);
     parent_body.source = Some(replacement_source);
     inbound_blocks_tx.send(parent_body)?;
     sync.tick();
@@ -414,7 +414,7 @@ fn staged_body_with_permanently_inadmissible_header_is_discarded() -> TestResult
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -428,7 +428,7 @@ fn staged_body_with_permanently_inadmissible_header_is_discarded() -> TestResult
     )
     .or_fail("regtest fixture block");
     bad.header.bits = CompactTarget::from_consensus(0x1e0f_ff00);
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(bad))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(bad))?;
     sync.tick();
     sync.tick();
 
@@ -467,7 +467,7 @@ fn staged_body_whose_resolved_header_is_inadmissible_is_evicted() -> TestResult 
     )
     .or_fail("regtest fixture");
     let fork_hash = Hash256::from(fork.block_hash());
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(fork))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(fork))?;
     sync.tick();
     sync.tick();
 
@@ -507,7 +507,7 @@ fn staged_body_gated_when_the_headers_drain_resolves_its_header() -> TestResult 
     )
     .or_fail("regtest fixture");
     let orphan_hash = Hash256::from(orphan_body.block_hash());
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(
         orphan_body.clone(),
     ))?;
     sync.tick();
@@ -561,7 +561,7 @@ fn deferred_owned_body_fetch_settles_the_staged_gate() -> TestResult {
         source: Some(source),
         wire_response: true,
     })?;
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(
         orphan_body.clone(),
     ))?;
     sync.tick();
@@ -656,7 +656,7 @@ fn unrequested_body_at_the_count_budget_is_refused() -> TestResult {
     }
 
     let refused_hash = Hash256::from(blocks[2].block_hash());
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[2].clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[2].clone()))?;
     sync.drain_inbound_blocks();
 
     let scheduler = sync.scheduler.lock();
@@ -703,7 +703,7 @@ fn stale_owned_fetch_source_does_not_settle_the_gate() -> TestResult {
         source: Some(source),
         wire_response: true,
     })?;
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(
         orphan_body.clone(),
     ))?;
     sync.tick();
@@ -744,8 +744,8 @@ fn binding_failure_does_not_burn_the_last_staging_slot() -> TestResult {
     bad.txs.push(regtest_fixture::coinbase(90));
     let bad_hash = Hash256::from(bad.block_hash());
     let good_hash = Hash256::from(blocks[1].block_hash());
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(bad))?;
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[1].clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(bad))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[1].clone()))?;
     sync.drain_inbound_blocks();
 
     let scheduler = sync.scheduler.lock();
@@ -773,7 +773,7 @@ fn gate_pending_body_survives_a_pending_branch_switch() -> TestResult {
     } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
     for block in &blocks {
-        inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(block.clone()))?;
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))?;
     }
     sync.tick();
     assert_eq!(
@@ -795,7 +795,7 @@ fn gate_pending_body_survives_a_pending_branch_switch() -> TestResult {
         .or_fail("regtest fixture");
     let fork_h4 =
         regtest_fixture::mined_regtest_header(fork_h3.compute_hash(), 4).or_fail("regtest fixture");
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(
         winner_body.clone(),
     ))?;
     sync.tick();
@@ -889,7 +889,7 @@ fn staged_retry_acceptance_credits_the_delivering_peer() -> TestResult {
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
 
     let peer = test_addr(9706, 0)?;
@@ -902,7 +902,7 @@ fn staged_retry_acceptance_credits_the_delivering_peer() -> TestResult {
     )
     .or_fail("regtest fixture block");
     let expected = unannounced.block_hash();
-    let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(unannounced);
+    let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(unannounced);
     inbound.source = Some(current_source(&peers, peer));
     inbound_blocks_tx.send(inbound)?;
     sync.tick();
@@ -1156,8 +1156,8 @@ fn compact_owned_body_fetch_marks_the_tip_pending() -> TestResult {
 type CompactGateFixture = (
     SyncHarness,
     Vec<Block>,
-    bitcoin_rs_wire::PeerSource,
-    bitcoin_rs_wire::test_support::MessageReceiver,
+    bitcoin_rs_p2p::PeerSource,
+    bitcoin_rs_p2p::test_support::MessageReceiver,
 );
 
 fn compact_gate_fixture(port: usize) -> Result<CompactGateFixture, TestError> {
@@ -1258,7 +1258,7 @@ fn compact_reconstruction_admission_reads_admitted_tree_state() -> TestResult {
     };
 
     let mut ahead = tip_child(tip, 43)?;
-    ahead.time = bitcoin_rs_execution::chain::current_unix_seconds().saturating_add(3 * 60 * 60);
+    ahead.time = bitcoin_rs_chain::chain::current_unix_seconds().saturating_add(3 * 60 * 60);
     regtest_fixture::mine_header_to_declared_target(&mut ahead)?;
     assert!(
         !sync.compact_reconstruction_admissible(source, &ahead),
@@ -1386,7 +1386,7 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> TestResult {
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,

@@ -1,4 +1,4 @@
-//! Node-wide byte and CPU accounting for every retained allocation.
+﻿//! Node-wide byte and CPU accounting for every retained allocation.
 //!
 //! One accountant owns the totals; all subsystem charges linearize through
 //! its single ledger lock, so every reader observes a whole reservation or
@@ -9,7 +9,7 @@
 //! `bitcoin_rs_storage::budget` so projection,
 //! storage, and offline tools charge the same ledger.
 
-use bitcoin_rs_execution::WindowLimits;
+use bitcoin_rs_chain::WindowLimits;
 use bitcoin_rs_storage::ChainstateCacheBudget;
 use bitcoin_rs_storage::budget::{
     BudgetCharge, BudgetError, BudgetOwner, BudgetReclaimer, CpuShares,
@@ -436,7 +436,7 @@ impl BudgetedIngressLedger {
     }
 }
 
-impl bitcoin_rs_wire::inbound::block_memory::IngressLedger for BudgetedIngressLedger {
+impl bitcoin_rs_p2p::inbound::block_memory::IngressLedger for BudgetedIngressLedger {
     fn capacity(&self) -> usize {
         usize::try_from(
             self.budget
@@ -478,7 +478,7 @@ impl BudgetedOutboundLedger {
     }
 }
 
-impl bitcoin_rs_wire::connection::OutboundLedger for BudgetedOutboundLedger {
+impl bitcoin_rs_p2p::connection::OutboundLedger for BudgetedOutboundLedger {
     fn try_take(&self, bytes: usize) -> bool {
         let bytes_u64 = u64::try_from(bytes).unwrap_or(u64::MAX);
         self.budget

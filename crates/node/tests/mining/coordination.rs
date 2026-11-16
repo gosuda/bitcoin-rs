@@ -1,4 +1,4 @@
-use std::str::FromStr as _;
+﻿use std::str::FromStr as _;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -16,7 +16,7 @@ use bitcoin_rs_node::{
     MiningCoordinator, MiningOverrides, Network, NetworkSelection, UserConfig, resolve,
     state::NodeState,
 };
-use bitcoin_rs_serving::mining::{
+use bitcoin_rs_rpc::mining::{
     BlockTemplate, MempoolSequenceWake, MiningControl, MiningControlError,
 };
 use compact_str::CompactString;
@@ -547,7 +547,7 @@ fn priority_change_replaces_the_cached_candidate_for_an_unchanged_pool() -> Resu
         Arc::ptr_eq(&first.candidate, &again.candidate),
         "precondition: an unchanged generation is served from the cache"
     );
-    let ranked = |template: &bitcoin_rs_serving::mining::BlockTemplate| {
+    let ranked = |template: &bitcoin_rs_rpc::mining::BlockTemplate| {
         template
             .candidate
             .transactions

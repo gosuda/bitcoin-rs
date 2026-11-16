@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -80,7 +80,7 @@ pub(crate) enum ConvertError {
     },
 
     #[error("checkpoint publication at the durable head failed: {0}")]
-    CheckpointPublish(#[source] bitcoin_rs_execution::recovery::ConvertedCheckpointError),
+    CheckpointPublish(#[source] bitcoin_rs_chain::recovery::ConvertedCheckpointError),
 
     #[error("block file '{file}' record {index} has bad magic")]
     BadBlockMagic { file: String, index: u64 },
@@ -157,5 +157,5 @@ pub(crate) enum ConvertError {
     },
 
     #[error("bulk index build failed: {0}")]
-    BulkBuild(#[from] bitcoin_rs_projection::segment::bulk_builder::BulkBuilderError),
+    BulkBuild(#[from] bitcoin_rs_index::segment::bulk_builder::BulkBuilderError),
 }

@@ -1,12 +1,12 @@
-use std::net::SocketAddr;
+﻿use std::net::SocketAddr;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_consensus::primitives::{Hash256, Txid};
 use bitcoin_rs_mempool::PeerToken;
-use bitcoin_rs_wire::connection::PeerLease;
-use bitcoin_rs_wire::peer_table::PeerTable;
-use bitcoin_rs_wire::wire::Message;
+use bitcoin_rs_p2p::connection::PeerLease;
+use bitcoin_rs_p2p::peer_table::PeerTable;
+use bitcoin_rs_p2p::wire::Message;
 
 fn parent(byte: u8) -> Txid {
     Txid::from(Hash256::from_le_bytes(&[byte; 32]))
@@ -44,7 +44,7 @@ fn request_missing_parents(peers: &PeerTable, source: PeerToken, parents: &[Txid
         return false;
     }
     if witness {
-        bitcoin_rs_wire::inv::request_witness(&mut items);
+        bitcoin_rs_p2p::inv::request_witness(&mut items);
     }
     peers.send(connection, Message::GetData(items)).is_ok() && !lease.is_cancelled()
 }
@@ -52,7 +52,7 @@ fn request_missing_parents(peers: &PeerTable, source: PeerToken, parents: &[Txid
 #[test]
 fn missing_parents_use_txids_and_deduplicate_repeated_inputs() {
     let table = PeerTable::new();
-    let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(2);
+    let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(2);
     let lease = PeerLease::new(sender);
     let source = source(&lease);
     table.register(source.addr.expect("known destination"), lease.clone());
@@ -80,14 +80,14 @@ fn missing_parents_request_witness_by_service_not_announcement_preference() {
     for witness in [false, true] {
         for wtxid_relay in [false, true] {
             let table = PeerTable::new();
-            let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(1);
+            let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(1);
             let lease = PeerLease::new(sender);
             let source = source(&lease);
             table.register(source.addr.expect("known destination"), lease.clone());
-            let mut version = bitcoin_rs_wire::handshake::version_message(
+            let mut version = bitcoin_rs_p2p::handshake::version_message(
                 1,
                 0,
-                bitcoin_rs_wire::peer_info::PeerRole::FullRelay,
+                bitcoin_rs_p2p::peer_info::PeerRole::FullRelay,
                 bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
                 bitcoin_rs_consensus::primitives::USER_AGENT,
             );
@@ -96,7 +96,7 @@ fn missing_parents_request_witness_by_service_not_announcement_preference() {
             } else {
                 ServiceFlags::NETWORK
             };
-            let mut info = bitcoin_rs_wire::PeerInfo::inbound_from_version(
+            let mut info = bitcoin_rs_p2p::PeerInfo::inbound_from_version(
                 source.addr.expect("known destination"),
                 source
                     .addr
@@ -106,7 +106,7 @@ fn missing_parents_request_witness_by_service_not_announcement_preference() {
                 &version,
                 0,
                 0,
-                Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+                Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
             );
             info.wtxid_relay = wtxid_relay;
             assert!(table.publish_info(source.addr.expect("known destination"), &lease, info,));
@@ -135,11 +135,11 @@ fn missing_parents_request_witness_by_service_not_announcement_preference() {
 #[test]
 fn stale_missing_parent_source_cannot_send_to_or_cancel_replacement() {
     let table = PeerTable::new();
-    let (old_sender, old_receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(1);
+    let (old_sender, old_receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(1);
     let old = PeerLease::new(old_sender);
     let stale_source = source(&old);
     table.register(stale_source.addr.expect("known destination"), old);
-    let (new_sender, new_receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(1);
+    let (new_sender, new_receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(1);
     let current = PeerLease::new(new_sender);
     table.register(
         stale_source.addr.expect("known destination"),
@@ -163,7 +163,7 @@ fn stale_missing_parent_source_cannot_send_to_or_cancel_replacement() {
 #[test]
 fn missing_parent_request_keeps_outbound_saturation_policy() {
     let table = PeerTable::new();
-    let (sender, _receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(1);
+    let (sender, _receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(1);
     let lease = PeerLease::new(sender);
     let source = source(&lease);
     assert!(!request_missing_parents(&table, source, &[parent(1)]));
@@ -177,7 +177,7 @@ fn missing_parent_request_keeps_outbound_saturation_policy() {
 #[test]
 fn cancelled_missing_parent_source_does_not_enqueue_a_request() {
     let table = PeerTable::new();
-    let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(1);
+    let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(1);
     let lease = PeerLease::new(sender);
     let source = source(&lease);
     table.register(source.addr.expect("known destination"), lease.clone());
@@ -190,12 +190,12 @@ fn cancelled_missing_parent_source_does_not_enqueue_a_request() {
 #[test]
 fn missing_parents_serve_unidentified_inbound_through_own_lease() {
     let table = PeerTable::new();
-    let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(2);
+    let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(2);
     let lease = PeerLease::new_inbound(sender);
     let source = crate::p2p::peer_token(lease.source(None));
     assert!(source.addr.is_none());
     table.register_unidentified(lease.clone());
-    let (other_sender, other_receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(2);
+    let (other_sender, other_receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(2);
     let other = PeerLease::new_inbound(other_sender);
     let other_source = crate::p2p::peer_token(other.source(None));
     assert!(other_source.addr.is_none());
@@ -222,7 +222,7 @@ fn missing_parents_serve_unidentified_inbound_through_own_lease() {
 #[test]
 fn missing_parents_resolve_unidentified_sessions() {
     let table = PeerTable::new();
-    let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(2);
+    let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(2);
     let lease = PeerLease::new(sender);
     table.register_unidentified(lease.clone());
     let source = crate::p2p::peer_token(lease.source(None));

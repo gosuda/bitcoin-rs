@@ -1,7 +1,7 @@
 use super::*;
 
 fn next_getheaders(
-    rx: &bitcoin_rs_wire::test_support::MessageReceiver,
+    rx: &bitcoin_rs_p2p::test_support::MessageReceiver,
 ) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, TestError> {
     while let Ok(message) = rx.try_recv() {
         if let Message::GetHeaders(request) = message {
@@ -22,7 +22,7 @@ fn applied_rewind_with_unchanged_headers_refetches_the_missing_prefix() -> TestR
     let hashes: Vec<_> = blocks.iter().map(Block::block_hash).collect();
     assert_eq!(witness_block_inventory(next_getdata(&outbound)?)?, hashes);
     for block in blocks {
-        incoming.send(bitcoin_rs_wire::InboundBlock::from_local(block))?;
+        incoming.send(bitcoin_rs_p2p::InboundBlock::from_local(block))?;
     }
     sync.tick();
     assert_eq!(applied.load_full().ok_or("missing applied tip")?.height, 3);
@@ -112,11 +112,9 @@ fn staged_successors_behind_a_rejected_frontier_still_probe() -> TestResult {
         blocks[0].block_hash(),
         "altering body transaction bytes must retain the header-derived hash"
     );
-    incoming.send(bitcoin_rs_wire::InboundBlock::from_local(
-        malformed_frontier,
-    ))?;
-    incoming.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[1].clone()))?;
-    incoming.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[2].clone()))?;
+    incoming.send(bitcoin_rs_p2p::InboundBlock::from_local(malformed_frontier))?;
+    incoming.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[1].clone()))?;
+    incoming.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[2].clone()))?;
 
     sync.tick();
 
@@ -145,7 +143,7 @@ fn superseded_session_gets_no_probe_and_cannot_send_getheaders() -> TestResult {
     let old_rx = connect_peer(&peers, synthetic_peer(peer, 1));
     let old_source = current_source(&peers, peer);
 
-    let (replacement_tx, replacement_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (replacement_tx, replacement_rx) = bitcoin_rs_p2p::test_support::message_channel();
     peers.register(peer, PeerLease::new(replacement_tx));
 
     sync.tick();
@@ -543,7 +541,7 @@ fn unsolicited_staged_body_never_rewinds_request_cursor() -> TestResult {
     let hashes: Vec<_> = blocks.iter().map(Block::block_hash).collect();
     assert_eq!(witness_block_inventory(next_getdata(&outbound)?)?, hashes);
     for block in blocks.into_iter().take(3) {
-        incoming.send(bitcoin_rs_wire::InboundBlock::from_local(block))?;
+        incoming.send(bitcoin_rs_p2p::InboundBlock::from_local(block))?;
     }
     sync.tick();
     assert_eq!(applied.load_full().ok_or("missing applied tip")?.height, 3);
@@ -561,7 +559,7 @@ fn unsolicited_staged_body_never_rewinds_request_cursor() -> TestResult {
     )
     .or_fail("regtest fixture block");
     let orphan_hash = Hash256::from(orphan.block_hash());
-    let mut inbound = vec![bitcoin_rs_wire::InboundBlock::from_local(orphan)];
+    let mut inbound = vec![bitcoin_rs_p2p::InboundBlock::from_local(orphan)];
     assert_eq!(sync.buffer_received_block_chunk(&mut inbound, None), 1);
     assert!(sync.scheduler.lock().stager.contains(&orphan_hash));
 

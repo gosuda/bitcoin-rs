@@ -1,12 +1,12 @@
 use std::time::{Duration, Instant};
 
+use bitcoin_rs_chain::chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_execution::chain::{BlockTree, TipSnapshot};
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
 
 use crate::p2p::BlockStager;
-use bitcoin_rs_wire::connection::PeerSource;
+use bitcoin_rs_p2p::connection::PeerSource;
 
 pub(crate) mod policy;
 
@@ -276,8 +276,8 @@ pub(crate) struct DownloadWindow {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum StallerKey {
-    Endpoint(bitcoin_rs_wire::PeerEndpoint),
-    Unidentified(bitcoin_rs_wire::ConnectionId),
+    Endpoint(bitcoin_rs_p2p::PeerEndpoint),
+    Unidentified(bitcoin_rs_p2p::ConnectionId),
 }
 
 impl From<PeerSource> for StallerKey {
@@ -726,7 +726,7 @@ impl DownloadWindow {
         Some((front.owner, *front_hash))
     }
 
-    pub(crate) fn stalling_peer(&self) -> Option<(Option<bitcoin_rs_wire::PeerEndpoint>, Instant)> {
+    pub(crate) fn stalling_peer(&self) -> Option<(Option<bitcoin_rs_p2p::PeerEndpoint>, Instant)> {
         self.stall
             .map(|episode| (episode.owner.endpoint, episode.since))
     }
@@ -1823,7 +1823,7 @@ impl DownloadWindow {
     }
 
     fn owner_address_count(&self) -> usize {
-        let mut owners: SmallVec<[Option<bitcoin_rs_wire::PeerEndpoint>; 16]> = SmallVec::new();
+        let mut owners: SmallVec<[Option<bitcoin_rs_p2p::PeerEndpoint>; 16]> = SmallVec::new();
         for pending in self.pending.values() {
             if !owners.contains(&pending.owner.endpoint) {
                 owners.push(pending.owner.endpoint);
@@ -1853,7 +1853,7 @@ fn non_empty_request(
 
 fn contiguous_request_entries(
     tree: &BlockTree,
-    tip_id: bitcoin_rs_execution::chain::NodeId,
+    tip_id: bitcoin_rs_chain::chain::NodeId,
     start_height: u32,
     end_height: u32,
 ) -> Option<Vec<PeerRequestEntry>> {

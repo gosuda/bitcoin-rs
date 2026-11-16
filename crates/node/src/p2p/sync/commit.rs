@@ -1,4 +1,4 @@
-use super::BlockSync;
+﻿use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::SchedulerState;
@@ -22,13 +22,13 @@ struct CommitWindowErrorOutcome {
     stopped: usize,
     failed_hash: Option<Hash256>,
     restore_from: usize,
-    failed_delivery: Option<(Option<bitcoin_rs_wire::connection::PeerSource>, Hash256)>,
+    failed_delivery: Option<(Option<bitcoin_rs_p2p::connection::PeerSource>, Hash256)>,
 }
 
 impl BlockSync {
     pub(super) fn punish_permanent_delivery_source(
         &self,
-        source: Option<bitcoin_rs_wire::connection::PeerSource>,
+        source: Option<bitcoin_rs_p2p::connection::PeerSource>,
         hash: bitcoin_rs_consensus::primitives::Hash256,
     ) {
         let Some(source) = source else {

@@ -1,4 +1,4 @@
-use std::time::Duration;
+﻿use std::time::Duration;
 
 use super::*;
 use crate::p2p::download_window::MINIMUM_CONNECT_TIME;
@@ -7,10 +7,10 @@ use crate::p2p::sync::frontier::UsablePeer;
 use crate::p2p::sync::peers::{
     ChainSyncAction, ChainSyncState, HEADERS_RESPONSE_TIME, chain_sync_subject, consider_eviction,
 };
-use bitcoin_rs_wire::peer_info::PeerRole;
+use bitcoin_rs_p2p::peer_info::PeerRole;
 
 fn outbound(port: u16, height: u32, role: PeerRole, at: Instant) -> UsablePeer {
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         port,
     ));
@@ -315,11 +315,11 @@ fn an_unsent_chain_sync_probe_arms_no_response_window() {
         )),
         Arc::new(PeerTable::new()),
         {
-            let (_tx, rx) = unbounded::<bitcoin_rs_wire::InboundHeaders>();
+            let (_tx, rx) = unbounded::<bitcoin_rs_p2p::InboundHeaders>();
             rx
         },
         {
-            let (_tx, rx) = unbounded::<bitcoin_rs_wire::InboundBlock>();
+            let (_tx, rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
             rx
         },
         super::synced_ibd_latch(),
@@ -465,7 +465,7 @@ fn frontier_and_eviction_probes_do_not_overwrite_live_requests() -> TestResult {
     assert!(rx.try_recv().is_err());
     assert_eq!(request_snapshot(), Some(frontier_request));
 
-    inbound_headers_tx.send(bitcoin_rs_wire::InboundHeaders {
+    inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
         headers: vec![blocks[0].header],
         source: Some(source),
         wire_response: true,
@@ -569,7 +569,7 @@ fn chain_sync_probe_holds_request_for_its_response_window() -> TestResult {
     assert!(rx.try_recv().is_err());
     assert_eq!(request_snapshot(), Some(aged_request));
 
-    inbound_headers_tx.send(bitcoin_rs_wire::InboundHeaders {
+    inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
         headers: vec![blocks[0].header],
         source: Some(source),
         wire_response: true,
@@ -645,7 +645,7 @@ fn queued_probe_answer_defers_eviction_until_admission() -> TestResult {
     assert!(sync.probe_chain_sync(source, &frontier));
     assert!(matches!(rx.try_recv()?, Message::GetHeaders(_)));
     sync.note_header_response_received(source);
-    inbound_headers_tx.send(bitcoin_rs_wire::InboundHeaders {
+    inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
         headers: vec![blocks[0].header],
         source: Some(source),
         wire_response: true,
@@ -790,7 +790,7 @@ fn empty_chain_sync_probe_keeps_original_five_second_pacing() -> TestResult {
         "only an unanswered probe uses the eviction response window",
     );
 
-    inbound_headers_tx.send(bitcoin_rs_wire::InboundHeaders {
+    inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
         headers: Vec::new(),
         source: Some(source),
         wire_response: true,
@@ -918,7 +918,7 @@ fn failed_sweep_probe_requests_headers_from_live_peer_in_same_tick() -> TestResu
     let now = Instant::now();
     let dead = test_addr(9_921, 0)?;
     let live = test_addr(9_921, 1)?;
-    let (tx, dead_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, dead_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let connected_at = now.checked_sub(MINIMUM_CONNECT_TIME).ok_or("connect age")?;
     let lease = PeerLease::new_connected_at(tx, connected_at);
     peers.register(dead, lease.clone());
@@ -985,7 +985,7 @@ fn failed_sweep_probe_reassigns_fresh_inflight_body_in_same_tick() -> TestResult
     let now = Instant::now();
     let dead = test_addr(9_922, 0)?;
     let live = test_addr(9_922, 1)?;
-    let (tx, dead_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, dead_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let connected_at = now.checked_sub(MINIMUM_CONNECT_TIME).ok_or("connect age")?;
     let lease = PeerLease::new_connected_at(tx, connected_at);
     peers.register(dead, lease.clone());
@@ -1049,7 +1049,7 @@ fn a_failed_sweep_probe_restores_the_armed_record() {
     sync.chain.bootstrap_genesis();
 
     let addr = test_addr(9_920, 0).expect("test address");
-    let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
     let connected_at = t0
         .checked_sub(MINIMUM_CONNECT_TIME)
         .expect("the test clock predates the connect age");

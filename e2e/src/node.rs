@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+﻿use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write as _};
 use std::net::{SocketAddr, TcpListener};
@@ -201,7 +201,7 @@ pub(crate) fn manifest_reference_sha256() -> Result<String> {
             std::env::consts::ARCH
         ))
     })?;
-    let table: toml::Table = bitcoin_rs_serving::manifest::MANIFEST_TOML
+    let table: toml::Table = bitcoin_rs_rpc::manifest::MANIFEST_TOML
         .parse()
         .map_err(|e| Error::Assertion(format!("cannot parse core-compat.toml: {e}")))?;
     let release = table

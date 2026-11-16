@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use crate::p2p::download_window::default_sync_budget;
 
 type HistoricalFixture = (SyncHarness, Arc<TestChain>, Vec<Block>);
@@ -22,7 +22,7 @@ fn fixture(count: u32) -> Result<HistoricalFixture, TestError> {
 fn deliver(sync: &BlockSync, block: &Block, source: PeerSource) {
     assert!(
         sync.receive_historical({
-            let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block.clone());
+            let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block.clone());
             inbound.source = Some(source);
             inbound
         })
@@ -226,7 +226,7 @@ fn late_retired_history_cannot_enter_foreground_staging() -> TestResult {
                 blocks[5].block_hash().0
             );
         }
-        let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone());
+        let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone());
         inbound.source = Some(source);
         let inbound = harness
             .sync

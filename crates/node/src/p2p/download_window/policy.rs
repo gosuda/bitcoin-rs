@@ -1,17 +1,17 @@
-use std::time::Duration;
+﻿use std::time::Duration;
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_consensus::primitives::Network;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bitcoin_rs_execution::chain::InitialBlockDownload;
+use bitcoin_rs_chain::chain::InitialBlockDownload;
 
 use super::DownloadWindow;
-use bitcoin_rs_wire::connection::PeerSource;
+use bitcoin_rs_p2p::connection::PeerSource;
 
 use super::SyncBudget;
-use bitcoin_rs_wire::PeerInfo;
+use bitcoin_rs_p2p::PeerInfo;
 
 pub(super) const BLOCK_DOWNLOAD_TIMEOUT_BASE: u32 = 2;
 pub(super) const BLOCK_DOWNLOAD_TIMEOUT_PER_PEER: u32 = 1;
@@ -24,7 +24,7 @@ pub(crate) const RECEIVED_BLOCK_BUDGET: usize = 256;
 pub(crate) const PENDING_BLOCK_BYTE_ESTIMATE: usize = 2 * 1024 * 1024;
 const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIMATE;
 const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
-const MAX_SERIALIZED_BLOCK_SIZE: usize = bitcoin_rs_wire::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
+const MAX_SERIALIZED_BLOCK_SIZE: usize = bitcoin_rs_p2p::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
 const _: () = assert!(
     RECEIVED_BLOCK_BYTE_BUDGET >= RECEIVED_BLOCK_BUDGET / 2 * MAX_SERIALIZED_BLOCK_SIZE,
     "staged byte budget must admit half the staged count window at max block size"

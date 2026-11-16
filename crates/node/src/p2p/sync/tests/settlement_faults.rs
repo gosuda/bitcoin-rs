@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 #[test]
 fn fatal_settlement_halts_further_apply_attempts() -> TestResult {
@@ -160,7 +160,7 @@ fn fatal_window_failure_schedules_no_retry() -> TestResult {
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -214,7 +214,7 @@ fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget() -> TestRe
     for block in fixture.blocks[1..6].iter().rev() {
         fixture
             .inbound_blocks_tx
-            .send(bitcoin_rs_wire::InboundBlock::from_local(block.clone()))?;
+            .send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))?;
     }
 
     fixture.sync.drain_inbound_blocks();
@@ -347,11 +347,11 @@ fn apply_cache_horizon_capped_by_pending_budget() -> TestResult {
 #[test]
 fn on_peer_ready_sweeps_dead_predecessor_header_request() -> TestResult {
     let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
-    let peer_addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let peer_addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
-    let source = bitcoin_rs_wire::PeerSource::for_test(peer_addr);
+    let source = bitcoin_rs_p2p::PeerSource::for_test(peer_addr);
     {
         let mut scheduler = sync.scheduler.lock();
         scheduler.headers_sync.entry(source).or_default().request =
@@ -379,11 +379,11 @@ fn on_peer_ready_sweeps_dead_predecessor_header_request() -> TestResult {
 #[test]
 fn on_peer_ready_sweep_releases_dead_owned_requests_only() -> TestResult {
     let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
-    let peer_addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let peer_addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8334,
     ));
-    let (stale_tx, _stale_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (stale_tx, _stale_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let stale = PeerLease::new(stale_tx);
     sync.peer_table.register(peer_addr, stale.clone());
     register_info(&sync.peer_table, synthetic_peer(peer_addr, 2));
@@ -424,11 +424,11 @@ fn far_future_matching_peer_retries_without_peer_blame() -> TestResult {
         inbound_headers_tx,
         peers,
     } = header_sync_with_genesis()?;
-    let peer_addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let peer_addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
-    let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(tx);
     peers.register(peer_addr, lease.clone());
     peers.publish_info(peer_addr, &lease, synthetic_peer(peer_addr, 8));
@@ -458,7 +458,7 @@ fn far_future_matching_peer_retries_without_peer_blame() -> TestResult {
     assert!(peers.is_connected(peer_addr));
     assert!(
         !sync.scheduler.lock().window.peer_in_staller_cooldown(
-            bitcoin_rs_wire::PeerSource::for_test(peer_addr),
+            bitcoin_rs_p2p::PeerSource::for_test(peer_addr),
             Instant::now()
         ),
         "local-clock rejection must not blame the peer"
@@ -502,7 +502,7 @@ fn same_address_registration_clears_getheaders_gate_and_routes_replacement() -> 
     sync.tick();
     assert!(matches!(old_rx.try_recv()?, Message::GetHeaders(_)));
 
-    let (new_tx, new_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (new_tx, new_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let new_lease = PeerLease::new(new_tx);
     peers.register(addr, new_lease.clone());
     peers.publish_info(addr, &new_lease, synthetic_peer(addr, 8));
@@ -596,7 +596,7 @@ pub(crate) fn locator_of(message: &Message) -> Option<Vec<[u8; 32]>> {
 }
 
 pub(crate) fn next_locator(
-    rx: &bitcoin_rs_wire::test_support::MessageReceiver,
+    rx: &bitcoin_rs_p2p::test_support::MessageReceiver,
 ) -> Option<Vec<[u8; 32]>> {
     rx.try_iter().find_map(|message| locator_of(&message))
 }

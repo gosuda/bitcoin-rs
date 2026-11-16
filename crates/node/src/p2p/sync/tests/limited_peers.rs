@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use bitcoin::p2p::ServiceFlags;
 
@@ -26,7 +26,7 @@ fn policy(ibd: Arc<InitialBlockDownload>, requested_height: u32) -> BlockDownloa
     }
 }
 
-fn sent_messages(rx: &bitcoin_rs_wire::test_support::MessageReceiver) -> Vec<Message> {
+fn sent_messages(rx: &bitcoin_rs_p2p::test_support::MessageReceiver) -> Vec<Message> {
     rx.try_iter().collect()
 }
 

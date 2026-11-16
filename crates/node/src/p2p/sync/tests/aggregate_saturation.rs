@@ -1,13 +1,13 @@
-use super::*;
-use bitcoin_rs_wire::connection::SharedOutboundBudget;
-use bitcoin_rs_wire::test_support::hog;
+﻿use super::*;
+use bitcoin_rs_p2p::connection::SharedOutboundBudget;
+use bitcoin_rs_p2p::test_support::hog;
 
 fn connect_on(
     peers: &Arc<PeerTable>,
     aggregate: &Arc<SharedOutboundBudget>,
     info: PeerInfo,
-) -> (PeerLease, bitcoin_rs_wire::test_support::MessageReceiver) {
-    let (queue, receiver) = bitcoin_rs_wire::test_support::message_channel();
+) -> (PeerLease, bitcoin_rs_p2p::test_support::MessageReceiver) {
+    let (queue, receiver) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(queue).with_shared_budget(aggregate);
     let Some(endpoint) = info.endpoint else {
         panic!("identified peer endpoint");

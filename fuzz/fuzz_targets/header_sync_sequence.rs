@@ -1,9 +1,9 @@
-#![no_main]
+﻿#![no_main]
 
 use std::collections::HashMap;
 
-use bitcoin_rs_execution::chain::regtest_fixture::{REGTEST_BITS, genesis_time};
-use bitcoin_rs_execution::chain::{
+use bitcoin_rs_chain::chain::regtest_fixture::{REGTEST_BITS, genesis_time};
+use bitcoin_rs_chain::chain::{
     BlockTree, HeaderValidationMode, NodeId, accept_headers, plan_reorg,
 };
 use bitcoin_rs_consensus::header_rules::ChainWork;
@@ -65,7 +65,7 @@ fn work_for_bits(bits: u32) -> ChainWork {
 
 fn mine(header: &mut Header) {
     loop {
-        if bitcoin_rs_execution::chain::compact_is_met_by(header.bits, Hash256::from(header.compute_hash())) {
+        if bitcoin_rs_chain::chain::compact_is_met_by(header.bits, Hash256::from(header.compute_hash())) {
             return;
         }
         header.nonce = header.nonce.wrapping_add(1);
@@ -216,7 +216,7 @@ fn mined_header(tree: &BlockTree, parent: &Tracked, delta: u32, nonce: u32) -> H
 fn submit(
     tree: &mut BlockTree,
     headers: &[Header],
-) -> Result<Vec<NodeId>, bitcoin_rs_execution::chain::ChainError> {
+) -> Result<Vec<NodeId>, bitcoin_rs_chain::chain::ChainError> {
     accept_headers(
         tree,
         headers,

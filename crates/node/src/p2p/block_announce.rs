@@ -1,4 +1,4 @@
-#[cfg(test)]
+﻿#[cfg(test)]
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,14 +12,14 @@ use parking_lot::Mutex;
 
 use crate::p2p::chain_query::{RecentBlockSlot, cmpct_message_from_image};
 #[cfg(test)]
-use bitcoin_rs_wire::connection::PeerLease;
-use bitcoin_rs_wire::connection::PeerSource;
-use bitcoin_rs_wire::dispatch::{ChainQuery, CommittedTip};
-use bitcoin_rs_wire::peer::COMPACT_BLOCK_VERSION;
+use bitcoin_rs_p2p::connection::PeerLease;
+use bitcoin_rs_p2p::connection::PeerSource;
+use bitcoin_rs_p2p::dispatch::{ChainQuery, CommittedTip};
+use bitcoin_rs_p2p::peer::COMPACT_BLOCK_VERSION;
 #[cfg(test)]
-use bitcoin_rs_wire::peer_info::PeerInfo;
-use bitcoin_rs_wire::peer_table::PeerTable;
-use bitcoin_rs_wire::wire::Message;
+use bitcoin_rs_p2p::peer_info::PeerInfo;
+use bitcoin_rs_p2p::peer_table::PeerTable;
+use bitcoin_rs_p2p::wire::Message;
 
 pub const MAX_BLOCKS_TO_ANNOUNCE: usize = 8;
 
@@ -29,7 +29,7 @@ const ANNOUNCE_POLL: Duration = Duration::from_millis(100);
 
 pub(crate) fn ibd_active(
     ibd: Option<&(
-        Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
+        Arc<bitcoin_rs_chain::chain::InitialBlockDownload>,
         bitcoin_rs_consensus::primitives::Network,
     )>,
 ) -> bool {
@@ -111,13 +111,13 @@ pub struct BlockAnnouncer {
     chain_query: Arc<dyn ChainQuery>,
     config: BlockAnnounceConfig,
     ibd: Option<(
-        Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
+        Arc<bitcoin_rs_chain::chain::InitialBlockDownload>,
         bitcoin_rs_consensus::primitives::Network,
     )>,
     state: Mutex<AnnounceState>,
     recent: RecentBlockSlot,
     stale_tips: Option<Arc<crate::p2p::sync::stale_tips::StaleTipRetainer>>,
-    block_tree: Option<bitcoin_rs_execution::chain::BlockTreeReader>,
+    block_tree: Option<bitcoin_rs_chain::chain::BlockTreeReader>,
 }
 
 impl BlockAnnouncer {
@@ -143,7 +143,7 @@ impl BlockAnnouncer {
     pub fn with_stale_tips(
         mut self,
         stale_tips: Arc<crate::p2p::sync::stale_tips::StaleTipRetainer>,
-        block_tree: bitcoin_rs_execution::chain::BlockTreeReader,
+        block_tree: bitcoin_rs_chain::chain::BlockTreeReader,
     ) -> Self {
         self.stale_tips = Some(stale_tips);
         self.block_tree = Some(block_tree);
@@ -159,7 +159,7 @@ impl BlockAnnouncer {
     #[must_use]
     pub fn with_ibd(
         mut self,
-        ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
+        ibd: Arc<bitcoin_rs_chain::chain::InitialBlockDownload>,
         network: bitcoin_rs_consensus::primitives::Network,
     ) -> Self {
         self.ibd = Some((ibd, network));
@@ -382,7 +382,7 @@ impl BlockAnnouncer {
         sent
     }
 
-    fn ready_sessions(&self) -> Vec<bitcoin_rs_wire::peer_table::PeerSession> {
+    fn ready_sessions(&self) -> Vec<bitcoin_rs_p2p::peer_table::PeerSession> {
         self.peers
             .sessions()
             .into_iter()
@@ -410,10 +410,10 @@ impl BlockAnnouncer {
 
     fn peer_anchor(
         &self,
-        session: &bitcoin_rs_wire::peer_table::PeerSession,
+        session: &bitcoin_rs_p2p::peer_table::PeerSession,
     ) -> (
         PeerSource,
-        bitcoin_rs_wire::peer_table::PeerAnnouncementState,
+        bitcoin_rs_p2p::peer_table::PeerAnnouncementState,
         Option<(Hash256, u32)>,
     ) {
         let source = session.lease.source(session.endpoint);
@@ -433,8 +433,8 @@ impl BlockAnnouncer {
 
     fn plan_compact_push(
         &self,
-        session: &bitcoin_rs_wire::peer_table::PeerSession,
-        peer_state: bitcoin_rs_wire::peer_table::PeerAnnouncementState,
+        session: &bitcoin_rs_p2p::peer_table::PeerSession,
+        peer_state: bitcoin_rs_p2p::peer_table::PeerAnnouncementState,
         known_position: Option<(Hash256, u32)>,
         tip_height: u32,
         build: impl FnOnce() -> Option<Message>,
@@ -540,7 +540,7 @@ impl BlockAnnouncer {
 
     fn plan_session_announcement(
         &self,
-        session: &bitcoin_rs_wire::peer_table::PeerSession,
+        session: &bitcoin_rs_p2p::peer_table::PeerSession,
         tip: CommittedTip,
         tip_hash: Hash256,
     ) -> Option<PlannedAnnouncement> {
@@ -615,7 +615,7 @@ impl BlockAnnouncer {
     fn planned_announcements(
         &self,
         tip: CommittedTip,
-        live_sessions: &[bitcoin_rs_wire::peer_table::PeerSession],
+        live_sessions: &[bitcoin_rs_p2p::peer_table::PeerSession],
     ) -> Vec<PlannedAnnouncement> {
         let tip_hash = Hash256::from(tip.hash);
         live_sessions
@@ -740,10 +740,10 @@ impl BlockAnnouncer {
                     .chain_query
                     .stale_tip_announcement(tip_hash, &session.demonstrated_tips)
                 {
-                    Some(bitcoin_rs_wire::dispatch::StaleTipHeaders::Headers(a)) => {
+                    Some(bitcoin_rs_p2p::dispatch::StaleTipHeaders::Headers(a)) => {
                         !prefers_blocks || a.have_block
                     }
-                    Some(bitcoin_rs_wire::dispatch::StaleTipHeaders::TooMany) | None => false,
+                    Some(bitcoin_rs_p2p::dispatch::StaleTipHeaders::TooMany) | None => false,
                 }
             });
 
@@ -751,7 +751,7 @@ impl BlockAnnouncer {
                 if stale_tips.knows(source, tip_hash) {
                     continue;
                 }
-                let Some(bitcoin_rs_wire::dispatch::StaleTipHeaders::Headers(announcement)) = self
+                let Some(bitcoin_rs_p2p::dispatch::StaleTipHeaders::Headers(announcement)) = self
                     .chain_query
                     .stale_tip_announcement(tip_hash, &session.demonstrated_tips)
                 else {

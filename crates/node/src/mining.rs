@@ -1,13 +1,13 @@
-use crate::chain_effects::{ChainFollowers, ConnectMutationError};
+﻿use crate::chain_effects::{ChainFollowers, ConnectMutationError};
 use alloc::sync::Arc;
-use bitcoin_rs_execution::ApplyError;
-use bitcoin_rs_execution::Chainstate;
-use bitcoin_rs_execution::chain::ChainError;
-use bitcoin_rs_execution::chain::NodeStatus;
-use bitcoin_rs_execution::chain::StableRead;
-use bitcoin_rs_execution::chain::TipSnapshot;
-use bitcoin_rs_execution::chain::signalling_deployments;
-use bitcoin_rs_execution::chain::{BlockTreeReader, TipReader};
+use bitcoin_rs_chain::ApplyError;
+use bitcoin_rs_chain::Chainstate;
+use bitcoin_rs_chain::chain::ChainError;
+use bitcoin_rs_chain::chain::NodeStatus;
+use bitcoin_rs_chain::chain::StableRead;
+use bitcoin_rs_chain::chain::TipSnapshot;
+use bitcoin_rs_chain::chain::signalling_deployments;
+use bitcoin_rs_chain::chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::MempoolReader;
 use bitcoin_rs_mempool::MutationResult;
@@ -20,37 +20,37 @@ use bitcoin_rs_consensus::primitives::CompactTarget;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Header;
 use bitcoin_rs_consensus::primitives::Network;
-use bitcoin_rs_serving::mining::AppliedTipSource;
-use bitcoin_rs_serving::mining::AvailableMiningRule;
-use bitcoin_rs_serving::mining::BlockTemplateMode;
-use bitcoin_rs_serving::mining::BlockTemplateRequest;
-use bitcoin_rs_serving::mining::BlockTemplateResult;
-use bitcoin_rs_serving::mining::BlockValidationResult;
+use bitcoin_rs_rpc::mining::AppliedTipSource;
+use bitcoin_rs_rpc::mining::AvailableMiningRule;
+use bitcoin_rs_rpc::mining::BlockTemplateMode;
+use bitcoin_rs_rpc::mining::BlockTemplateRequest;
+use bitcoin_rs_rpc::mining::BlockTemplateResult;
+use bitcoin_rs_rpc::mining::BlockValidationResult;
 #[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_serving::mining::Candidate;
-use bitcoin_rs_serving::mining::CandidateContext;
-use bitcoin_rs_serving::mining::ChainContextSource;
-use bitcoin_rs_serving::mining::CoinbaseBudget;
-use bitcoin_rs_serving::mining::GenerateRequest;
-use bitcoin_rs_serving::mining::GenerateSelection;
-use bitcoin_rs_serving::mining::GenerateTx;
-use bitcoin_rs_serving::mining::GeneratedBlock;
-use bitcoin_rs_serving::mining::MempoolSequenceWake;
-use bitcoin_rs_serving::mining::MempoolSnapshotSource;
-use bitcoin_rs_serving::mining::MiningChainContext;
-use bitcoin_rs_serving::mining::MiningControl;
-use bitcoin_rs_serving::mining::MiningControlError;
-pub use bitcoin_rs_serving::mining::MiningGenerationSignal;
-use bitcoin_rs_serving::mining::MiningInfo;
-use bitcoin_rs_serving::mining::MiningRule;
-use bitcoin_rs_serving::mining::PreparedTemplateBody;
-use bitcoin_rs_serving::mining::SelectedBody;
-use bitcoin_rs_serving::mining::header_reject_reason;
-use bitcoin_rs_serving::mining::image_needs_witness_reserved_value;
-use bitcoin_rs_serving::mining::select_template_body;
-use bitcoin_rs_serving::mining::select_template_body_after;
-use bitcoin_rs_serving::mining::solve_block;
-use bitcoin_rs_serving::mining::update_uncommitted_block_structures;
+use bitcoin_rs_rpc::mining::Candidate;
+use bitcoin_rs_rpc::mining::CandidateContext;
+use bitcoin_rs_rpc::mining::ChainContextSource;
+use bitcoin_rs_rpc::mining::CoinbaseBudget;
+use bitcoin_rs_rpc::mining::GenerateRequest;
+use bitcoin_rs_rpc::mining::GenerateSelection;
+use bitcoin_rs_rpc::mining::GenerateTx;
+use bitcoin_rs_rpc::mining::GeneratedBlock;
+use bitcoin_rs_rpc::mining::MempoolSequenceWake;
+use bitcoin_rs_rpc::mining::MempoolSnapshotSource;
+use bitcoin_rs_rpc::mining::MiningChainContext;
+use bitcoin_rs_rpc::mining::MiningControl;
+use bitcoin_rs_rpc::mining::MiningControlError;
+pub use bitcoin_rs_rpc::mining::MiningGenerationSignal;
+use bitcoin_rs_rpc::mining::MiningInfo;
+use bitcoin_rs_rpc::mining::MiningRule;
+use bitcoin_rs_rpc::mining::PreparedTemplateBody;
+use bitcoin_rs_rpc::mining::SelectedBody;
+use bitcoin_rs_rpc::mining::header_reject_reason;
+use bitcoin_rs_rpc::mining::image_needs_witness_reserved_value;
+use bitcoin_rs_rpc::mining::select_template_body;
+use bitcoin_rs_rpc::mining::select_template_body_after;
+use bitcoin_rs_rpc::mining::solve_block;
+use bitcoin_rs_rpc::mining::update_uncommitted_block_structures;
 use compact_str::CompactString;
 
 pub struct MiningCoordinator {
@@ -231,10 +231,10 @@ impl AppliedTipSource for AppliedTipAdapter {
         self.tip.load_full().map(|snapshot| (*snapshot).clone())
     }
 
-    fn applied_epoch(&self) -> Option<bitcoin_rs_execution::chain::AppliedEpoch> {
+    fn applied_epoch(&self) -> Option<bitcoin_rs_chain::chain::AppliedEpoch> {
         self.epoch.current().or_else(|| {
             self.applied_tip()
-                .map(|tip| bitcoin_rs_execution::chain::AppliedEpoch::new(tip, 0))
+                .map(|tip| bitcoin_rs_chain::chain::AppliedEpoch::new(tip, 0))
         })
     }
 }
@@ -442,7 +442,7 @@ impl MiningControl for MiningCoordinator {
         let network_hashes_per_second = {
             let tree = self.block_tree.read();
             tip.as_ref().map_or(0.0, |tip| {
-                bitcoin_rs_serving::mining::estimate_network_hashps(
+                bitcoin_rs_rpc::mining::estimate_network_hashps(
                     &tree,
                     tip.tip_id,
                     120,
@@ -458,7 +458,7 @@ impl MiningControl for MiningCoordinator {
     fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {
         let tree = self.block_tree.read();
         let tip = self.chainstate.applied_tip_snapshot();
-        bitcoin_rs_serving::mining::network_hash_ps(
+        bitcoin_rs_rpc::mining::network_hash_ps(
             &tree,
             tip.as_deref(),
             lookup,
@@ -515,10 +515,10 @@ impl MiningControl for MiningCoordinator {
         }
         match self.chainstate.admit_headers(std::slice::from_ref(&header)) {
             Ok(_) => Ok(()),
-            Err(bitcoin_rs_execution::HeaderAdmissionError::Rejected(error)) => {
+            Err(bitcoin_rs_chain::HeaderAdmissionError::Rejected(error)) => {
                 Err(header_reject_reason(error))
             }
-            Err(bitcoin_rs_execution::HeaderAdmissionError::Refused(error)) => Err(
+            Err(bitcoin_rs_chain::HeaderAdmissionError::Refused(error)) => Err(
                 MiningControlError::Unavailable(CompactString::from(error.to_string())),
             ),
         }
@@ -623,7 +623,7 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
     let reason = match error {
         ApplyError::ProofOfWork { .. } => CompactString::from("high-hash"),
         ApplyError::PrevHashMismatch { .. } => {
-            CompactString::from(bitcoin_rs_serving::mining::STALE_PARENT_REASON)
+            CompactString::from(bitcoin_rs_rpc::mining::STALE_PARENT_REASON)
         }
         ApplyError::BlockOutputsExceedInputs | ApplyError::BlockValueOverflow => {
             CompactString::from("bad-cb-amount")
@@ -632,15 +632,15 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             CompactString::from("bad-txns-inputs-missingorspent")
         }
         ApplyError::Consensus(_)
-            if bitcoin_rs_execution::classify_apply_error(error)
-                == bitcoin_rs_execution::WindowApplyDisposition::Operational =>
+            if bitcoin_rs_chain::classify_apply_error(error)
+                == bitcoin_rs_chain::WindowApplyDisposition::Operational =>
         {
             return Err(MiningControlError::Failed(CompactString::from(
                 error.to_string(),
             )));
         }
         ApplyError::Consensus(consensus) => {
-            bitcoin_rs_serving::mining::consensus_reject_reason(consensus)
+            bitcoin_rs_rpc::mining::consensus_reject_reason(consensus)
         }
         ApplyError::Chain(
             chain @ (ChainError::MissingParent { .. }
@@ -656,7 +656,7 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             | ChainError::TimestampTooFarAhead { .. }
             | ChainError::BadVersion { .. }
             | ChainError::TimewarpAttack { .. }),
-        ) => bitcoin_rs_serving::mining::chain_reject_reason(chain),
+        ) => bitcoin_rs_rpc::mining::chain_reject_reason(chain),
         ApplyError::Shutdown
         | ApplyError::ConcurrentChainChange
         | ApplyError::StagedBudgetExhausted => {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::io::{self, Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,14 +7,14 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_consensus::primitives::BlockHash;
-use bitcoin_rs_serving::mining::MiningControl;
-use bitcoin_rs_serving::mining::pool::ledger::MinerId;
-use bitcoin_rs_serving::mining::pool::stratum::sv1::{ConnectionLimiter, ConnectionPermit};
-use bitcoin_rs_serving::mining::pool::stratum::sv2::{
+use bitcoin_rs_rpc::mining::MiningControl;
+use bitcoin_rs_rpc::mining::pool::ledger::MinerId;
+use bitcoin_rs_rpc::mining::pool::stratum::sv1::{ConnectionLimiter, ConnectionPermit};
+use bitcoin_rs_rpc::mining::pool::stratum::sv2::{
     AdmitError, AuthorityKeypair, BlockSubmission, Connection, ERROR_CODE_SHARE_NOT_RECORDED,
     ERROR_CODE_SUBMIT_SHARES_STALE_SHARE, Event, Limits, MAX_FEED_LEN, PendingBlock, ServerConfig,
 };
-use bitcoin_rs_serving::mining::pool::{BlockStatus, PoolCore, RecordOutcome, ShareTarget};
+use bitcoin_rs_rpc::mining::pool::{BlockStatus, PoolCore, RecordOutcome, ShareTarget};
 
 use super::authority;
 use super::ledger::{BlockRecordOutcome, BlockRecordPermit, DeferredCharge, LedgerHost};

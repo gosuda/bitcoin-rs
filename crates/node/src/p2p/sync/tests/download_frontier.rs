@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 #[test]
 fn chain_frontier_uses_captured_applied_tip_during_advance() -> TestResult {
@@ -222,7 +222,7 @@ fn apply_buffered_blocks_waits_for_pending_reorg() -> TestResult {
     let head_hash = Hash256::from(head.block_hash());
 
     sync.buffer_received_block_chunk(
-        &mut vec![bitcoin_rs_wire::InboundBlock::from_local(head.clone())],
+        &mut vec![bitcoin_rs_p2p::InboundBlock::from_local(head.clone())],
         Some(head_hash),
     );
     assert!(sync.scheduler.lock().stager.contains(&head_hash));
@@ -251,7 +251,7 @@ fn tick_does_not_resend_same_getheaders_while_pending() -> TestResult {
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -289,7 +289,7 @@ fn inbound_headers_response_releases_getheaders_gate() -> TestResult {
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -343,7 +343,7 @@ fn rejected_matching_peer_headers_release_gate_and_retry_immediately() -> TestRe
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -382,7 +382,7 @@ fn orphan_headers_keep_source_peer_connected() -> TestResult {
         peers,
         ..
     } = header_sync_with_genesis()?;
-    let peer_addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let peer_addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -425,7 +425,7 @@ fn tick_bounded_request_peer_selection_skips_inflight_saturated_prefix() -> Test
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let first_addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let first_addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
@@ -443,7 +443,7 @@ fn tick_bounded_request_peer_selection_skips_inflight_saturated_prefix() -> Test
         return Err(std::io::Error::other("expected first peer getheaders").into());
     }
 
-    let second_addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let second_addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8334,
     ));
@@ -480,11 +480,11 @@ fn tick_demotes_peer_after_expired_pending_and_retries_on_alternate_peer() -> Te
         }
         .with_pending_timeout_override(Duration::ZERO),
     );
-    let stale_addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let stale_addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
-    let healthy_addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let healthy_addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8334,
     ));

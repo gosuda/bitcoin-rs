@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::primitives::Hash256;
 use crossbeam_channel::bounded;
@@ -68,7 +68,7 @@ fn dummy_wtxid(byte: u8) -> Wtxid {
 }
 
 fn fresh_node_id() -> u64 {
-    let (tx, _rx) = bounded::<bitcoin_rs_wire::QueuedFrame>(1);
+    let (tx, _rx) = bounded::<bitcoin_rs_p2p::QueuedFrame>(1);
     PeerLease::new(tx).node_id()
 }
 
@@ -517,8 +517,8 @@ fn local_tx_relay_uses_committed_wtxid_and_ignores_peer_and_removed_entries() {
         (
             3,
             AdmissionOrigin::Peer(PeerToken {
-                endpoint: Some(bitcoin_rs_wire::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
-                addr: Some(bitcoin_rs_wire::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
+                endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
+                addr: Some(bitcoin_rs_p2p::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
                 connection_id: 7,
             }),
             false,
@@ -636,8 +636,8 @@ fn live_wtxid(txid: &Txid, gateway: &MempoolGateway) -> Wtxid {
 }
 fn relay_identity_peer() -> AdmissionOrigin {
     AdmissionOrigin::Peer(bitcoin_rs_mempool::PeerToken {
-        endpoint: Some(bitcoin_rs_wire::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
-        addr: Some(bitcoin_rs_wire::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
+        endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
+        addr: Some(bitcoin_rs_p2p::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
         connection_id: 7,
     })
 }

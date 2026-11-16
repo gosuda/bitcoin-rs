@@ -1,12 +1,12 @@
-use super::*;
+﻿use super::*;
 
 fn answer_requests(
-    rx: &bitcoin_rs_wire::test_support::MessageReceiver,
+    rx: &bitcoin_rs_p2p::test_support::MessageReceiver,
     source: PeerSource,
     headers: &[Header],
     bodies: &HashMap<Hash256, Block>,
     inbound_headers_tx: &crossbeam_channel::Sender<InboundHeaders>,
-    inbound_blocks_tx: &crossbeam_channel::Sender<bitcoin_rs_wire::InboundBlock>,
+    inbound_blocks_tx: &crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>,
 ) -> TestResult {
     while let Ok(message) = rx.try_recv() {
         match message {
@@ -20,7 +20,7 @@ fn answer_requests(
             Message::GetData(inventory) => {
                 for hash in witness_block_inventory(inventory)? {
                     if let Some(block) = bodies.get(&hash.0) {
-                        let mut inbound = bitcoin_rs_wire::InboundBlock::from_local(block.clone());
+                        let mut inbound = bitcoin_rs_p2p::InboundBlock::from_local(block.clone());
                         inbound.source = Some(source);
                         inbound_blocks_tx.send(inbound)?;
                     }
@@ -68,7 +68,7 @@ fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
         },
     );
 
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
 
     let s1 = test_addr(9821, 0)?;
     let s2 = test_addr(9821, 1)?;
@@ -157,7 +157,7 @@ fn losing_fork_evidence_never_revokes_the_height_a_peer_was_asked_at() -> TestRe
         inbound_blocks_tx,
     } = SyncHarness::new(tree);
     install_budget(&sync, super::super::default_sync_budget(Network::Regtest));
-    inbound_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().map(|tip| tip.height),

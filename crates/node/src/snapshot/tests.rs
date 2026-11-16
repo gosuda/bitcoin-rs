@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 use crate::test_support::TestError;
 use bitcoin_rs_storage::utxo::core_snapshot::{SnapshotError, read_and_verify};
 impl From<SnapshotExportError> for TestError {
@@ -916,7 +916,7 @@ fn process_kill_between_checkpoint_publish_and_head_commit_restarts_cold() -> Re
     drop(cs_store);
     assert_eq!(actual.height, 0);
     assert_eq!(actual.tip, Network::Regtest.genesis_block_hash());
-    let prepared = bitcoin_rs_execution::recovery::prepare_initial_state_with_engine(
+    let prepared = bitcoin_rs_chain::recovery::prepare_initial_state_with_engine(
         &dir.path().join("node"),
         Network::Regtest,
         Some(&actual),
@@ -926,7 +926,7 @@ fn process_kill_between_checkpoint_publish_and_head_commit_restarts_cold() -> Re
     assert!(
         matches!(
             prepared.initial.resume_source,
-            bitcoin_rs_execution::recovery::ResumeSource::Cold
+            bitcoin_rs_chain::recovery::ResumeSource::Cold
         ),
         "a kill between checkpoint publish and head commit must restore cold"
     );
@@ -980,7 +980,7 @@ fn write_manifest_bytes(
     utxo_commitment: [u8; 32],
     core_bytes: &[u8],
 ) -> Result<PathBuf, TestError> {
-    use bitcoin_rs_execution::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
+    use bitcoin_rs_chain::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
     use sha2::Digest;
 
     let mut sizes = [0_u64; ARTIFACT_SLOTS];
@@ -995,7 +995,7 @@ fn write_manifest_bytes(
         genesis: Network::Regtest.genesis_block_hash().to_le_bytes(),
         base_hash,
         base_height,
-        schema: bitcoin_rs_projection::index_format_version(),
+        schema: bitcoin_rs_index::index_format_version(),
         utxo_commitment,
         index_commitments: [None; 4],
         coverage: [None; 4],
@@ -1014,7 +1014,7 @@ fn write_manifest_with_utxo_digest(
     core_bytes: &[u8],
     utxo_digest: [u8; 32],
 ) -> Result<PathBuf, TestError> {
-    use bitcoin_rs_execution::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
+    use bitcoin_rs_chain::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
 
     let mut sizes = [0_u64; ARTIFACT_SLOTS];
     let mut hashes = [[0_u8; 32]; ARTIFACT_SLOTS];
@@ -1028,7 +1028,7 @@ fn write_manifest_with_utxo_digest(
         genesis: Network::Regtest.genesis_block_hash().to_le_bytes(),
         base_hash: pinned.block_hash.to_le_bytes(),
         base_height: pinned.height,
-        schema: bitcoin_rs_projection::index_format_version(),
+        schema: bitcoin_rs_index::index_format_version(),
         utxo_commitment: pinned.hash_serialized.to_le_bytes(),
         index_commitments: [None; 4],
         coverage: [None; 4],
@@ -1060,7 +1060,7 @@ fn write_manifest_with_mismatched_index_artifact(
     pinned: &bitcoin_rs_consensus::primitives::AssumeUtxoData,
     core_bytes: &[u8],
 ) -> Result<PathBuf, TestError> {
-    use bitcoin_rs_execution::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
+    use bitcoin_rs_chain::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
     use sha2::Digest;
 
     let mut sizes = [0_u64; ARTIFACT_SLOTS];
@@ -1076,7 +1076,7 @@ fn write_manifest_with_mismatched_index_artifact(
     hashes[1] = [0xee; 32];
 
     let mut index_commitments = [None; 4];
-    index_commitments[0] = Some(bitcoin_rs_execution::manifest::ManifestIndexCommitment {
+    index_commitments[0] = Some(bitcoin_rs_chain::manifest::ManifestIndexCommitment {
         sha256: [0xee; 32],
         size_bytes: sizes[1],
     });
@@ -1087,7 +1087,7 @@ fn write_manifest_with_mismatched_index_artifact(
         genesis: Network::Regtest.genesis_block_hash().to_le_bytes(),
         base_hash: pinned.block_hash.to_le_bytes(),
         base_height: pinned.height,
-        schema: bitcoin_rs_projection::index_format_version(),
+        schema: bitcoin_rs_index::index_format_version(),
         utxo_commitment: pinned.hash_serialized.to_le_bytes(),
         index_commitments,
         coverage: [None; 4],
@@ -1268,7 +1268,7 @@ fn three_positions_move_independently() -> Result<(), TestError> {
     assert_eq!(p0.historical_validation_height, 0);
     assert_ne!(p0.active_chain_height, p0.historical_validation_height);
 
-    let child = bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(
+    let child = bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_child_at(
         bitcoin_rs_consensus::primitives::BlockHash::from(pinned.block_hash),
         201,
     )?;
@@ -1342,7 +1342,7 @@ fn an_oversized_manifest_is_refused_before_activation() -> Result<(), TestError>
     assert!(matches!(
         result,
         Err(SnapshotImportError::Manifest(
-            bitcoin_rs_execution::manifest::ManifestError::Format("manifest is larger than 1 MiB")
+            bitcoin_rs_chain::manifest::ManifestError::Format("manifest is larger than 1 MiB")
         ))
     ));
     assert!(matches!(
@@ -1366,7 +1366,7 @@ fn manifest_utxo_digest_is_checked_in_the_ingest_pass() -> Result<(), TestError>
     assert!(matches!(
         state.import_manifest(&manifest_path),
         Err(SnapshotImportError::Manifest(
-            bitcoin_rs_execution::manifest::ManifestError::ArtifactHashMismatch { slot: 0, .. }
+            bitcoin_rs_chain::manifest::ManifestError::ArtifactHashMismatch { slot: 0, .. }
         ))
     ));
     assert!(
@@ -1386,7 +1386,7 @@ fn ingest_pass_file_swap_after_the_verification_pass_fails_closed() -> Result<()
     let dir = tempfile::tempdir()?;
     let (state, core_path) = snapshot_inputs(dir.path())?;
     let core_bytes = std::fs::read(&core_path)?;
-    let attestation = bitcoin_rs_execution::assumeutxo::FileAttestation {
+    let attestation = bitcoin_rs_chain::assumeutxo::FileAttestation {
         sha256: {
             use sha2::Digest;
             sha2::Sha256::digest(&core_bytes).into()
@@ -1422,7 +1422,7 @@ fn a_manifest_on_a_foreign_schema_is_refused_at_activation() -> Result<(), TestE
     let (state, core_path) = snapshot_inputs(dir.path())?;
     let core_bytes = std::fs::read(&core_path)?;
     let manifest_path = write_valid_manifest(dir.path(), pinned, &core_bytes)?;
-    let mut manifest: bitcoin_rs_execution::manifest::SnapshotManifest =
+    let mut manifest: bitcoin_rs_chain::manifest::SnapshotManifest =
         sonic_rs::from_slice(&std::fs::read(&manifest_path)?)?;
     manifest.schema = 1;
     let foreign = dir.path().join("foreign_schema_manifest.json");
@@ -1432,7 +1432,7 @@ fn a_manifest_on_a_foreign_schema_is_refused_at_activation() -> Result<(), TestE
     assert!(matches!(
         result,
         Err(SnapshotImportError::Manifest(
-            bitcoin_rs_execution::manifest::ManifestError::SchemaMismatch { found: 1, .. }
+            bitcoin_rs_chain::manifest::ManifestError::SchemaMismatch { found: 1, .. }
         ))
     ));
     assert!(matches!(
@@ -1464,7 +1464,7 @@ fn a_snapshot_file_from_another_base_is_refused_before_activation() -> Result<()
     assert!(matches!(
         result,
         Err(SnapshotImportError::Manifest(
-            bitcoin_rs_execution::manifest::ManifestError::SnapshotBaseMismatch {
+            bitcoin_rs_chain::manifest::ManifestError::SnapshotBaseMismatch {
                 expected_height: 110,
                 found_height: 200,
                 ..
@@ -1541,7 +1541,7 @@ fn checkpoint_published_before_head_commit_restarts_cold() -> Result<(), TestErr
         coin_count: 0,
         coin_digest: pinned.hash_serialized,
     };
-    let cold = bitcoin_rs_execution::recovery::prepare_initial_state_with_engine(
+    let cold = bitcoin_rs_chain::recovery::prepare_initial_state_with_engine(
         &data_dir,
         Network::Regtest,
         Some(&uncommitted),
@@ -1551,11 +1551,11 @@ fn checkpoint_published_before_head_commit_restarts_cold() -> Result<(), TestErr
     assert!(
         matches!(
             cold.initial.resume_source,
-            bitcoin_rs_execution::recovery::ResumeSource::Cold
+            bitcoin_rs_chain::recovery::ResumeSource::Cold
         ),
         "a checkpoint at the base of an in-flight activation must not be restored"
     );
-    let ordinary = bitcoin_rs_execution::recovery::prepare_initial_state_with_engine(
+    let ordinary = bitcoin_rs_chain::recovery::prepare_initial_state_with_engine(
         &data_dir,
         Network::Regtest,
         Some(&uncommitted),
@@ -1565,7 +1565,7 @@ fn checkpoint_published_before_head_commit_restarts_cold() -> Result<(), TestErr
     assert!(
         matches!(
             ordinary.initial.resume_source,
-            bitcoin_rs_execution::recovery::ResumeSource::Checkpoint
+            bitcoin_rs_chain::recovery::ResumeSource::Checkpoint
         ),
         "a checkpoint at a compiled base with no activation in flight must restore"
     );
@@ -1579,7 +1579,7 @@ fn checkpoint_published_before_head_commit_restarts_cold() -> Result<(), TestErr
         pending: None,
         checkpoint: None,
     });
-    let warm = bitcoin_rs_execution::recovery::prepare_initial_state_with_engine(
+    let warm = bitcoin_rs_chain::recovery::prepare_initial_state_with_engine(
         &data_dir,
         Network::Regtest,
         Some(&committed),
@@ -1589,7 +1589,7 @@ fn checkpoint_published_before_head_commit_restarts_cold() -> Result<(), TestErr
     assert!(
         matches!(
             warm.initial.resume_source,
-            bitcoin_rs_execution::recovery::ResumeSource::Checkpoint
+            bitcoin_rs_chain::recovery::ResumeSource::Checkpoint
         ),
         "the head that names the base must restore the published checkpoint"
     );

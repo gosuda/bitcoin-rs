@@ -1,17 +1,17 @@
 use std::{path::Path, sync::Arc};
 
 use bitcoin_rs_consensus::primitives::{Block, BlockHash, Hash256, Header, Txid};
-use bitcoin_rs_serving::context::PoolOperator;
-use bitcoin_rs_serving::mining::pool::ledger as pool_ledger;
-use bitcoin_rs_serving::mining::pool::ledger::{
+use bitcoin_rs_rpc::context::PoolOperator;
+use bitcoin_rs_rpc::mining::pool::ledger as pool_ledger;
+use bitcoin_rs_rpc::mining::pool::ledger::{
     Balance, MinerId, PayoutPolicy, PoolConfig, RoundState, ShareCredit, ShareReceipt,
 };
-use bitcoin_rs_serving::mining::pool::stratum::sv1::{AccountResolver, Password};
-use bitcoin_rs_serving::mining::pool::{
+use bitcoin_rs_rpc::mining::pool::stratum::sv1::{AccountResolver, Password};
+use bitcoin_rs_rpc::mining::pool::{
     AcceptedShare, BlockReceipt, FoundBlock, JobId, LedgerUnavailable, RecordOutcome, SessionId,
     ShareClass, ShareLedger, ShareTarget, WorkerIdentity,
 };
-use bitcoin_rs_serving::mining::{BlockValidationResult, MiningControlError};
+use bitcoin_rs_rpc::mining::{BlockValidationResult, MiningControlError};
 use bitcoin_rs_storage::KvStore;
 
 use super::ledger::{Ledger, LedgerHost};
@@ -331,7 +331,7 @@ fn block_record_reservations_are_bounded_and_released(open: OpenStore) -> TestRe
 
 fn durable_undetermined_keeps_reservation_until_waiter_removed(open: OpenStore) -> TestResult {
     use super::ledger::{BlockRecordOutcome, DeferredCharge};
-    use bitcoin_rs_serving::mining::pool::BlockStatus;
+    use bitcoin_rs_rpc::mining::pool::BlockStatus;
 
     let directory = tempfile::tempdir()?;
     let host = Arc::new(registered_host(open, directory.path(), EPOCH)?);
@@ -396,7 +396,7 @@ fn durable_undetermined_keeps_reservation_until_waiter_removed(open: OpenStore) 
 #[test]
 fn protocol_admissions_share_total_capacity_and_release_it_on_drop() -> TestResult {
     let shared =
-        Arc::new(bitcoin_rs_serving::mining::pool::stratum::sv1::ConnectionLimiter::new(1, 1)?);
+        Arc::new(bitcoin_rs_rpc::mining::pool::stratum::sv1::ConnectionLimiter::new(1, 1)?);
     let sv1 = Arc::clone(&shared);
     let sv2 = Arc::clone(&shared);
     let first = sv1
@@ -404,7 +404,7 @@ fn protocol_admissions_share_total_capacity_and_release_it_on_drop() -> TestResu
         .map_err(|_| TestError::ExpectationFailed("sv1 admits"))?;
     assert!(matches!(
         sv2.try_admit("192.0.2.2".parse()?),
-        Err(bitcoin_rs_serving::mining::pool::stratum::sv1::RefusalReason::ConnectionLimit)
+        Err(bitcoin_rs_rpc::mining::pool::stratum::sv1::RefusalReason::ConnectionLimit)
     ));
     assert_eq!(shared.active(), 1);
     drop(first);
@@ -420,7 +420,7 @@ fn protocol_admissions_share_total_capacity_and_release_it_on_drop() -> TestResu
 #[test]
 fn protocol_admissions_share_per_ip_capacity_without_consuming_refused_slots() -> TestResult {
     let shared =
-        Arc::new(bitcoin_rs_serving::mining::pool::stratum::sv1::ConnectionLimiter::new(3, 1)?);
+        Arc::new(bitcoin_rs_rpc::mining::pool::stratum::sv1::ConnectionLimiter::new(3, 1)?);
     let sv1 = Arc::clone(&shared);
     let sv2 = Arc::clone(&shared);
     let same_ip = "192.0.2.1".parse()?;
@@ -429,7 +429,7 @@ fn protocol_admissions_share_per_ip_capacity_without_consuming_refused_slots() -
         .map_err(|_| TestError::ExpectationFailed("per-IP sv1 admits"))?;
     assert!(matches!(
         sv2.try_admit(same_ip),
-        Err(bitcoin_rs_serving::mining::pool::stratum::sv1::RefusalReason::PerIpLimit)
+        Err(bitcoin_rs_rpc::mining::pool::stratum::sv1::RefusalReason::PerIpLimit)
     ));
     let other = sv2
         .try_admit("192.0.2.2".parse()?)
@@ -678,9 +678,7 @@ fn pool_prepare_holds_directory_lock_for_service_lifetime() -> TestResult {
         max_connections: 128,
         max_connections_per_ip: 8,
         share_difficulty: "1".to_owned(),
-        share_target: bitcoin_rs_serving::mining::pool::ShareTarget::from_pool_difficulty_decimal(
-            "1",
-        )?,
+        share_target: bitcoin_rs_rpc::mining::pool::ShareTarget::from_pool_difficulty_decimal("1")?,
         window_work: 1_000,
         fee_bps: 0,
         reward_script: vec![0x51],
@@ -691,8 +689,8 @@ fn pool_prepare_holds_directory_lock_for_service_lifetime() -> TestResult {
         max_payout_outputs: 10,
     });
     let state = crate::state::NodeState::open(config, None)?;
-    let control: Arc<dyn bitcoin_rs_serving::mining::MiningControl> =
-        Arc::new(bitcoin_rs_serving::mining::FakeMiningControl::default());
+    let control: Arc<dyn bitcoin_rs_rpc::mining::MiningControl> =
+        Arc::new(bitcoin_rs_rpc::mining::FakeMiningControl::default());
     let Some(service) = super::PoolService::prepare(&state, &control)? else {
         panic!("enabled pool must prepare a service");
     };

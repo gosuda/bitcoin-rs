@@ -13,8 +13,8 @@ use crate::p2p::download_window::{peer_can_serve_height, servable_floor, serves_
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_wire::Message;
-use bitcoin_rs_wire::connection::PeerSource;
+use bitcoin_rs_p2p::Message;
+use bitcoin_rs_p2p::connection::PeerSource;
 use smallvec::SmallVec;
 use std::sync::Arc;
 use std::time::Duration;
@@ -83,7 +83,7 @@ impl UnavailableBodies {
 fn not_found_block_hash(item: &Inventory) -> Option<Hash256> {
     match item {
         Inventory::CompactBlock(hash) => Some(Hash256::from_le_bytes(hash.as_byte_array())),
-        other => bitcoin_rs_wire::inv::inventory_block_hash(other),
+        other => bitcoin_rs_p2p::inv::inventory_block_hash(other),
     }
 }
 
@@ -495,7 +495,7 @@ mod tests {
     use crate::p2p::download_window::DownloadWindow;
     use crate::p2p::download_window::RefusalFilter;
     use bitcoin_rs_consensus::primitives::Hash256;
-    use bitcoin_rs_wire::connection::PeerSource;
+    use bitcoin_rs_p2p::connection::PeerSource;
     use std::net::IpAddr;
     use std::net::Ipv4Addr;
     use std::net::SocketAddr;
@@ -507,9 +507,9 @@ mod tests {
     }
 
     fn test_chain() -> (
-        bitcoin_rs_execution::chain::BlockTree,
+        bitcoin_rs_chain::chain::BlockTree,
         Vec<(
-            bitcoin_rs_execution::chain::NodeId,
+            bitcoin_rs_chain::chain::NodeId,
             bitcoin_rs_consensus::primitives::Header,
         )>,
     ) {
@@ -530,7 +530,7 @@ mod tests {
         })
         .take(32)
         .collect();
-        let mut tree = bitcoin_rs_execution::chain::BlockTree::new();
+        let mut tree = bitcoin_rs_chain::chain::BlockTree::new();
         let mut parent = None;
         let mut nodes = Vec::with_capacity(headers.len());
         for header in headers {
@@ -538,7 +538,7 @@ mod tests {
                 .insert_node(
                     parent,
                     header,
-                    bitcoin_rs_execution::chain::NodeStatus::HeaderValid,
+                    bitcoin_rs_chain::chain::NodeStatus::HeaderValid,
                 )
                 .unwrap_or_else(|error| panic!("test header: {error}"));
             parent = Some(inserted);
@@ -553,8 +553,8 @@ mod tests {
         super::super::SchedulerState,
         bitcoin_rs_consensus::primitives::Hash256,
     ) {
+        use bitcoin_rs_chain::chain::{ChainTxCount, TipSnapshot};
         use bitcoin_rs_consensus::header_rules::ChainWork;
-        use bitcoin_rs_execution::chain::{ChainTxCount, TipSnapshot};
         let budget = crate::p2p::sync::default_sync_budget(
             bitcoin_rs_consensus::primitives::Network::Regtest,
         );

@@ -1,13 +1,13 @@
 use super::{map_apply_error, test_block_validity_error};
+use bitcoin_rs_chain::ApplyError;
+use bitcoin_rs_chain::chain::ChainError;
+use bitcoin_rs_chain::chain::NodeId;
 use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Txid;
-use bitcoin_rs_execution::ApplyError;
-use bitcoin_rs_execution::chain::ChainError;
-use bitcoin_rs_execution::chain::NodeId;
-use bitcoin_rs_serving::mining::BlockValidationResult;
-use bitcoin_rs_serving::mining::MiningControlError;
+use bitcoin_rs_rpc::mining::BlockValidationResult;
+use bitcoin_rs_rpc::mining::MiningControlError;
 use compact_str::CompactString;
 
 #[test]
@@ -42,9 +42,9 @@ fn operational_failures_are_not_block_rejections() {
                 covered: 1,
             },
             ApplyError::RecoveryCoinStats(Box::new(
-                bitcoin_rs_execution::recovery::RecoveryError::Storage(
-                    StorageError::InvalidOperation("recovery coin statistics read failed"),
-                ),
+                bitcoin_rs_chain::recovery::RecoveryError::Storage(StorageError::InvalidOperation(
+                    "recovery coin statistics read failed",
+                )),
             )),
             ApplyError::CoinStoreRead(StorageError::InvalidOperation("coin read failed")),
             ApplyError::Consensus(ConsensusError::Kernel("verifier unavailable".to_owned())),

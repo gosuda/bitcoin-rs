@@ -1,4 +1,4 @@
-# Post-quantum migration feasibility
+﻿# Post-quantum migration feasibility
 
 ## Decision
 
@@ -554,7 +554,7 @@ experiment. Legacy sunsets and any hard fork require their own decisions.
 [eval]: https://github.com/gosuda/bitcoin-rs/blob/60b33f6be7c55eb27e6892cdb7770687a8e40276/crates/consensus/src/script/eval.rs
 [checker]: https://github.com/gosuda/bitcoin-rs/blob/60b33f6be7c55eb27e6892cdb7770687a8e40276/crates/consensus/src/script/checker.rs
 [bip9-code]: https://github.com/gosuda/bitcoin-rs/blob/60b33f6be7c55eb27e6892cdb7770687a8e40276/crates/consensus/src/bip9.rs
-[deployment]: https://github.com/gosuda/bitcoin-rs/blob/60b33f6be7c55eb27e6892cdb7770687a8e40276/crates/execution/src/chain/deployment.rs
+[deployment]: https://github.com/gosuda/bitcoin-rs/blob/60b33f6be7c55eb27e6892cdb7770687a8e40276/crates/chain/src/chain/deployment.rs
 [standardness]: https://github.com/gosuda/bitcoin-rs/blob/60b33f6be7c55eb27e6892cdb7770687a8e40276/crates/mempool/src/standardness.rs
 [kernel]: https://github.com/gosuda/bitcoin-rs/blob/60b33f6be7c55eb27e6892cdb7770687a8e40276/crates/consensus/src/kernel.rs
 [wallet]: https://github.com/gosuda/bitcoin-rs/blob/60b33f6be7c55eb27e6892cdb7770687a8e40276/docs/contracts/wallet-facing.md

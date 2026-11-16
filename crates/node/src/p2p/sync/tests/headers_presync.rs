@@ -1,4 +1,4 @@
-use bitcoin_rs_wire::PeerRemote;
+﻿use bitcoin_rs_p2p::PeerRemote;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::time::Instant;
@@ -13,7 +13,7 @@ use super::super::default_sync_budget;
 use super::super::headers_presync::HeadersSyncPhase;
 use super::super::headers_presync::HeadersSyncState;
 use super::*;
-use bitcoin_rs_wire::wire::MAX_HEADERS_MESSAGE_COUNT;
+use bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT;
 
 const PAGE: usize = MAX_HEADERS_MESSAGE_COUNT;
 
@@ -53,7 +53,7 @@ fn chain_on(fork: &Header, fork_height: u32, len: usize) -> Vec<Header> {
 
 fn chain_work(headers: &[Header]) -> ChainWork {
     headers.iter().fold(ChainWork::ZERO, |total, header| {
-        total + bitcoin_rs_execution::chain::block_work(header)
+        total + bitcoin_rs_chain::chain::block_work(header)
     })
 }
 
@@ -92,13 +92,13 @@ fn connect(
 ) -> (
     PeerRemote,
     PeerLease,
-    bitcoin_rs_wire::test_support::MessageReceiver,
+    bitcoin_rs_p2p::test_support::MessageReceiver,
 ) {
-    let addr = PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    let addr = PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         port,
     ));
-    let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
     let lease = PeerLease::new(tx);
     peers.register(addr, lease.clone());
     peers.publish_info(addr, &lease, synthetic_peer(addr, start_height));
@@ -147,7 +147,7 @@ fn expire_request(sync: &BlockSync, source: PeerSource) -> TestResult {
     Ok(())
 }
 
-fn assert_no_getheaders(rx: &bitcoin_rs_wire::test_support::MessageReceiver) {
+fn assert_no_getheaders(rx: &bitcoin_rs_p2p::test_support::MessageReceiver) {
     assert!(
         !rx.try_iter()
             .any(|message| matches!(message, Message::GetHeaders(_))),
@@ -182,7 +182,7 @@ fn assert_request_unchanged(
 fn assert_competing_requests_suppressed(
     sync: &BlockSync,
     source: PeerSource,
-    rx: &bitcoin_rs_wire::test_support::MessageReceiver,
+    rx: &bitcoin_rs_p2p::test_support::MessageReceiver,
     locator: Vec<Hash256>,
     target_height: i32,
 ) -> TestResult {
@@ -414,7 +414,7 @@ fn low_work_headers_do_not_reach_block_tree() -> TestResult {
 
     let chain = chain_on(&genesis, 0, 2 * PAGE + 500);
     assert_eq!(
-        bitcoin_rs_execution::chain::block_work(&chain[0]),
+        bitcoin_rs_chain::chain::block_work(&chain[0]),
         ChainWork::from(WORK_PER_HEADER),
         "the fixture's work-per-header constant must hold"
     );
@@ -620,7 +620,7 @@ fn a_substituted_redownload_header_disconnects_the_connection() -> TestResult {
             .unwrap_or_else(|| unreachable!("the sync state is live"));
         if hash != Hash256::from(original_hash)
             && bit != original_bit
-            && bitcoin_rs_execution::chain::compact_is_met_by(rogue.bits, hash)
+            && bitcoin_rs_chain::chain::compact_is_met_by(rogue.bits, hash)
         {
             break;
         }
@@ -631,7 +631,7 @@ fn a_substituted_redownload_header_disconnects_the_connection() -> TestResult {
     for index in commitment_index..chain_len {
         let mut header = substituted[index];
         header.prev_blockhash = substituted[index - 1].compute_hash();
-        while !bitcoin_rs_execution::chain::compact_is_met_by(
+        while !bitcoin_rs_chain::chain::compact_is_met_by(
             header.bits,
             Hash256::from(header.compute_hash()),
         ) {
@@ -844,7 +844,7 @@ fn replaced_connection_cannot_admit_queued_predecessor_headers() -> TestResult {
         "the predecessor has both lifecycle facts before replacement",
     );
 
-    let (replacement_tx, replacement_rx) = bitcoin_rs_wire::test_support::message_channel();
+    let (replacement_tx, replacement_rx) = bitcoin_rs_p2p::test_support::message_channel();
     let replacement_lease = PeerLease::new(replacement_tx);
     peers.register(addr, replacement_lease.clone());
     peers.publish_info(addr, &replacement_lease, synthetic_peer(addr, 100_000));
@@ -1307,7 +1307,7 @@ fn assert_invalid_body_header_is_discarded(block: Block, port: u16) -> TestResul
     let (addr, _lease, _rx) = connect(&peers, port, 100_000);
     let source = current_source(&peers, addr);
     let hash = Hash256::from(block.block_hash());
-    let mut batch = vec![bitcoin_rs_wire::InboundBlock::from_local(block)];
+    let mut batch = vec![bitcoin_rs_p2p::InboundBlock::from_local(block)];
     batch[0].source = Some(source);
     assert_eq!(sync.buffer_received_block_chunk(&mut batch, None), 1);
     assert!(
@@ -1341,7 +1341,7 @@ fn body_carried_low_work_bad_pow_is_discarded_and_faults_peer() -> TestResult {
         1,
         vec![regtest_fixture::coinbase(1)],
     )?;
-    while bitcoin_rs_execution::chain::compact_is_met_by(
+    while bitcoin_rs_chain::chain::compact_is_met_by(
         block.header.bits,
         Hash256::from(block.block_hash()),
     ) {
@@ -1361,7 +1361,7 @@ fn body_carried_low_work_bad_nbits_is_discarded_and_faults_peer() -> TestResult 
     )?;
     block.header.bits =
         bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x207f_fffe);
-    while !bitcoin_rs_execution::chain::compact_is_met_by(
+    while !bitcoin_rs_chain::chain::compact_is_met_by(
         block.header.bits,
         Hash256::from(block.block_hash()),
     ) {
@@ -1384,7 +1384,7 @@ fn body_carried_low_work_valid_header_stays_deferred() -> TestResult {
         vec![regtest_fixture::coinbase(3)],
     )?;
     let hash = Hash256::from(block.block_hash());
-    let mut batch = vec![bitcoin_rs_wire::InboundBlock::from_local(block)];
+    let mut batch = vec![bitcoin_rs_p2p::InboundBlock::from_local(block)];
     batch[0].source = Some(source);
     assert_eq!(sync.buffer_received_block_chunk(&mut batch, None), 1);
 

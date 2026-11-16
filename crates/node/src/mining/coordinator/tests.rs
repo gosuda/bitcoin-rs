@@ -1,4 +1,5 @@
 use super::*;
+use bitcoin_rs_chain::chain::{ChainError, ChainTxCount, NodeId};
 use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::Amount;
 use bitcoin_rs_consensus::primitives::BlockImage;
@@ -6,13 +7,12 @@ use bitcoin_rs_consensus::primitives::LockTime;
 use bitcoin_rs_consensus::primitives::Script;
 use bitcoin_rs_consensus::primitives::Tx;
 use bitcoin_rs_consensus::primitives::TxOut;
-use bitcoin_rs_execution::chain::{ChainError, ChainTxCount, NodeId};
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolLimits;
 use bitcoin_rs_mempool::MutationChange;
 use bitcoin_rs_mempool::MutationOutcome;
 use bitcoin_rs_mempool::RemovalReason;
-use bitcoin_rs_serving::mining::{
+use bitcoin_rs_rpc::mining::{
     BlockTemplate, Candidate, MiningCapability, MiningChainContext, MiningRule,
     PreparedTemplateBody, SelectedBody, SelectedTx, TemplateId, select_template_body,
     select_template_body_after,
@@ -289,9 +289,9 @@ impl AppliedTipSource for StaticTip {
         self.tip.lock().clone()
     }
 
-    fn applied_epoch(&self) -> Option<bitcoin_rs_execution::chain::AppliedEpoch> {
+    fn applied_epoch(&self) -> Option<bitcoin_rs_chain::chain::AppliedEpoch> {
         self.applied_tip()
-            .map(|tip| bitcoin_rs_execution::chain::AppliedEpoch::new(tip, *self.commit.lock()))
+            .map(|tip| bitcoin_rs_chain::chain::AppliedEpoch::new(tip, *self.commit.lock()))
     }
 }
 

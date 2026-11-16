@@ -1,10 +1,10 @@
-use std::io::{Read, Write};
+﻿use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_projection::{
+use bitcoin_rs_index::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
 };
 use parking_lot::Mutex;

@@ -1,8 +1,8 @@
-use super::fee_revision::service_over;
+﻿use super::fee_revision::service_over;
 use super::*;
 use bitcoin_rs_consensus::primitives::{BlockImage, Sequence, TxIn, Witness};
 use bitcoin_rs_mempool::MempoolEntry;
-use bitcoin_rs_serving::mining::{MiningError, SelectedBody, assemble_candidate};
+use bitcoin_rs_rpc::mining::{MiningError, SelectedBody, assemble_candidate};
 use std::thread::JoinHandle;
 
 type TestResult<T = ()> = Result<T, TestError>;

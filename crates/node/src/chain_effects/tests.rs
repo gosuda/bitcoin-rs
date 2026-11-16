@@ -1,15 +1,15 @@
 use super::*;
 use crate::test_support::TestError;
+use bitcoin_rs_chain::chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::primitives::{
     Amount, BlockImage, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
 };
-use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolLimits,
     MutationOutcome, PeerToken, SubmitError, SubmitOutcome,
 };
-use bitcoin_rs_serving::mining::{BlockValidationResult, MiningControl};
+use bitcoin_rs_rpc::mining::{BlockValidationResult, MiningControl};
 use parking_lot::Mutex;
 
 #[derive(Debug, Default)]
@@ -180,7 +180,7 @@ struct ReceiptWake {
     receipts: Mutex<Vec<(Hash256, usize)>>,
 }
 
-impl bitcoin_rs_serving::mining::MempoolSequenceWake for ReceiptWake {
+impl bitcoin_rs_rpc::mining::MempoolSequenceWake for ReceiptWake {
     fn publish_generation_from(&self, _: u64) {}
 
     fn stage_tip(&self, _: &TipSnapshot, _: &BlockImage) {}
@@ -197,7 +197,7 @@ fn gatewayless_connect_publishes_an_empty_receipt_for_the_tip() -> Result<(), Te
     let genesis = Network::Regtest.genesis_block();
     let tip = genesis_tip(&genesis)?;
     let wake = Arc::new(ReceiptWake::default());
-    let wake_handle: Arc<dyn bitcoin_rs_serving::mining::MempoolSequenceWake> = wake.clone();
+    let wake_handle: Arc<dyn bitcoin_rs_rpc::mining::MempoolSequenceWake> = wake.clone();
     let followers = ChainFollowers::noop();
     followers.mining().attach_sequence_wake(&wake_handle);
     assert!(followers.mempool_gateway().is_none());
@@ -521,7 +521,7 @@ fn active_chain_change_is_retryable_not_shutdown() -> Result<(), TestError> {
 
     assert!(matches!(
         followers.begin_mempool_change(),
-        Err(bitcoin_rs_execution::ApplyError::ConcurrentChainChange)
+        Err(bitcoin_rs_chain::ApplyError::ConcurrentChainChange)
     ));
     active.finish()?;
     assert!(followers.begin_mempool_change()?.is_some());
@@ -552,7 +552,7 @@ fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> R
         }
     };
     assert_eq!(outcome.hash, hash);
-    assert!(matches!(source, bitcoin_rs_execution::ApplyError::Shutdown));
+    assert!(matches!(source, bitcoin_rs_chain::ApplyError::Shutdown));
     let Some(committed_tip) = state.chainstate().applied_tip_snapshot() else {
         panic!("committed tip missing");
     };
@@ -560,7 +560,7 @@ fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> R
     assert!(matches!(
         followers.apply_connect(&state.chainstate(), &genesis),
         Err(ConnectMutationError::NotCommitted(
-            bitcoin_rs_execution::ApplyError::Shutdown
+            bitcoin_rs_chain::ApplyError::Shutdown
         ))
     ));
     Ok(())
@@ -777,7 +777,7 @@ enum NestedApply {
 struct RefusedSettlementObserver {
     gateway: Mutex<Option<Arc<MempoolGateway>>>,
     followers: Mutex<Option<Arc<ChainFollowers>>>,
-    chainstate: Mutex<Option<Arc<bitcoin_rs_execution::Chainstate>>>,
+    chainstate: Mutex<Option<Arc<bitcoin_rs_chain::Chainstate>>>,
     entered: Mutex<Option<crossbeam_channel::Sender<()>>>,
     release: Mutex<Option<crossbeam_channel::Receiver<()>>>,
     outcome: Mutex<Option<NestedApply>>,

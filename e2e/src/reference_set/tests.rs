@@ -1,8 +1,8 @@
-#![expect(clippy::expect_used, reason = "reference identity rejection tests")]
+﻿#![expect(clippy::expect_used, reason = "reference identity rejection tests")]
 
 use super::{CorpusCustody, ReferenceError, load_reference_set, reference_set};
 use bitcoin::hashes::{Hash, sha256};
-use bitcoin_rs_serving::manifest::MANIFEST_TOML;
+use bitcoin_rs_rpc::manifest::MANIFEST_TOML;
 
 fn edit_reference(section: Option<&str>, edit: impl FnOnce(&mut toml::Table)) -> String {
     let mut manifest: toml::Table = toml::from_str(MANIFEST_TOML).expect("manifest parses");

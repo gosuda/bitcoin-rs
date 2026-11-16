@@ -1,13 +1,13 @@
 use crate::options::{IndexBundleDirError, OptionParseError, UserConfig, check_index_bundle_path};
+use bitcoin_rs_chain::ValidationMode;
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::primitives::Network;
-use bitcoin_rs_execution::ValidationMode;
-use bitcoin_rs_projection::IndexCapabilities;
+use bitcoin_rs_index::IndexCapabilities;
+use bitcoin_rs_p2p::PeerNetwork;
+use bitcoin_rs_p2p::endpoint::{ClassifiedEndpoint, classify_endpoint};
 #[cfg(feature = "pool")]
-use bitcoin_rs_serving::mining::pool::ledger as pool_ledger;
+use bitcoin_rs_rpc::mining::pool::ledger as pool_ledger;
 use bitcoin_rs_storage::StorageBackend;
-use bitcoin_rs_wire::PeerNetwork;
-use bitcoin_rs_wire::endpoint::{ClassifiedEndpoint, classify_endpoint};
 use core::fmt;
 use crossbeam_channel::Receiver;
 use serde::Deserialize;
@@ -25,7 +25,7 @@ pub enum ConfigError {
     #[error(transparent)]
     IndexBundleDir(#[from] IndexBundleDirError),
     #[error(transparent)]
-    Subnet(#[from] bitcoin_rs_wire::SubnetParseError),
+    Subnet(#[from] bitcoin_rs_p2p::SubnetParseError),
     #[error(transparent)]
     SocketAddr(#[from] std::net::AddrParseError),
     #[error(transparent)]
@@ -78,11 +78,11 @@ pub enum ConfigError {
     PoolRewardScriptCanonical,
     #[cfg(feature = "pool")]
     #[error(transparent)]
-    PoolLedger(#[from] bitcoin_rs_serving::mining::pool::ledger::LedgerError),
+    PoolLedger(#[from] bitcoin_rs_rpc::mining::pool::ledger::LedgerError),
     #[cfg(feature = "pool")]
     #[error("invalid pool share difficulty: {difficulty_error}")]
     PoolShareDifficulty {
-        difficulty_error: bitcoin_rs_serving::mining::pool::JobError,
+        difficulty_error: bitcoin_rs_rpc::mining::pool::JobError,
     },
     #[error("pool share target must match configured difficulty")]
     PoolShareTargetMismatch,
@@ -140,7 +140,7 @@ pub enum ConfigError {
     #[error("--p2p-stale-tip-prefers-blocks requires --p2p-stale-tip-relay")]
     StaleTipPrefersBlocks,
     #[error(transparent)]
-    Zmq(#[from] bitcoin_rs_serving::zmq::ZmqConfigError),
+    Zmq(#[from] bitcoin_rs_rpc::zmq::ZmqConfigError),
     #[error(transparent)]
     Overlay(#[from] std::io::Error),
     #[error("P2P magic overrides currently require --network mainnet")]
@@ -188,7 +188,7 @@ pub enum ConfigError {
     #[error("transaction, script and compact-filter indexing are not compatible with -prune")]
     PruneWithIndexes,
     #[error(transparent)]
-    RpcAuth(#[from] bitcoin_rs_serving::auth::AuthError),
+    RpcAuth(#[from] bitcoin_rs_rpc::auth::AuthError),
     #[error("failed to generate RPC cookie randomness: {randomness_error}")]
     CookieRandomness {
         randomness_error: bitcoin::secp256k1::rand::Error,
@@ -205,7 +205,7 @@ pub enum ConfigError {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct NotificationConfig {
-    pub zmq: Vec<bitcoin_rs_serving::zmq::ZmqEndpointConfig>,
+    pub zmq: Vec<bitcoin_rs_rpc::zmq::ZmqEndpointConfig>,
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -259,7 +259,7 @@ pub struct PoolConfig {
     pub max_connections_per_ip: u32,
     pub share_difficulty: String,
     #[cfg(feature = "pool")]
-    pub share_target: bitcoin_rs_serving::mining::pool::ShareTarget,
+    pub share_target: bitcoin_rs_rpc::mining::pool::ShareTarget,
     pub window_work: u64,
     pub fee_bps: u16,
     pub reward_script: Vec<u8>,
@@ -289,7 +289,7 @@ impl PoolConfig {
         #[cfg(feature = "pool")]
         {
             self.ledger_config().validate()?;
-            match bitcoin_rs_serving::mining::pool::ShareTarget::from_pool_difficulty_decimal(
+            match bitcoin_rs_rpc::mining::pool::ShareTarget::from_pool_difficulty_decimal(
                 &self.share_difficulty,
             ) {
                 Ok(target) if target == self.share_target => Ok(()),
@@ -458,7 +458,7 @@ fn resolve_pool(settings: &UserConfig) -> Result<Option<PoolConfig>, ConfigError
                 .share_difficulty
                 .as_deref()
                 .ok_or(ConfigError::PoolShareDifficultyMissing)?;
-            bitcoin_rs_serving::mining::pool::ShareTarget::from_pool_difficulty_decimal(text)
+            bitcoin_rs_rpc::mining::pool::ShareTarget::from_pool_difficulty_decimal(text)
                 .map_err(|difficulty_error| ConfigError::PoolShareDifficulty { difficulty_error })?
         },
         window_work: pool.window_work.ok_or(ConfigError::PoolWindowWorkMissing)?,
@@ -481,16 +481,16 @@ pub struct StorageConfig {
 
 #[derive(Clone, Debug)]
 pub struct P2pConfig {
-    pub overlay: bitcoin_rs_wire::overlay::OverlayConfig,
+    pub overlay: bitcoin_rs_p2p::overlay::OverlayConfig,
     pub magic: [u8; 4],
     pub listen: Vec<SocketAddr>,
     pub dns_seeds_enabled: bool,
     pub asmap: Option<PathBuf>,
-    pub noban_subnets: Vec<bitcoin_rs_wire::IpSubnet>,
+    pub noban_subnets: Vec<bitcoin_rs_p2p::IpSubnet>,
     pub connect: Vec<String>,
     pub fast_sync: bool,
     pub v2_transport: bool,
-    pub relay_offers: bitcoin_rs_wire::RelayOffers,
+    pub relay_offers: bitcoin_rs_p2p::RelayOffers,
     /// `-uacomment` values, composed into the subversion exactly as Core's
     /// `InitSubversion` does (`crates/primitives` `sub_version`).
     pub ua_comments: Vec<String>,
@@ -593,7 +593,7 @@ impl NodeConfig {
                 scripthash_limit: settings
                     .indexes
                     .scripthash_limit
-                    .unwrap_or(bitcoin_rs_projection::runtime::DEFAULT_SCRIPTHASH_LIMIT),
+                    .unwrap_or(bitcoin_rs_index::runtime::DEFAULT_SCRIPTHASH_LIMIT),
                 txindex: settings.indexes.txindex.unwrap_or(false),
                 blockfilterindex: settings.indexes.blockfilterindex.unwrap_or(false),
                 script_index: settings
@@ -709,7 +709,7 @@ impl NodeConfig {
         self.validate_index_bundle()?;
         self.validate_p2p_network()?;
         self.p2p.overlay.validate()?;
-        bitcoin_rs_serving::zmq::validate_endpoint_configs(&self.notifications.zmq)?;
+        bitcoin_rs_rpc::zmq::validate_endpoint_configs(&self.notifications.zmq)?;
         Ok(())
     }
 
@@ -829,7 +829,7 @@ fn materialize_p2p(
     network: Network,
 ) -> P2pConfig {
     P2pConfig {
-        overlay: bitcoin_rs_wire::overlay::OverlayConfig {
+        overlay: bitcoin_rs_p2p::overlay::OverlayConfig {
             proxy: settings.proxy,
             onion_proxy: settings.onion_proxy,
             onlynet: settings.onlynet.clone().unwrap_or_default(),
@@ -860,7 +860,7 @@ fn materialize_p2p(
             .unwrap_or_else(|| profile.connect.clone()),
         fast_sync: settings.fast_sync.unwrap_or(false),
         v2_transport: settings.v2_transport.unwrap_or(true),
-        relay_offers: bitcoin_rs_wire::RelayOffers {
+        relay_offers: bitcoin_rs_p2p::RelayOffers {
             package_relay: settings.package_relay.unwrap_or(false),
             stale_tip_relay: settings.stale_tip_relay.unwrap_or(false),
             stale_tip_prefers_blocks: settings.stale_tip_prefers_blocks.unwrap_or(false),
@@ -881,7 +881,7 @@ fn materialize_rpc(
         public_max_connections: settings.public_max_connections.unwrap_or(128),
         esplora_max_queries: settings
             .esplora_max_queries
-            .unwrap_or(bitcoin_rs_serving::esplora::DEFAULT_MAX_QUERIES.get()),
+            .unwrap_or(bitcoin_rs_rpc::esplora::DEFAULT_MAX_QUERIES.get()),
         rest: settings.rest.unwrap_or(false),
         silent_payments: settings.silent_payments.unwrap_or(false),
         compressed_transactions: settings.compressed_transactions.unwrap_or(false),
@@ -1002,15 +1002,12 @@ impl Auth {
         }
     }
 
-    pub(crate) fn to_rpc_auth(
-        &self,
-        data_dir: &Path,
-    ) -> Result<bitcoin_rs_serving::Auth, ConfigError> {
+    pub(crate) fn to_rpc_auth(&self, data_dir: &Path) -> Result<bitcoin_rs_rpc::Auth, ConfigError> {
         match self {
             Self::Basic { user, password } => {
-                Ok(bitcoin_rs_serving::Auth::basic(user.clone(), password))
+                Ok(bitcoin_rs_rpc::Auth::basic(user.clone(), password))
             }
-            Self::Cookie { path } => Ok(bitcoin_rs_serving::Auth::cookie(path)?),
+            Self::Cookie { path } => Ok(bitcoin_rs_rpc::Auth::cookie(path)?),
             Self::GeneratedCookie => generate_rpc_cookie(&data_dir.join(".cookie")),
         }
     }
@@ -1033,7 +1030,7 @@ impl fmt::Debug for Auth {
     }
 }
 
-fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_serving::Auth, ConfigError> {
+fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_rpc::Auth, ConfigError> {
     use bitcoin::secp256k1::rand::{RngCore as _, rngs::OsRng};
     use std::fmt::Write as _;
     use std::fs::{self, OpenOptions};
@@ -1080,7 +1077,7 @@ fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_serving::Auth, ConfigEr
         path: path.to_path_buf(),
         io_error,
     })?;
-    Ok(bitcoin_rs_serving::Auth::cookie(path)?)
+    Ok(bitcoin_rs_rpc::Auth::cookie(path)?)
 }
 
 const DRYNET4_CONNECT: &str = "drynet4.drivechain.dev:8533";

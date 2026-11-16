@@ -1,6 +1,6 @@
-use super::*;
+﻿use super::*;
 use bitcoin::hashes::Hash as _;
-use bitcoin_rs_serving::mining::{
+use bitcoin_rs_rpc::mining::{
     BlockValidationResult, CoinbaseBudget, GenerateRequest, GenerateSelection, solve_block,
 };
 use bitcoin_rs_consensus::primitives::{
@@ -15,8 +15,8 @@ enum TestError {
     Io(std::io::Error),
     AddrParse(std::net::AddrParseError),
     Node(bitcoin_rs_node::NodeError),
-    Mining(bitcoin_rs_serving::mining::MiningError),
-    MiningControl(bitcoin_rs_serving::mining::MiningControlError),
+    Mining(bitcoin_rs_rpc::mining::MiningError),
+    MiningControl(bitcoin_rs_rpc::mining::MiningControlError),
     Consensus(bitcoin::consensus::encode::Error),
     Join(tokio::task::JoinError),
     Elapsed(tokio::time::error::Elapsed),
@@ -75,8 +75,8 @@ impl From<bitcoin_rs_node::NodeError> for TestError {
     }
 }
 
-impl From<bitcoin_rs_serving::mining::MiningError> for TestError {
-    fn from(e: bitcoin_rs_serving::mining::MiningError) -> Self {
+impl From<bitcoin_rs_rpc::mining::MiningError> for TestError {
+    fn from(e: bitcoin_rs_rpc::mining::MiningError) -> Self {
         Self::Mining(e)
     }
 }
@@ -110,8 +110,8 @@ impl<T> From<tokio::sync::mpsc::error::SendError<T>> for TestError {
         Self::Send
     }
 }
-impl From<bitcoin_rs_serving::mining::MiningControlError> for TestError {
-    fn from(e: bitcoin_rs_serving::mining::MiningControlError) -> Self {
+impl From<bitcoin_rs_rpc::mining::MiningControlError> for TestError {
+    fn from(e: bitcoin_rs_rpc::mining::MiningControlError) -> Self {
         Self::MiningControl(e)
     }
 }
@@ -131,7 +131,7 @@ impl<T> From<crossbeam_channel::SendError<T>> for TestError {
 type TestResult = Result<(), TestError>;
 
 pub(super) fn empty_candidate(parent: u8) -> Arc<Candidate> {
-    use bitcoin_rs_serving::mining::{CandidateContext, assemble_candidate};
+    use bitcoin_rs_rpc::mining::{CandidateContext, assemble_candidate};
     Arc::new(
         assemble_candidate(
             &CandidateContext {

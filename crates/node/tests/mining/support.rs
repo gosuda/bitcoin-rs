@@ -7,20 +7,20 @@ use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin::hex::FromHex;
+use bitcoin_rs_chain::chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness, deserialize as native_deserialize, encode::double_sha256,
 };
 use bitcoin_rs_consensus::script::push_int;
-use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_mempool::{AdmissionOrigin, BodyInterest, MempoolEntry, SubmitOutcome};
 use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
-use bitcoin_rs_serving::mining::{
+use bitcoin_rs_rpc::mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
     BlockValidationResult, CoinbaseBudget, MempoolSequenceWake, MiningControl,
     MiningGenerationSignal, solve_block,
 };
-use bitcoin_rs_serving::{
+use bitcoin_rs_rpc::{
     Handler,
     context::{
         ChainAdmissionView, ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles,
@@ -327,7 +327,7 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
     Ok(tip.hash)
 }
 
-pub(crate) fn current_tip(state: &NodeState) -> Result<bitcoin_rs_execution::chain::TipSnapshot> {
+pub(crate) fn current_tip(state: &NodeState) -> Result<bitcoin_rs_chain::chain::TipSnapshot> {
     let Some(tip) = state.chainstate().applied_tip_snapshot() else {
         return Err(TestError::message("applied tip must exist"));
     };
@@ -529,7 +529,7 @@ pub(crate) fn rpc_handler(state: &NodeState, mining_control: Arc<dyn MiningContr
         },
         indexes: IndexHandles::default(),
         network: NetworkHandles {
-            overlay: bitcoin_rs_wire::overlay::OverlayConfig::default(),
+            overlay: bitcoin_rs_p2p::overlay::OverlayConfig::default(),
             peer_table: state.peer_table(),
             p2p: state.p2p(),
             local_services: state.p2p().local_services().to_u64(),

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+﻿use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -9,7 +9,7 @@ use bitcoin_rs_mempool::{
     AdmissionOrigin, MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome,
 };
 #[cfg(test)]
-use bitcoin_rs_wire::PeerLease;
+use bitcoin_rs_p2p::PeerLease;
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 
 pub const DEFAULT_TX_RELAY_QUEUE_CAPACITY: usize = 1024;
@@ -147,7 +147,7 @@ pub trait RelaySink: Send + Sync {
 pub struct PeerRelaySink {
     peers: Arc<crate::p2p::NodeTxPolicy>,
     ibd: Option<(
-        Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
+        Arc<bitcoin_rs_chain::chain::InitialBlockDownload>,
         bitcoin_rs_consensus::primitives::Network,
     )>,
 }
@@ -161,7 +161,7 @@ impl PeerRelaySink {
     #[must_use]
     pub fn with_ibd(
         mut self,
-        ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
+        ibd: Arc<bitcoin_rs_chain::chain::InitialBlockDownload>,
         network: bitcoin_rs_consensus::primitives::Network,
     ) -> Self {
         self.ibd = Some((ibd, network));

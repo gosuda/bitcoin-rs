@@ -1,9 +1,9 @@
-use bitcoin_rs_node::test_support::TestError;
+﻿use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_node::Network;
-use bitcoin_rs_serving::mining::{
+use bitcoin_rs_rpc::mining::{
     BlockTemplateMode, BlockTemplateRequest, BlockValidationResult, CoinbaseBudget,
     MiningCapability, MiningControl, MiningControlError, TemplateId, solve_block,
 };

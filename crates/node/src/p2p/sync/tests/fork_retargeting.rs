@@ -1,8 +1,8 @@
-use super::*;
+﻿use super::*;
 
 struct TwoBranches {
     sync: BlockSync,
-    rx: bitcoin_rs_wire::test_support::MessageReceiver,
+    rx: bitcoin_rs_p2p::test_support::MessageReceiver,
     source: PeerSource,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     losing_hashes: Vec<BlockHash>,
@@ -76,7 +76,7 @@ fn two_branches() -> Result<TwoBranches, TestError> {
     let block_tree = Arc::new(RwLock::new(tree));
     let peers = Arc::new(PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx) = unbounded::<InboundHeaders>();
-    let (_inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_wire::InboundBlock>();
+    let (_inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
     let sync = BlockSync::new(
         std::sync::Arc::new(TestChain::new(
             Arc::clone(&chain_tip),
@@ -156,7 +156,7 @@ fn retarget_purges_staged_off_branch_bodies() -> TestResult {
     let [losing1, losing2]: [Block; 2] = losing_bodies
         .try_into()
         .map_err(|_| "the fixture has two losing bodies")?;
-    let mut delivery = vec![bitcoin_rs_wire::InboundBlock::from_local(losing1)];
+    let mut delivery = vec![bitcoin_rs_p2p::InboundBlock::from_local(losing1)];
     assert_eq!(sync.buffer_received_block_chunk(&mut delivery, None), 1);
     assert_eq!(sync.scheduler.lock().stager.received_len(), 1);
 
@@ -172,7 +172,7 @@ fn retarget_purges_staged_off_branch_bodies() -> TestResult {
         "the retarget must purge the staged losing-branch body"
     );
 
-    let mut late = vec![bitcoin_rs_wire::InboundBlock::from_local(losing2)];
+    let mut late = vec![bitcoin_rs_p2p::InboundBlock::from_local(losing2)];
     assert_eq!(
         sync.buffer_received_block_chunk(&mut late, None),
         0,
@@ -281,7 +281,7 @@ fn retarget_runs_before_the_peer_budget_truncates() -> TestResult {
     let block_tree = Arc::new(RwLock::new(tree));
     let peers = Arc::new(PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx) = unbounded::<InboundHeaders>();
-    let (_inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_wire::InboundBlock>();
+    let (_inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
     let sync = BlockSync::new(
         std::sync::Arc::new(TestChain::new(
             Arc::clone(&chain_tip),
