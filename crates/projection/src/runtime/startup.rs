@@ -1221,7 +1221,7 @@ mod tests {
     // SNP-10
     #[test]
     fn populated_attach_refusal_preserves_sibling_coverage()
-    -> Result<(), Box<dyn std::error::Error>> {
+    -> Result<(), crate::portable::TestError> {
         let dir = tempfile::tempdir()?;
         let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
             dir.path(),
