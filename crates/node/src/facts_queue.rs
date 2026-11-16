@@ -120,7 +120,7 @@ mod tests {
     fn budget() -> Arc<NodeBudget> {
         Arc::new(NodeBudget::new(
             BudgetCaps {
-                staged_images: 8_192,
+                staged_images: 9_362,
                 engine_cache: 0,
                 coin_cache: 0,
                 facts_queue: 4_096,
@@ -190,7 +190,14 @@ mod tests {
         budget
             .allocate(BudgetOwner::StagedImages, staged)
             .expect("staged allocation fits");
-        assert_eq!(budget.total_committed(), 8_192 + size);
+        let receiving = budget.caps().receive_cap();
+        budget
+            .reserve(BudgetOwner::PeerReceive, receiving)
+            .expect("receive reservation fits");
+        budget
+            .allocate(BudgetOwner::PeerReceive, receiving)
+            .expect("receive allocation fits");
+        assert_eq!(budget.total_committed(), staged + receiving + size);
 
         budget
             .ensure_available(BudgetOwner::FactsQueue, 4_096)

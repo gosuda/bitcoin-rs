@@ -744,7 +744,7 @@ impl NodeState {
             assumeutxo: Some(Arc::clone(&assumeutxo)),
             budget: Arc::clone(&budget),
         }));
-        let staged_cap = usize::try_from(budget.caps().staged_images).unwrap_or(usize::MAX);
+        let staged_cap = usize::try_from(budget.caps().image_ingress_cap()).unwrap_or(usize::MAX);
         let sync_budget = if config.p2p.fast_sync {
             fast_sync_budget(config.network).with_byte_ceiling(staged_cap)
         } else {
@@ -757,6 +757,7 @@ impl NodeState {
         let block_memory = Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
             ingress_ledger,
         ));
+        budget.add_reclaimer(sync.staged_image_reclaimer(&budget));
         let prune_service = if config.storage.prune_target_mb > 0 {
             Some(storage.deferred.prune_service(
                 Arc::clone(&block_files),
