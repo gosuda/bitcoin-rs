@@ -54,6 +54,7 @@ cargo_test() {
 clippy_lane_services() {
   profile "clippy: services and tools (kernel-free)" \
     cargo clippy --locked --workspace --all-targets \
+      --features bitcoin-rs-serving/silent-payments,bitcoin-rs-serving/zmq \
       --exclude bitcoin-rs --exclude bitcoin-rs-node \
       --exclude bitcoin-rs-consensus --exclude bitcoin-rs-execution \
       --exclude bitcoin-rs-e2e --exclude bitcoin-rs-wire \
@@ -63,7 +64,8 @@ clippy_lane_services() {
 clippy_lane_node_runtime() {
   profile "clippy: node runtime and wire" \
     cargo clippy --locked -p bitcoin-rs -p bitcoin-rs-e2e -p bitcoin-rs-wire \
-      --features bitcoin-rs/silent-payments --all-targets -- -D warnings
+      --features bitcoin-rs/silent-payments,bitcoin-rs-wire/test-seam \
+      --all-targets -- -D warnings
   profile "clippy: bitcoin-rs-consensus (native)" \
     cargo clippy --locked -p bitcoin-rs-consensus \
       --no-default-features --all-targets -- -D warnings
