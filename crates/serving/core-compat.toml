@@ -1,0 +1,152 @@
+# Bitcoin Core reference record
+#
+# Only `[reference]` is machine-read: it pins the Bitcoin Core identities
+# every claim is made against -- the released product, the kernel tree the
+# oracle lane links, the replay corpora, and the formal model checker.
+# `e2e/src/reference_set.rs` parses and validates them;
+# `scripts/provision-ci-reference-fixtures.sh` consumes the release pins;
+# `scripts/check_models.py` fingerprints this file into each model-check run.
+#
+# `[admission_profile]` is policy evidence, not machine-checked input: it
+# records the selected settings and explicit non-parity cases that
+# `docs/policies/mempool-policy.md` cites in prose.
+#
+# External-surface compatibility claims do not live here. `REGISTRY` in
+# `crates/serving/src/registry.rs` is their single owner: each row binds one
+# surface to one status from the six-state vocabulary in
+# `crates/serving/src/manifest.rs` -- Supported, Deviation, Implemented
+# (unverified), Extension, Disabled, Unimplemented -- and only a shipped
+# JSON-RPC row also carries a dispatch arm (REST, ZMQ, `Unimplemented` and
+# `pending` rows set `handler: None`). `crates/serving/tests/manifest_coverage.rs`
+# renders `docs/rpc-reference.md` from that table, checks it against the
+# dispatcher, the REST router and the fixed Core ZMQ topic list, and refuses
+# a `Supported` claim while `[reference].differential_harness` below is false.
+
+[reference]
+# The development version of the kernel oracle, distinct from the released
+# product identity below. The source and package digests pin this snapshot;
+# 31.99.0 by itself is only Core's development-version convention.
+core_version = "31.99.0"
+# Where that revision comes from: the oracle links libbitcoinkernel built
+# from this tree. `bitcoinkernel` is the safe wrapper; `libbitcoinkernel-sys`
+# vendors the Core source under `bitcoin/`, and its `CMakeLists.txt` carries the
+# CLIENT_VERSION above.
+kernel_crate = "bitcoinkernel"
+kernel_crate_version = "0.3.2"
+kernel_sys_crate = "libbitcoinkernel-sys"
+kernel_sys_crate_version = "0.4.1"
+# Published crate custody: `.cargo_vcs_info.json` identifies the wrapper tree.
+# Its subtree squash 84c89f1baa0bb14dca891323c6f5538b7241db44 records this
+# bitcoin/bitcoin source commit in `git-subtree-split`; the 0.4.1 release is
+# upstream build-flags only (its `bitcoin/` tree is byte-identical to 0.4.0's,
+# verified by `diff -rq` of the two published crate packages), so the vendored
+# tree stays at that squash.
+# https://github.com/sedited/rust-bitcoinkernel/commit/84c89f1baa0bb14dca891323c6f5538b7241db44
+kernel_vendor_commit = "f27eff2051e4e4d153b65fc7273c9a05dcd673fe"
+kernel_source_commit = "70d9ec7f3d452789d04dce81dc02db0b3b778bb5"
+kernel_sys_crate_sha256 = "345d18a1ce19a1becfcaaa066e3a60e9c7813ef5c23ea8c20704ca4ba1a46339"
+# Set when a differential harness compares *values* against a running reference
+# (#78 scope item 2). Still false, and deliberately so: no harness currently
+# compares result values or shapes against Core's own declarations. A method
+# whose shape matches can still answer a different number.
+#
+# Surface `supported` claims live in REGISTRY and stay gated on this flag.
+differential_harness = false
+
+
+# ---------------------------------------------------------------------------
+# Reference identities
+#
+# Two distinct identities live under this table, and they must never be
+# confused:
+#
+#   * `[reference.release]` below is the RELEASED Bitcoin Core product,
+#     installed from a checksum-pinned tarball. It is the product behavior
+#     reference the compatibility claims in `crates/serving/src/registry.rs` are
+#     ultimately made against -- the same pinned reference the status
+#     vocabulary talks about.
+#   * the scalar keys above (`core_version = "31.99.0"`, the kernel crates)
+#     are the Core development tree this node links for the oracle lane.
+#     Oracle evidence only: not a release, and never a policy pin.
+#
+# A reference carrying only a version label or a digest that does not match is
+# rejected by `e2e/src/reference_set.rs`. `docs/contracts/reference-set.md` is a
+# readable projection; on conflict, this file and that parser govern.
+# ---------------------------------------------------------------------------
+
+[reference.release]
+# The released product identity. `version_output` is what the pinned
+# `bitcoind -version` prints, checked verbatim.
+core_version = "31.1"
+git_tag = "v31.1"
+source_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"
+version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"
+# The canonical artifact: the platform whose bitcoind captured the checked-in
+# fixtures and corpora. `target` is the bitcoincore.org archive suffix; every
+# artifact pinning repeats the (target, archive, digests) shape so
+# `artifact_for` can select a runnable binary without reinterpreting fields.
+target = "x86_64-linux-gnu"
+archive = "bitcoin-31.1-x86_64-linux-gnu.tar.gz"
+archive_sha256 = "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
+bitcoind_sha256 = "986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08"
+
+# Additional runnable artifacts for the same released product, one row per
+# developer platform a lane may execute on. The canonical artifact above
+# remains the fixture-capture identity; a row repeating its target (or a
+# sibling's) is rejected by the reference-set parser.
+[[reference.release.platforms]]
+target = "arm64-apple-darwin"
+archive = "bitcoin-31.1-arm64-apple-darwin.tar.gz"
+archive_sha256 = "16a097c09fbd7eb78b240ce1dae123663ea2e5e377cfd6a951e71e227e23cf2f"
+bitcoind_sha256 = "d55c12b0b02001cc16b1481c4075361dcba193100a8143924abda911174c09ec"
+
+[[reference.release.platforms]]
+target = "win64"
+archive = "bitcoin-31.1-win64.zip"
+archive_sha256 = "c99ef173471c58e6766d9eebd12e6c35349082eeed3939bc99eed58ef57db587"
+bitcoind_sha256 = "f79eeb94e1379986df9f7be4c78c8fc8e18dc9be64a31cbaa8acad249d3db77a"
+
+# Replay corpora, pinned by stop identity. `manifest_sha256` is produced when
+# the corpus archive is exported; until then it stays ABSENT (a placeholder
+# digest would be an invented one, so the loader reports the corpus as
+# custody-blocked instead). Both corpora below now carry exported digests.
+
+[[reference.corpora]]
+id = "C150"
+stop_height = 150000
+stop_hash = "0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b"
+# Exported 2026-09-07 by the pinned bitcoind (digest 986e63b3) into a fresh
+# datadir.
+# `manifest_sha256` is the export-time manifest digest defined by REF-04
+# (docs/contracts/reference-set.md), not the SHA-256 of the manifest file.
+manifest_sha256 = "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b91d"
+
+[[reference.corpora]]
+id = "Cmodern"
+stop_height = 709635
+stop_hash = "00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f"
+# Exported 2026-09-09 by the pinned bitcoind (digest 986e63b3).
+# `manifest_sha256` is the export-time manifest digest defined by REF-04
+# (docs/contracts/reference-set.md), not the SHA-256 of the manifest file.
+manifest_sha256 = "b87bac6720d1b68acadaa9863b56073ee213f4613e8dfa4a93c4459dc5f017cd"
+
+# The formal model checker, pinned by archive and jar digest. Evidence tool
+# only; no checker run is claimed anywhere in this file.
+
+[reference.formal_tool]
+name = "apalache-mc"
+version = "0.62.4"
+archive_sha256 = "3b6b7ebf24e778535bf47e0cb3f0799c9ab9048df41119c7d3091c6ca1760bc1"
+jar_sha256 = "e5223915507b65cc5f1638bd037ede60f8a4fc1644aff46355779f9b05df9262"
+
+# Selected policy evidence and explicit non-parity cases for issue #639.
+[admission_profile]
+reference_settings = ["-acceptnonstdtxn=0", "-minrelaytxfee=0.00001000", "-incrementalrelayfee=0.00001000", "-dustrelayfee=0.00003000", "-datacarriersize=83"]
+process_gate = "overhaul_process_harness::policy_cases"
+unsupported = [
+  "submitpackage supports singletons and 1p1c CPFP only; wider packages, replacement and capacity eviction are explicitly refused. Esplora /txs/package remains 404. Native consensus/script and numeric rejection details remain deviations.",
+  "Core transient non-optimal SFL diagrams, its randomized work-budget decisions and tie ordering are not emulated by the exact closure solver; adversarial/churn parity remains unverified.",
+  "Core allocator-based capacity is not implemented; pool capacity, the rolling minimum fee, and post-block decay are measured against pool total virtual size, while each eviction trim bump derives from the removed chunk's own modified fee and charged weight (rbf::trim_bump).",
+  "Core speculative insert-and-trim failure side effects are not reproduced; candidate refusal is atomic.",
+  "Generic consensus/script details, missing-input/max-fee numeric codes and CompactSize-inclusive nulldata accounting retain local behavior."
+]

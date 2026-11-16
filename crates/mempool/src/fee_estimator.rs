@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use bitcoin_rs_primitives::Txid;
+use bitcoin_rs_consensus::primitives::Txid;
 use hashbrown::HashMap;
 
 const BUCKET_GROWTH_NUM: u64 = 105;
@@ -200,8 +200,12 @@ impl FeeEstimator {
         }
         let bucket = &mut self.buckets[bucket_index];
         if waited > MAX_CONF_TARGET {
-            for target in entry.resolved_through..MAX_CONF_TARGET {
-                bucket.resolved_within[target] += 1.0;
+            for count in bucket
+                .resolved_within
+                .iter_mut()
+                .skip(entry.resolved_through)
+            {
+                *count += 1.0;
             }
             return;
         }
@@ -248,7 +252,7 @@ mod history_codec {
         build_buckets,
     };
     use alloc::vec::Vec;
-    use bitcoin_rs_primitives::Txid;
+    use bitcoin_rs_consensus::primitives::Txid;
     use hashbrown::HashMap;
 
     pub(super) const HISTORY_MAGIC: [u8; 8] = *b"BRSEFEES";
@@ -311,7 +315,9 @@ mod history_codec {
                 .take(32)?
                 .try_into()
                 .map_err(|_| HistoryReject::Corrupt)?;
-            Ok(Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&raw)))
+            Ok(Txid(
+                bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&raw),
+            ))
         }
 
         fn finish(&self) -> Result<(), HistoryReject> {

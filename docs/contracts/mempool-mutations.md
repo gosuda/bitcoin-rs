@@ -6,7 +6,7 @@ It also defines the ZMQ `sequence` mapping built on those records.
 Owners:
 - `MempoolGateway` (`crates/mempool/src/gateway.rs`)
 - `MutationResult`/`MutationOutcome`/`RemovalReason`/`MutationEnvelope`/`AdmissionOrigin` (`crates/mempool/src/mutation.rs`)
-- The ZMQ sequence observer (`crates/rpc/src/zmq.rs`)
+- The ZMQ sequence observer (`crates/serving/src/zmq.rs`)
 
 The gateway also owns transaction preparation and retries (`crates/mempool/src/admission.rs`).
 The gateway owns its private orphan/reject state (`crates/mempool/src/orphan.rs`).
@@ -200,7 +200,7 @@ The gateway owns its private orphan/reject state (`crates/mempool/src/orphan.rs`
 - It applies the RPC modified-feerate cap before scripts.
 - Preview and native caller-cap semantics are unchanged.
 - Chain facts come through `AdmissionChain` as provisional inputs for a submission attempt.
-- The shared borrowed `ChainAdmissionView` in `crates/rpc/src/context.rs` reads existing UTXO and block-tree handles.
+- The shared borrowed `ChainAdmissionView` in `crates/serving/src/context.rs` reads existing UTXO and block-tree handles.
 - It uses one captured applied tip for height and MTP.
 - It takes no additional chain-transition lock.
 - A stable reader holding that mutex MUST NOT spend admission's retry budget.
@@ -210,7 +210,8 @@ The gateway owns its private orphan/reject state (`crates/mempool/src/orphan.rs`
 - RPC and node peer ingress use that same view.
 - They use it with no gateway ownership, shadow version, or copied chain-state model.
 - A provider can return no snapshot to request a transient retry.
-- Peer and native package duplicate suppression uses positive live-coin evidence from `UtxoSet::has_live_outputs_for_txid`.
+- The serving provider returns no snapshot when the coin store cannot read or decode a prevout row or the confirmation row.
+- Peer and native package duplicate suppression uses positive live-coin evidence from `UtxoReader::has_live_outputs_for_txid`, answered from `CoinStore` in the engine `coins` keyspace.
 - The absence of live outputs leaves confirmation status unknown.
 - RPC transaction-body cache membership supplies no such evidence.
 - The gateway identifies a resident orphan by its witness transaction hash, as Core 31.1's orphanage does.

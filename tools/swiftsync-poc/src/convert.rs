@@ -1,5 +1,5 @@
 use bitcoin::hashes::Hash;
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
+use bitcoin_rs_consensus::primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
 
 pub fn block_hash(value: bitcoin::BlockHash) -> Hash256 {
     Hash256::from_le_bytes(&value.to_byte_array())

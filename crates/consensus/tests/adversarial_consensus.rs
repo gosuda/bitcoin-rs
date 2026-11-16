@@ -1,18 +1,17 @@
 use bitcoin::hashes::Hash as _;
 use bitcoin_rs_consensus::bip34::check_bip34;
 use bitcoin_rs_consensus::bip68::{check_sequence_lock, sequence_lock_satisfied};
+use bitcoin_rs_consensus::primitives::{
+    Amount, Block, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness,
+};
 use bitcoin_rs_consensus::verify_block::{
     MAX_BLOCK_WEIGHT, is_sixty_four_byte_mutation, verify_block_non_contextual, verify_block_rules,
     verify_merkle_root_with_txids,
 };
 use bitcoin_rs_consensus::verify_tx::{is_final_tx, verify_coinbase_script_sig_size};
 use bitcoin_rs_consensus::{
-    ConsensusError, LocktimeRule, MAX_BLOCK_SIGOPS_COST, block_subsidy, locktime_cutoff,
-    verify_coinbase_amount,
-};
-use bitcoin_rs_primitives::{
-    Amount, Block, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
-    Witness,
+    ConsensusError, MAX_BLOCK_SIGOPS_COST, block_subsidy, verify_coinbase_amount,
 };
 
 fn coinbase_tx(script_sig_len: usize) -> Tx {
@@ -62,10 +61,10 @@ fn block_with(txs: Vec<Tx>) -> Block {
     Block {
         header: Header {
             version: 1,
-            prev_blockhash: bitcoin_rs_primitives::BlockHash::default(),
+            prev_blockhash: bitcoin_rs_consensus::primitives::BlockHash::default(),
             merkle_root: root,
             time: 1_234_567_890,
-            bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x207f_ffff),
+            bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs,
@@ -107,8 +106,10 @@ fn block_stripped_size_boundaries() {
 fn block_sigops_cost_limit_boundary() {
     assert_eq!(MAX_BLOCK_SIGOPS_COST, 80_000);
     let mut cb = coinbase_tx(4);
-    cb.outputs[0].script_pubkey =
-        Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_001]);
+    cb.outputs[0].script_pubkey = Script::from_bytes(vec![
+        bitcoin_rs_consensus::script::opcode::OP_CHECKSIG;
+        20_001
+    ]);
     let block = block_with(vec![cb]);
     let res = verify_block_non_contextual(&block);
     assert!(matches!(res, Err(ConsensusError::SigopsLimit { .. })));
@@ -135,10 +136,10 @@ fn sixty_four_byte_non_coinbase_mutation() {
 
 #[test]
 fn bip34_coinbase_height_encoding() {
-    let encoded_height_100 = bitcoin_rs_script::push_int(100);
+    let encoded_height_100 = bitcoin_rs_consensus::script::push_int(100);
     assert_eq!(check_bip34(100, &encoded_height_100), Ok(()));
 
-    let encoded_height_101 = bitcoin_rs_script::push_int(101);
+    let encoded_height_101 = bitcoin_rs_consensus::script::push_int(101);
     assert!(check_bip34(100, &encoded_height_101).is_err());
     assert!(check_bip34(100, &[]).is_err());
 }
@@ -150,19 +151,17 @@ fn bip68_relative_locktime_block_based_boundaries() {
     assert!(sequence_lock_satisfied(2, sequence, 100, 0, 110, 0));
     assert!(sequence_lock_satisfied(2, sequence, 100, 0, 111, 0));
 
-    assert_eq!(
+    assert!(matches!(
         check_sequence_lock(2, sequence, 100, 0, 109, 0),
-        Err(ConsensusError::Bip {
-            bip: "BIP68",
-            reason: "input sequence height-based lock unmet: prevout at height 100 + 10 blocks > current 109".to_owned()
-        })
-    );
+        Err(ConsensusError::Bip { bip: "BIP68", reason })
+            if reason.starts_with("input sequence height-based lock unmet")
+    ));
     assert_eq!(check_sequence_lock(2, sequence, 100, 0, 110, 0), Ok(()));
 }
 
 #[test]
 fn bip68_relative_locktime_time_based_boundaries() {
-    let sequence = bitcoin_rs_primitives::SEQUENCE_LOCKTIME_TYPE_FLAG | 2;
+    let sequence = bitcoin_rs_consensus::primitives::SEQUENCE_LOCKTIME_TYPE_FLAG | 2;
     let prev_mtp = 10_000;
     let earliest = prev_mtp + 2 * 512;
 
@@ -195,7 +194,7 @@ fn bip68_relative_locktime_time_based_boundaries() {
 
 #[test]
 fn bip68_disable_flag_and_version_one_bypass_lock() {
-    let disabled = bitcoin_rs_primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG | 0x64;
+    let disabled = bitcoin_rs_consensus::primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG | 0x64;
     assert!(sequence_lock_satisfied(2, disabled, 100, 0, 0, 0));
 
     assert!(sequence_lock_satisfied(1, 100, 100, 0, 0, 0));
@@ -214,28 +213,16 @@ fn is_final_tx_boundaries() {
     assert!(!is_final_tx(&tx, 200, 1_000_000));
     assert!(!is_final_tx(&tx, 199, 1_000_000));
 
-    tx.inputs[0].sequence = Sequence::from_consensus(bitcoin_rs_primitives::SEQUENCE_FINAL);
+    tx.inputs[0].sequence =
+        Sequence::from_consensus(bitcoin_rs_consensus::primitives::SEQUENCE_FINAL);
     assert!(is_final_tx(&tx, 199, 1_000_000));
 
     tx.inputs[0].sequence = Sequence::from_consensus(0xffff_fffe);
-    tx.lock_time = LockTime::from_consensus(bitcoin_rs_primitives::LOCKTIME_THRESHOLD + 100);
-    let cutoff = bitcoin_rs_primitives::LOCKTIME_THRESHOLD + 100;
+    tx.lock_time =
+        LockTime::from_consensus(bitcoin_rs_consensus::primitives::LOCKTIME_THRESHOLD + 100);
+    let cutoff = bitcoin_rs_consensus::primitives::LOCKTIME_THRESHOLD + 100;
     assert!(!is_final_tx(&tx, 100, cutoff));
     assert!(is_final_tx(&tx, 100, cutoff + 1));
-}
-
-#[test]
-fn locktime_cutoff_rules() {
-    let prev_mtp = 1_000_000;
-    let candidate = 1_000_500;
-    assert_eq!(
-        locktime_cutoff(LocktimeRule::MedianTimePast, prev_mtp, candidate),
-        prev_mtp
-    );
-    assert_eq!(
-        locktime_cutoff(LocktimeRule::CandidateTime, prev_mtp, candidate),
-        candidate
-    );
 }
 
 #[test]

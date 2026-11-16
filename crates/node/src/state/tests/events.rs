@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::test_support::TestError;
-use bitcoin_rs_primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockImage;
 
 // EVT-01
 #[test]
@@ -67,8 +67,8 @@ fn active_chain_snapshot_anchors_at_restored_tip_after_restart() -> Result<(), T
 
     let (tip, first_epoch) = {
         let state = NodeState::open(config.clone(), None)?;
-        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-        let tip = state.apply_block(&BlockPayload::from_local(genesis))?;
+        let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
+        let tip = state.apply_block(&BlockImage::from_local(genesis))?;
         assert!(state.publish_checkpoint()?.is_some());
         (tip, state.chainstate().chain_snapshot().epoch)
     };
@@ -221,7 +221,7 @@ fn non_regular_epoch_lock_refuses_start() -> Result<(), TestError> {
     config.p2p.listen.clear();
 
     let Err(crate::NodeOpenError::DataDir(
-        bitcoin_rs_chainstate::events::DataDirError::LockNotRegularFile,
+        bitcoin_rs_execution::events::DataDirError::LockNotRegularFile,
     )) = NodeState::open(config, None)
     else {
         return Err(TestError::message(

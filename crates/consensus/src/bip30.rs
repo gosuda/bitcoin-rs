@@ -1,10 +1,10 @@
-use bitcoin_rs_primitives::Hash256;
+use crate::primitives::Hash256;
 
 use crate::ConsensusError;
 
 pub const BIP34_IMPLIES_BIP30_LIMIT: u32 = 1_983_702;
 
-const BIP30_DUPLICATE_TXID_EXCEPTIONS: [(u32, Hash256); 2] = [
+pub const BIP30_DUPLICATE_TXID_EXCEPTIONS: [(u32, Hash256); 2] = [
     (
         91_842,
         Hash256::from_le_bytes(&[
@@ -44,7 +44,7 @@ pub fn is_bip30_exception(height: u32, block_hash: Hash256) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::Hash256;
+    use crate::primitives::Hash256;
 
     use super::{BIP30_DUPLICATE_TXID_EXCEPTIONS, check_duplicate_txid, is_bip30_exception};
 

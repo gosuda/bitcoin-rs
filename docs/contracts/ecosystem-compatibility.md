@@ -98,9 +98,9 @@ Consumption without a bitcoin-rs-specific layer provides stronger evidence than 
 - Examples include `partial_noise_frame_survives_a_job_refresh`.
 - Examples include `embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown`.
 - Proof also requires the retained functional compose run named in the owner matrix row.
-- This matrix uses a different axis from `crates/rpc/core-compat.toml` and `crates/rpc/src/registry.rs`.
-- `crates/rpc/core-compat.toml` owns Core reference identity pins.
-- `crates/rpc/src/registry.rs` owns per-method Core-schema status.
+- This matrix uses a different axis from `crates/serving/core-compat.toml` and `crates/serving/src/registry.rs`.
+- `crates/serving/core-compat.toml` owns Core reference identity pins.
+- `crates/serving/src/registry.rs` owns per-method Core-schema status.
 - Those files record API shape claims against Core.
 - This matrix records which real consumers exercised the surface.
 - Neither mechanism substitutes for the other.

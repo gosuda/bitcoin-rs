@@ -5,10 +5,10 @@ extern crate alloc;
 use super::TestError;
 use alloc::sync::Arc;
 
-use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolError, MempoolLimits, PolicyError};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
+use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolError, MempoolLimits, PolicyError};
 
 #[test]
 fn cluster_weight_preserves_fractional_vbytes_at_the_exact_boundary() -> Result<(), TestError> {
@@ -26,8 +26,9 @@ fn cluster_weight_preserves_fractional_vbytes_at_the_exact_boundary() -> Result<
         let parent = weighted(chained_tx(2, outpoint(1, 0)), 401);
         let child = weighted(chained_tx(3, OutPoint::new(parent.txid(), 0)), child_weight);
         for (tx, weight) in [(&parent, 401), (&child, child_weight)] {
-            let oracle: bitcoin::Transaction =
-                bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(tx))?;
+            let oracle: bitcoin::Transaction = bitcoin::consensus::deserialize(
+                &bitcoin_rs_consensus::primitives::consensus_bytes(tx),
+            )?;
             assert_eq!(oracle.weight().to_wu(), weight);
             assert_eq!(oracle.vsize(), 101);
         }
@@ -205,9 +206,7 @@ fn fee_estimate_access_reuses_pool_owned_estimator() -> Result<(), TestError> {
     assert_eq!(pool.estimate_fee_rate(2), None);
 
     let first = chained_tx(81, outpoint(80, 0));
-    let first_txid = first.txid();
     let second = chained_tx(82, outpoint(81, 0));
-    let second_txid = second.txid();
     pool.insert_entry(MempoolEntry::new(
         Arc::new(first.clone()),
         100,
@@ -226,7 +225,11 @@ fn fee_estimate_access_reuses_pool_owned_estimator() -> Result<(), TestError> {
     ))?;
     assert_eq!(pool.estimate_fee_rate(2), None);
 
-    pool.remove_for_block(&[&first, &second], &[first_txid, second_txid], 8, 1);
+    pool.remove_for_block(
+        &bitcoin_rs_mempool::TransitionFacts::from_txs(&[&first, &second]),
+        8,
+        1,
+    );
     assert!(pool.estimate_fee_rate(2).is_some());
     Ok(())
 }

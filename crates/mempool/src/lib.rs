@@ -20,6 +20,9 @@ mod pool;
 mod rbf;
 mod reader;
 mod rolling_min_fee;
+mod settlement;
+#[cfg(any(test, verification, kani))]
+pub(crate) mod settlement_model;
 pub mod snapshot;
 pub mod standardness;
 mod submit_package;
@@ -57,6 +60,7 @@ pub use rbf::{RbfError, required_fee};
 #[cfg(any(test, feature = "test-seam"))]
 pub use rbf::{ReplacementCandidate, ReplacementPlan};
 pub use reader::MempoolReader;
+pub use settlement::TransitionFacts;
 pub use standardness::{StandardnessError, StandardnessPolicy, is_standard_spend, is_standard_tx};
 pub use submit_package::{PackageSubmission, PackageTxResult};
 pub use truc::TrucError;

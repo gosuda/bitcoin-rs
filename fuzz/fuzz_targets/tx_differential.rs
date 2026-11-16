@@ -1,7 +1,7 @@
 #![no_main]
 
 use bitcoin::hashes::Hash;
-use bitcoin_rs_primitives::{DecodeError, Tx, consensus_bytes, deserialize};
+use bitcoin_rs_consensus::primitives::{DecodeError, Tx, consensus_bytes, deserialize};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

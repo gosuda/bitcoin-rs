@@ -631,3 +631,59 @@ fn reader_recovers_cursor_after_mismatch_error() -> Result<(), crate::StorageErr
     );
     Ok(())
 }
+
+#[test]
+fn torn_tail_recovery_is_visible_to_operator_filter() -> Result<(), crate::StorageError> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Clone, Default)]
+    struct OperatorFilter(Arc<AtomicBool>);
+
+    impl tracing::Subscriber for OperatorFilter {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::INFO
+                && metadata
+                    .target()
+                    .starts_with("bitcoin_rs_storage::block_file")
+        }
+
+        fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if self.enabled(event.metadata()) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    let data_dir = tempdir()?;
+    {
+        let store = FlatFileBlockStore::open(data_dir.path())?;
+        store.append(7, hash(7), b"complete")?;
+    }
+    let path = data_dir.path().join("blocks/blk00000.dat");
+    {
+        let mut file = OpenOptions::new().append(true).open(&path)?;
+        file.write_all(&BLOCK_FILE_MAGIC[..2])?;
+        file.flush()?;
+    }
+    let seen = OperatorFilter::default();
+    let dispatch = tracing::Dispatch::new(seen.clone());
+    tracing::dispatcher::with_default(&dispatch, || FlatFileBlockStore::open(data_dir.path()))?;
+    assert!(
+        seen.0.load(Ordering::SeqCst),
+        "torn tail recovery must be visible to bitcoin_rs_storage::block_file filter"
+    );
+    Ok(())
+}

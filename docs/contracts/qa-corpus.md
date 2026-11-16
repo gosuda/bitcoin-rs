@@ -48,7 +48,7 @@ This page states the end-state evidence roles.
 
 ### `QAC-05`: Native-consensus-codec round-trip over corpus seeds
 
-- **Owner**: `crates/primitives/tests/differential.rs` enforces the contract over `tx_validate` and `block_validate` seeds.
+- **Owner**: `crates/consensus/tests/primitives_differential.rs` enforces the contract over `tx_validate` and `block_validate` seeds.
 - The harness reads seeds from `BITCOIN_RS_FUZZ_CORPUS/<target>`.
 - The variable names the companion repository `corpus/` directory.
 - A checkout-root value is wrong and causes the gate to skip.

@@ -4,8 +4,7 @@ use std::path::PathBuf;
 
 use super::{Auth, ConfigError, NetworkSelection, NodeConfig, ScriptIndexMode, ValidationEngine};
 use crate::options::{
-    ChainstateJournalOverrides, P2pOverrides, RpcOverrides, StorageOverrides, UserConfig,
-    ValidationOverrides,
+    P2pOverrides, RpcOverrides, StorageOverrides, UserConfig, ValidationOverrides,
 };
 
 fn pool_layer() -> UserConfig {
@@ -134,9 +133,12 @@ fn pool_layers_preserve_explicit_fields_and_override_policy() -> Result<(), Test
     assert!(pool.sv2_bind.is_none());
     assert_eq!(pool.fee_bps, 125);
     assert_eq!(pool.share_difficulty, "2.5");
+    let mut share_target_bytes = [0_u8; 32];
+    share_target_bytes[26] = 0x66;
+    share_target_bytes[27] = 0x66;
     assert_eq!(
         pool.share_target,
-        bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal("2.5")?
+        bitcoin_rs_serving::mining::pool::ShareTarget::from_le_bytes(share_target_bytes)?
     );
     assert_eq!(pool.ledger_config().window_work, 1000);
     assert_eq!(pool.ledger_config().pool_fee_bps, 125);
@@ -288,7 +290,7 @@ fn ua_comments_are_validated_and_resolved_in_cores_shape() {
         );
     }
 
-    let overflow = "a".repeat(bitcoin_rs_primitives::MAX_SUBVERSION_LENGTH);
+    let overflow = "a".repeat(bitcoin_rs_consensus::primitives::MAX_SUBVERSION_LENGTH);
     let layer = UserConfig {
         p2p: crate::options::P2pOverrides {
             ua_comments: Some(vec![overflow]),
@@ -296,9 +298,10 @@ fn ua_comments_are_validated_and_resolved_in_cores_shape() {
         },
         ..Default::default()
     };
-    let expected_len =
-        bitcoin_rs_primitives::sub_version(layer.p2p.ua_comments.as_deref().unwrap_or_default())
-            .len();
+    let expected_len = bitcoin_rs_consensus::primitives::sub_version(
+        layer.p2p.ua_comments.as_deref().unwrap_or_default(),
+    )
+    .len();
     let Err(error) = super::resolve(&[&layer]) else {
         panic!("an oversized subversion must fail startup");
     };
@@ -314,7 +317,8 @@ fn ua_comments_are_validated_and_resolved_in_cores_shape() {
 #[test]
 fn mempool_persistence_can_be_disabled_without_changing_other_settings() {
     assert!(
-        NodeConfig::default_for_network(bitcoin_rs_primitives::Network::Regtest).persist_mempool
+        NodeConfig::default_for_network(bitcoin_rs_consensus::primitives::Network::Regtest)
+            .persist_mempool
     );
     let layer = UserConfig {
         persist_mempool: Some(false),
@@ -384,7 +388,8 @@ fn mempool_snapshot_restore_timeout_is_configurable_and_scales_with_budget() {
             ..Default::default()
         };
         assert!(super::resolve(&[&invalid]).is_err());
-        let mut config = NodeConfig::default_for_network(bitcoin_rs_primitives::Network::Regtest);
+        let mut config =
+            NodeConfig::default_for_network(bitcoin_rs_consensus::primitives::Network::Regtest);
         config.mempool_snapshot_restore_timeout_secs = seconds;
         assert!(
             config.validate().is_err(),
@@ -438,7 +443,7 @@ fn generated_rpc_cookie_is_private_and_rotates() -> Result<(), TestError> {
 fn overlay_targets_without_routes_are_rejected() -> Result<(), TestError> {
     let onlynet_onion = UserConfig {
         p2p: P2pOverrides {
-            onlynet: Some(vec![bitcoin_rs_p2p::PeerNetwork::Onion]),
+            onlynet: Some(vec![bitcoin_rs_wire::PeerNetwork::Onion]),
             ..P2pOverrides::default()
         },
         ..UserConfig::default()
@@ -447,7 +452,7 @@ fn overlay_targets_without_routes_are_rejected() -> Result<(), TestError> {
 
     let onlynet_i2p = UserConfig {
         p2p: P2pOverrides {
-            onlynet: Some(vec![bitcoin_rs_p2p::PeerNetwork::I2p]),
+            onlynet: Some(vec![bitcoin_rs_wire::PeerNetwork::I2p]),
             ..P2pOverrides::default()
         },
         ..UserConfig::default()
@@ -470,8 +475,8 @@ fn overlay_targets_without_routes_are_rejected() -> Result<(), TestError> {
             i2p_sam: Some(SocketAddr::from(([127, 0, 0, 1], 7656))),
             i2p_accept: Some(true),
             onlynet: Some(vec![
-                bitcoin_rs_p2p::PeerNetwork::Onion,
-                bitcoin_rs_p2p::PeerNetwork::I2p,
+                bitcoin_rs_wire::PeerNetwork::Onion,
+                bitcoin_rs_wire::PeerNetwork::I2p,
             ]),
             ..P2pOverrides::default()
         },
@@ -499,11 +504,12 @@ fn overlay_targets_without_routes_are_rejected() -> Result<(), TestError> {
 
 #[test]
 fn malformed_overlay_connect_targets_are_rejected() -> Result<(), TestError> {
-    let good_tor =
-        bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
+    let good_tor = bitcoin_rs_wire::endpoint::format_endpoint(
+        bitcoin_rs_consensus::primitives::PeerEndpoint::TorV3 {
             key: [3u8; 32],
             port: 8333,
-        });
+        },
+    );
     let (good_onion_host, _) = good_tor
         .split_once(':')
         .ok_or(TestError::Missing("Tor endpoint port separator"))?;
@@ -594,9 +600,9 @@ fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> Re
     let zero_port_config = super::resolve(&[&routes_layer, &zero_port_user_config])?;
     assert_eq!(zero_port_config.p2p.connect, vec![zero_port_i2p.clone()]);
     assert_eq!(
-        bitcoin_rs_p2p::endpoint::classify_endpoint(&zero_port_i2p),
-        bitcoin_rs_p2p::endpoint::ClassifiedEndpoint::Valid(
-            bitcoin_rs_primitives::PeerEndpoint::I2p {
+        bitcoin_rs_wire::endpoint::classify_endpoint(&zero_port_i2p),
+        bitcoin_rs_wire::endpoint::ClassifiedEndpoint::Valid(
+            bitcoin_rs_consensus::primitives::PeerEndpoint::I2p {
                 hash: [0u8; 32],
                 port: 0,
             }
@@ -647,11 +653,12 @@ fn ordinary_hostname_connect_targets_remain_accepted_at_startup() -> Result<(), 
 
 #[test]
 fn valid_overlay_connect_targets_enforce_routes() -> Result<(), TestError> {
-    let good_tor =
-        bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
+    let good_tor = bitcoin_rs_wire::endpoint::format_endpoint(
+        bitcoin_rs_consensus::primitives::PeerEndpoint::TorV3 {
             key: [3u8; 32],
             port: 8333,
-        });
+        },
+    );
     let good_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
 
     let tor_no_route = UserConfig {
@@ -786,11 +793,12 @@ fn hostname_connect_targets_are_rejected_with_privacy_route() {
 
 #[test]
 fn typed_overlay_connect_targets_are_accepted_with_dns_disabled() -> Result<(), TestError> {
-    let good_tor =
-        bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
+    let good_tor = bitcoin_rs_wire::endpoint::format_endpoint(
+        bitcoin_rs_consensus::primitives::PeerEndpoint::TorV3 {
             key: [9u8; 32],
             port: 8333,
-        });
+        },
+    );
     let good_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
     let proxy = SocketAddr::from(([127, 0, 0, 1], 9050));
     let sam = SocketAddr::from(([127, 0, 0, 1], 7656));
@@ -1017,7 +1025,6 @@ fn resolve_keeps_absent_nested_fields_at_their_network_defaults() {
     assert!(!config.indexes.txindex);
     assert_eq!(config.indexes.script_index, ScriptIndexMode::Disabled);
     assert_eq!(config.observability.metrics_bind, None);
-    assert!(config.chainstate_journal.enabled);
     assert_eq!(
         config.validation.assume_valid_height, 0,
         "regtest pins no assume-valid anchor"
@@ -1107,37 +1114,15 @@ fn validation_engine_kernel_is_rejected_without_kernel_support() {
         Ok(_) => panic!("a build without kernel support must reject engine = kernel"),
         Err(error) => error,
     };
-    let message = error.to_string();
     assert!(
-        message.contains("not compiled") && message.contains("kernel"),
-        "unsupported-build error must name the missing capability, got {message}"
+        matches!(
+            error,
+            ConfigError::ValidationEngineUnsupported {
+                engine: ValidationEngine::Kernel
+            }
+        ),
+        "unsupported-build error must name the missing capability: {error:?}"
     );
-}
-
-#[test]
-fn journal_nested_overrides_apply_field_by_field_across_layers() {
-    let base = UserConfig {
-        chainstate_journal: ChainstateJournalOverrides {
-            blocks: Some(200),
-            ..ChainstateJournalOverrides::default()
-        },
-        ..UserConfig::default()
-    };
-    let higher = UserConfig {
-        chainstate_journal: ChainstateJournalOverrides {
-            seconds: Some(45),
-            ..ChainstateJournalOverrides::default()
-        },
-        ..UserConfig::default()
-    };
-    let config = resolved(&[&base, &higher]);
-    assert_eq!(config.chainstate_journal.blocks, 200);
-    assert_eq!(config.chainstate_journal.seconds, 45);
-    assert_eq!(
-        config.chainstate_journal.rotate_mib, 256,
-        "untouched bounds keep the network defaults"
-    );
-    assert_eq!(config.chainstate_journal.max_journal_mib, 2048);
 }
 
 #[test]
@@ -1236,53 +1221,6 @@ fn p2p_magic_override_is_cross_field_validated() {
 }
 
 #[test]
-fn journal_retention_and_lag_bounds_are_cross_field_validated() {
-    let inverted_retention = UserConfig {
-        chainstate_journal: ChainstateJournalOverrides {
-            rotate_mib: Some(4096),
-            max_journal_mib: Some(2048),
-            ..ChainstateJournalOverrides::default()
-        },
-        ..UserConfig::default()
-    };
-    let Err(error) = super::resolve(&[&inverted_retention]) else {
-        panic!("retention below rotation must fail validation");
-    };
-    assert!(
-        matches!(error, ConfigError::JournalMaxJournalMib),
-        "{error:?}"
-    );
-
-    let inverted_lag = UserConfig {
-        chainstate_journal: ChainstateJournalOverrides {
-            blocks: Some(500),
-            max_lag_blocks: Some(100),
-            ..ChainstateJournalOverrides::default()
-        },
-        ..UserConfig::default()
-    };
-    let Err(error) = super::resolve(&[&inverted_lag]) else {
-        panic!("a lag bound below the batch size must fail validation");
-    };
-    assert!(
-        matches!(error, ConfigError::JournalMaxLagBlocks),
-        "{error:?}"
-    );
-
-    let zero_period = UserConfig {
-        chainstate_journal: ChainstateJournalOverrides {
-            seconds: Some(0),
-            ..ChainstateJournalOverrides::default()
-        },
-        ..UserConfig::default()
-    };
-    let Err(error) = super::resolve(&[&zero_period]) else {
-        panic!("a non-positive period must fail validation");
-    };
-    assert!(matches!(error, ConfigError::JournalSeconds), "{error:?}");
-}
-
-#[test]
 fn earlier_set_fields_survive_a_later_bare_network_selection() {
     let overrides = UserConfig {
         p2p: P2pOverrides {
@@ -1302,7 +1240,10 @@ fn earlier_set_fields_survive_a_later_bare_network_selection() {
         ..UserConfig::default()
     };
     let config = resolved(&[&overrides, &selection]);
-    assert_eq!(config.network, bitcoin_rs_primitives::Network::Regtest);
+    assert_eq!(
+        config.network,
+        bitcoin_rs_consensus::primitives::Network::Regtest
+    );
     assert_eq!(
         config.p2p.connect,
         vec!["127.0.0.1:8333"],
@@ -1318,7 +1259,7 @@ fn earlier_set_fields_survive_a_later_bare_network_selection() {
     );
     assert_eq!(
         config.p2p.magic,
-        bitcoin_rs_primitives::Network::Regtest.magic(),
+        bitcoin_rs_consensus::primitives::Network::Regtest.magic(),
         "a field no layer set still fills from the winning profile"
     );
 }
@@ -1361,4 +1302,34 @@ fn empty_data_dir_is_rejected_by_config_validation() {
         panic!("empty data_dir must fail config validation");
     };
     assert!(matches!(error, ConfigError::DataDirEmpty), "{error:?}");
+}
+
+// ARCH-03
+#[test]
+fn storage_backend_gate_admits_exactly_the_compiled_engines() {
+    for backend in [
+        bitcoin_rs_storage::StorageBackend::RocksDb,
+        bitcoin_rs_storage::StorageBackend::SurrealKv,
+        bitcoin_rs_storage::StorageBackend::Mdbx,
+    ] {
+        let mut config =
+            NodeConfig::default_for_network(bitcoin_rs_consensus::primitives::Network::Regtest);
+        config.storage.backend = backend;
+        let result = config.validate();
+        if backend.is_compiled_in() {
+            assert!(
+                result.is_ok(),
+                "{backend:?} is compiled in and must pass validation, got {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    &result,
+                    Err(ConfigError::StorageBackendUnsupported { backend: rejected })
+                        if *rejected == backend
+                ),
+                "{backend:?} is not compiled in and must be refused by name, got {result:?}"
+            );
+        }
+    }
 }

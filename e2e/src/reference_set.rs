@@ -1,5 +1,5 @@
 use bitcoin::hashes::{Hash as _, sha256};
-use bitcoin_rs_rpc::manifest::MANIFEST_TOML;
+use bitcoin_rs_serving::manifest::MANIFEST_TOML;
 
 const REQUIRED_CORPORA: [&str; 2] = ["C150", "Cmodern"];
 

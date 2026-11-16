@@ -2,7 +2,7 @@
 
 `docs/contracts/qa-corpus.md` QAC-01 and QAC-04 and the framing in
 `fuzz/fuzz_targets/p2p_message.rs` require a selector followed by the payload,
-which may be empty. `crates/p2p/src/compat.rs` owns selector order; comments
+which may be empty. `crates/wire/src/compat.rs` owns selector order; comments
 are not inventory entries. The project data-preservation invariant applies to
 publication, and QAC-01 requires bounded ingress. File races
 below are injected in disposable directories, not an operator checkout.

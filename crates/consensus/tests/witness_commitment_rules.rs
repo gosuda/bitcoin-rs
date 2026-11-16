@@ -1,12 +1,12 @@
+use bitcoin_rs_consensus::primitives::{
+    Amount, Block, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness,
+};
 use bitcoin_rs_consensus::verify_block::{
     BlockRuleContext, verify_block_rules, verify_block_rules_precomputed,
 };
 use bitcoin_rs_consensus::{
     BlockFacts, BlockView, ConsensusError, check_block_body_binding, compute_merkle_root,
-};
-use bitcoin_rs_primitives::{
-    Amount, Block, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
-    Witness,
 };
 
 const PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];

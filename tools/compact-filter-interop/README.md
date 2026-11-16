@@ -11,7 +11,7 @@ Install the repository-pinned Bitcoin Core 31.1 using the existing
 `scripts/install-bitcoind.sh` installer, then:
 
 ```sh
-cargo build -p bitcoin-rs --features fjall
+cargo build -p bitcoin-rs
 cargo build --locked --manifest-path tools/compact-filter-interop/Cargo.toml
 python3 tools/compact-filter-interop/run.py \
   --bitcoind /path/to/bitcoin-core-31.1/bin/bitcoind \
@@ -33,8 +33,8 @@ tiny regtest measurements are not a mainnet benchmark; mainnet overhead remains
 unqualified.
 
 The pinned Core v31.1 fixture lives at
-`crates/index/tests/data/blockfilters-core-31.1.json`. Run it with
-`cargo test -p bitcoin-rs-index basic_filters_match_pinned_core_vectors`.
+`crates/projection/tests/data/blockfilters-core-31.1.json`. Run it with
+`cargo test -p bitcoin-rs-projection basic_filters_match_pinned_core_vectors`.
 
 Enable serving with `--blockfilterindex` (boolean; default false). Only basic
 filters on the active chain are supported. Catch-up/reconciliation refuses

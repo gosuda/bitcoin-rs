@@ -15,8 +15,8 @@ The default build is kernel-free. `cargo build -p bitcoin-rs` uses the native Ru
 | Subcommand | What it runs |
 | :--- | :--- |
 | `fmt` | `cargo fmt --all -- --check` |
-| `clippy` | Four kernel-free clippy profiles plus a production `cargo check` for the binary |
-| `test-crates` | Library test lanes |
+| `clippy [lane]` | Kernel-free clippy profiles (`all`, `services`, `node-runtime`) plus production cargo check |
+| `test-crates [lane]` | Library test lanes (`all`, `silent-payments`, `storage`, `consensus-execution`, `node-serving`) |
 | `test-binary` | Node binary test lane |
 | `test-workspace` | Workspace test lane |
 | `test` | `test-crates`, then `test-binary`, then `test-workspace` |
@@ -29,7 +29,7 @@ The default build is kernel-free. `cargo build -p bitcoin-rs` uses the native Ru
 
 `all` deliberately omits `proofs`. CI runners carry no Kani, Lean, or Aeneas toolchain. Run `proofs` yourself when you change a module with a `proofs.rs` file, a `*_model.rs` model, or a Lean file.
 
-The clippy profiles are not one command. The script checks the workspace with `silent-payments` but excludes `bitcoin-rs-consensus`, `bitcoin-rs-chainstate`, and `bitcoin-rs-node`. It then checks each of those three with its own feature set, and adds a production `check` of the `bitcoin-rs` binary. A clippy run over only the workspace misses those per-crate feature sets.
+The clippy profiles are not one command. They can be run as a whole or split into lanes: `services` (storage, projection, serving, mempool, tools) and `node-runtime` (bitcoin-rs, e2e, wire, consensus, execution, node). The script checks consensus, execution, and node with their respective native/feature combinations, and adds a production check of the bitcoin-rs binary. A clippy run over only the workspace misses those per-crate feature sets.
 
 The test lanes use `cargo nextest` when it is installed. Without nextest they fall back to `cargo test --no-fail-fast`. The two runners execute the same tests because the tree has no doctests.
 
@@ -40,13 +40,13 @@ The test lanes use `cargo nextest` when it is installed. Without nextest they fa
 For a change in one crate, start with the narrow test target:
 
 ```
-cargo test --locked -p bitcoin-rs-primitives --lib
+cargo test --locked -p bitcoin-rs-consensus --lib
 ```
 
 Replace the package and target with the owner you changed. A single test name narrows it further:
 
 ```
-cargo test --locked -p bitcoin-rs-primitives --lib superfluous_segwit_marker_is_rejected
+cargo test --locked -p bitcoin-rs-consensus --lib superfluous_segwit_marker_is_rejected
 ```
 
 That second command ran in this checkout and passed. The exact filter is useful when a contract test names the behavior.
@@ -55,7 +55,7 @@ For a formatting-only change, run `./scripts/ci-pr.sh fmt`. For a contract or ev
 
 ## What CI runs
 
-Pull requests run `fmt`, `deny`, `contracts`, `clippy`, and `test-crates` in parallel jobs. Merge-group requests add `book`, `test-binary`, and `test-workspace`, plus the kernel-consensus and full-node-compile lanes. Main pushes and manual dispatches add the full-node feature set with the C++ kernel and `--include-ignored` consensus vectors. They also run the kernel oracle, benchmark-smoke compilation, Python comparator tests, the Core differential lane, and native-script evidence.
+Pull requests run `fmt`, `deny`, `contracts`, `clippy`, and `test-crates` in parallel jobs. Merge-group requests add `book`, `test-binary`, and `test-workspace`, plus the kernel-consensus and full-node-compile lanes. Main pushes and manual dispatches add the full-node feature set with the C++ kernel and `--include-ignored` consensus vectors. They also run the kernel oracle, the Core differential lane, and native-script evidence.
 
 The compatibility campaign runs MSRV, dependency-range, and feature-matrix lanes. The model-check workflow is manual. The documented lane list is in [`CONCEPTS.md`](https://github.com/gosuda/bitcoin-rs/blob/main/CONCEPTS.md) under CI lane parity, and [`CONTRIBUTING.md`](https://github.com/gosuda/bitcoin-rs/blob/main/CONTRIBUTING.md) owns the pull-request verification rules.
 

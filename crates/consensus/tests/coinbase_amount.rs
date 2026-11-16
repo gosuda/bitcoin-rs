@@ -1,5 +1,5 @@
+use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_consensus::{ConsensusError, block_subsidy, verify_coinbase_amount};
-use bitcoin_rs_primitives::Network;
 
 const MAINNET: u32 = 210_000;
 const REGTEST: u32 = 150;

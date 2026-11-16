@@ -3,7 +3,7 @@ use crate::test_fixtures::{p2sh_true_script, true_redeem_script_sig};
 use crate::{ChainAdmissionSnapshot, Mempool, MempoolLimits, MempoolObserver, MutationEnvelope};
 use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin_rs_consensus::ValidationEngine;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, PeerEndpoint, Script, Sequence, TxIn, TxOut, Witness,
 };
 

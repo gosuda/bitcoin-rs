@@ -1,11 +1,9 @@
 /-
 Safety invariants of the chain-admission machine (Rust owner
-`crates/chainstate/src/admission_model.rs`). The state abstraction keeps the
+`crates/execution/src/admission_model.rs`). The state abstraction keeps the
 fields the ordered-commit rules constrain: retry and job budgets, the commit
-counter chain, the writer/reader exclusion, and the observer cursor.
-This file proves an abstract ordered-commit machine, not a line-by-line image of
-`docs/models/ChainAdmission/*.tla`: the TLA modules own the liveness checks and the
-root, frame and sync detail. Field and action names are frozen for the Rust model.
+counter chain, the window delta extent, the writer/reader exclusion, and the observer cursor.
+Field and action names are frozen for the Rust model.
 -/
 
 namespace ChainAdmission
@@ -20,6 +18,7 @@ structure State where
   reader : Nat
   subscribed : Nat
   cursor : Nat
+  windowDelta : Nat
 
 /-- Retry bound, job slots and publication counter bound. -/
 def maxAttempts : Nat := 4
@@ -28,14 +27,14 @@ def counterBound : Nat := 1024
 
 def init : State :=
   { attempts := 0, jobs := 0, proposed := 0, committed := 0, published := 0,
-    writer := 0, reader := 0, subscribed := 0, cursor := 0 }
+    writer := 0, reader := 0, subscribed := 0, cursor := 0, windowDelta := 0 }
 
 inductive Action
   | startJob
   | finishJob
   | prepare
   | commitBatch
-  | publish
+  | publishPrefix
   | failBatch
   | retry
   | subscribe
@@ -50,12 +49,16 @@ inductive Action
 def step (s : State) : Action → State
   | .startJob => if s.jobs < jobSlots then { s with jobs := s.jobs + 1 } else s
   | .finishJob => if 0 < s.jobs then { s with jobs := s.jobs - 1 } else s
-  | .prepare => if s.proposed < counterBound then { s with proposed := s.proposed + 1 } else s
+  | .prepare =>
+    if s.proposed < counterBound then
+      { s with proposed := s.proposed + 1, windowDelta := s.proposed + 1 }
+    else s
   | .commitBatch =>
-    if s.committed < s.proposed then { s with committed := s.committed + 1 } else s
-  | .publish => if s.published < s.committed then { s with published := s.published + 1 } else s
+    if s.committed < s.windowDelta then { s with committed := s.windowDelta } else s
+  | .publishPrefix =>
+    if s.published < s.committed then { s with published := s.committed } else s
   | .failBatch => if s.attempts < maxAttempts then { s with attempts := s.attempts + 1 } else s
-  | .retry => s
+  | .retry => { s with windowDelta := s.committed }
   | .subscribe => { s with subscribed := 1, cursor := 0 }
   | .observe =>
     if s.subscribed = 1 ∧ s.cursor < s.published then { s with cursor := s.cursor + 1 } else s
@@ -65,13 +68,14 @@ def step (s : State) : Action → State
   | .releaseReader => { s with reader := 0 }
   | .stutter => s
 
-/-- Ordered-commit safety: bounded work, monotone publication chain, exclusive
-durable writer, and an observer that never leads publication. -/
+/-- Ordered-commit safety: bounded work, monotone publication chain, window-delta validity,
+exclusive durable writer, and an observer that never leads publication. -/
 def safety (s : State) : Prop :=
   s.attempts ≤ maxAttempts
   ∧ s.jobs ≤ jobSlots
   ∧ s.published ≤ s.committed
-  ∧ s.committed ≤ s.proposed
+  ∧ s.committed ≤ s.windowDelta
+  ∧ s.windowDelta ≤ s.proposed
   ∧ s.proposed ≤ counterBound
   ∧ s.writer + s.reader ≤ 1
   ∧ s.cursor ≤ s.published
@@ -81,7 +85,7 @@ theorem safety_init : safety init := by
   unfold safety init maxAttempts jobSlots counterBound
   decide
 
--- RCV-02, SYNC-05
+-- RCV-02, SYNC-05, WIN-03, WIN-06, CMT-02, CMT-03
 /-- `safety` is an inductive invariant of `step` from `init`. -/
 theorem safety_inductive (s : State) (a : Action) (h : safety s) :
     safety (step s a) := by
@@ -89,14 +93,14 @@ theorem safety_inductive (s : State) (a : Action) (h : safety s) :
   cases a <;> simp only [step] <;> (try split)
   all_goals
     simp only [maxAttempts, jobSlots, counterBound] at *
-    refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+    refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   all_goals
     first
       | omega
       | trivial
       | (left; trivial)
       | (right; trivial)
-      | (rcases h with ⟨_, _, _, _, _, _, _, hlast⟩
+      | (rcases h with ⟨_, _, _, _, _, _, _, _, hlast⟩
          rcases hlast with hsub | hcur <;> omega)
 
 end ChainAdmission

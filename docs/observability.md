@@ -11,9 +11,6 @@ Owners:
 - Boundary rule and audit: this page (`OBS-01`..`OBS-06`)
 - USDT probe ABI and compatibility table: [`tracing.md`](tracing.md)
   (`crates/consensus/probes.d`, `crates/consensus/src/trace.rs`)
-- Hot-path attribution of measured product stages:
-  [`contracts/hot-path-attribution.md`](contracts/hot-path-attribution.md)
-  (HPA-01..HPA-13), inventory in [`benchmarks/hot-path-ledger.toml`](benchmarks/hot-path-ledger.toml)
 - Metrics module docs and signal registry: `crates/node/src/metrics.rs`
 
 ## Clauses
@@ -29,15 +26,14 @@ migration.
 Metrics MUST NOT carry per-event payloads, block/tx/peer identity, or any
 other high-cardinality label value. The only label values allowed are
 enumerations: backend names, durability modes, and closed reason taxonomies
-(see `node.sync.stall_episodes_cleared{reason}` in `crates/p2p/src/download_window.rs`
+(see `node.sync.stall_episodes_cleared{reason}` in `crates/node/src/p2p/download_window.rs`
 for the pattern). They also include the enum capability states of `node.capability.txindex_readiness`, and
 the closed family labels of `index.family_planned_write_bytes{family}` where
-`family` in `{tx_lookup, script_history, script_live, headers, filters}`.
+`family` in `{tx_lookup, script_history, script_live, headers, filters, tail_log}`.
 No speculative instrumentation: a signal earns its place by an operator
 decision (alert, dashboard, SLO) or a named contract hook (below).
-Benchmark evidence identity (binary/configuration/corpus digests and hardware)
-is recorded with benchmark samples under HPA-12; it is not attached to every
-Prometheus series as global labels.
+Evidence identity (binary/configuration/corpus digests and hardware)
+is not attached to Prometheus series as global labels.
 
 RPC connection isolation (API-34/WF-02) exposes `rpc.connections.active`
 (gauge, admitted live workers), `rpc.connections.rejected_total` (counter,
@@ -112,16 +108,19 @@ row for `index.family_planned_write_bytes`. This clause describes it.
 
 `index.family_planned_write_bytes{family}` is a histogram in bytes with one
 label, `family`, in `{tx_lookup, script_history, script_live, headers,
-filters}`. The families are the transaction-id lookup rows, the script funding
-and spending rows, the live-view mutations, the block header identity rows, and
-the basic compact-filter rows. A forward batch commit records one observation
+filters, tail_log}`. The families are the transaction-id lookup rows, the
+script history rows, the live-view mutations, the block header identity rows,
+the basic compact-filter rows, and the segment-tail log rows. A forward batch
+commit records one observation
 for each family whose planned bytes are non-zero, after the store commit
-succeeds (`commit_forward_with_cursor` in `crates/index/src/index/write.rs`;
+succeeds (`commit_forward_with_cursor` in `crates/projection/src/index/write.rs`;
 `commit_forward` and `commit_block` use it). A failed commit records nothing,
 and no other commit path records this metric. The value is the sum, over the
 blocks of the batch, of the bytes each block planned for that family under the
 rule in the next table (`PendingRows::encoded_bytes_by_family` in
-`crates/index/src/index/rows.rs`). The sum is fixed as blocks join the batch,
+`crates/projection/src/index/rows.rs` for `script_live` and `headers`, and
+`planned_tail_bytes` in `crates/projection/src/index/tail_writes.rs` for the
+other families). The sum is fixed as blocks join the batch,
 before the commit merges, sorts, and de-duplicates the batch rows. The value is
 row-size arithmetic over the prepared rows. It does not read the store, so it
 does not include write-ahead-log, storage-engine, or device write volume, and
@@ -129,11 +128,12 @@ it is not a count of bytes written.
 
 | `family` | Planned bytes per block |
 | --- | --- |
-| `tx_lookup` | Distinct transaction-id rows times `HASH_PREFIX_ROW_SIZE` (12), plus every transaction-id position times `TX_POSITION_SIZE` (6). |
-| `script_history` | The same rule over the funding rows and the spending rows together. |
-| `script_live` | `SCRIPT_LIVE_ROW_SIZE` (43, the width of the row key) times the number of live-view operations. Inserts and deletes each count once. |
+| `tx_lookup` | The key and value bytes of each `TxDir` put that the block's segment-tail append writes. |
+| `script_history` | The key and value bytes of each `ScriptDict`, `ScriptPost`, `SpendDir`, and `ScriptStats` put that the tail append writes. |
+| `script_live` | For each live insert, `SCRIPT_LIVE_ROW_SIZE` (43) plus the encoded value length. For each live delete, 43, the key only. |
 | `headers` | `HEADER_ROW_SIZE` (80) times the number of header rows. |
-| `filters` | For each filter row, 98 plus the filter length. |
+| `filters` | The key and value bytes of each `Filters` put that the tail append writes. |
+| `tail_log` | The key and value bytes of each `IdxMeta` put that the tail append writes, plus 36 bytes (`4 + SCRIPT_STATS_VALUE_LEN`) for each `ScriptStats` put, the prior value its undo entry may carry. |
 
 ### `OBS-02`: `tracing::` is diagnostics, not an API
 
@@ -153,35 +153,32 @@ layer that must not pollute metrics cardinality. If a detailed per-event datum
 is worth keeping in production but is not operator-facing, it is a probe
 argument, not a metric label. This slice adds no new probes.
 
-### `OBS-04`: Hot-path attribution hooks are exempt, and only via the ledger
+### `OBS-04`: Per-event decomposition histograms are a fixed exempt set
 
-The measured product-stage histograms that
-[`contracts/hot-path-attribution.md`](contracts/hot-path-attribution.md)
-consumes (HPA-04: "Existing `metrics::histogram!` names in the ledger are
-diagnostic hooks") are grandfathered into the metrics API. They are per-event
-decompositions. Their inventory is exactly the `histogram = ` keys of
-[`benchmarks/hot-path-ledger.toml`](benchmarks/hot-path-ledger.toml). A hook
-outside that file must be renamed into `tracing::`, and a new hook must first
-become a ledger path row. The named hooks are:
-| Ledger hook | Ledger path |
-| --- | --- |
-| `node.window.verify_seconds` | `apply.prove_window` |
-| `node.apply_block.total_seconds` | `apply.commit` |
-| `node.window.context_seconds` | `apply.header_accept` |
-| `node.window.parse_seconds` | `apply.block_decode` |
-| `node.window.prepare_seconds` | `apply.window_overlay` |
-| `node.apply_block.block_rules_seconds` | `apply.merkle_witness` |
-| `node.apply_block.script_verify_seconds` | `apply.script_verify` |
-| `node.apply_block.bip30_bip34_seconds` | `apply.contextual_checks` |
-| `node.apply_block.utxo_commit_seconds` | `apply.utxo_commit` |
-| `node.apply_block.undo_persist_seconds` | `apply.undo_persist` |
-| `node.apply_block.block_body_persist_seconds` | `apply.body_persist` |
-| `node.apply_block.coin_stats_finish_seconds` | `apply.coinstats` |
-| `node.apply_block.block_tree_insert_seconds` | `apply.tip_publish` |
-| `node.sync.getdata_batch_size` | `p2p.request_schedule` |
-| `node.sync.apply_idle_seconds` | `p2p.apply_idle` |
-| `node.sync.download_blocked_by_apply_seconds` | `p2p.download_blocked_by_apply` |
-| `node.event_loop.tick_seconds` | `p2p.event_loop` |
+The per-event decomposition histograms named below are grandfathered into the
+metrics API. They are the only `metrics::histogram!` names allowed to carry
+per-event decompositions; a new decomposition is a `tracing::` event, not a new
+metric. The named hooks are:
+| Histogram |
+| --- |
+| `node.window.verify_seconds` |
+| `node.apply_block.total_seconds` |
+| `node.window.context_seconds` |
+| `node.window.parse_seconds` |
+| `node.window.prepare_seconds` |
+| `node.apply_block.block_rules_seconds` |
+| `node.apply_block.script_verify_seconds` |
+| `node.apply_block.bip30_bip34_seconds` |
+| `node.apply_block.utxo_commit_seconds` |
+| `node.apply_block.undo_persist_seconds` |
+| `node.apply_block.block_body_persist_seconds` |
+| `node.apply_block.coin_stats_finish_seconds` |
+| `node.apply_block.block_tree_insert_seconds` |
+| `node.sync.getdata_batch_size` |
+| `node.sync.apply_idle_seconds` |
+| `node.sync.download_blocked_by_apply_seconds` |
+| `node.sync.apply_buffered_blocks_seconds` |
+| `node.event_loop.tick_seconds` |
 
 ### `OBS-05`: Decision table for new instrumentation
 
@@ -190,7 +187,7 @@ become a ledger path row. The named hooks are:
 | Would an operator alert or dashboard on it? Is it a rate/total, backlog, or stable latency? | `metrics::` (OBS-01) |
 | Is it a per-event decomposition a developer attaches to one investigation? | `tracing::` (OBS-02) |
 | Is it detailed per-event data (hashes, payloads, peer identity, raw durations) worth keeping in production? | USDT probe argument (OBS-03) |
-| Is it a measured product stage the hot-path attribution consumes? | ledger path first, then `metrics::` hook (OBS-04) |
+| Is it a new per-event decomposition of a measured product stage? | `tracing::` (OBS-02); the OBS-04 histogram exempt set is closed |
 | Does it need a block hash, txid, or peer address as a metric label? | none of the above, so it is a `tracing::` field or probe argument |
 
 ### `OBS-06`: Metric migration
@@ -213,7 +210,6 @@ below):
 | `node.apply_block.script_resolution_seconds` | `tracing::debug!("script_verify: profile")` field `script_resolution_us` |
 | `node.apply_block.script_prepare_seconds` | `"script_verify: profile"` field `script_prepare_us` |
 | `node.apply_block.script_parallel_seconds` | `"script_verify: profile"` field `script_parallel_us` |
-| `node.chainstate_journal.replay_seconds` | removed as redundant: already a `replay_seconds` field on `tracing::info!("chainstate restore selected")` |
 | `node.durable_head.group_sync_seconds` | `tracing::debug!("durable_head: group commit")` field `sync_us` |
 | `node.durable_head.group_commit_seconds` | `"durable_head: group commit"` field `commit_us` |
 | `node.durable_head.group_blocks` | `"durable_head: group commit"` field `blocks` |
@@ -228,13 +224,13 @@ below):
 | `node.sync.chain_sync_probes` | `tracing::debug!("block sync: sent chain-sync eviction probe")` |
 | `node.sync.prefix_probe_peers` | `tracing::info!("block sync: started common-prefix peer probe")` field `alternates` |
 | `node.sync.cold_front_hedges` | `tracing::info!("block sync: hedged cold-start stalled front")` |
-| Prometheus global labels `binary_sha256`, `version`, `config_sha256`, `backend`, `durability`, `hardware`, `corpus_id`, `corpus_manifest_sha256` | removed from operator scrapes; `EvidenceIdentity` remains attached to benchmark ledger samples under HPA-12 |
+| Prometheus global labels `binary_sha256`, `version`, `config_sha256`, `backend`, `durability`, `hardware`, `corpus_id`, `corpus_manifest_sha256` | removed from operator scrapes; `EvidenceIdentity` (`crates/node/src/metrics.rs`) stays in code, not in operator series |
 
 Retired validation-stage timers emit `apply_block: profile` events as each
 stage completes, before its error is propagated. They include `height` and
 `block_hash`, cover proposals as well as commits, and contain only the fields
 for the completed stage; unvisited stages have no event. The later commit
-summary retains the operational/ledger stage durations. The migrated validation
+summary retains the per-stage durations. The migrated validation
 and prevout-resolution clocks start only when DEBUG tracing is enabled; no
 retired metric is restored. `script_verify: profile` emits `script_resolution_us`
 before propagating a resolution error, then emits preparation/parallel timings
@@ -245,12 +241,12 @@ if verification runs. Consumers must not require every field on a single event.
 - `scrape_returns_operator_metrics_without_evidence_identity_labels` exercises
   the rendered Prometheus boundary with a corpus-bearing process identity. It
   scans every sample, including the real txindex readiness gauge. Evidence
-  identity remains in benchmark ledger records, not in operator time-series
+  identity remains in code, not in operator time-series
   labels.
 - The chainstate observability fixtures check retired metric names only on the
   caller thread. The fixtures connect coinbase-only apply/window cases on
   top of a directly published genesis seed. Seeding alone (`seed_genesis` in
-  `crates/chainstate/src/test_fixtures.rs`) publishes the genesis tip with
+  `crates/execution/src/test_fixtures.rs`) publishes the genesis tip with
   count 1 without connect and without hooks, so it emits no apply/window
   observation. Nonzero stage observations require at least one connected mined
   coinbase-only child: `apply_block` for the apply timers, a `connect_window`
@@ -266,15 +262,14 @@ if verification runs. Consumers must not require every field on a single event.
   valid-block fixture.
 - `composite_isolates_a_panicking_leg` exercises the real observer failure
   path and requires the operator counter to have no leg label.
-- `family_byte_histograms_recording` (`crates/index/src/index/rows.rs`) drives
-  `record_family_byte_histograms` against a local recorder. It checks the five
-  `family` label values with their byte values, and that a family with zero
+- `family_byte_histograms_recording` (`crates/projection/src/index/rows/tests.rs`)
+  drives `record_family_byte_histograms` against a local recorder. It checks the
+  six `family` label values with their byte values, and that a family with zero
   planned bytes records nothing. It does not drive a commit.
 - Review enforcement: a new `metrics::` call site must cite an OBS clause in
-  the PR. A series not in the ledger and not an operator signal is a
-  review-failing diagnostic leak into the metrics API.
-- The historical stage-timer tables were removed from
-  [`benchmarks/end-to-end-sync.md`](benchmarks/end-to-end-sync.md#history)
-  and are in Git history at commit `bda50acd4`. They use old metric names on
+  the PR. A series outside the OBS-04 exempt set and not an operator signal is
+  a review-failing diagnostic leak into the metrics API.
+- The historical stage-timer tables are in Git history at commit `bda50acd4`.
+  They use old metric names on
   retired artifacts. They are evidence, not a promise that those series still
   exist.

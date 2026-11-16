@@ -8,7 +8,7 @@
 # sync Core's chain over BIP324 v2: one dials Core, and Core dials the other.
 # Records Core's view of the bitcoin-rs peer and both ends' view of each
 # transport into an evidence JSON and runs
-# `crates/p2p/tests/core_interop_live.rs` against it.
+# `crates/wire/tests/core_interop_live.rs` against it.
 #
 # usage: run-p2p-core-interop.sh --bitcoind-command <command>
 #            [--bitcoin-rs-command <command>] [--workdir <dir>] [--evidence <path>]
@@ -136,7 +136,7 @@ CORE_LOG="${WORKDIR}/bitcoind.log"
 RS_RPC_USER="interop"
 RS_RPC_PASSWORD="interop"
 # Sole producer-side owner of the evidence schema identifier; the verifier
-# (crates/p2p/tests/core_interop_live.rs SCHEMA) consumes the value recorded
+# (crates/wire/tests/core_interop_live.rs SCHEMA) consumes the value recorded
 # in the evidence. Do not add a second definition in this script.
 EVIDENCE_SCHEMA="bitcoin-rs-core-differential-v4"
 
@@ -877,7 +877,7 @@ echo "evidence written to ${EVIDENCE}"
 if [[ "${SKIP_VERIFIER}" -ne 1 ]]; then
   echo "==> running the ignored verifier test"
   P2P_CORE_INTEROP_EVIDENCE="${EVIDENCE}" env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR \
-    cargo test --locked --profile quickstart -p bitcoin-rs-p2p \
+    cargo test --locked --profile quickstart -p bitcoin-rs-wire \
       --test suite core_interop_live:: -- --ignored --nocapture
 fi
 

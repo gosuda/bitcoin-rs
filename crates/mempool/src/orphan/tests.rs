@@ -1,11 +1,13 @@
 use super::*;
-use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut, Witness};
+use bitcoin_rs_consensus::primitives::{
+    Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut, Witness,
+};
 fn source(id: u64) -> PeerToken {
     PeerToken {
-        endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+        endpoint: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::Ip(
             core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
         )),
-        addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+        addr: Some(bitcoin_rs_consensus::primitives::PeerEndpoint::from((
             [127, 0, 0, 1],
             8333,
         ))),

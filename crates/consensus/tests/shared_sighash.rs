@@ -1,21 +1,21 @@
 #![expect(clippy::expect_used, reason = "fixed independent-reference fixtures")]
 
 use bitcoin::hashes::Hash as _;
+use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
 use bitcoin::sighash::{
     Annex, EcdsaSighashType, Prevouts, SighashCache as OracleCache, TapSighashType,
 };
 use bitcoin_rs_consensus::kernel::{BlockParse, verify_tx_scripts};
-use bitcoin_rs_consensus::{
-    BlockView, ConsensusError, ScriptStageTimings, ValidationEngine, verify_block_input_scripts,
-};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, Network, OutPoint, Script, Sequence, Sighash, SighashCache,
     SighashError, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
-use bitcoin_rs_script::{
+use bitcoin_rs_consensus::script::{
     PreparedTransaction, PrevoutError, ScriptErrCode, ScriptError, VerifyFlags, opcode, push_data,
 };
-use secp256k1::{Keypair, Message, PublicKey, SECP256K1, SecretKey};
+use bitcoin_rs_consensus::{
+    BlockView, ConsensusError, ScriptStageTimings, ValidationEngine, verify_block_input_scripts,
+};
 
 const MODES: [Sighash; 7] = [
     Sighash::Default,
@@ -230,9 +230,10 @@ struct SigningFixture {
 }
 
 fn signing_fixture() -> SigningFixture {
+    let secp = Secp256k1::new();
     let key = SecretKey::from_slice(&[7; 32]).expect("test key");
-    let pubkey = PublicKey::from_secret_key(SECP256K1, &key);
-    let keypair = Keypair::from_secret_key(SECP256K1, &key);
+    let pubkey = PublicKey::from_secret_key(&secp, &key);
+    let keypair = Keypair::from_secret_key(&secp, &key);
     let mut script = push_data(&pubkey.serialize());
     script.push(opcode::OP_CHECKSIG);
     let mut witness_script = vec![0xab];
@@ -246,7 +247,7 @@ fn signing_fixture() -> SigningFixture {
     let tree = bitcoin::taproot::TaprootBuilder::new()
         .add_leaf(0, tapscript.clone())
         .expect("single leaf")
-        .finalize(SECP256K1, keypair.x_only_public_key().0)
+        .finalize(&secp, keypair.x_only_public_key().0)
         .expect("taproot tree");
     let control = tree
         .control_block(&(tapscript.clone(), bitcoin::taproot::LeafVersion::TapScript))
@@ -326,7 +327,8 @@ fn sign_taproot_input(
             TapSighashType::from_consensus_u8(mode.to_u8()).expect("mode"),
         )
         .expect("taproot digest");
-    let mut signature = SECP256K1
+    let secp = Secp256k1::new();
+    let mut signature = secp
         .sign_schnorr_no_aux_rand(
             &Message::from_digest(digest.to_byte_array()),
             &fixture.keypair,
@@ -379,7 +381,8 @@ fn sign_ecdsa_input(
             .expect("BIP143 digest")
             .to_byte_array()
     };
-    let mut signature = SECP256K1
+    let secp = Secp256k1::new();
+    let mut signature = secp
         .sign_ecdsa(&Message::from_digest(digest), &fixture.key)
         .serialize_der()
         .to_vec();
@@ -576,7 +579,7 @@ fn native_signature_cache_preserves_verdicts() {
         .zip(&prevouts)
         .map(|(input, output)| (input.previous_output, output.clone()))
         .collect();
-    let cache = bitcoin_rs_script::SignatureCache::new();
+    let cache = bitcoin_rs_consensus::script::SignatureCache::new();
     assert_eq!(
         verify_tx_scripts(
             &tx,

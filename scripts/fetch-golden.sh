@@ -2,7 +2,7 @@
 set -euo pipefail
 
 heights=(0 1 170 91722 91812 91842 91880 173818 363731 481823 481824 624455 709632 800000 880000)
-out_dir="crates/primitives/tests/testdata"
+out_dir="crates/consensus/tests/testdata"
 mkdir -p "${out_dir}"
 
 # Stage on the destination filesystem so a failed transfer cannot become a cache hit.

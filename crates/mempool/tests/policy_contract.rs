@@ -7,6 +7,10 @@ use super::{p2sh_true_script, true_redeem_script_sig};
 use alloc::sync::Arc;
 use bitcoin_rs_consensus::ValidationEngine;
 
+use bitcoin_rs_consensus::primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
+use bitcoin_rs_consensus::script::opcode;
 use bitcoin_rs_mempool::standardness::{
     AcceptanceRejectReason, StandardnessError, StandardnessPolicy, is_standard_tx,
 };
@@ -15,10 +19,6 @@ use bitcoin_rs_mempool::{
     MempoolLimits, MutationOutcome, PolicyError, PrevoutMeta, RbfError, RemovalReason,
     ReplacementCandidate,
 };
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
-};
-use bitcoin_rs_script::opcode;
 use parking_lot::RwLock;
 
 const DUST_RELAY_FEE_SAT_PER_KVB: u64 = 3_000;
@@ -85,7 +85,7 @@ fn entry(tx: Tx, vsize: u32, fee: u64) -> MempoolEntry {
 }
 
 #[test]
-fn below_min_relay_fee_rejects_on_both_surfaces_at_the_same_floor() -> Result<(), TestError> {
+fn below_min_relay_fee_rejects_at_the_same_floor() -> Result<(), TestError> {
     let mut pool = Mempool::new(MempoolLimits::default());
     let low = tx(outpoint(1, 0), 1_000, 0xFF_FF_FF_FF);
     let err = pool
@@ -293,7 +293,7 @@ fn cluster_count_limit_rejects_a_sibling_that_ancestors_would_admit() -> Result<
 }
 
 #[test]
-fn cluster_size_limit_rejects_on_both_surfaces() -> Result<(), TestError> {
+fn cluster_size_limit_rejects() -> Result<(), TestError> {
     let limits = MempoolLimits {
         cluster_count: 100,
         cluster_size_vbytes: 250,
@@ -313,7 +313,7 @@ fn cluster_size_limit_rejects_on_both_surfaces() -> Result<(), TestError> {
 }
 
 #[test]
-fn replacement_into_a_full_cluster_is_allowed_on_both_surfaces() -> Result<(), TestError> {
+fn replacement_into_a_full_cluster_is_allowed() -> Result<(), TestError> {
     let limits = MempoolLimits {
         cluster_count: 2,
         ..MempoolLimits::default()
@@ -335,7 +335,7 @@ fn replacement_into_a_full_cluster_is_allowed_on_both_surfaces() -> Result<(), T
 }
 
 #[test]
-fn oversized_weight_is_not_standard_on_both_surfaces() {
+fn oversized_weight_is_not_standard() {
     let mut oversized = tx(outpoint(1, 0), 1_000, 0xFF_FF_FF_FF);
     oversized.outputs = (0..3_400)
         .map(|_| TxOut {
@@ -351,7 +351,7 @@ fn oversized_weight_is_not_standard_on_both_surfaces() {
 }
 
 #[test]
-fn nonstandard_output_script_is_not_standard_on_both_surfaces() {
+fn nonstandard_output_script_is_not_standard() {
     let weird = tx_multi(&[(outpoint(1, 0), 0xFF_FF_FF_FF)], 5_000, op_true_script());
     assert_eq!(
         is_standard_tx(&weird, &policy()).err(),
@@ -405,7 +405,7 @@ impl AdmissionChain for MetaChain {
             height: self.height,
             locktime_cutoff: self.locktime_cutoff,
             csv_active: self.csv_active,
-            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+            next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
             confirmed: false,
         })
     }
@@ -827,7 +827,7 @@ fn mempool_min_fee_holds_until_a_block_connects_then_halves_each_half_life() -> 
     assert_eq!(pool.min_fee_sat_per_kvb(T0), floor);
     assert_eq!(pool.min_fee_sat_per_kvb(T0 + 30 * 24 * 60 * 60), floor);
 
-    pool.remove_for_block(&[], &[], 2, T0);
+    pool.remove_for_block(&bitcoin_rs_mempool::TransitionFacts::from_txs(&[]), 2, T0);
     assert_eq!(pool.min_fee_sat_per_kvb(T0), floor);
     assert_eq!(pool.min_fee_sat_per_kvb(T0 + HALF_LIFE_SECS), floor / 2);
     assert_eq!(pool.min_fee_sat_per_kvb(T0 + 2 * HALF_LIFE_SECS), floor / 4);

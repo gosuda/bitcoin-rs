@@ -4,11 +4,11 @@ use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin::hex::DisplayHex;
-use bitcoin_rs_mempool::{BodyInterest, MempoolObserver, MutationEnvelope, MutationOutcome};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Witness, consensus_bytes,
     encode::double_sha256,
 };
+use bitcoin_rs_mempool::{BodyInterest, MempoolObserver, MutationEnvelope, MutationOutcome};
 use parking_lot::Mutex;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 

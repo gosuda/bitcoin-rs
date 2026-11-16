@@ -4,13 +4,13 @@ use std::str::FromStr;
 use bitcoin::merkle_tree::calculate_root;
 use bitcoin_rs_consensus::BlockFacts;
 use bitcoin_rs_consensus::kernel::BlockParse;
+use bitcoin_rs_consensus::primitives::layout::ParsedBlock;
+use bitcoin_rs_consensus::primitives::{Block, Tx, Txid, Wtxid, consensus_bytes};
 use bitcoin_rs_consensus::verify_block::{
     BlockRuleContext, block_witness_commitment_matches, verify_block_rules,
     verify_block_rules_precomputed,
 };
 use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
-use bitcoin_rs_primitives::layout::ParsedBlock;
-use bitcoin_rs_primitives::{Block, Tx, Txid, Wtxid, consensus_bytes};
 
 const LEGACY_HEIGHT: u32 = 170;
 const SEGWIT_HEIGHT: u32 = 481_824;
@@ -18,7 +18,7 @@ const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
 fn fixture_bytes(height: u32) -> Vec<u8> {
     let path = format!(
-        "{}/../primitives/tests/testdata/{}.bin",
+        "{}/tests/testdata/{}.bin",
         env!("CARGO_MANIFEST_DIR"),
         height
     );
@@ -29,7 +29,7 @@ fn fixture_bytes(height: u32) -> Vec<u8> {
 
 fn fixture_txids(height: u32) -> Vec<Txid> {
     let path = format!(
-        "{}/../primitives/tests/testdata/{}.txids.txt",
+        "{}/tests/testdata/{}.txids.txt",
         env!("CARGO_MANIFEST_DIR"),
         height
     );

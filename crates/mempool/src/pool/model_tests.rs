@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
 };
 use hashbrown::{HashMap, HashSet};
@@ -26,7 +26,7 @@ fn model_tx(nonce: u32, inputs: &[OutPoint], outputs_count: u32) -> Tx {
                 previous_output: *previous_output,
                 script_sig: Script::new(),
                 sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: bitcoin_rs_primitives::Witness::new(),
+                witness: bitcoin_rs_consensus::primitives::Witness::new(),
             })
             .collect(),
         outputs: (0..out_count)
@@ -572,8 +572,7 @@ impl ModelDriver {
         let block_id_list: Vec<Txid> = block_txs.iter().map(Tx::txid).collect();
         let expected_removals = self.naive.plan_block_removals(&block_txs, &block_id_list);
         let outcome = self.pool.remove_for_block(
-            &block_refs,
-            &block_id_list,
+            &crate::settlement::TransitionFacts::from_txs(&block_refs),
             self.height.saturating_add(1),
             self.current_time,
         );

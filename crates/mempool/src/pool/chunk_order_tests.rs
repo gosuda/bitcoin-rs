@@ -4,9 +4,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use bitcoin_rs_primitives::{
-    Amount, Block, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
-    Witness,
+use bitcoin_rs_consensus::primitives::{
+    Amount, Block, BlockImage, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
+    TxOut, Txid, Witness,
 };
 use hashbrown::{HashMap, HashSet};
 use proptest::prelude::*;
@@ -353,7 +353,11 @@ fn remove_for_block_confirms_and_conflicts() -> Result<(), MempoolError> {
     ))?;
 
     let confirmed = order_tx(1, &[], 1, Sequence::MAX);
-    let included = pool.remove_for_block(&[&confirmed], &[parent_txid], 3, 5);
+    let included = pool.remove_for_block(
+        &crate::settlement::TransitionFacts::from_txs(&[&confirmed]),
+        3,
+        5,
+    );
     assert!(pool.contains_txid(&child_txid));
     assert!(!pool.contains_txid(&parent_txid));
     assert!(
@@ -365,8 +369,11 @@ fn remove_for_block_confirms_and_conflicts() -> Result<(), MempoolError> {
     pool.assert_index_matches_oracle("a block inclusion");
 
     let conflict = order_tx(6, &[(other_out.txid, other_out.vout)], 1, Sequence::MAX);
-    let conflict_txid = conflict.txid();
-    let swept = pool.remove_for_block(&[&conflict], &[conflict_txid], 3, 6);
+    let swept = pool.remove_for_block(
+        &crate::settlement::TransitionFacts::from_txs(&[&conflict]),
+        3,
+        6,
+    );
     assert!(!pool.contains_txid(&rival_child_txid));
     assert_eq!(pool.len(), 2);
     assert!(
@@ -476,7 +483,11 @@ fn a_full_cluster_keeps_its_exact_order_through_mutations() {
     pool.assert_index_matches_oracle("a leaf overlay");
 
     let confirmed = order_tx(1, &[], 2, Sequence::MAX);
-    pool.remove_for_block(&[&confirmed], &[spine[0]], 3, 133);
+    pool.remove_for_block(
+        &crate::settlement::TransitionFacts::from_txs(&[&confirmed]),
+        3,
+        133,
+    );
     assert_eq!(pool.len(), 63);
     assert_eq!(
         pool.derived.chunks.len(),
@@ -531,8 +542,11 @@ fn live_facts(pool: &Mempool) -> Vec<(Vec<Txid>, i128, u64)> {
 
 fn apply_block(pool: &mut Mempool, block: &Block) {
     let refs: Vec<&Tx> = block.txs.iter().collect();
-    let ids = block.txids();
-    let _ = pool.remove_for_block(&refs, &ids, 3, 5);
+    let _ = pool.remove_for_block(&crate::settlement::TransitionFacts::from_txs(&refs), 3, 5);
+}
+
+fn block_facts(block: &Block) -> crate::settlement::TransitionFacts {
+    crate::settlement::TransitionFacts::from_block(&BlockImage::from_local(block.clone()))
 }
 
 fn twin_pools(build: impl Fn(&mut Mempool)) -> (Mempool, Mempool) {
@@ -550,7 +564,7 @@ fn assert_projection_matches_real(first: &Mempool, second: &mut Mempool, block: 
     let before_sequence = first.sequence_number();
     let before_fee_sequence = first.fee_delta_sequence_number();
     let before_live = live_facts(first);
-    let plan = first.plan_block_removals(block);
+    let plan = first.plan_block_removals(&block_facts(block));
     assert_plan_unique(&plan);
     let projected = projected_facts(first, &plan);
     assert_eq!(first.len(), before_len, "projection mutated membership");
@@ -619,7 +633,7 @@ fn projected_long_touched_run_still_yields_the_untouched_tail() {
         block_txs.push(order_tx(2 * pair + 1, &[], 1, Sequence::MAX));
     }
     let block = test_block(block_txs);
-    let plan = first.plan_block_removals(&block);
+    let plan = first.plan_block_removals(&block_facts(&block));
     assert_eq!(
         plan.removals.len(),
         usize::try_from(PAIRS).expect("pair count fits"),
@@ -635,7 +649,7 @@ fn projected_empty_plan_matches_live_order() {
         insert_ordered(pool, 2, &[], 1, order_fee(2));
     });
     let block = test_block(alloc::vec![coinbase_stub(999_991)]);
-    let plan = first.plan_block_removals(&block);
+    let plan = first.plan_block_removals(&block_facts(&block));
     assert!(plan.removals.is_empty(), "empty block must plan nothing");
     assert_eq!(plan.fee_deltas_cleared, 0);
     assert_projection_matches_real(&first, &mut second, &block);
@@ -654,7 +668,7 @@ fn projected_surviving_child_treats_confirmed_parent_as_selected() {
     let child_txid = order_tx(2, &[(parent_txid, 0)], 1, Sequence::MAX).txid();
     let child_id = first.entry_id_by_txid(&child_txid).expect("child pooled");
     let block = test_block(alloc::vec![coinbase_stub(999_992), parent_tx]);
-    let plan = first.plan_block_removals(&block);
+    let plan = first.plan_block_removals(&block_facts(&block));
     assert_plan_unique(&plan);
     assert_eq!(
         plan.removals,
@@ -692,7 +706,7 @@ fn projected_splitting_bridge_yields_independent_pieces() {
     let (first, mut second) = twin_pools(build);
     let parent_tx = order_tx(1, &[], 2, Sequence::MAX);
     let block = test_block(alloc::vec![coinbase_stub(999_993), parent_tx]);
-    let plan = first.plan_block_removals(&block);
+    let plan = first.plan_block_removals(&block_facts(&block));
     assert_plan_unique(&plan);
     assert_eq!(plan.removals.len(), 1);
     let projected = projected_facts(&first, &plan);
@@ -724,7 +738,7 @@ fn projected_equal_rate_prefix_preserved() -> Result<(), MempoolError> {
     build(&mut second)?;
     let unrelated = order_tx(3, &[], 1, Sequence::MAX);
     let block = test_block(alloc::vec![coinbase_stub(999_994), unrelated]);
-    let plan = first.plan_block_removals(&block);
+    let plan = first.plan_block_removals(&block_facts(&block));
     assert_plan_unique(&plan);
     assert_eq!(plan.removals.len(), 1);
     let projected = first.chunks_after(&plan);
@@ -793,7 +807,7 @@ fn projected_conflicts_and_descendants_match_real() -> Result<(), MempoolError> 
         .expect("rival child pooled");
     let conflict = order_tx(30, &[(other_out.txid, other_out.vout)], 1, Sequence::MAX);
     let block = test_block(alloc::vec![coinbase_stub(999_995), conflict]);
-    let plan = first.plan_block_removals(&block);
+    let plan = first.plan_block_removals(&block_facts(&block));
     assert_plan_unique(&plan);
     let mut expected = alloc::vec![
         (rival_id, RemovalReason::Conflict),
@@ -838,7 +852,7 @@ fn projected_prioritised_fees_and_cleared_overlays_match_real() {
     }
     let confirmed = order_tx(1, &[], 1, Sequence::MAX);
     let block = test_block(alloc::vec![coinbase_stub(999_996), confirmed]);
-    let plan = first.plan_block_removals(&block);
+    let plan = first.plan_block_removals(&block_facts(&block));
     assert_plan_unique(&plan);
     assert_eq!(
         plan.fee_deltas_cleared, 1,
@@ -1030,7 +1044,7 @@ proptest! {
                 expected_cleared += 1;
             }
         }
-        let plan = first.plan_block_removals(&block);
+        let plan = first.plan_block_removals(&block_facts(&block));
         assert_plan_unique(&plan);
         assert_eq!(
             plan.fee_deltas_cleared, expected_cleared,
