@@ -11081,7 +11081,7 @@ mod script_live {
         failure_persistence: Some(std::boxed::Box::new(
             proptest::test_runner::FileFailurePersistence::Direct(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../testdata/projection/regressions/tests.txt"
+                "/../../testdata/projection/regressions/script_live.txt"
             )),
         )),
         ..(proptest::test_runner::Config {
@@ -12728,7 +12728,7 @@ mod tx_positions {
         failure_persistence: Some(std::boxed::Box::new(
             proptest::test_runner::FileFailurePersistence::Direct(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../testdata/projection/regressions/tests.txt"
+                "/../../testdata/projection/regressions/tx_positions.txt"
             )),
         )),
         ..(ProptestConfig {

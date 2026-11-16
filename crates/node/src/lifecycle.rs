@@ -1723,6 +1723,7 @@ mod tests {
             false,
         )?;
 
+        let _ = shutdown_tx.send(());
         node.shutdown_blocking()?;
 
         let reopened = NodeState::open(config, None)?;

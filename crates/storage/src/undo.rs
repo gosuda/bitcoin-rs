@@ -570,18 +570,17 @@ mod tests {
 
             let mut flipped = row;
             flipped[flip_pos] ^= flip_mask;
-            if flipped != row {
-                let res = DisconnectMarker::decode(&flipped);
-                if flip_pos == 36 && flipped[36] >= 2 {
-                    prop_assert!(matches!(res, Err(StorageError::Backend(_))));
-                } else if let Ok(other) = res {
-                    let other_encoded = other.encode();
-                    prop_assert_eq!(
-                        other_encoded.as_slice(),
-                        flipped.as_slice(),
-                        "decoded marker from mutated bytes must re-encode to mutated bytes"
-                    );
-                }
+            let res = DisconnectMarker::decode(&flipped);
+            if flip_pos == 36 && flipped[36] >= 2 {
+                prop_assert!(matches!(res, Err(StorageError::Backend(_))));
+            } else {
+                let other = res.map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+                let other_encoded = other.encode();
+                prop_assert_eq!(
+                    other_encoded.as_slice(),
+                    flipped.as_slice(),
+                    "decoded marker from mutated bytes must re-encode to mutated bytes"
+                );
             }
         }
     }

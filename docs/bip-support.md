@@ -26,8 +26,8 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | 66 | [Strict DER](../crates/consensus/src/verify_block.rs) | ✅ | - | Core activation heights |
 | 68/112/113 | [Relative locks / MTP](../crates/consensus/src/bip68.rs) | ✅ | - | [Block connection](../crates/execution/src/connect.rs); BIP9 activation |
 | 94 | [Timewarp protection](../crates/execution/src/chain/header_sync.rs) | ✅ | - | Testnet4 BIP94 candidate-timestamp floor at retarget boundaries |
-| 141 | [Segwit validation](../crates/consensus/tests.rs) | ✅ | - | Commitments, weight, [sigops](../crates/consensus/tests.rs) |
-| 143 | [Segwit v0 sighash](../crates/consensus/tests.rs) | ✅ | - | [Reference vectors](../crates/consensus/tests.rs) |
+| 141 | [Segwit validation](../crates/consensus/tests.rs) | ✅ | - | Commitments, weight, sigops (`vectors::valid_witness_scripts_enforce_the_inclusive_sigop_limit`) |
+| 143 | [Segwit v0 sighash](../crates/consensus/tests.rs) | ✅ | - | Reference vectors (`vectors::sighash_vectors_match_bitcoin_cache`) |
 | 147 | [NULLDUMMY](../crates/consensus/src/script/eval.rs) | ✅ | - | Enforced with WITNESS flag |
 | 320 | [General-purpose version bits](../crates/execution/src/chain/deployment.rs) | ❌ | - | Candidates use versionbits; no general-purpose policy |
 | 325 | [Signet block solution](../crates/consensus/src/signet.rs) | ◐ | - | Default challenge only; custom challenges unsupported |

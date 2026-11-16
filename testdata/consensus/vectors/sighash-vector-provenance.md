@@ -16,8 +16,7 @@ self-generated pin.
   Extension" (`tapleaf_hash` || `key_version` || `codesep_pos`). The tapscript
   upstream JSON was published only in the now-defunct sipa/bip-taproot
   repository. Script-path leaves are covered structurally in
-  `crates/consensus/tests.rs` with each synthetic pin commented
-  to the exact BIP341/BIP342 section that defines the hashed fields.
+  `crates/consensus/tests.rs`.
 
 Regenerating fixtures from this crate's own implementation is forbidden here.
 If a vector must change, cite the new upstream commit in this file and the

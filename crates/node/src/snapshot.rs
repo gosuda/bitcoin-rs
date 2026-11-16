@@ -944,6 +944,88 @@ fn active_snapshot_base(
     }
 }
 
+fn observe_outputs(observer: &mut ScriptLiveSeedObserver<'_>, txid: Hash256, record: &UtxoRecord) {
+    for output in record.outputs() {
+        observer.observe_coin(SnapshotCoin {
+            txid,
+            vout: output.vout,
+            value: output.value,
+            script_pubkey: output.script_pubkey,
+            height: output.height,
+            coinbase: output.coinbase,
+        });
+    }
+}
+
+fn admit_seed(seed: Option<&ScriptLiveSeedSession>, refused: &mut Option<IndexError>) -> bool {
+    match seed.and_then(ScriptLiveSeedSession::take_error) {
+        Some(error) => {
+            *refused = Some(error);
+            false
+        }
+        None => true,
+    }
+}
+
+fn ingest_error(error: SnapshotImportError) -> SnapshotImportError {
+    match error {
+        SnapshotImportError::Activation(AssumeUtxoError::ArtifactDigestMismatch {
+            expected_sha256,
+            found_sha256,
+            expected_size,
+            found_size,
+        }) => SnapshotImportError::Manifest(if expected_sha256 == found_sha256 {
+            bitcoin_rs_execution::manifest::ManifestError::ArtifactSizeMismatch {
+                slot: bitcoin_rs_execution::manifest::UTXO_SLOT,
+                declared: expected_size,
+                actual: found_size,
+            }
+        } else {
+            bitcoin_rs_execution::manifest::ManifestError::ArtifactHashMismatch {
+                slot: bitcoin_rs_execution::manifest::UTXO_SLOT,
+                declared: expected_sha256,
+                actual: found_sha256,
+            }
+        }),
+        other => codec_import_error(other),
+    }
+}
+
+fn codec_import_error(error: SnapshotImportError) -> SnapshotImportError {
+    match error {
+        SnapshotImportError::Activation(AssumeUtxoError::Codec(error)) => {
+            SnapshotImportError::Codec(error)
+        }
+        other => other,
+    }
+}
+
+fn settle_seed(
+    seed: Option<&ScriptLiveSeedSession>,
+    outcome: Result<ActivatedSnapshot, SnapshotImportError>,
+    refused: Option<IndexError>,
+) -> Result<ActivatedSnapshot, SnapshotImportError> {
+    let Some(session) = seed else {
+        return outcome;
+    };
+    match outcome {
+        Ok(activated) => {
+            session.publish(IndexWatermark {
+                height: activated.height,
+                hash: activated.base_hash.to_le_bytes(),
+            });
+            Ok(activated)
+        }
+        Err(error) => {
+            session.abort();
+            Err(match refused {
+                Some(seed_error) => SnapshotImportError::Seed(seed_error),
+                None => error,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2596,87 +2678,5 @@ mod tests {
             ))
         ));
         Ok(())
-    }
-}
-
-fn observe_outputs(observer: &mut ScriptLiveSeedObserver<'_>, txid: Hash256, record: &UtxoRecord) {
-    for output in record.outputs() {
-        observer.observe_coin(SnapshotCoin {
-            txid,
-            vout: output.vout,
-            value: output.value,
-            script_pubkey: output.script_pubkey,
-            height: output.height,
-            coinbase: output.coinbase,
-        });
-    }
-}
-
-fn admit_seed(seed: Option<&ScriptLiveSeedSession>, refused: &mut Option<IndexError>) -> bool {
-    match seed.and_then(ScriptLiveSeedSession::take_error) {
-        Some(error) => {
-            *refused = Some(error);
-            false
-        }
-        None => true,
-    }
-}
-
-fn ingest_error(error: SnapshotImportError) -> SnapshotImportError {
-    match error {
-        SnapshotImportError::Activation(AssumeUtxoError::ArtifactDigestMismatch {
-            expected_sha256,
-            found_sha256,
-            expected_size,
-            found_size,
-        }) => SnapshotImportError::Manifest(if expected_sha256 == found_sha256 {
-            bitcoin_rs_execution::manifest::ManifestError::ArtifactSizeMismatch {
-                slot: bitcoin_rs_execution::manifest::UTXO_SLOT,
-                declared: expected_size,
-                actual: found_size,
-            }
-        } else {
-            bitcoin_rs_execution::manifest::ManifestError::ArtifactHashMismatch {
-                slot: bitcoin_rs_execution::manifest::UTXO_SLOT,
-                declared: expected_sha256,
-                actual: found_sha256,
-            }
-        }),
-        other => codec_import_error(other),
-    }
-}
-
-fn codec_import_error(error: SnapshotImportError) -> SnapshotImportError {
-    match error {
-        SnapshotImportError::Activation(AssumeUtxoError::Codec(error)) => {
-            SnapshotImportError::Codec(error)
-        }
-        other => other,
-    }
-}
-
-fn settle_seed(
-    seed: Option<&ScriptLiveSeedSession>,
-    outcome: Result<ActivatedSnapshot, SnapshotImportError>,
-    refused: Option<IndexError>,
-) -> Result<ActivatedSnapshot, SnapshotImportError> {
-    let Some(session) = seed else {
-        return outcome;
-    };
-    match outcome {
-        Ok(activated) => {
-            session.publish(IndexWatermark {
-                height: activated.height,
-                hash: activated.base_hash.to_le_bytes(),
-            });
-            Ok(activated)
-        }
-        Err(error) => {
-            session.abort();
-            Err(match refused {
-                Some(seed_error) => SnapshotImportError::Seed(seed_error),
-                None => error,
-            })
-        }
     }
 }

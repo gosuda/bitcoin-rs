@@ -49,7 +49,7 @@ Error precedence here is fixed by call order: the early `check_bip34` in `crates
 
 ## Undo records
 
-Every committed block produces an `UndoRecord`: the prevouts its inputs spent, built inside `build_block_changes_checked` in `crates/execution/src/connect.rs`. The window stage holds it as `PendingBlockCommit.undo_record` in `crates/execution/src/window.rs`, and `flush` writes all undo rows in the same `CommitRecords` batch in `crates/storage/src/durable_head.rs` as the body locator rows and durable-head facts. Disconnects load the record back with `load_block_undo_for_block` in `crates/storage/src/utxo/contract.rs` and replay it through `plan_disconnect` and `disconnect_block_admitted` in `crates/execution/src/disconnect.rs`. A disconnect whose removed outpoints differ from the stored undo fails (`disconnect_refuses_undo_whose_removed_outpoint_differs_from_the_block` in `crates/execution/src/lib.rs`); a missing or truncated undo keeps state and refuses (in `crates/execution/src/lib.rs`).
+Every committed block produces an `UndoRecord`: the prevouts its inputs spent, built inside `build_block_changes_checked` in `crates/execution/src/connect.rs`. The window stage holds it as `PendingBlockCommit.undo_record` in `crates/execution/src/window.rs`, and `flush` writes all undo rows in the same `CommitRecords` batch in `crates/storage/src/durable_head.rs` as the body locator rows and durable-head facts. Disconnects load the record back with `load_block_undo_for_block` in `crates/storage/src/utxo/contract.rs` and replay it through `plan_disconnect` and `disconnect_block_admitted` in `crates/execution/src/disconnect.rs`. A disconnect whose removed outpoints differ from the stored undo fails (`undo_validation_matches_the_block_shape` in `crates/storage/src/utxo/contract.rs`); a missing or truncated undo keeps state and refuses (`disconnect_refuses_missing_or_truncated_undo_and_keeps_state` in `crates/execution/src/lib.rs`).
 
 ## Reorg attempt and settlement
 
@@ -84,7 +84,7 @@ The window treats them asymmetrically (`apply_window_admitted` in `crates/execut
 |---|---|---|
 | A window commits every block in order | `a_window_commits_every_block_in_order` | `crates/execution/src/lib.rs` |
 | Duplicate live txid refused at any height | `a_block_with_a_duplicate_live_txid_is_refused_at_any_height` | `crates/execution/src/lib.rs` |
-| Disconnect refuses a mismatching undo | `disconnect_refuses_undo_whose_removed_outpoint_differs_from_the_block` | `crates/execution/src/lib.rs` |
+| Disconnect refuses a mismatching undo | `undo_validation_matches_the_block_shape` | `crates/storage/src/utxo/contract.rs` |
 | Reorg below the retained undo window refuses before mutation | `a_reorg_below_the_retained_undo_window_refuses_before_mutation` | `crates/execution/src/lib.rs` |
 | Fatal pre-transition settlement closes admission | `fatal_pretransition_settlement_closes_admission` | `crates/execution/src/reorg.rs` |
 | Committed outcome retained, retry forbidden on settlement failure | `committed_connect_settlement_failure_retains_outcome_and_forbids_retry` | `crates/node/src/chain_effects.rs` (clause `SYNC-04` evidence) |

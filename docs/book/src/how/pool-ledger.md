@@ -177,10 +177,10 @@ That test records a share on job 7 and one on job 8, retires job 7, asserts the 
 $ env -u CARGO_BUILD_BUILD_DIR RUSTC_WRAPPER= \
     cargo test --offline --locked -p bitcoin-rs-serving \
     --features pool,test-seam --test suite \
-    pool_sv1::applied_block_retires_job -- --nocapture
+    mining_pool_sv1::applied_block_retires_job -- --nocapture
 
 running 1 test
-test pool_sv1::applied_block_retires_job_and_second_submit_is_stale ... ok
+test mining_pool_sv1::applied_block_retires_job_and_second_submit_is_stale ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 103 filtered out; finished in 0.01s
 ```

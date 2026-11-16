@@ -566,7 +566,7 @@ mod chain_header_sync_roundtrip {
                     bits,
                     anchor_time.saturating_add(
                         u32::try_from(
-                            u64::from(tip_time - anchor_time) * u64::from(height)
+                            u64::from(tip_time.saturating_sub(anchor_time)) * u64::from(height)
                                 / u64::from(tip_height),
                         )
                         .unwrap_or(u32::MAX),
