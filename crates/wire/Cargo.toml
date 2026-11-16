@@ -63,8 +63,8 @@ tempfile.workspace = true
 
 [[test]]
 name = "suite"
-path = "tests/suite.rs"
+path = "tests.rs"
 
 [[test]]
 name = "decode_heap_amplification"
-path = "tests/decode_heap_amplification.rs"
+path = "decode_heap_amplification_tests.rs"

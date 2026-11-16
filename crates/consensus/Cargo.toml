@@ -56,13 +56,13 @@ proptest.workspace = true
 
 [[test]]
 name = "suite"
-path = "tests/suite.rs"
+path = "tests.rs"
 
 # Inspects its own ELF/USDT notes; retain an independent artifact boundary.
 [[test]]
 name = "sdt_notes"
-path = "tests/sdt_notes.rs"
+path = "sdt_notes_tests.rs"
 
 [[test]]
 name = "primitives_witness_heap_amplification"
-path = "tests/primitives_witness_heap_amplification.rs"
+path = "primitives_witness_heap_amplification_tests.rs"

@@ -21,11 +21,1914 @@ use crate::{EntryId, MempoolEntry, MempoolLimits, MempoolPolicySnapshot, PolicyE
 use core::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
-mod chunk_order_tests;
+mod chunk_order_tests {
+    #![expect(clippy::expect_used)]
+
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::cmp::Ordering;
+
+    use bitcoin_rs_consensus::primitives::{
+        Amount, Block, BlockImage, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
+        TxOut, Txid, Witness,
+    };
+    use hashbrown::{HashMap, HashSet};
+    use proptest::prelude::*;
+
+    use super::{BlockRemovalPlan, Mempool};
+    use crate::fee_diagram::FeeWeight;
+    use crate::mutation::{MutationOutcome, RemovalReason};
+    use crate::{
+        EntryId, FeeDiagramError, MempoolEntry, MempoolError, MempoolLimits, ReplacementCandidate,
+    };
+
+    impl Mempool {
+        pub(super) fn oracle_chunk_order(&self) -> Result<Vec<Vec<Txid>>, FeeDiagramError> {
+            struct OracleChunk {
+                fee: i128,
+                weight: u64,
+                prefix: u64,
+                max_txid: Txid,
+                txids: Vec<Txid>,
+            }
+            let mut members: Vec<(EntryId, &MempoolEntry)> = self
+                .entries
+                .iter()
+                .filter_map(|(index, entry)| {
+                    let id = EntryId::try_from(index).ok()?;
+                    Some((id, entry))
+                })
+                .collect();
+            members.sort_by_key(|(_, entry)| entry.txid);
+            if members.is_empty() {
+                return Ok(Vec::new());
+            }
+            let positions: HashMap<EntryId, usize> = members
+                .iter()
+                .enumerate()
+                .map(|(position, (id, _))| (*id, position))
+                .collect();
+            let fees: Vec<FeeWeight> = members
+                .iter()
+                .map(|(_, entry)| FeeWeight {
+                    fee: entry.modified_fee(),
+                    weight: u32::try_from(entry.policy_weight()).unwrap_or(u32::MAX),
+                })
+                .collect();
+            let parents: Vec<Vec<usize>> = members
+                .iter()
+                .map(|(_, entry)| {
+                    let mut parents: Vec<usize> = entry
+                        .tx
+                        .inputs
+                        .iter()
+                        .filter_map(|input| {
+                            let parent = self.entry_id_by_txid(&input.previous_output.txid)?;
+                            positions.get(&parent).copied()
+                        })
+                        .collect();
+                    parents.sort_unstable();
+                    parents.dedup();
+                    parents
+                })
+                .collect();
+            let mut all = Vec::new();
+            for group in crate::fee_diagram::components(&parents)? {
+                let local_fees: Vec<FeeWeight> = group.iter().map(|&i| fees[i]).collect();
+                let local_parents: Vec<Vec<usize>> = group
+                    .iter()
+                    .map(|&i| {
+                        parents[i]
+                            .iter()
+                            .map(|parent| {
+                                group
+                                    .binary_search(parent)
+                                    .map_err(|_| FeeDiagramError::Dependencies)
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut prefix = 0_u64;
+                let mut rate: Option<FeeWeight> = None;
+                for chunk in crate::fee_diagram::linearize(&local_fees, &local_parents)? {
+                    let total = chunk.total;
+                    prefix = match rate {
+                        Some(current) if current.rate_cmp(total) == Ordering::Equal => {
+                            prefix.saturating_add(u64::from(total.weight))
+                        }
+                        _ => u64::from(total.weight),
+                    };
+                    rate = Some(total);
+                    let txids: Vec<Txid> = chunk
+                        .members
+                        .iter()
+                        .map(|&local| members[group[local]].1.txid)
+                        .collect();
+                    let max_txid = txids.iter().copied().max().unwrap_or_default();
+                    all.push(OracleChunk {
+                        fee: total.fee,
+                        weight: u64::from(total.weight),
+                        prefix,
+                        max_txid,
+                        txids,
+                    });
+                }
+            }
+            all.sort_by(|left, right| {
+                (right.fee * i128::from(left.weight))
+                    .cmp(&(left.fee * i128::from(right.weight)))
+                    .then_with(|| left.prefix.cmp(&right.prefix))
+                    .then_with(|| left.max_txid.cmp(&right.max_txid))
+            });
+            Ok(all.into_iter().map(|chunk| chunk.txids).collect())
+        }
+
+        pub(super) fn chunk_order(&self) -> Vec<Vec<Txid>> {
+            self.chunks_by_feerate()
+                .map(|chunk| chunk.txids.to_vec())
+                .collect()
+        }
+
+        pub(super) fn assert_index_matches_oracle(&self, stage: &str) {
+            let maintained = self.chunk_order();
+            let oracle = self
+                .oracle_chunk_order()
+                .expect("the oracle re-solves the admitted graph");
+            assert_eq!(maintained, oracle, "chunk order diverged after {stage}");
+            self.assert_index_invariants();
+        }
+
+        fn assert_index_invariants(&self) {
+            let mut seen = HashSet::new();
+            let mut flattened: Vec<EntryId> = Vec::new();
+            let mut previous: Option<(i128, u64)> = None;
+            for chunk in self.chunks_by_feerate() {
+                assert!(!chunk.is_empty(), "the index holds an empty chunk");
+                let mut fee = 0_i128;
+                let mut weight = 0_u64;
+                for (id, entry) in chunk.entries() {
+                    assert!(seen.insert(id), "an entry sits in two chunks");
+                    fee = fee.saturating_add(entry.modified_fee());
+                    weight = weight.saturating_add(entry.policy_weight());
+                }
+                assert_eq!(fee, chunk.modified_fee, "chunk fee drifted");
+                assert_eq!(weight, chunk.charged_weight, "chunk weight drifted");
+                flattened.extend(chunk.members.iter().copied());
+                if let Some((previous_fee, previous_weight)) = previous {
+                    assert!(
+                        chunk.modified_fee * i128::from(previous_weight)
+                            <= previous_fee * i128::from(chunk.charged_weight),
+                        "feerates increase along the index"
+                    );
+                }
+                previous = Some((chunk.modified_fee, chunk.charged_weight));
+            }
+            assert_eq!(seen.len(), self.len(), "the index drops live entries");
+            let positions: HashMap<EntryId, usize> = flattened
+                .iter()
+                .enumerate()
+                .map(|(position, &id)| (id, position))
+                .collect();
+            for chunk in self.chunks_by_feerate() {
+                for &member in chunk.members {
+                    for parent in chunk.parents_of(member) {
+                        assert!(
+                            positions[&parent] < positions[&member],
+                            "a parent sorts after its child"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn order_tx(label: u64, spends: &[(Txid, u32)], outputs: u32, sequence: Sequence) -> Tx {
+        let mut seed = [0xC1_u8; 32];
+        seed[..8].copy_from_slice(&label.to_le_bytes());
+        let inputs = if spends.is_empty() {
+            alloc::vec![TxIn {
+                previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&seed)), 0),
+                script_sig: Script::new(),
+                sequence,
+                witness: Witness::new(),
+            }]
+        } else {
+            spends
+                .iter()
+                .map(|&(txid, vout)| TxIn {
+                    previous_output: OutPoint::new(txid, vout),
+                    script_sig: Script::new(),
+                    sequence,
+                    witness: Witness::new(),
+                })
+                .collect()
+        };
+        Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs,
+            outputs: (0..outputs.max(1))
+                .map(|index| TxOut {
+                    value: Amount::from_sat(5_000 + ((label + u64::from(index)) % 9_000)),
+                    script_pubkey: Script::from(vec![0x51]),
+                })
+                .collect(),
+        }
+    }
+
+    fn order_fee(label: u64) -> u64 {
+        1_000 + (label.wrapping_mul(2_654_435_761) % 20_000)
+    }
+
+    fn order_pool() -> Mempool {
+        Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        })
+    }
+
+    fn insert_ordered(
+        pool: &mut Mempool,
+        label: u64,
+        spends: &[(Txid, u32)],
+        outputs: u32,
+        fee: u64,
+    ) -> Txid {
+        let tx = order_tx(label, spends, outputs, Sequence::MAX);
+        let txid = tx.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 200, fee, label, 1, 0))
+            .expect("fixture insert must apply");
+        txid
+    }
+
+    #[test]
+    fn single_insertion_indexes_one_chunk() {
+        let mut pool = order_pool();
+        let txid = insert_ordered(&mut pool, 7, &[], 1, order_fee(7));
+        assert_eq!(pool.chunk_order(), alloc::vec![alloc::vec![txid]]);
+        assert_eq!(pool.derived.chunks.len(), 1);
+        pool.assert_index_matches_oracle("a single insertion");
+    }
+
+    #[test]
+    fn equal_rate_parent_sorts_before_its_child() -> Result<(), MempoolError> {
+        let mut pool = order_pool();
+        let parent = order_tx(1, &[], 1, Sequence::MAX);
+        let parent_txid = parent.txid();
+        let mut parent_entry = MempoolEntry::new(Arc::new(parent), 200, 2_000, 1, 1, 0);
+        parent_entry.weight = 800;
+        pool.insert_entry(parent_entry)?;
+        let child = order_tx(2, &[(parent_txid, 0)], 1, Sequence::MAX);
+        let child_txid = child.txid();
+        let mut child_entry = MempoolEntry::new(Arc::new(child), 100, 1_000, 2, 1, 0);
+        child_entry.weight = 400;
+        pool.insert_entry(child_entry)?;
+        let oracle = pool.oracle_chunk_order()?;
+        assert_eq!(
+            oracle.len(),
+            2,
+            "the solver keeps the equal-rate pair split"
+        );
+        assert_eq!(
+            pool.chunk_order(),
+            alloc::vec![alloc::vec![parent_txid], alloc::vec![child_txid]]
+        );
+        pool.assert_index_matches_oracle("an equal-rate pair");
+        Ok(())
+    }
+
+    #[test]
+    fn distinct_output_indices_link_by_vout() {
+        let mut pool = order_pool();
+        let parent_txid = insert_ordered(&mut pool, 1, &[], 3, order_fee(1));
+        insert_ordered(&mut pool, 2, &[(parent_txid, 1)], 1, order_fee(2));
+        insert_ordered(&mut pool, 3, &[(parent_txid, 2)], 1, order_fee(3));
+        insert_ordered(&mut pool, 4, &[(parent_txid, 9)], 1, order_fee(4));
+        assert_eq!(pool.len(), 4);
+        pool.assert_index_matches_oracle("distinct vout links");
+    }
+
+    #[test]
+    fn negative_prioritise_keeps_the_cluster_indexed() {
+        let mut pool = order_pool();
+        let first = insert_ordered(&mut pool, 1, &[], 1, 5_000);
+        let second = insert_ordered(&mut pool, 2, &[], 1, 6_000);
+        pool.prioritise(first, -15_000)
+            .expect("negative overlay applies");
+        let order = pool.chunk_order();
+        assert_eq!(order.len(), 2);
+        assert_eq!(order[0], alloc::vec![second]);
+        assert_eq!(order[1], alloc::vec![first]);
+        pool.assert_index_matches_oracle("a negative overlay");
+    }
+
+    #[test]
+    fn remove_for_block_confirms_and_conflicts() -> Result<(), MempoolError> {
+        let mut pool = order_pool();
+        let parent = order_tx(1, &[], 1, Sequence::MAX);
+        let parent_txid = parent.txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(parent),
+            200,
+            order_fee(1),
+            1,
+            1,
+            0,
+        ))?;
+        let child = order_tx(2, &[(parent_txid, 0)], 1, Sequence::MAX);
+        let child_txid = child.txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(child),
+            200,
+            order_fee(2),
+            2,
+            1,
+            0,
+        ))?;
+        let other = order_tx(3, &[], 1, Sequence::MAX);
+        let other_out = OutPoint::new(other.txid(), 0);
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(other),
+            200,
+            order_fee(3),
+            3,
+            1,
+            0,
+        ))?;
+        let rival_parent = order_tx(4, &[(other_out.txid, other_out.vout)], 1, Sequence::MAX);
+        let rival_parent_txid = rival_parent.txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(rival_parent),
+            200,
+            order_fee(4),
+            4,
+            1,
+            0,
+        ))?;
+        let rival_child = order_tx(5, &[(rival_parent_txid, 0)], 1, Sequence::MAX);
+        let rival_child_txid = rival_child.txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(rival_child),
+            200,
+            order_fee(5),
+            5,
+            1,
+            0,
+        ))?;
+
+        let confirmed = order_tx(1, &[], 1, Sequence::MAX);
+        let included = pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[&confirmed]),
+            3,
+            5,
+        );
+        assert!(pool.contains_txid(&child_txid));
+        assert!(!pool.contains_txid(&parent_txid));
+        assert!(included.changes.iter().any(
+            |change| change.outcome == MutationOutcome::Removed(RemovalReason::BlockInclusion)
+        ));
+        pool.assert_index_matches_oracle("a block inclusion");
+
+        let conflict = order_tx(6, &[(other_out.txid, other_out.vout)], 1, Sequence::MAX);
+        let swept = pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[&conflict]),
+            3,
+            6,
+        );
+        assert!(!pool.contains_txid(&rival_child_txid));
+        assert_eq!(pool.len(), 2);
+        assert!(
+            swept
+                .changes
+                .iter()
+                .all(|change| change.outcome == MutationOutcome::Removed(RemovalReason::Conflict))
+        );
+        pool.assert_index_matches_oracle("a block conflict");
+        Ok(())
+    }
+
+    #[test]
+    fn rbf_replacement_keeps_the_index_current() -> Result<(), MempoolError> {
+        let mut pool = order_pool();
+        let funding = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0x11; 32])), 0);
+        let original = order_tx(
+            1,
+            &[(funding.txid, funding.vout)],
+            1,
+            Sequence::ENABLE_RBF_NO_LOCKTIME,
+        );
+        let original_txid = original.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(original), 1_000, 2_000, 1, 7, 0))?;
+        let child = order_tx(2, &[(original_txid, 0)], 1, Sequence::MAX);
+        let child_txid = child.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 200, 1_000, 2, 7, 0))?;
+
+        let winner = order_tx(
+            11,
+            &[(funding.txid, funding.vout)],
+            1,
+            Sequence::ENABLE_RBF_NO_LOCKTIME,
+        );
+        let winner_txid = winner.txid();
+        pool.replace_transaction(
+            &ReplacementCandidate::new(Arc::new(winner), 1_000, 4_000, 1).with_sigop_cost(4),
+            10,
+            1,
+        )
+        .map_err(crate::RbfError::into_pool_error)?;
+        assert!(pool.contains_txid(&winner_txid));
+        assert!(!pool.contains_txid(&original_txid));
+        assert!(!pool.contains_txid(&child_txid));
+        pool.assert_index_matches_oracle("a replacement");
+        Ok(())
+    }
+
+    #[test]
+    fn merge_two_clusters_via_bridge_tx() {
+        let mut pool = order_pool();
+        let first = insert_ordered(&mut pool, 1, &[], 1, order_fee(1));
+        let second = insert_ordered(&mut pool, 2, &[], 1, order_fee(2));
+        assert_eq!(pool.derived.chunks.len(), 2);
+        insert_ordered(&mut pool, 3, &[(first, 0), (second, 0)], 1, order_fee(3));
+        assert_eq!(pool.len(), 3);
+        assert_eq!(
+            pool.derived.chunks.len(),
+            1,
+            "the bridge joins both clusters into one component"
+        );
+        pool.assert_index_matches_oracle("a cluster merge");
+    }
+
+    #[test]
+    fn a_full_cluster_keeps_its_exact_order_through_mutations() {
+        let mut pool = order_pool();
+        let mut spine: Vec<Txid> = Vec::new();
+        let mut leaves: Vec<Txid> = Vec::new();
+        for step in 0_u64..32 {
+            let spends: Vec<(Txid, u32)> =
+                spine.last().map(|&txid| (txid, 0)).into_iter().collect();
+            let node = insert_ordered(&mut pool, step + 1, &spends, 2, order_fee(step + 1));
+            spine.push(node);
+            leaves.push(insert_ordered(
+                &mut pool,
+                step + 101,
+                &[(node, 1)],
+                1,
+                order_fee(step + 101),
+            ));
+        }
+        assert_eq!(pool.len(), 64);
+        assert_eq!(pool.derived.chunks.len(), 1, "one component holds all 64");
+        pool.assert_index_matches_oracle("a full cluster");
+
+        let overflow = order_tx(900, &[(spine[31], 0)], 1, Sequence::MAX);
+        assert!(
+            pool.insert_entry(MempoolEntry::new(
+                Arc::new(overflow),
+                200,
+                50_000,
+                900,
+                1,
+                0
+            ))
+            .is_err(),
+            "the cluster count limit refuses a 65th member"
+        );
+        assert_eq!(pool.len(), 64);
+        pool.assert_index_matches_oracle("a refused 65th member");
+
+        pool.prioritise(spine[0], 500_000)
+            .expect("positive overlay applies");
+        pool.assert_index_matches_oracle("a root overlay");
+        pool.prioritise(leaves[10], -1_000_000)
+            .expect("negative overlay applies");
+        pool.assert_index_matches_oracle("a leaf overlay");
+
+        let confirmed = order_tx(1, &[], 2, Sequence::MAX);
+        pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[&confirmed]),
+            3,
+            133,
+        );
+        assert_eq!(pool.len(), 63);
+        assert_eq!(
+            pool.derived.chunks.len(),
+            2,
+            "confirming the root splits its first leaf from the rest"
+        );
+        pool.assert_index_matches_oracle("the root confirmation");
+    }
+
+    fn test_block(txs: Vec<Tx>) -> Block {
+        Block {
+            header: Header::default(),
+            txs,
+        }
+    }
+
+    fn coinbase_stub(label: u64) -> Tx {
+        order_tx(label, &[], 1, Sequence::MAX)
+    }
+
+    fn assert_plan_unique(plan: &BlockRemovalPlan) {
+        let mut seen = HashSet::new();
+        for (id, _) in &plan.removals {
+            assert!(seen.insert(*id), "removal plan repeats entry {id}");
+        }
+    }
+
+    fn projected_facts(pool: &Mempool, plan: &BlockRemovalPlan) -> Vec<(Vec<Txid>, i128, u64)> {
+        pool.chunks_after(plan)
+            .iter()
+            .map(|chunk| {
+                (
+                    chunk.txids.to_vec(),
+                    chunk.modified_fee,
+                    chunk.charged_weight,
+                )
+            })
+            .collect()
+    }
+
+    fn live_facts(pool: &Mempool) -> Vec<(Vec<Txid>, i128, u64)> {
+        pool.chunks_by_feerate()
+            .map(|chunk| {
+                (
+                    chunk.txids.to_vec(),
+                    chunk.modified_fee,
+                    chunk.charged_weight,
+                )
+            })
+            .collect()
+    }
+
+    fn apply_block(pool: &mut Mempool, block: &Block) {
+        let refs: Vec<&Tx> = block.txs.iter().collect();
+        let _ = pool.remove_for_block(&crate::settlement::TransitionFacts::from_txs(&refs), 3, 5);
+    }
+
+    fn block_facts(block: &Block) -> crate::settlement::TransitionFacts {
+        crate::settlement::TransitionFacts::from_block(&BlockImage::from_local(block.clone()))
+    }
+
+    fn twin_pools(build: impl Fn(&mut Mempool)) -> (Mempool, Mempool) {
+        let mut first = order_pool();
+        let mut second = order_pool();
+        build(&mut first);
+        build(&mut second);
+        first.assert_index_matches_oracle("twin first");
+        second.assert_index_matches_oracle("twin second");
+        (first, second)
+    }
+
+    fn assert_projection_matches_real(first: &Mempool, second: &mut Mempool, block: &Block) {
+        let before_len = first.len();
+        let before_sequence = first.sequence_number();
+        let before_fee_sequence = first.fee_delta_sequence_number();
+        let before_live = live_facts(first);
+        let plan = first.plan_block_removals(&block_facts(block));
+        assert_plan_unique(&plan);
+        let projected = projected_facts(first, &plan);
+        assert_eq!(first.len(), before_len, "projection mutated membership");
+        assert_eq!(
+            first.sequence_number(),
+            before_sequence,
+            "projection moved the membership sequence"
+        );
+        assert_eq!(
+            first.fee_delta_sequence_number(),
+            before_fee_sequence,
+            "projection moved the fee sequence"
+        );
+        assert_eq!(
+            live_facts(first),
+            before_live,
+            "projection reordered the live index"
+        );
+        apply_block(second, block);
+        let actual: Vec<(Vec<Txid>, i128, u64)> = second
+            .chunks_by_feerate()
+            .map(|chunk| {
+                (
+                    chunk.txids.to_vec(),
+                    chunk.modified_fee,
+                    chunk.charged_weight,
+                )
+            })
+            .collect();
+        assert_eq!(
+            projected.len(),
+            actual.len(),
+            "projected chunk count diverged"
+        );
+        for (index, (projected_chunk, actual_chunk)) in projected.iter().zip(&actual).enumerate() {
+            assert_eq!(
+                projected_chunk.0, actual_chunk.0,
+                "projected members diverged at chunk {index}"
+            );
+            assert_eq!(
+                projected_chunk.1, actual_chunk.1,
+                "projected modified fee diverged at chunk {index}"
+            );
+            assert_eq!(
+                projected_chunk.2, actual_chunk.2,
+                "projected charged weight diverged at chunk {index}"
+            );
+        }
+        second.assert_index_matches_oracle("real removal after projection");
+    }
+
+    #[test]
+    fn projected_long_touched_run_still_yields_the_untouched_tail() {
+        const PAIRS: u64 = 32;
+        let (first, mut second) = twin_pools(|pool| {
+            for pair in 0..PAIRS {
+                let parent = 2 * pair + 1;
+                let child = 2 * pair + 2;
+                let parent_txid = insert_ordered(pool, parent, &[], 1, 100);
+                insert_ordered(pool, child, &[(parent_txid, 0)], 1, 50_000);
+            }
+            insert_ordered(pool, 1_000, &[], 1, 100);
+        });
+        let mut block_txs = alloc::vec![coinbase_stub(999_990)];
+        for pair in 0..PAIRS {
+            block_txs.push(order_tx(2 * pair + 1, &[], 1, Sequence::MAX));
+        }
+        let block = test_block(block_txs);
+        let plan = first.plan_block_removals(&block_facts(&block));
+        assert_eq!(
+            plan.removals.len(),
+            usize::try_from(PAIRS).expect("pair count fits"),
+            "every parent confirms"
+        );
+        assert_projection_matches_real(&first, &mut second, &block);
+    }
+
+    #[test]
+    fn projected_empty_plan_matches_live_order() {
+        let (first, mut second) = twin_pools(|pool| {
+            insert_ordered(pool, 1, &[], 1, order_fee(1));
+            insert_ordered(pool, 2, &[], 1, order_fee(2));
+        });
+        let block = test_block(alloc::vec![coinbase_stub(999_991)]);
+        let plan = first.plan_block_removals(&block_facts(&block));
+        assert!(plan.removals.is_empty(), "empty block must plan nothing");
+        assert_eq!(plan.fee_deltas_cleared, 0);
+        assert_projection_matches_real(&first, &mut second, &block);
+    }
+
+    #[test]
+    fn projected_surviving_child_treats_confirmed_parent_as_selected() {
+        let (first, mut second) = twin_pools(|pool| {
+            insert_ordered(pool, 1, &[], 1, order_fee(1));
+            let parent = order_tx(1, &[], 1, Sequence::MAX).txid();
+            insert_ordered(pool, 2, &[(parent, 0)], 1, order_fee(2));
+        });
+        let parent_tx = order_tx(1, &[], 1, Sequence::MAX);
+        let parent_txid = parent_tx.txid();
+        let parent_id = first.entry_id_by_txid(&parent_txid).expect("parent pooled");
+        let child_txid = order_tx(2, &[(parent_txid, 0)], 1, Sequence::MAX).txid();
+        let child_id = first.entry_id_by_txid(&child_txid).expect("child pooled");
+        let block = test_block(alloc::vec![coinbase_stub(999_992), parent_tx]);
+        let plan = first.plan_block_removals(&block_facts(&block));
+        assert_plan_unique(&plan);
+        assert_eq!(
+            plan.removals,
+            alloc::vec![(parent_id, RemovalReason::BlockInclusion)]
+        );
+        let projected = first.chunks_after(&plan);
+        let mut child_chunk = None;
+        for chunk in projected.iter() {
+            if chunk.members.contains(&child_id) {
+                child_chunk = Some(chunk);
+            }
+        }
+        let child_chunk = child_chunk.expect("surviving child stays projected");
+        assert!(
+            child_chunk.parents_of(child_id).next().is_none(),
+            "confirmed parent must filter out of projected parents"
+        );
+        assert!(
+            !first.parents_of(child_id).is_empty(),
+            "live parents keep the confirmed edge"
+        );
+        assert_projection_matches_real(&first, &mut second, &block);
+        assert!(second.contains_txid(&child_txid));
+        assert!(!second.contains_txid(&parent_txid));
+    }
+
+    #[test]
+    fn projected_splitting_bridge_yields_independent_pieces() {
+        let build = |pool: &mut Mempool| {
+            insert_ordered(pool, 1, &[], 2, order_fee(1));
+            let parent = order_tx(1, &[], 2, Sequence::MAX).txid();
+            insert_ordered(pool, 2, &[(parent, 0)], 1, order_fee(2));
+            insert_ordered(pool, 3, &[(parent, 1)], 1, order_fee(3));
+        };
+        let (first, mut second) = twin_pools(build);
+        let parent_tx = order_tx(1, &[], 2, Sequence::MAX);
+        let block = test_block(alloc::vec![coinbase_stub(999_993), parent_tx]);
+        let plan = first.plan_block_removals(&block_facts(&block));
+        assert_plan_unique(&plan);
+        assert_eq!(plan.removals.len(), 1);
+        let projected = projected_facts(&first, &plan);
+        assert_eq!(projected.len(), 2, "split children project as two chunks");
+        for (txids, _, _) in &projected {
+            assert_eq!(txids.len(), 1, "split pieces never merge into one chunk");
+        }
+        assert_projection_matches_real(&first, &mut second, &block);
+    }
+
+    #[test]
+    fn projected_equal_rate_prefix_preserved() -> Result<(), MempoolError> {
+        let build = |pool: &mut Mempool| -> Result<(), MempoolError> {
+            let parent = order_tx(1, &[], 1, Sequence::MAX);
+            let parent_txid = parent.txid();
+            let mut parent_entry = MempoolEntry::new(Arc::new(parent), 200, 2_000, 1, 1, 0);
+            parent_entry.weight = 800;
+            pool.insert_entry(parent_entry)?;
+            let child = order_tx(2, &[(parent_txid, 0)], 1, Sequence::MAX);
+            let mut child_entry = MempoolEntry::new(Arc::new(child), 100, 1_000, 2, 1, 0);
+            child_entry.weight = 400;
+            pool.insert_entry(child_entry)?;
+            insert_ordered(pool, 3, &[], 1, order_fee(3));
+            Ok(())
+        };
+        let mut first = order_pool();
+        let mut second = order_pool();
+        build(&mut first)?;
+        build(&mut second)?;
+        let unrelated = order_tx(3, &[], 1, Sequence::MAX);
+        let block = test_block(alloc::vec![coinbase_stub(999_994), unrelated]);
+        let plan = first.plan_block_removals(&block_facts(&block));
+        assert_plan_unique(&plan);
+        assert_eq!(plan.removals.len(), 1);
+        let projected = first.chunks_after(&plan);
+        let mut order: Vec<Txid> = Vec::new();
+        for chunk in projected.iter() {
+            order.extend(chunk.txids.iter().copied());
+        }
+        let parent_txid = order_tx(1, &[], 1, Sequence::MAX).txid();
+        let child_txid = order_tx(2, &[(parent_txid, 0)], 1, Sequence::MAX).txid();
+        let parent_pos = order.iter().position(|txid| *txid == parent_txid);
+        let child_pos = order.iter().position(|txid| *txid == child_txid);
+        assert!(
+            parent_pos.is_some_and(|parent| child_pos.is_some_and(|child| parent < child)),
+            "equal-rate parent must precede its child in projection"
+        );
+        assert_projection_matches_real(&first, &mut second, &block);
+        Ok(())
+    }
+
+    #[test]
+    fn projected_conflicts_and_descendants_match_real() -> Result<(), MempoolError> {
+        let build = |pool: &mut Mempool| -> Result<OutPoint, MempoolError> {
+            let other = order_tx(10, &[], 1, Sequence::MAX);
+            let funding = OutPoint::new(other.txid(), 0);
+            pool.insert_entry(MempoolEntry::new(
+                Arc::new(other),
+                200,
+                order_fee(10),
+                10,
+                1,
+                0,
+            ))?;
+            let rival = order_tx(11, &[(funding.txid, funding.vout)], 1, Sequence::MAX);
+            let rival_txid = rival.txid();
+            pool.insert_entry(MempoolEntry::new(
+                Arc::new(rival),
+                200,
+                order_fee(11),
+                11,
+                1,
+                0,
+            ))?;
+            let rival_child = order_tx(12, &[(rival_txid, 0)], 1, Sequence::MAX);
+            pool.insert_entry(MempoolEntry::new(
+                Arc::new(rival_child),
+                200,
+                order_fee(12),
+                12,
+                1,
+                0,
+            ))?;
+            insert_ordered(pool, 20, &[], 1, order_fee(20));
+            Ok(funding)
+        };
+        let mut first = order_pool();
+        let mut second = order_pool();
+        let other_out = build(&mut first)?;
+        build(&mut second)?;
+        let funding_txid = order_tx(10, &[], 1, Sequence::MAX).txid();
+        let rival_txid = order_tx(11, &[(other_out.txid, other_out.vout)], 1, Sequence::MAX).txid();
+        let rival_child_txid = order_tx(12, &[(rival_txid, 0)], 1, Sequence::MAX).txid();
+        let singleton_txid = order_tx(20, &[], 1, Sequence::MAX).txid();
+        let rival_id = first.entry_id_by_txid(&rival_txid).expect("rival pooled");
+        let rival_child_id = first
+            .entry_id_by_txid(&rival_child_txid)
+            .expect("rival child pooled");
+        let conflict = order_tx(30, &[(other_out.txid, other_out.vout)], 1, Sequence::MAX);
+        let block = test_block(alloc::vec![coinbase_stub(999_995), conflict]);
+        let plan = first.plan_block_removals(&block_facts(&block));
+        assert_plan_unique(&plan);
+        let mut expected = alloc::vec![
+            (rival_id, RemovalReason::Conflict),
+            (rival_child_id, RemovalReason::Conflict),
+        ];
+        expected.sort_unstable_by_key(|(id, _)| *id);
+        assert_eq!(
+            plan.removals, expected,
+            "block spending 10:0 removes exactly the rival and its child as conflicts"
+        );
+        assert_projection_matches_real(&first, &mut second, &block);
+        assert!(
+            second.contains_txid(&funding_txid),
+            "conflict sweep keeps the funding entry"
+        );
+        assert!(
+            second.contains_txid(&singleton_txid),
+            "conflict sweep keeps the unrelated singleton"
+        );
+        assert!(!second.contains_txid(&rival_txid));
+        assert!(!second.contains_txid(&rival_child_txid));
+        assert_eq!(second.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn projected_prioritised_fees_and_cleared_overlays_match_real() {
+        let mut first = order_pool();
+        let mut second = order_pool();
+        for pool in [&mut first, &mut second] {
+            insert_ordered(&mut *pool, 1, &[], 1, 5_000);
+            insert_ordered(&mut *pool, 2, &[], 1, 6_000);
+            insert_ordered(&mut *pool, 3, &[], 1, 7_000);
+        }
+        let first_txid = order_tx(1, &[], 1, Sequence::MAX).txid();
+        let second_txid = order_tx(2, &[], 1, Sequence::MAX).txid();
+        for pool in [&mut first, &mut second] {
+            pool.prioritise(first_txid, 50_000)
+                .expect("positive overlay applies");
+            pool.prioritise(second_txid, -4_000)
+                .expect("negative overlay applies");
+        }
+        let confirmed = order_tx(1, &[], 1, Sequence::MAX);
+        let block = test_block(alloc::vec![coinbase_stub(999_996), confirmed]);
+        let plan = first.plan_block_removals(&block_facts(&block));
+        assert_plan_unique(&plan);
+        assert_eq!(
+            plan.fee_deltas_cleared, 1,
+            "only the confirmed overlay clears"
+        );
+        let projected = projected_facts(&first, &plan);
+        assert_eq!(projected.len(), 2);
+        assert_projection_matches_real(&first, &mut second, &block);
+        assert_eq!(
+            second.fee_delta_sequence_number(),
+            first.fee_delta_sequence_number().wrapping_add(1)
+        );
+    }
+
+    proptest! {
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/mempool/regressions/pool/chunk_order_tests.txt"
+            )),
+        )),
+        ..proptest::test_runner::Config::default()
+    })]
+
+        #[test]
+        fn projected_chunks_match_real_remove_for_block(
+            actions in prop::collection::vec(
+                (
+                    0_u64..16,
+                    prop::option::of(0_u64..16),
+                    0_usize..3,
+                    1_u32..3,
+                    0_u32..3,
+                ),
+                1..24,
+            ),
+            overlay_picks in prop::collection::vec((0_u64..16, 0_usize..5), 0..4),
+            block_picks in prop::collection::vec((0_u64..16, 0_u8..2), 0..6),
+        ) {
+            const DELTAS: [i64; 5] = [-15_000, -1_000, 100, 1_000, 15_000];
+            let mut actions = actions;
+            actions.insert(0, (1, Some(0), 0, 1, 0));
+            actions.insert(0, (0, None, 0, 2, 0));
+            let build = |pool: &mut Mempool| {
+                let mut inserted: HashMap<u64, (Txid, u32)> = HashMap::new();
+                for (label, parent, fee_class, outputs, vout) in &actions {
+                    let fees = [order_fee(*label), 100, 50_000];
+                    let fee = fees[*fee_class % fees.len()];
+                    let mut spends = Vec::new();
+                    let intended_parent = if let Some(parent_label) = parent
+                        && let Some(&(parent_txid, slots)) = inserted.get(parent_label)
+                    {
+                        spends.push((parent_txid, vout % slots));
+                        Some(parent_txid)
+                    } else {
+                        None
+                    };
+                    let tx = order_tx(*label, &spends, *outputs, Sequence::MAX);
+                    let txid = tx.txid();
+                    if pool
+                        .insert_entry(MempoolEntry::new(Arc::new(tx), 200, fee, *label, 1, 0))
+                        .is_ok()
+                    {
+                        inserted.insert(*label, (txid, *outputs));
+                        if let Some(parent_txid) = intended_parent {
+                            let child_id = pool.entry_id_by_txid(&txid);
+                            let parent_id = pool.entry_id_by_txid(&parent_txid);
+                            assert!(
+                                child_id.is_some() && parent_id.is_some(),
+                                "the child and its tracked parent must both be resident"
+                            );
+                            assert!(
+                                child_id.zip(parent_id).is_some_and(|(child, parent)| {
+                                    pool.parents_of(child).contains(&parent)
+                                }),
+                                "label {label} must link to its tracked resident parent"
+                            );
+                        }
+                    }
+                }
+            };
+            let (mut first, mut second) = twin_pools(build);
+            let pooled_for_overlays = first.iter_txids();
+            for (label, delta_idx) in &overlay_picks {
+                let target = if pooled_for_overlays.is_empty() {
+                    order_tx(*label, &[], 1, Sequence::MAX).txid()
+                } else {
+                    let at = usize::try_from(*label).expect("label fits usize") % pooled_for_overlays.len();
+                    pooled_for_overlays[at]
+                };
+                let delta = DELTAS[*delta_idx % DELTAS.len()];
+                let _ = first.prioritise(target, delta);
+                let _ = second.prioritise(target, delta);
+            }
+            let pooled = first.iter_txids();
+            let mut block_txs = alloc::vec![coinbase_stub(999_997)];
+            for (index, (label, kind)) in block_picks.iter().enumerate() {
+                if pooled.is_empty() {
+                    block_txs.push(order_tx(*label, &[], 1, Sequence::MAX));
+                    continue;
+                }
+                let at = usize::try_from(*label).expect("label fits usize") % pooled.len();
+                let victim = pooled[at];
+                if *kind == 0 {
+                    if let Some(tx) = first.transaction_by_txid(&victim) {
+                        block_txs.push(tx.as_ref().clone());
+                    }
+                } else if let Some(entry) = first.entry_by_txid(&victim) {
+                    if let Some(input) = entry.tx.inputs.first() {
+                        let out = input.previous_output;
+                        let step = u64::try_from(index).expect("index fits u64");
+                        let fresh = label.wrapping_mul(32).wrapping_add(step).wrapping_add(1_000);
+                        block_txs.push(order_tx(fresh, &[(out.txid, out.vout)], 1, Sequence::MAX));
+                    }
+                }
+            }
+            let block = test_block(block_txs);
+            let mut id_of: HashMap<Txid, EntryId> = HashMap::new();
+            for txid in first.iter_txids() {
+                if let Some(id) = first.entry_id_by_txid(&txid) {
+                    id_of.insert(txid, id);
+                }
+            }
+            let mut planned: HashSet<EntryId> = HashSet::new();
+            let mut expected: Vec<(EntryId, RemovalReason)> = Vec::new();
+            for tx in &block.txs {
+                if let Some(&id) = id_of.get(&tx.txid()) {
+                    if planned.insert(id) {
+                        expected.push((id, RemovalReason::BlockInclusion));
+                    }
+                }
+                let mut direct = Vec::new();
+                for entry in first.iter_entries() {
+                    let Some(&eid) = id_of.get(&entry.txid) else {
+                        continue;
+                    };
+                    if planned.contains(&eid) {
+                        continue;
+                    }
+                    let mut hits = false;
+                    for binput in &tx.inputs {
+                        for einput in &entry.tx.inputs {
+                            if einput.previous_output == binput.previous_output {
+                                hits = true;
+                                break;
+                            }
+                        }
+                        if hits {
+                            break;
+                        }
+                    }
+                    if hits {
+                        direct.push(eid);
+                    }
+                }
+                direct.sort_unstable();
+                direct.dedup();
+                for root in direct {
+                    if planned.contains(&root) {
+                        continue;
+                    }
+                    let mut seen_local: HashSet<EntryId> = HashSet::new();
+                    seen_local.insert(root);
+                    let mut subtree = alloc::vec![root];
+                    let mut stack = alloc::vec![root];
+                    while let Some(current) = stack.pop() {
+                        for child_txid in first.spender_txids(current) {
+                            let Some(&child) = id_of.get(&child_txid) else {
+                                continue;
+                            };
+                            if planned.contains(&child) {
+                                continue;
+                            }
+                            if seen_local.insert(child) {
+                                subtree.push(child);
+                                stack.push(child);
+                            }
+                        }
+                    }
+                    subtree.sort_unstable();
+                    for id in subtree {
+                        if planned.insert(id) {
+                            expected.push((id, RemovalReason::Conflict));
+                        }
+                    }
+                }
+            }
+            let overlay_set: HashSet<Txid> = first
+                .prioritised_transactions()
+                .into_iter()
+                .map(|row| row.txid)
+                .collect();
+            let mut seen_block: HashSet<Txid> = HashSet::new();
+            let mut expected_cleared = 0_u64;
+            for tx in &block.txs {
+                let txid = tx.txid();
+                if seen_block.insert(txid) && overlay_set.contains(&txid) {
+                    expected_cleared += 1;
+                }
+            }
+            let plan = first.plan_block_removals(&block_facts(&block));
+            assert_plan_unique(&plan);
+            assert_eq!(
+                plan.fee_deltas_cleared, expected_cleared,
+                "cleared-overlay count diverged from the overlay set"
+            );
+            assert_eq!(
+                plan.removals, expected,
+                "planned set and reasons diverged from the input-descendant oracle"
+            );
+            assert_projection_matches_real(&first, &mut second, &block);
+        }
+    }
+}
 pub(crate) mod fee_policy;
 #[cfg(test)]
 #[expect(clippy::expect_used)]
-mod model_tests;
+mod model_tests {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+
+    use bitcoin_rs_consensus::primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    };
+    use hashbrown::{HashMap, HashSet};
+    use proptest::prelude::*;
+
+    use super::{EntryId, Mempool, MempoolEntry, MempoolLimits};
+    use crate::ReplacementCandidate;
+    use crate::mutation::MutationOutcome;
+    use crate::policy::MEMPOOL_EXPIRY_SECS;
+
+    const FEE_TIERS: [u64; 6] = [0, 500, 1_000, 10_000, 100_000, 1_000_000];
+    const VSIZE_TIERS: [u32; 5] = [100, 200, 400, 1_000, 2_000];
+
+    fn model_tx(nonce: u32, inputs: &[OutPoint], outputs_count: u32) -> Tx {
+        let out_count = outputs_count.max(1);
+        Tx {
+            version: 2,
+            lock_time: LockTime::from_consensus(nonce),
+            inputs: inputs
+                .iter()
+                .map(|previous_output| TxIn {
+                    previous_output: *previous_output,
+                    script_sig: Script::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: bitcoin_rs_consensus::primitives::Witness::new(),
+                })
+                .collect(),
+            outputs: (0..out_count)
+                .map(|vout| {
+                    let vout_u8 = u8::try_from(vout % 256).unwrap_or(0);
+                    TxOut {
+                        value: Amount::from_sat(50_000),
+                        script_pubkey: Script::from_bytes(alloc::vec![0x51, 0x20, vout_u8]),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct NaiveEntry {
+        tx: Arc<Tx>,
+        vsize: u32,
+        fee: u64,
+        time: u64,
+    }
+
+    #[derive(Default)]
+    struct NaiveMempool {
+        entries: HashMap<Txid, NaiveEntry>,
+        spends: HashMap<OutPoint, HashSet<Txid>>,
+    }
+
+    impl NaiveMempool {
+        fn contains_txid(&self, txid: &Txid) -> bool {
+            self.entries.contains_key(txid)
+        }
+
+        fn len(&self) -> usize {
+            self.entries.len()
+        }
+
+        fn children_of(&self, txid: &Txid) -> HashSet<Txid> {
+            let mut children = HashSet::new();
+            for (child_txid, entry) in &self.entries {
+                for input in &entry.tx.inputs {
+                    if input.previous_output.txid == *txid {
+                        children.insert(*child_txid);
+                    }
+                }
+            }
+            children
+        }
+
+        fn ancestors_of(&self, txid: &Txid) -> HashSet<Txid> {
+            let mut ancestors = HashSet::new();
+            let mut stack = alloc::vec![*txid];
+            while let Some(current) = stack.pop() {
+                let Some(entry) = self.entries.get(&current) else {
+                    continue;
+                };
+                for input in &entry.tx.inputs {
+                    let parent = input.previous_output.txid;
+                    if self.entries.contains_key(&parent) && ancestors.insert(parent) {
+                        stack.push(parent);
+                    }
+                }
+            }
+            ancestors
+        }
+
+        fn collect_descendants(&self, root: &Txid) -> HashSet<Txid> {
+            let mut descendants = HashSet::new();
+            let mut stack = alloc::vec![*root];
+            descendants.insert(*root);
+            while let Some(current) = stack.pop() {
+                for child in self.children_of(&current) {
+                    if descendants.insert(child) {
+                        stack.push(child);
+                    }
+                }
+            }
+            descendants
+        }
+
+        fn insert(&mut self, tx: Arc<Tx>, vsize: u32, fee: u64, time: u64) {
+            let txid = tx.txid();
+            for input in &tx.inputs {
+                self.spends
+                    .entry(input.previous_output)
+                    .or_default()
+                    .insert(txid);
+            }
+            self.entries.insert(
+                txid,
+                NaiveEntry {
+                    tx,
+                    vsize,
+                    fee,
+                    time,
+                },
+            );
+        }
+
+        fn remove(&mut self, txid: &Txid) -> Option<NaiveEntry> {
+            let entry = self.entries.remove(txid)?;
+            for input in &entry.tx.inputs {
+                if let Some(set) = self.spends.get_mut(&input.previous_output) {
+                    set.remove(txid);
+                    if set.is_empty() {
+                        self.spends.remove(&input.previous_output);
+                    }
+                }
+            }
+            Some(entry)
+        }
+
+        fn remove_all(&mut self, txids: &HashSet<Txid>) {
+            for txid in txids {
+                self.remove(txid);
+            }
+        }
+
+        fn conflicts_for(&self, tx: &Tx) -> HashSet<Txid> {
+            let mut conflicts = HashSet::new();
+            for input in &tx.inputs {
+                if let Some(residents) = self.spends.get(&input.previous_output) {
+                    for &resident in residents {
+                        if resident != tx.txid() {
+                            conflicts.insert(resident);
+                        }
+                    }
+                }
+            }
+            conflicts
+        }
+
+        fn all_conflicts_and_descendants(&self, direct: &HashSet<Txid>) -> HashSet<Txid> {
+            let mut all = HashSet::new();
+            for conflict in direct {
+                for desc in self.collect_descendants(conflict) {
+                    all.insert(desc);
+                }
+            }
+            all
+        }
+        fn evaluate_bip125_replacement(
+            &self,
+            candidate: &Tx,
+            candidate_fee: u64,
+            candidate_vsize: u32,
+        ) -> Option<HashSet<Txid>> {
+            let direct = self.conflicts_for(candidate);
+            if direct.is_empty() {
+                return None;
+            }
+            let victims = self.all_conflicts_and_descendants(&direct);
+            if victims.len() > 100 {
+                return None;
+            }
+            for input in &candidate.inputs {
+                if victims.contains(&input.previous_output.txid) {
+                    return None;
+                }
+            }
+            let victims_fee: u64 = victims
+                .iter()
+                .filter_map(|t| self.entries.get(t))
+                .map(|e| e.fee)
+                .sum();
+            let min_relay_bump = u64::from(candidate_vsize);
+            let min_required = victims_fee.saturating_add(min_relay_bump);
+            if candidate_fee <= victims_fee || candidate_fee < min_required {
+                return None;
+            }
+            let victims_vsize: u64 = victims
+                .iter()
+                .filter_map(|t| self.entries.get(t))
+                .map(|e| u64::from(e.vsize))
+                .sum();
+            if u128::from(candidate_fee) * u128::from(victims_vsize.max(1))
+                <= u128::from(victims_fee) * u128::from(candidate_vsize)
+            {
+                return None;
+            }
+            Some(victims)
+        }
+
+        fn plan_block_removals(&self, block_txs: &[Tx], block_txids: &[Txid]) -> HashSet<Txid> {
+            let mut to_remove = HashSet::new();
+            for txid in block_txids {
+                if self.entries.contains_key(txid) {
+                    to_remove.insert(*txid);
+                }
+            }
+            for btx in block_txs {
+                let conflicts = self.conflicts_for(btx);
+                for conf in conflicts {
+                    if !to_remove.contains(&conf) {
+                        to_remove.extend(self.collect_descendants(&conf));
+                    }
+                }
+            }
+            to_remove
+        }
+
+        fn plan_expiry(&self, current_time: u64) -> HashSet<Txid> {
+            let cutoff = current_time.saturating_sub(MEMPOOL_EXPIRY_SECS);
+            let expired_roots: HashSet<Txid> = self
+                .entries
+                .iter()
+                .filter(|(_, e)| e.time < cutoff)
+                .map(|(t, _)| *t)
+                .collect();
+            self.all_conflicts_and_descendants(&expired_roots)
+        }
+    }
+
+    fn assert_ancestor_descendant_invariants(pool: &Mempool) {
+        for (index, entry) in pool.entries.iter() {
+            let id = EntryId::try_from(index).expect("id fits u32");
+
+            let mut ancestors: HashSet<EntryId> = HashSet::new();
+            let mut queue = alloc::vec![id];
+            while let Some(current) = queue.pop() {
+                if let Some(links) = pool.links(current) {
+                    for &parent in &links.parents {
+                        if ancestors.insert(parent) {
+                            queue.push(parent);
+                        }
+                    }
+                }
+            }
+            let expected_anc_count =
+                u32::try_from(ancestors.len().saturating_add(1)).unwrap_or(u32::MAX);
+            let mut expected_anc_size = u64::from(entry.vsize);
+            let mut expected_anc_fee = entry.fee;
+            let mut expected_anc_fee_delta = i128::from(entry.fee_delta);
+            for &parent_id in &ancestors {
+                if let Some(parent) = pool.entry(parent_id) {
+                    expected_anc_size = expected_anc_size.saturating_add(u64::from(parent.vsize));
+                    expected_anc_fee = expected_anc_fee.saturating_add(parent.fee);
+                    expected_anc_fee_delta =
+                        expected_anc_fee_delta.saturating_add(i128::from(parent.fee_delta));
+                }
+            }
+            assert_eq!(pool.ancestor_count_inclusive(id), expected_anc_count);
+            assert_eq!(entry.ancestor_size, expected_anc_size);
+            assert_eq!(entry.ancestor_fee, expected_anc_fee);
+            assert_eq!(entry.ancestor_fee_delta, expected_anc_fee_delta);
+
+            let mut descendants: HashSet<EntryId> = HashSet::new();
+            let mut queue = alloc::vec![id];
+            while let Some(current) = queue.pop() {
+                if let Some(links) = pool.links(current) {
+                    for &child in &links.children {
+                        if descendants.insert(child) {
+                            queue.push(child);
+                        }
+                    }
+                }
+            }
+            let expected_desc_count =
+                u32::try_from(descendants.len().saturating_add(1)).unwrap_or(u32::MAX);
+            let mut expected_desc_size = u64::from(entry.vsize);
+            let mut expected_desc_fee = entry.fee;
+            let mut expected_desc_fee_delta = i128::from(entry.fee_delta);
+            for &child_id in &descendants {
+                if let Some(child) = pool.entry(child_id) {
+                    expected_desc_size = expected_desc_size.saturating_add(u64::from(child.vsize));
+                    expected_desc_fee = expected_desc_fee.saturating_add(child.fee);
+                    expected_desc_fee_delta =
+                        expected_desc_fee_delta.saturating_add(i128::from(child.fee_delta));
+                }
+            }
+            assert_eq!(pool.descendant_count_inclusive(id), expected_desc_count);
+            assert_eq!(entry.descendant_size, expected_desc_size);
+            assert_eq!(entry.descendant_fee, expected_desc_fee);
+            assert_eq!(entry.descendant_fee_delta, expected_desc_fee_delta);
+        }
+    }
+
+    fn assert_accounting_invariants(pool: &Mempool) {
+        let mut sum_vsize = 0_u64;
+        let mut sum_fees = 0_u64;
+        let mut count = 0_usize;
+        for (_index, entry) in pool.entries.iter() {
+            sum_vsize = sum_vsize.saturating_add(u64::from(entry.vsize));
+            sum_fees = sum_fees.saturating_add(entry.fee);
+            count = count.saturating_add(1);
+            assert_eq!(
+                crate::accounting::charged_weight(entry.weight, entry.vsize, entry.sigop_cost),
+                entry.policy_weight()
+            );
+        }
+        assert_eq!(pool.total_vsize(), sum_vsize);
+        assert_eq!(pool.stats().bytes, sum_vsize);
+        assert_eq!(pool.aggregate_fees(), sum_fees);
+        assert_eq!(pool.stats().total_fee, sum_fees);
+        assert_eq!(pool.len(), count);
+        assert_eq!(pool.stats().txs, u64::try_from(count).unwrap_or(u64::MAX));
+        assert_eq!(pool.dynamic_memory_usage(), pool.recount_memory_usage());
+    }
+
+    fn assert_edge_invariants(pool: &Mempool) {
+        for (index, entry) in pool.entries.iter() {
+            let id = EntryId::try_from(index).expect("id fits u32");
+            let links = pool.links(id).expect("live entry links");
+
+            for &parent in &links.parents {
+                assert!(pool.entry(parent).is_some());
+                let parent_links = pool.links(parent).expect("parent links");
+                assert!(parent_links.children.contains(&id));
+            }
+            for &child in &links.children {
+                assert!(pool.entry(child).is_some());
+                let child_links = pool.links(child).expect("child links");
+                assert!(child_links.parents.contains(&id));
+            }
+            for input in &entry.tx.inputs {
+                if let Some(parent_id) = pool.entry_id_by_txid(&input.previous_output.txid) {
+                    assert!(links.parents.contains(&parent_id));
+                }
+            }
+        }
+    }
+
+    fn assert_pool_matches_model(pool: &Mempool, naive: &NaiveMempool) {
+        assert_eq!(pool.len(), naive.len());
+        for (txid, entry) in &naive.entries {
+            let pooled = pool.entry_by_txid(txid).expect("pooled entry");
+            assert_eq!(pooled.fee, entry.fee);
+            assert_eq!(pooled.vsize, entry.vsize);
+            assert_eq!(pooled.time, entry.time);
+        }
+        for (_index, entry) in pool.entries.iter() {
+            assert!(naive.contains_txid(&entry.txid));
+        }
+    }
+    #[derive(Clone, Copy, Debug)]
+    struct AddParams {
+        nonce: u32,
+        fee_tier: usize,
+        vsize_tier: usize,
+        outputs_count: u32,
+    }
+
+    struct ModelDriver {
+        pool: Mempool,
+        naive: NaiveMempool,
+        reorg_stash: Vec<Arc<Tx>>,
+        current_time: u64,
+        height: u32,
+        root_counter: u32,
+    }
+
+    impl ModelDriver {
+        fn new() -> Self {
+            Self {
+                pool: Mempool::new(MempoolLimits {
+                    max_total_bytes: 0,
+                    min_relay_fee_sat_per_kvb: 0,
+                    cluster_count: 64,
+                    ..MempoolLimits::default()
+                }),
+                naive: NaiveMempool::default(),
+                reorg_stash: Vec::new(),
+                current_time: 1_700_000_000,
+                height: 800_000,
+                root_counter: 0,
+            }
+        }
+
+        fn apply_add(&mut self, params: AddParams, parent_picks: &[usize]) {
+            let pooled = self.pool.iter_txids();
+            let mut inputs = Vec::new();
+            if !pooled.is_empty() && !parent_picks.is_empty() {
+                for &pick in parent_picks {
+                    let parent_txid = pooled[pick % pooled.len()];
+                    if let Some(entry) = self.naive.entries.get(&parent_txid) {
+                        let vout = u32::try_from(pick % entry.tx.outputs.len().max(1)).unwrap_or(0);
+                        let point = OutPoint::new(parent_txid, vout);
+                        if !inputs.contains(&point) && !self.naive.spends.contains_key(&point) {
+                            inputs.push(point);
+                        }
+                    }
+                }
+            }
+            if inputs.is_empty() {
+                let mut seed = [0xA5_u8; 32];
+                let root_id = self.root_counter;
+                self.root_counter = self.root_counter.wrapping_add(1);
+                seed[..4].copy_from_slice(&root_id.to_le_bytes());
+                inputs.push(OutPoint::new(Txid::from(Hash256::from_le_bytes(&seed)), 0));
+            }
+            let tx = Arc::new(model_tx(params.nonce, &inputs, params.outputs_count));
+            let fee = FEE_TIERS[params.fee_tier % FEE_TIERS.len()];
+            let vsize = VSIZE_TIERS[params.vsize_tier % VSIZE_TIERS.len()];
+            let entry = MempoolEntry::new(
+                Arc::clone(&tx),
+                vsize,
+                fee,
+                self.current_time,
+                self.height,
+                0,
+            );
+            if self.naive.contains_txid(&tx.txid()) {
+                return;
+            }
+            match self.pool.insert_entry(entry) {
+                Ok(_) => self.naive.insert(tx, vsize, fee, self.current_time),
+                Err(error) => panic!(
+                    "model predicts acceptance for a fresh insertion that spends only unspent outpoints, but the pool refused: {error:?}"
+                ),
+            }
+        }
+        fn apply_replace(
+            &mut self,
+            nonce: u32,
+            victim_pick: usize,
+            fee_bump: u64,
+            shortfall: bool,
+        ) {
+            let pooled = self.pool.iter_txids();
+            if pooled.is_empty() {
+                return;
+            }
+            let victim_txid = pooled[victim_pick % pooled.len()];
+            let Some(victim) = self.naive.entries.get(&victim_txid) else {
+                return;
+            };
+            let Some(first_in) = victim.tx.inputs.first() else {
+                return;
+            };
+            let conflict_outpoint = first_in.previous_output;
+            let candidate = Arc::new(model_tx(nonce, &[conflict_outpoint], 2));
+            let direct = self.naive.conflicts_for(&candidate);
+            let victims = self.naive.all_conflicts_and_descendants(&direct);
+            let victims_fee: u64 = victims
+                .iter()
+                .filter_map(|t| self.naive.entries.get(t))
+                .map(|e| e.fee)
+                .sum();
+            let victims_vsize: u64 = victims
+                .iter()
+                .filter_map(|t| self.naive.entries.get(t))
+                .map(|e| u64::from(e.vsize))
+                .sum();
+            let rate_fee = victims_fee
+                .saturating_mul(200)
+                .checked_div(victims_vsize.max(1))
+                .unwrap_or(0);
+            let fee = if shortfall {
+                victims_fee / 2
+            } else {
+                victims_fee
+                    .max(rate_fee)
+                    .saturating_add(10_000)
+                    .saturating_add(fee_bump)
+            };
+            if self.naive.contains_txid(&candidate.txid()) {
+                return;
+            }
+            let expected = self.naive.evaluate_bip125_replacement(&candidate, fee, 200);
+            let repl = ReplacementCandidate::new(Arc::clone(&candidate), 200, fee, 0);
+            let outcome = self
+                .pool
+                .replace_transaction(&repl, self.current_time, self.height);
+            let Some(victims) = expected else {
+                assert!(
+                    outcome.is_err(),
+                    "model predicts a BIP125 rejection, but the pool accepted the replacement"
+                );
+                return;
+            };
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(crate::rbf::RbfError::InsufficientFeerateDiagram) => return,
+                Err(error) => {
+                    panic!(
+                        "model predicts a BIP125-valid replacement, but the pool refused: {error:?}"
+                    );
+                }
+            };
+            let mut pool_removed = HashSet::new();
+            for change in outcome.changes {
+                if let MutationOutcome::Removed(_) = change.outcome {
+                    pool_removed.insert(Txid(change.txid));
+                }
+            }
+            assert_eq!(
+                pool_removed, victims,
+                "pool removed set must equal BIP125 victims"
+            );
+            self.naive.remove_all(&victims);
+            self.naive.insert(candidate, 200, fee, self.current_time);
+        }
+
+        fn apply_remove_for_block(
+            &mut self,
+            block_picks: &[usize],
+            conflict_pick: Option<usize>,
+            nonce: u32,
+        ) {
+            let pooled = self.pool.iter_txids();
+            if pooled.is_empty() {
+                return;
+            }
+            let mut block_spent_inputs: HashSet<OutPoint> = HashSet::new();
+            let mut mined: HashSet<Txid> = HashSet::new();
+            let mut block_txs = Vec::new();
+            for &pick in block_picks {
+                let txid = pooled[pick % pooled.len()];
+                for ancestor in self.naive.ancestors_of(&txid) {
+                    mined.insert(ancestor);
+                }
+                mined.insert(txid);
+            }
+            let mut mined: Vec<Txid> = mined.into_iter().collect();
+            mined.sort_unstable_by_key(|txid| {
+                let depth = self.naive.ancestors_of(txid).len();
+                (depth, *txid)
+            });
+            for txid in &mined {
+                if let Some(entry) = self.naive.entries.get(txid) {
+                    let tx = entry.tx.as_ref().clone();
+                    if tx
+                        .inputs
+                        .iter()
+                        .any(|i| block_spent_inputs.contains(&i.previous_output))
+                    {
+                        continue;
+                    }
+                    for input in &tx.inputs {
+                        block_spent_inputs.insert(input.previous_output);
+                    }
+                    block_txs.push(tx);
+                }
+            }
+            if let Some(cpick) = conflict_pick
+                && let Some(entry) = self.naive.entries.get(&pooled[cpick % pooled.len()])
+                && let Some(in0) = entry.tx.inputs.first()
+                && !block_spent_inputs.contains(&in0.previous_output)
+            {
+                block_spent_inputs.insert(in0.previous_output);
+                let mut conf_tx = model_tx(nonce, &[in0.previous_output], 1);
+                conf_tx.version = 1;
+                block_txs.push(conf_tx);
+            }
+            if block_txs.is_empty() {
+                return;
+            }
+            let block_refs: Vec<&Tx> = block_txs.iter().collect();
+            let block_id_list: Vec<Txid> = block_txs.iter().map(Tx::txid).collect();
+            let expected_removals = self.naive.plan_block_removals(&block_txs, &block_id_list);
+            let outcome = self.pool.remove_for_block(
+                &crate::settlement::TransitionFacts::from_txs(&block_refs),
+                self.height.saturating_add(1),
+                self.current_time,
+            );
+            let mut pool_removed = HashSet::new();
+            for change in outcome.changes {
+                if let MutationOutcome::Removed(_) = change.outcome {
+                    pool_removed.insert(Txid(change.txid));
+                }
+            }
+            assert_eq!(
+                pool_removed, expected_removals,
+                "pool removals must match naive model block removals"
+            );
+            for tid in &expected_removals {
+                if let Some(entry) = self.naive.remove(tid) {
+                    self.reorg_stash.push(entry.tx);
+                }
+            }
+        }
+
+        fn apply_evict(&mut self, keep_percent: u8) {
+            if self.pool.is_empty() {
+                return;
+            }
+            let pct = u64::from(keep_percent.clamp(10, 90));
+            let target = self.pool.dynamic_memory_usage().saturating_mul(pct) / 100;
+            if let Ok(changes) = crate::eviction::evict_lowest_fee_packages(&mut self.pool, target)
+            {
+                for change in changes {
+                    let txid = Txid(change.txid);
+                    self.naive.remove(&txid);
+                }
+            }
+        }
+
+        fn apply_expire(&mut self, hours_elapsed: u32) {
+            self.current_time = self
+                .current_time
+                .saturating_add(u64::from(hours_elapsed) * 3600);
+            let expected_expired = self.naive.plan_expiry(self.current_time);
+            let outcome = self.pool.expire(self.current_time);
+            let mut pool_expired = HashSet::new();
+            for change in outcome.changes {
+                if let MutationOutcome::Removed(_) = change.outcome {
+                    pool_expired.insert(Txid(change.txid));
+                }
+            }
+            assert_eq!(
+                pool_expired, expected_expired,
+                "pool expired set must match naive model expiry"
+            );
+            self.naive.remove_all(&expected_expired);
+        }
+
+        fn apply_reorg_readd(&mut self, count: usize) {
+            let mut readded = 0_usize;
+            let mut remaining = Vec::new();
+            for tx in self.reorg_stash.drain(..) {
+                let can_readd = readded < count
+                    && tx
+                        .inputs
+                        .iter()
+                        .all(|i| !self.naive.spends.contains_key(&i.previous_output));
+                if can_readd {
+                    let entry = MempoolEntry::new(
+                        Arc::clone(&tx),
+                        200,
+                        10_000,
+                        self.current_time,
+                        self.height,
+                        0,
+                    );
+                    match self.pool.insert_entry(entry) {
+                        Ok(_) => {}
+                        Err(error) => panic!(
+                            "model predicts acceptance for the reorg re-add, but the pool refused: {error:?}"
+                        ),
+                    }
+                    self.naive.insert(tx, 200, 10_000, self.current_time);
+                    readded = readded.saturating_add(1);
+                    continue;
+                }
+                remaining.push(tx);
+            }
+            self.reorg_stash = remaining;
+        }
+
+        fn assert_invariants(&self) {
+            assert_ancestor_descendant_invariants(&self.pool);
+            self.pool.assert_index_matches_oracle("model command step");
+            assert_accounting_invariants(&self.pool);
+            assert_edge_invariants(&self.pool);
+            assert_pool_matches_model(&self.pool, &self.naive);
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum ModelOp {
+        Add {
+            params: AddParams,
+            parent_picks: Vec<usize>,
+            time_offset: u64,
+        },
+        Replace {
+            nonce: u32,
+            victim_pick: usize,
+            fee_bump: u64,
+            shortfall: bool,
+            time_offset: u64,
+        },
+        RemoveForBlock {
+            block_picks: Vec<usize>,
+            conflict_pick: Option<usize>,
+            nonce: u32,
+            time_offset: u64,
+        },
+        Evict {
+            keep_percent: u8,
+        },
+        Expire {
+            hours_elapsed: u32,
+        },
+        ReorgReAdd {
+            count: usize,
+        },
+    }
+
+    fn arb_model_op() -> impl Strategy<Value = ModelOp> {
+        prop_oneof![
+            3 => (
+                any::<u32>(),
+                prop::collection::vec(0_usize..16, 0..3),
+                0_usize..6,
+                0_usize..5,
+                1_u32..4,
+                0_u64..100,
+            ).prop_map(|(nonce, parent_picks, fee_tier, vsize_tier, outputs_count, time_offset)| {
+                ModelOp::Add {
+                    params: AddParams {
+                        nonce,
+                        fee_tier,
+                        vsize_tier,
+                        outputs_count,
+                    },
+                    parent_picks,
+                    time_offset,
+                }
+            }),
+            1 => (
+                any::<u32>(),
+                0_usize..16,
+                0_u64..50_000,
+                any::<bool>(),
+                0_u64..100,
+            ).prop_map(|(nonce, victim_pick, fee_bump, shortfall, time_offset)| {
+                ModelOp::Replace {
+                    nonce,
+                    victim_pick,
+                    fee_bump,
+                    shortfall,
+                    time_offset,
+                }
+            }),
+            1 => (
+                prop::collection::vec(0_usize..16, 1..4),
+                prop::option::of(0_usize..16),
+                any::<u32>(),
+                0_u64..100,
+            ).prop_map(|(block_picks, conflict_pick, nonce, time_offset)| {
+                ModelOp::RemoveForBlock {
+                    block_picks,
+                    conflict_pick,
+                    nonce,
+                    time_offset,
+                }
+            }),
+            1 => (10_u8..90).prop_map(|keep_percent| ModelOp::Evict { keep_percent }),
+            1 => (1_u32..400).prop_map(|hours_elapsed| ModelOp::Expire { hours_elapsed }),
+            1 => (1_usize..4).prop_map(|count| ModelOp::ReorgReAdd { count }),
+        ]
+    }
+
+    fn proptest_cases(default: u32) -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+
+    proptest! {
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/mempool/regressions/pool.txt"
+            )),
+        )),
+        ..(ProptestConfig {
+            cases: proptest_cases(256),
+            ..ProptestConfig::default()
+        })
+    })]
+        // POL-03, POL-05, MPL-02
+        #[test]
+        fn mempool_model_command_sequence_preserves_all_invariants(
+            ops in prop::collection::vec(arb_model_op(), 1..32)
+        ) {
+            let mut driver = ModelDriver::new();
+
+            for op in ops {
+                match op {
+                    ModelOp::Add {
+                        params,
+                        parent_picks,
+                        time_offset,
+                    } => {
+                        driver.current_time = driver.current_time.saturating_add(time_offset);
+                        driver.apply_add(params, &parent_picks);
+                    }
+                    ModelOp::Replace {
+                        nonce,
+                        victim_pick,
+                        fee_bump,
+                        shortfall,
+                        time_offset,
+                    } => {
+                        driver.current_time = driver.current_time.saturating_add(time_offset);
+                        driver.apply_replace(nonce, victim_pick, fee_bump, shortfall);
+                    }
+                    ModelOp::RemoveForBlock {
+                        block_picks,
+                        conflict_pick,
+                        nonce,
+                        time_offset,
+                    } => {
+                        driver.current_time = driver.current_time.saturating_add(time_offset);
+                        driver.apply_remove_for_block(&block_picks, conflict_pick, nonce);
+                    }
+                    ModelOp::Evict { keep_percent } => {
+                        driver.apply_evict(keep_percent);
+                    }
+                    ModelOp::Expire { hours_elapsed } => {
+                        driver.apply_expire(hours_elapsed);
+                    }
+                    ModelOp::ReorgReAdd { count } => {
+                        driver.apply_reorg_readd(count);
+                    }
+                }
+
+                driver.assert_invariants();
+            }
+        }
+    }
+}
 pub(crate) use fee_policy::ProjectionScope;
 pub(crate) mod package;
 
@@ -2585,11 +4488,2570 @@ mod package_tests {
 
 #[cfg(test)]
 #[expect(clippy::expect_used)]
-mod tests;
+mod tests {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use hashbrown::HashSet;
+
+    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Tx, TxIn, TxOut};
+
+    use super::*;
+    use crate::rbf::LimitEnforcement;
+
+    fn change_txids(result: &crate::mutation::MutationResult) -> Vec<Hash256> {
+        result.changes.iter().map(|change| change.txid).collect()
+    }
+
+    // MPL-02
+    #[test]
+    fn mutation_batch_crossing_sequence_rollover_keeps_base_and_lookups() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        pool.mempool_sequence = u64::MAX - 1;
+
+        let mut changes = Vec::new();
+        pool.push_change(&mut changes, txid_of([0xAA; 32]), MutationOutcome::Accepted);
+        pool.push_change(&mut changes, txid_of([0xBB; 32]), MutationOutcome::Accepted);
+        assert_eq!(pool.sequence_number(), 0, "assignment wraps modulo 2^64");
+
+        let result = pool.finish_mutation(changes);
+        assert_eq!(result.sequence_base, u64::MAX);
+        assert_eq!(result.sequence_of(0), Some(u64::MAX));
+        assert_eq!(result.sequence_of(1), Some(0));
+        assert_eq!(result.sequence_of(2), None);
+    }
+
+    #[test]
+    fn pending_broadcast_index_tracks_flags_across_entry_lifecycle() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let first = Arc::new(tx(1, Vec::new()));
+        let second = Arc::new(tx(2, Vec::new()));
+        let assert_index = |pool: &Mempool| {
+            let flags: std::collections::BTreeSet<_> = pool
+                .iter_entries()
+                .filter(|entry| entry.unbroadcast)
+                .map(|entry| entry.wtxid)
+                .collect();
+            assert_eq!(pool.derived.unbroadcast, flags);
+        };
+        let mut entry = MempoolEntry::new(Arc::clone(&first), 100, 10_000, 1, 0, 0);
+        entry.unbroadcast = true;
+        pool.insert_entry(entry)?;
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&second), 100, 10_000, 1, 0, 0))?;
+        assert_index(&pool);
+        pool.set_unbroadcast(second.wtxid(), true);
+        pool.set_unbroadcast(second.wtxid(), true);
+        pool.set_unbroadcast(first.wtxid(), false);
+        assert_index(&pool);
+        pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[second.as_ref()]),
+            2,
+            1,
+        );
+        assert_index(&pool);
+        assert!(
+            pool.derived.unbroadcast.is_empty(),
+            "removal must retire the index key, not leave a tombstone"
+        );
+        pool.insert_entry(MempoolEntry::new(second, 100, 10_000, 1, 0, 0))?;
+        assert_index(&pool);
+        pool.set_unbroadcast(first.wtxid(), true);
+        assert_index(&pool);
+        pool.clear();
+        assert_index(&pool);
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_send_cannot_undo_a_completed_broadcast() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = Arc::new(tx(1, Vec::new()));
+        let wtxid = tx.wtxid();
+        let mut entry = MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0);
+        entry.unbroadcast = true;
+        pool.insert_entry(entry)?;
+
+        pool.mark_broadcast(wtxid);
+        pool.commit_broadcast(wtxid);
+        pool.mark_broadcast(wtxid);
+        pool.restore_broadcast(wtxid);
+
+        let entry = pool.entry_by_txid(&tx.txid()).expect("entry lives");
+        assert!(
+            !entry.unbroadcast && !pool.derived.unbroadcast.contains(&wtxid),
+            "a failed send must not undo a broadcast that already completed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_earlier_failure_cannot_overwrite_a_peer_success() -> Result<(), MempoolError> {
+        // Two peers' serves interleave on one entry: the second send commits
+        // between the first send's mark and its failure, so the first failure's
+        // rollback must not re-flag the transaction.
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = Arc::new(tx(1, Vec::new()));
+        let wtxid = tx.wtxid();
+        let mut entry = MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0);
+        entry.unbroadcast = true;
+        pool.insert_entry(entry)?;
+
+        pool.mark_broadcast(wtxid);
+        pool.mark_broadcast(wtxid);
+        pool.commit_broadcast(wtxid);
+        pool.restore_broadcast(wtxid);
+
+        let entry = pool.entry_by_txid(&tx.txid()).expect("entry lives");
+        assert!(
+            !entry.unbroadcast && !pool.derived.unbroadcast.contains(&wtxid),
+            "an earlier failure must not overwrite a successful send"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unbroadcast_returns_only_after_every_in_flight_send_fails() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = Arc::new(tx(1, Vec::new()));
+        let wtxid = tx.wtxid();
+        let mut entry = MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0);
+        entry.unbroadcast = true;
+        pool.insert_entry(entry)?;
+
+        pool.mark_broadcast(wtxid);
+        pool.mark_broadcast(wtxid);
+        pool.restore_broadcast(wtxid);
+        assert!(
+            !pool.derived.unbroadcast.contains(&wtxid),
+            "a send still in flight keeps the broadcast window open"
+        );
+        pool.restore_broadcast(wtxid);
+        assert!(
+            pool.derived.unbroadcast.contains(&wtxid),
+            "with no send committed the entry is unbroadcast again"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_stale_rollback_cannot_revive_a_replaced_entry() -> Result<(), MempoolError> {
+        // The entry a failing send marked was evicted and re-admitted before
+        // the rollback arrived: the new entry keeps its own broadcast state.
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = Arc::new(tx(1, Vec::new()));
+        let wtxid = tx.wtxid();
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0))?;
+        pool.mark_broadcast(wtxid);
+        pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[tx.as_ref()]),
+            2,
+            1,
+        );
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0))?;
+
+        pool.restore_broadcast(wtxid);
+        pool.commit_broadcast(wtxid);
+
+        let entry = pool.entry_by_txid(&tx.txid()).expect("entry lives");
+        assert!(
+            !entry.unbroadcast && !entry.broadcast_done && entry.broadcast_marks == 0,
+            "a stale attempt must not touch a replaced entry"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn default_min_relay_fee_is_1_sat_per_vbyte() {
+        let pool = Mempool::new(MempoolLimits::default());
+        assert_eq!(pool.min_relay_fee_sat_per_kvb(), 1_000);
+    }
+    #[test]
+    fn min_fee_floors_at_min_relay_while_the_rolling_rate_is_zero() {
+        let pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 1_000,
+            ..MempoolLimits::default()
+        });
+        assert_eq!(pool.min_fee_sat_per_kvb(0), 1_000);
+        assert_eq!(pool.min_fee_sat_per_kvb(u64::MAX), 1_000);
+    }
+
+    #[test]
+    fn insert_entry_rejects_below_min_relay_fee() {
+        let limits = MempoolLimits {
+            min_relay_fee_sat_per_kvb: 5_000,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+        let tx = single_output_tx(&[], Sequence::MAX, 1_000, vec![0x51].into());
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 100, 1, 7, 0);
+        let result = pool.insert_entry(entry);
+
+        assert!(
+            matches!(
+                result,
+                Err(MempoolError::Policy(PolicyError::BelowMinRelayFee {
+                    tx_rate: 1_000,
+                    min_rate: 5_000
+                }))
+            ),
+            "expected BelowMinRelayFee rejection, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn stats_reports_empty_and_inserted_entry_counters() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        assert_eq!(pool.stats(), MempoolStats::default());
+
+        let tx = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        let entry = MempoolEntry::new(Arc::new(tx), 123, 4_567, 0, 0, 0);
+        let expected_vsize = u64::from(entry.vsize);
+        let expected_fee = entry.fee;
+
+        pool.insert_entry(entry)?;
+
+        let stats = pool.stats();
+        assert_eq!(stats.txs, 1);
+        assert_eq!(stats.bytes, expected_vsize);
+        assert_eq!(stats.total_fee, expected_fee);
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_fees_sums_entry_fees() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        assert_eq!(pool.aggregate_fees(), 0);
+
+        let entry_a = MempoolEntry::new(Arc::new(tx(1, Vec::new())), 400, 500, 1, 7, 0);
+        let entry_b = MempoolEntry::new(Arc::new(tx(2, Vec::new())), 900, 1_000, 2, 7, 0);
+        pool.insert_entry(entry_a)?;
+        pool.insert_entry(entry_b)?;
+
+        assert_eq!(pool.aggregate_fees(), 1_500);
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_fees_stays_saturated_after_decrements() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let prioritised = tx(2, Vec::new());
+        let prioritised_txid = prioritised.txid();
+        let removed = tx(3, Vec::new());
+
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(1, Vec::new())),
+            100,
+            u64::MAX - 1,
+            1,
+            7,
+            0,
+        ))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(prioritised), 100, 100, 2, 7, 0))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(removed.clone()),
+            100,
+            50,
+            3,
+            7,
+            0,
+        ))?;
+
+        assert_eq!(pool.aggregate_fees(), u64::MAX);
+        assert!(
+            !pool
+                .remove_for_block(
+                    &crate::settlement::TransitionFacts::from_txs(&[&removed]),
+                    8,
+                    1
+                )
+                .is_empty()
+        );
+        assert_eq!(pool.aggregate_fees(), u64::MAX);
+        pool.prioritise(prioritised_txid, -100)
+            .expect("overlay delta applies");
+        assert_eq!(pool.aggregate_fees(), u64::MAX);
+        Ok(())
+    }
+
+    #[test]
+    fn iter_by_fee_rate_desc_orders_highest_first() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let low_tx = single_output_tx(&[], Sequence::MAX, 1_000, vec![0x51].into());
+        let low_txid = low_tx.txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7, 0));
+        let high_tx = single_output_tx(&[], Sequence::MAX, 99_000, vec![0x52].into());
+        let high_txid = high_tx.txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7, 0));
+        let ordered = pool.iter_by_fee_rate_desc();
+        assert_eq!(ordered.len(), 2);
+        let Some(&first_id) = ordered.first() else {
+            panic!("expected at least one entry");
+        };
+        let Some(first_entry) = pool.entry(first_id) else {
+            panic!("first entry missing");
+        };
+        assert_eq!(first_entry.tx.txid(), high_txid);
+        let Some(&second_id) = ordered.get(1) else {
+            panic!("expected two entries");
+        };
+        let Some(second_entry) = pool.entry(second_id) else {
+            panic!("second entry missing");
+        };
+        assert_eq!(second_entry.tx.txid(), low_txid);
+    }
+
+    #[test]
+    fn fee_rate_aggregate_tracks_duplicate_rates_and_removals() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let first = Arc::new(tx(10, Vec::new()));
+        let second = Arc::new(tx(11, Vec::new()));
+        let other_rate = Arc::new(tx(12, Vec::new()));
+
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&first), 100, 1_000, 1, 7, 0))?;
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&second), 200, 2_000, 2, 7, 0))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::clone(&other_rate),
+            100,
+            3_000,
+            3,
+            7,
+            0,
+        ))?;
+
+        let ten_k = pool
+            .derived
+            .fee_rate_aggregates
+            .get(&10_000)
+            .expect("duplicate rate aggregate");
+        assert_eq!((ten_k.count, ten_k.vsize), (2, 300));
+        assert_eq!(
+            pool.fee_rate_histogram().collect::<Vec<_>>(),
+            vec![(10_000, 300), (30_000, 100)]
+        );
+
+        assert_eq!(
+            pool.remove_for_block(
+                &crate::settlement::TransitionFacts::from_txs(&[first.as_ref()]),
+                4,
+                1
+            )
+            .len(),
+            1
+        );
+        let ten_k = pool
+            .derived
+            .fee_rate_aggregates
+            .get(&10_000)
+            .expect("remaining duplicate rate aggregate");
+        assert_eq!((ten_k.count, ten_k.vsize), (1, 200));
+        assert_eq!(
+            pool.fee_rate_histogram().collect::<Vec<_>>(),
+            vec![(10_000, 200), (30_000, 100)]
+        );
+
+        assert_eq!(
+            pool.remove_for_block(
+                &crate::settlement::TransitionFacts::from_txs(&[second.as_ref()]),
+                5,
+                1
+            )
+            .len(),
+            1
+        );
+        assert!(!pool.derived.fee_rate_aggregates.contains_key(&10_000));
+        assert_eq!(
+            pool.fee_rate_histogram().collect::<Vec<_>>(),
+            vec![(30_000, 100)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn iter_above_fee_rate_filters_to_high_fee_only() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let low_tx = single_output_tx(&[], Sequence::MAX, 1_000, vec![0x51].into());
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7, 0));
+        let high_tx = single_output_tx(&[], Sequence::MAX, 99_000, vec![0x52].into());
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7, 0));
+        let high_only = pool.iter_above_fee_rate(50_000);
+        assert_eq!(high_only.len(), 1);
+        let both = pool.iter_above_fee_rate(500);
+        assert_eq!(both.len(), 2);
+        let none = pool.iter_above_fee_rate(200_000);
+        assert_eq!(none.len(), 0);
+    }
+
+    #[test]
+    fn iter_replaceable_txids_returns_only_rbf_signaled_txs() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let rbf_tx = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: txid_of([0xaa; 32]),
+                    vout: 0,
+                },
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0x0000_0001),
+                witness: Witness::new(),
+            }],
+            outputs: Vec::new(),
+        };
+        let rbf_txid = rbf_tx.txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(rbf_tx), 100, 10_000, 1, 7, 0));
+        let non_rbf_tx = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: txid_of([0xbb; 32]),
+                    vout: 0,
+                },
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: Vec::new(),
+        };
+        let non_rbf_txid = non_rbf_tx.txid();
+        let _ = pool.insert_entry(MempoolEntry::new(
+            Arc::new(non_rbf_tx),
+            100,
+            10_000,
+            1,
+            7,
+            0,
+        ));
+        let replaceable = pool.iter_replaceable_txids();
+        assert!(replaceable.contains(&rbf_txid));
+        assert!(!replaceable.contains(&non_rbf_txid));
+        assert_eq!(replaceable.len(), 1);
+    }
+
+    #[test]
+    fn sequence_number_bumps_on_successful_insert() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let before = pool.sequence_number();
+        let tx = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0);
+        pool.insert_entry(entry)?;
+        let after = pool.sequence_number();
+        assert!(after > before, "expected sequence to bump");
+        Ok(())
+    }
+
+    #[test]
+    fn clear_removes_all_entries_and_bumps_sequence() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = single_output_tx(&[], Sequence::MAX, 99_000, vec![0x51].into());
+        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))?;
+        let seq_before_clear = pool.sequence_number();
+
+        pool.clear();
+
+        assert_eq!(pool.len(), 0);
+        assert!(pool.derived.by_txid.is_empty());
+        assert!(pool.derived.funding.is_empty());
+        assert!(pool.derived.spending.is_empty());
+        assert!(pool.derived.chunks.is_empty());
+        assert!(pool.fee_deltas.is_empty(), "clear is a wholesale reset");
+        assert!(pool.sequence_number() > seq_before_clear);
+        Ok(())
+    }
+
+    #[test]
+    fn outpoint_spender_returns_the_spending_entry_and_vin() {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let outpoint = OutPoint {
+            txid: txid_of([0xaa; 32]),
+            vout: 7,
+        };
+        let decoy = OutPoint {
+            txid: txid_of([0xbb; 32]),
+            vout: 3,
+        };
+        let spending = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![
+                TxIn {
+                    previous_output: decoy,
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                },
+                TxIn {
+                    previous_output: outpoint,
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                },
+            ],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(99_000),
+                script_pubkey: vec![0x51].into(),
+            }],
+        };
+        let spending_txid = spending.txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(spending), 100, 10_000, 1, 7, 0));
+        let spender = pool
+            .outpoint_spender(outpoint)
+            .expect("the index and the entries agree")
+            .expect("the pool holds a spender");
+        assert_eq!(spender.entry.txid, spending_txid);
+        assert_eq!(spender.vin, 1);
+    }
+
+    #[test]
+    fn outpoint_spender_returns_none_for_unspent_outpoint() {
+        let pool = Mempool::new(MempoolLimits::default());
+        let outpoint = OutPoint {
+            txid: txid_of([0xff; 32]),
+            vout: 0,
+        };
+        assert!(matches!(pool.outpoint_spender(outpoint), Ok(None)));
+    }
+
+    #[test]
+    fn entries_funding_script_selects_only_matching_funders() {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let matching = vec![0x51];
+        let other = vec![0x52];
+        let funder = |script: Vec<u8>, tag: u8| {
+            single_output_tx(
+                &[OutPoint {
+                    txid: txid_of([tag; 32]),
+                    vout: 0,
+                }],
+                Sequence::MAX,
+                50_000,
+                script.into(),
+            )
+        };
+        let matching_tx = funder(matching.clone(), 0xaa);
+        let matching_txid = matching_tx.txid();
+        let matching_wtxid = matching_tx.wtxid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(matching_tx),
+            100,
+            10_000,
+            1,
+            7,
+            0,
+        ))
+        .expect("matching insert");
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(funder(other, 0xbb)),
+            100,
+            10_000,
+            1,
+            7,
+            0,
+        ))
+        .expect("other insert");
+
+        let funded: Vec<_> = pool
+            .entries_funding_script(ScriptHash::from_script(&matching))
+            .map(|entry| entry.txid)
+            .collect();
+        assert_eq!(funded, vec![matching_txid]);
+        assert!(pool.contains_wtxid(&matching_wtxid));
+        assert_eq!(
+            pool.entry_by_wtxid(&matching_wtxid).map(|entry| entry.txid),
+            Some(matching_txid)
+        );
+        assert_eq!(pool.iter_entries().count(), 2);
+    }
+
+    #[test]
+    fn outpoint_spender_errors_when_the_index_names_a_missing_entry() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let outpoint = OutPoint {
+            txid: txid_of([0xee; 32]),
+            vout: 0,
+        };
+        pool.derived
+            .spending
+            .insert((SpendingKey::from(outpoint), 9_999));
+        assert!(matches!(
+            pool.outpoint_spender(outpoint),
+            Err(MempoolError::InconsistentSpendingIndex)
+        ));
+    }
+
+    #[test]
+    fn outpoint_spender_errors_when_the_entry_does_not_spend_the_outpoint() {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let unrelated = OutPoint {
+            txid: txid_of([0xdd; 32]),
+            vout: 0,
+        };
+        let indexed = OutPoint {
+            txid: txid_of([0xcc; 32]),
+            vout: 5,
+        };
+        let tx = single_output_tx(&[unrelated], Sequence::MAX, 99_000, vec![0x51].into());
+        let entry_txid = tx.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))
+            .expect("insertion succeeds");
+        let id = pool
+            .entry_id_by_txid(&entry_txid)
+            .expect("inserted entry id resolves");
+        pool.derived
+            .spending
+            .insert((SpendingKey::from(indexed), id));
+        assert!(matches!(
+            pool.outpoint_spender(indexed),
+            Err(MempoolError::InconsistentSpendingIndex)
+        ));
+    }
+
+    #[test]
+    fn outpoint_spender_keeps_the_first_entry_when_two_spenders_are_indexed() {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let outpoint = OutPoint {
+            txid: txid_of([0x11; 32]),
+            vout: 0,
+        };
+        let spender_tx =
+            |fee: u64| single_output_tx(&[outpoint], Sequence::MAX, fee, vec![0x51].into());
+        let first = spender_tx(99_000);
+        let first_txid = first.txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(first), 100, 10_000, 1, 7, 0));
+        let _ = pool.insert_entry(MempoolEntry::new(
+            Arc::new(spender_tx(98_000)),
+            100,
+            10_000,
+            1,
+            7,
+            0,
+        ));
+        let spender = pool
+            .outpoint_spender(outpoint)
+            .expect("both rows are internally consistent")
+            .expect("the pool holds spenders");
+        assert_eq!(spender.entry.txid, first_txid);
+    }
+
+    #[test]
+    fn is_outpoint_spent_returns_true_after_insert() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let prev_txid = txid_of([0xaa_u8; 32]);
+        let outpoint = OutPoint {
+            txid: prev_txid,
+            vout: 1,
+        };
+        let spending = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![],
+        };
+        pool.insert_entry(MempoolEntry::new(Arc::new(spending), 100, 10_000, 1, 7, 0))?;
+        assert!(pool.is_outpoint_spent(&outpoint));
+        Ok(())
+    }
+
+    #[test]
+    fn is_outpoint_spent_returns_false_for_unspent_outpoint() {
+        let pool = Mempool::new(MempoolLimits::default());
+        let outpoint = OutPoint {
+            txid: txid_of([0xff_u8; 32]),
+            vout: 0,
+        };
+        assert!(!pool.is_outpoint_spent(&outpoint));
+    }
+
+    #[test]
+    fn block_inclusion_keeps_unmined_descendants() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let parent = tx(13, Vec::new());
+        let parent_txid = parent.txid();
+        let child = tx(14, vec![OutPoint::new(parent_txid, 0)]);
+        let child_txid = child.txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(parent.clone()),
+            100,
+            1_000,
+            1,
+            7,
+            0,
+        ))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 2, 7, 0))?;
+        let child_id = pool
+            .entry_id_by_txid(&child_txid)
+            .expect("child id resolves");
+
+        let removed = pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[&parent]),
+            8,
+            1,
+        );
+
+        assert_eq!(
+            removed.changes,
+            vec![MutationChange {
+                txid: Hash256::from(parent_txid),
+                outcome: MutationOutcome::Removed(RemovalReason::BlockInclusion),
+            }]
+        );
+        assert!(pool.contains_txid(&child_txid));
+        assert_eq!(pool.ancestor_ids_for_entry(child_id), Vec::<u32>::new());
+        let incremental = totals(&pool);
+        pool.recompute_all_metadata();
+        assert_eq!(incremental, totals(&pool));
+        Ok(())
+    }
+
+    #[test]
+    fn descendant_ids_for_entry_returns_descendants_excluding_origin() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let parent = tx(1, Vec::new());
+        let parent_txid = parent.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0, 0))?;
+        let parent_id = pool
+            .entry_id_by_txid(&parent_txid)
+            .expect("parent id resolves");
+        let child = tx(2, vec![OutPoint::new(parent_txid, 0)]);
+        let child_txid = child.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 0, 0))?;
+        let child_id = pool
+            .entry_id_by_txid(&child_txid)
+            .expect("child id resolves");
+
+        let descendants = pool.descendant_ids_for_entry(parent_id);
+
+        assert_eq!(descendants, vec![child_id]);
+        Ok(())
+    }
+
+    #[test]
+    fn descendant_count_inclusive_returns_one_for_lone_tx() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let lone = tx(1, Vec::new());
+        let lone_txid = lone.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(lone), 500, 1_000, 1, 7, 0))?;
+        let Some(id) = pool.entry_id_by_txid(&lone_txid) else {
+            panic!("insert failed");
+        };
+        assert_eq!(pool.descendant_count_inclusive(id), 1);
+        assert_eq!(pool.ancestor_count_inclusive(id), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_moves_modified_fee_without_touching_actual_fees() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = tx(1, Vec::new());
+        let txid = tx.txid();
+        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0))?;
+
+        pool.prioritise(txid, 500).expect("overlay delta applies");
+
+        let Some(entry) = pool.entry_by_txid(&txid) else {
+            panic!("tx missing after prioritise");
+        };
+        assert_eq!(
+            entry.fee, 1_000,
+            "the actual fee is what the transaction pays"
+        );
+        assert_eq!(
+            entry.fee_rate, 10_000,
+            "the actual fee rate is policy input"
+        );
+        assert_eq!(entry.fee_delta, 500);
+        assert_eq!(entry.modified_fee(), 1_500);
+        assert_eq!(
+            pool.aggregate_fees(),
+            1_000,
+            "aggregates read actual fees only"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_keeps_the_actual_fee_when_modified_fee_goes_negative() -> Result<(), MempoolError>
+    {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = tx(2, Vec::new());
+        let txid = tx.txid();
+        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0))?;
+
+        pool.prioritise(txid, -2_000)
+            .expect("negative overlay applies");
+
+        let Some(entry) = pool.entry_by_txid(&txid) else {
+            panic!("tx missing after prioritise");
+        };
+        assert_eq!(entry.fee, 1_000);
+        assert_eq!(entry.fee_rate, 10_000);
+        assert_eq!(entry.modified_fee(), -1_000);
+        assert_eq!(
+            pool.derived.chunks.len(),
+            1,
+            "a negative overlay still indexes the entry"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_accumulates_additively_and_rejects_overflow() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let entry_tx = tx(3, Vec::new());
+        let txid = entry_tx.txid();
+        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(entry_tx), 100, 1_000, 1, 7, 0))?;
+
+        pool.prioritise(txid, 2_000).expect("first delta applies");
+        pool.prioritise(txid, 3_000)
+            .expect("second delta accumulates");
+        pool.prioritise(txid, -1_200)
+            .expect("a negative delta subtracts");
+        assert_eq!(
+            pool.entry_by_txid(&txid).map(|entry| entry.fee_delta),
+            Some(3_800),
+            "deltas are additive, not replacements"
+        );
+
+        let other = tx(4, Vec::new());
+        let other_txid = other.txid();
+        let _other_id =
+            pool.insert_entry(MempoolEntry::new(Arc::new(other), 100, 1_000, 1, 7, 0))?;
+        pool.prioritise(other_txid, i64::MAX)
+            .expect("the signed range edge itself is storable");
+        assert_eq!(
+            pool.prioritise(other_txid, 1),
+            Err(PrioritiseError::FeeDeltaOverflow)
+        );
+        assert_eq!(
+            pool.entry_by_txid(&other_txid).map(|entry| entry.fee_delta),
+            Some(i64::MAX),
+            "a rejected delta leaves the overlay exactly as it was"
+        );
+        pool.prioritise(other_txid, -1)
+            .expect("recovery from the edge works");
+        Ok(())
+    }
+
+    #[test]
+    fn prioritised_transactions_includes_absent_txids() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let pooled = tx(30, Vec::new());
+        let pooled_txid = pooled.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7, 0))?;
+        pool.prioritise(pooled_txid, 500)
+            .expect("pooled overlay applies");
+
+        let absent_txid = tx(31, Vec::new()).txid();
+        pool.prioritise(absent_txid, -25)
+            .expect("absent overlay is stored");
+
+        let overlay = pool.prioritised_transactions();
+        assert_eq!(overlay.len(), 2);
+        let pooled_row = overlay
+            .iter()
+            .find(|entry| entry.txid == pooled_txid)
+            .expect("pooled overlay is listed");
+        assert_eq!(pooled_row.fee_delta, 500);
+        assert!(pooled_row.in_mempool);
+        assert_eq!(pooled_row.modified_fee, Some(1_500));
+        let absent_row = overlay
+            .iter()
+            .find(|entry| entry.txid == absent_txid)
+            .expect("absent overlay is listed");
+        assert_eq!(absent_row.fee_delta, -25);
+        assert!(!absent_row.in_mempool);
+        assert_eq!(absent_row.modified_fee, None);
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_removes_a_zeroed_overlay() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let pooled = tx(32, Vec::new());
+        let pooled_txid = pooled.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7, 0))?;
+        pool.prioritise(pooled_txid, 500)
+            .expect("pooled overlay applies");
+        pool.prioritise(pooled_txid, -500)
+            .expect("reversing the overlay clears it");
+        assert!(
+            pool.prioritised_transactions().is_empty(),
+            "a zero accumulated delta must leave the overlay map"
+        );
+        assert_eq!(
+            pool.entry_by_txid(&pooled_txid)
+                .map(|entry| entry.fee_delta),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_propagates_the_overlay_through_package_deltas() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let parent = tx(5, Vec::new());
+        let parent_txid = parent.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0, 0))?;
+        let parent_id = pool
+            .entry_id_by_txid(&parent_txid)
+            .expect("parent id resolves");
+        let child = tx(6, vec![OutPoint::new(parent_txid, 0)]);
+        let child_txid = child.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 2_000, 0, 0, 0))?;
+        let child_id = pool
+            .entry_id_by_txid(&child_txid)
+            .expect("child id resolves");
+        let grandchild = tx(7, vec![OutPoint::new(child_txid, 0)]);
+        let grandchild_txid = grandchild.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(grandchild), 100, 3_000, 0, 0, 0))?;
+        let grandchild_id = pool
+            .entry_id_by_txid(&grandchild_txid)
+            .expect("grandchild id resolves");
+
+        pool.prioritise(child_txid, 500)
+            .expect("overlay delta applies");
+
+        let Some(parent_after) = pool.entry(parent_id) else {
+            panic!("missing parent");
+        };
+        assert_eq!(
+            parent_after.descendant_fee, 6_000,
+            "actual fees do not move"
+        );
+        assert_eq!(parent_after.descendant_fee_delta, 500);
+        let Some(child_after) = pool.entry(child_id) else {
+            panic!("missing child");
+        };
+        assert_eq!(child_after.ancestor_fee, 3_000, "actual fees do not move");
+        assert_eq!(child_after.ancestor_fee_delta, 500);
+        assert_eq!(
+            i128::from(child_after.ancestor_fee) + child_after.ancestor_fee_delta,
+            3_500,
+            "the modified ancestor package fee carries the overlay"
+        );
+        let Some(grandchild_after) = pool.entry(grandchild_id) else {
+            panic!("missing grandchild");
+        };
+        assert_eq!(
+            grandchild_after.ancestor_fee, 6_000,
+            "actual fees do not move"
+        );
+        assert_eq!(grandchild_after.ancestor_fee_delta, 500);
+        Ok(())
+    }
+
+    #[test]
+    fn a_delta_may_predate_admission() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = tx(8, Vec::new());
+        let txid = tx.txid();
+        let before = pool.sequence_number();
+
+        pool.prioritise(txid, 1_500)
+            .expect("an absent txid stores its delta");
+        assert!(!pool.contains_txid(&txid));
+        assert_eq!(pool.sequence_number(), before);
+
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0))?;
+
+        let Some(entry) = pool.entry_by_txid(&txid) else {
+            panic!("insert failed");
+        };
+        assert_eq!(entry.fee_delta, 1_500);
+        assert_eq!(
+            entry.fee, 1_000,
+            "a pre-admission delta adjusts ordering only"
+        );
+        assert_eq!(entry.modified_fee(), 2_500);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_removal_keeps_the_overlay_for_readmission() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = tx(9, Vec::new());
+        let txid = tx.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7, 0))?;
+        pool.prioritise(txid, 700).expect("delta applies");
+
+        assert!(!pool.evict_below_fee_rate(10_001).is_empty());
+
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0))?;
+        let Some(entry) = pool.entry_by_txid(&txid) else {
+            panic!("readmission failed");
+        };
+        assert_eq!(entry.fee_delta, 700, "ordinary removal keeps the overlay");
+        assert_eq!(entry.fee, 1_000);
+        Ok(())
+    }
+
+    #[test]
+    fn mined_removal_clears_only_the_overlays_of_block_transactions() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let parent = tx(10, Vec::new());
+        let parent_txid = parent.txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(parent.clone()),
+            100,
+            1_000,
+            1,
+            7,
+            0,
+        ))?;
+        let child = tx(11, vec![OutPoint::new(parent_txid, 0)]);
+        let child_txid = child.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 7, 0))?;
+        let stranger = tx(12, Vec::new());
+        let stranger_txid = stranger.txid();
+
+        pool.prioritise(parent_txid, 100)
+            .expect("parent delta applies");
+        pool.prioritise(child_txid, 200)
+            .expect("child delta applies");
+        pool.prioritise(stranger_txid, 50)
+            .expect("stranger delta applies");
+
+        let removed = pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[&parent, &stranger]),
+            8,
+            1,
+        );
+
+        assert_eq!(removed.len(), 1, "only the mined parent leaves");
+        assert_eq!(
+            removed.changes,
+            vec![MutationChange {
+                txid: Hash256::from(parent_txid),
+                outcome: MutationOutcome::Removed(RemovalReason::BlockInclusion),
+            }]
+        );
+        assert!(!pool.fee_deltas.contains_key(&parent_txid));
+        assert!(!pool.fee_deltas.contains_key(&stranger_txid));
+        assert_eq!(
+            pool.fee_deltas.get(&child_txid).copied(),
+            Some(200),
+            "the unmined child keeps its overlay"
+        );
+        assert!(pool.contains_txid(&child_txid));
+
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7, 0))?;
+        assert_eq!(
+            pool.entry_by_txid(&parent_txid)
+                .map(|entry| entry.fee_delta),
+            Some(0),
+            "a mined transaction's overlay is erased"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_reorders_priority_index() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let lower_fee_tx = tx(13, Vec::new());
+        let lower_fee_txid = lower_fee_tx.txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(lower_fee_tx),
+            100,
+            1_000,
+            1,
+            7,
+            0,
+        ))?;
+        let lower_fee_id = pool
+            .entry_id_by_txid(&lower_fee_txid)
+            .expect("lower id resolves");
+        let higher_fee_tx = tx(14, Vec::new());
+        let higher_fee_txid = higher_fee_tx.txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(higher_fee_tx),
+            100,
+            2_000,
+            2,
+            7,
+            0,
+        ))?;
+        let higher_fee_id = pool
+            .entry_id_by_txid(&higher_fee_txid)
+            .expect("higher id resolves");
+
+        assert_eq!(
+            pool.chunks_by_feerate()
+                .flat_map(|chunk| chunk.members.iter().copied())
+                .next(),
+            Some(higher_fee_id)
+        );
+        pool.prioritise(lower_fee_txid, 2_000)
+            .expect("delta applies");
+
+        assert_eq!(
+            pool.chunks_by_feerate()
+                .flat_map(|chunk| chunk.members.iter().copied())
+                .next(),
+            Some(lower_fee_id)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_snapshot_outlives_pool_mutation() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = tx(17, Vec::new());
+        let txid = tx.txid();
+        let shared = Arc::new(tx);
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&shared), 100, 1_000, 1, 7, 0))?;
+
+        let snapshot = pool.mining_snapshot();
+        pool.clear();
+        pool.prioritise(txid, 5_000)
+            .expect("delta applies after the clear");
+
+        let Some(entry) = snapshot.entries.first() else {
+            panic!("the snapshot holds what it captured");
+        };
+        assert_eq!(entry.txid, txid);
+        assert_eq!(entry.fee, 1_000);
+        assert_eq!(entry.fee_delta, 0);
+        assert!(
+            Arc::ptr_eq(&entry.tx, &shared),
+            "payloads are shared, not copied"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn admissions_and_mined_confirmations_feed_the_pool_owned_estimator() -> Result<(), MempoolError>
+    {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        assert_eq!(pool.estimate_fee_rate(2), None, "no history yet");
+
+        let first = tx(18, Vec::new());
+        let first_txid = first.txid();
+        let second = tx(19, Vec::new());
+        let second_txid = second.txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(first.clone()),
+            100,
+            10_000,
+            1,
+            7,
+            0,
+        ))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(second.clone()),
+            100,
+            10_000,
+            1,
+            7,
+            0,
+        ))?;
+        assert_eq!(
+            pool.estimate_fee_rate(2),
+            None,
+            "arrivals alone are not confirmation evidence"
+        );
+
+        pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[&first, &second]),
+            8,
+            1,
+        );
+        assert!(
+            pool.estimate_fee_rate(2).is_some(),
+            "the confirmations this pool observed itself answer the estimate"
+        );
+        assert!(!pool.contains_txid(&first_txid));
+        assert!(
+            !pool.contains_txid(&second_txid),
+            "the mined transactions left the pool"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn evict_below_fee_rate_removes_low_fee_entries_only() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let low = single_output_tx(&[], Sequence::MAX, 1_000, vec![0x51].into());
+        let low_txid = low.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(low), 100, 100, 1, 7, 0))?;
+
+        let high = single_output_tx(&[], Sequence::MAX, 99_000, vec![0x52].into());
+        let high_txid = high.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(high), 100, 10_000, 1, 7, 0))?;
+
+        let evicted = pool.evict_below_fee_rate(5_000);
+
+        assert_eq!(change_txids(&evicted), vec![Hash256::from(low_txid)]);
+        assert!(!pool.contains_txid(&low_txid));
+        assert!(pool.contains_txid(&high_txid));
+        Ok(())
+    }
+
+    #[test]
+    fn enforce_size_limit_evicts_lowest_fee_until_below_target() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+
+        let low = single_output_tx(&[], Sequence::MAX, 1_000, vec![0x51].into());
+        let low_txid = low.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(low), 500, 100, 1, 7, 0))?;
+
+        let high = single_output_tx(&[], Sequence::MAX, 99_000, vec![0x52].into());
+        let high_txid = high.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(high), 500, 10_000, 1, 7, 0))?;
+
+        let evicted = pool.enforce_size_limit(unit())?;
+
+        assert_eq!(evicted.len(), 1);
+        assert!(!pool.contains_txid(&low_txid));
+        assert!(pool.contains_txid(&high_txid));
+        assert!(pool.dynamic_memory_usage() <= unit());
+        Ok(())
+    }
+
+    #[test]
+    fn insert_entry_triggers_size_limit_eviction_when_overflow() {
+        let limits = MempoolLimits {
+            max_total_bytes: unit() * 3 / 2,
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        };
+        let limit = limits.max_total_bytes;
+        let mut pool = Mempool::new(limits);
+
+        for nonce in 0..2_u32 {
+            let tx = single_output_tx(
+                &[],
+                Sequence::MAX,
+                1_000 + u64::from(nonce),
+                vec![0x51, u8::try_from(nonce).unwrap_or(0)].into(),
+            );
+            let fee = 100_u64.saturating_add(u64::from(nonce).saturating_mul(50));
+
+            let _ = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 600, fee, 1, 7, 0));
+        }
+
+        assert!(
+            pool.dynamic_memory_usage() <= limit,
+            "size limit must hold after inserts: {}",
+            pool.dynamic_memory_usage()
+        );
+    }
+
+    #[test]
+    fn capacity_rejection_is_atomic_and_a_better_arrival_can_enter() {
+        fn tx_paying(nonce: u8) -> Arc<Tx> {
+            Arc::new(single_output_tx(
+                &[],
+                Sequence::MAX,
+                1_000 + u64::from(nonce),
+                vec![0x51, nonce].into(),
+            ))
+        }
+
+        let limits = MempoolLimits {
+            max_total_bytes: unit() * 3 / 2,
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+
+        let seated = pool.insert_entry(MempoolEntry::new(tx_paying(1), 900, 90_000, 1, 7, 0));
+        assert!(seated.is_ok(), "the first transaction fits: {seated:?}");
+
+        let before = (pool.sequence_number(), pool.estimator_history());
+        let refused = pool.insert_entry(MempoolEntry::new(tx_paying(2), 900, 10, 2, 7, 0));
+        assert!(matches!(refused, Err(MempoolError::Full)));
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool.sequence_number(), before.0);
+        assert_eq!(pool.estimator_history(), before.1);
+
+        let admitted = pool.insert_entry(MempoolEntry::new(tx_paying(3), 900, 900_000, 3, 7, 0));
+        let Ok(_result) = admitted else {
+            panic!("a better-paying transaction must be admitted: {admitted:?}");
+        };
+        assert_eq!(pool.len(), 1, "the accepted transaction is the only entry");
+        assert!(
+            pool.entries.iter().any(|(_, entry)| entry.vsize == 900),
+            "an accepted entry must resolve"
+        );
+    }
+
+    #[test]
+    fn a_replacement_that_would_be_shed_leaves_the_pool_unchanged() {
+        let limits = MempoolLimits {
+            max_total_bytes: unit() * 5 / 2,
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+
+        let prev = OutPoint {
+            txid: txid_of([0x11; 32]),
+            vout: 0,
+        };
+
+        let original = single_output_tx(
+            &[prev],
+            Sequence::ENABLE_RBF_NO_LOCKTIME,
+            1_000,
+            vec![0x51].into(),
+        );
+        let original_txid = original.txid();
+        let seated = pool.insert_entry(MempoolEntry::new(Arc::new(original), 100, 10_000, 1, 7, 0));
+        assert!(seated.is_ok(), "original must fit: {seated:?}");
+
+        let bystander = tx(8, Vec::new());
+        let seated_by = pool.insert_entry(MempoolEntry::new(
+            Arc::new(bystander),
+            850,
+            8_500_000,
+            1,
+            7,
+            0,
+        ));
+        assert!(seated_by.is_ok(), "bystander must fit: {seated_by:?}");
+        assert_eq!(pool.len(), 2);
+
+        let replacement = single_output_tx(
+            &[prev],
+            Sequence::ENABLE_RBF_NO_LOCKTIME,
+            100,
+            vec![0x52; usize::try_from(unit()).unwrap_or(usize::MAX)].into(),
+        );
+        let replacement_txid = replacement.txid();
+        let before = (
+            pool.mining_snapshot().entries.clone(),
+            pool.estimator_history(),
+            pool.policy_stamp(),
+        );
+        let result = pool.replace_transaction(
+            &crate::ReplacementCandidate::new(Arc::new(replacement), 900, 100_000, 1)
+                .with_sigop_cost(4),
+            2,
+            7,
+        );
+        assert!(matches!(
+            result,
+            Err(crate::RbfError::Mempool(MempoolError::Full))
+        ));
+        assert!(pool.contains_txid(&original_txid));
+        assert!(!pool.contains_txid(&replacement_txid));
+        assert_eq!(pool.mining_snapshot().entries, before.0);
+        assert_eq!(pool.estimator_history(), before.1);
+        assert_ne!(pool.policy_stamp(), before.2);
+        assert!(pool.min_fee_sat_per_kvb(9) > 0);
+    }
+
+    fn totals(pool: &Mempool) -> Vec<(usize, u64, u64, u64, u64)> {
+        let mut all = pool
+            .entries
+            .iter()
+            .map(|(index, entry)| {
+                (
+                    index,
+                    entry.ancestor_size,
+                    entry.ancestor_fee,
+                    entry.descendant_size,
+                    entry.descendant_fee,
+                )
+            })
+            .collect::<Vec<_>>();
+        all.sort_unstable();
+        all
+    }
+
+    fn graph_pool() -> Result<(Mempool, Vec<OutPoint>), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let mut outs = Vec::new();
+
+        let add = |pool: &mut Mempool,
+                   label: u8,
+                   parents: Vec<OutPoint>|
+         -> Result<OutPoint, MempoolError> {
+            let transaction = tx(label, parents);
+            let txid = transaction.txid();
+            let vsize = 100 + u32::from(label);
+            pool.insert_entry(MempoolEntry::new(
+                Arc::new(transaction),
+                vsize,
+                u64::from(vsize) * 10,
+                u64::from(label),
+                1,
+                0,
+            ))?;
+            Ok(OutPoint::new(txid, 0))
+        };
+
+        let root = add(&mut pool, 1, vec![OutPoint::default()])?;
+        let mid = add(&mut pool, 2, vec![root])?;
+        let leaf = add(&mut pool, 3, vec![mid])?;
+        let sibling = add(&mut pool, 4, vec![root])?;
+        let joined = add(&mut pool, 5, vec![leaf, sibling])?;
+        let lonely = add(&mut pool, 6, vec![OutPoint::default()])?;
+
+        outs.extend([root, mid, leaf, sibling, joined, lonely]);
+        Ok((pool, outs))
+    }
+
+    #[test]
+    fn incremental_metadata_matches_the_full_recompute() -> Result<(), MempoolError> {
+        let (mut pool, _outs) = graph_pool()?;
+
+        let incremental = totals(&pool);
+        pool.recompute_all_metadata();
+        assert_eq!(
+            incremental,
+            totals(&pool),
+            "incremental insert metadata diverged from the full recompute"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_metadata_matches_the_full_recompute_after_removals() -> Result<(), MempoolError>
+    {
+        for victim in 0..6_u32 {
+            let (mut pool, _outs) = graph_pool()?;
+            let Some(entry) = pool.entry(victim) else {
+                panic!("entry {victim} must be present in the fixture");
+            };
+            let tx = entry.tx.clone();
+            let removed =
+                pool.remove_for_block(&crate::settlement::TransitionFacts::from_txs(&[&tx]), 8, 1);
+            assert!(
+                !removed.is_empty(),
+                "entry {victim} must be present in the fixture"
+            );
+
+            let incremental = totals(&pool);
+            pool.recompute_all_metadata();
+            assert_eq!(
+                incremental,
+                totals(&pool),
+                "incremental removal metadata diverged from the full recompute \
+                 after removing entry {victim}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn eviction_during_insertion_leaves_metadata_a_rebuild_agrees_with() -> Result<(), MempoolError>
+    {
+        let limits = MempoolLimits {
+            max_total_bytes: 4 * crate::pool::entry_memory_usage(&tx(
+                31,
+                vec![OutPoint::default()],
+            )) + 16,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+
+        let root = tx(31, vec![OutPoint::default()]);
+        let root_out = OutPoint::new(root.txid(), 0);
+        pool.insert_entry(MempoolEntry::new(Arc::new(root), 100, 500, 0, 1, 0))?;
+        let child = tx(32, vec![root_out]);
+        let child_out = OutPoint::new(child.txid(), 0);
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 9_000, 1, 1, 0))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(33, vec![child_out])),
+            100,
+            100_000,
+            2,
+            1,
+            0,
+        ))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(34, vec![OutPoint::default()])),
+            100,
+            200,
+            3,
+            1,
+            0,
+        ))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(35, vec![OutPoint::default()])),
+            100,
+            300,
+            4,
+            1,
+            0,
+        ))?;
+        assert!(
+            pool.len() < 5,
+            "the fixture must actually cross the size limit"
+        );
+
+        let incremental = totals(&pool);
+        let index = pool.chunk_order();
+        pool.recompute_all_metadata();
+        assert_eq!(
+            incremental,
+            totals(&pool),
+            "eviction left package totals a full recompute disagrees with"
+        );
+        assert_eq!(
+            index,
+            pool.chunk_order(),
+            "eviction left a stale chunk index behind"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn running_totals_track_inserts_removals_and_prioritise() -> Result<(), MempoolError> {
+        fn folded(pool: &Mempool) -> (u64, u64) {
+            pool.entries
+                .iter()
+                .fold((0_u64, 0_u64), |(size, fee), (_, entry)| {
+                    (
+                        size.saturating_add(u64::from(entry.vsize)),
+                        fee.saturating_add(entry.fee),
+                    )
+                })
+        }
+        fn check(pool: &Mempool, stage: &str) {
+            let (size, fee) = folded(pool);
+            assert_eq!(pool.total_vsize(), size, "vsize total wrong after {stage}");
+            assert_eq!(pool.aggregate_fees(), fee, "fee total wrong after {stage}");
+            let stats = pool.stats();
+            assert_eq!(stats.bytes, size, "stats.bytes wrong after {stage}");
+            assert_eq!(stats.total_fee, fee, "stats.total_fee wrong after {stage}");
+        }
+
+        let (mut pool, outs) = graph_pool()?;
+        check(&pool, "inserts");
+
+        let Some(root) = outs.first().map(|out| out.txid) else {
+            panic!("fixture must hold entries");
+        };
+        pool.prioritise(root, 250_000)
+            .expect("prioritise up must apply");
+        check(&pool, "a positive fee delta");
+
+        pool.prioritise(root, -100_000)
+            .expect("prioritise down must apply");
+        check(&pool, "a negative fee delta");
+
+        let Some(victim_txid) = outs.get(1).map(|out| out.txid) else {
+            panic!("fixture must hold a second entry");
+        };
+        let Some(victim) = pool.entry_by_txid(&victim_txid) else {
+            panic!("fixture must hold the victim entry");
+        };
+        let victim_tx = victim.tx.clone();
+        let removed = pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[&victim_tx]),
+            8,
+            1,
+        );
+        assert!(!removed.is_empty(), "the victim must actually be removed");
+        assert!(
+            outs.get(2).is_some_and(|out| pool.contains_txid(&out.txid)),
+            "the chain below the victim remains in the pool"
+        );
+        check(&pool, "a removal");
+
+        pool.clear();
+        check(&pool, "clear");
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_reindexes_the_descendants_it_lifts() -> Result<(), MempoolError> {
+        let (mut pool, outs) = graph_pool()?;
+
+        let Some(txid) = outs.first().map(|out| out.txid) else {
+            panic!("fixture must hold entries");
+        };
+        pool.prioritise(txid, 5_000_000)
+            .expect("prioritise must apply");
+
+        let after_prioritise = pool.chunk_order();
+        let totals_after = totals(&pool);
+        pool.recompute_all_metadata();
+        assert_eq!(
+            totals_after,
+            totals(&pool),
+            "prioritise left package totals a full recompute disagrees with"
+        );
+        assert_eq!(
+            after_prioritise,
+            pool.chunk_order(),
+            "prioritise left stale chunk keys behind"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inserting_a_parent_after_its_child_refreshes_the_child() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+
+        let parent = tx(11, vec![OutPoint::default()]);
+        let parent_out = OutPoint::new(parent.txid(), 0);
+        let child = tx(12, vec![parent_out]);
+
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 1, 0))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 200, 4_000, 1, 1, 0))?;
+
+        let incremental = totals(&pool);
+        pool.recompute_all_metadata();
+        assert_eq!(
+            incremental,
+            totals(&pool),
+            "a child inserted before its parent kept stale ancestor totals"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn full_refusal_raises_the_floor_to_the_candidate_chunk_rate() {
+        let mut pool = Mempool::new(MempoolLimits {
+            max_total_bytes: unit() * 3 / 2,
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let seated = single_output_tx(&[], Sequence::MAX, 1_001, vec![0x51, 1].into());
+        pool.insert_entry(MempoolEntry::new(Arc::new(seated), 900, 90_000, 1, 7, 0))
+            .expect("first fits");
+        assert_eq!(pool.min_fee_sat_per_kvb(2), 0);
+        let candidate = single_output_tx(&[], Sequence::MAX, 1_002, vec![0x51, 2].into());
+        let refused = pool.insert_entry(MempoolEntry::new(Arc::new(candidate), 900, 10, 2, 7, 0));
+        assert!(matches!(refused, Err(MempoolError::Full)));
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool.min_fee_sat_per_kvb(2), 1_011);
+    }
+
+    #[test]
+    fn remove_for_block_stamps_the_floor_for_decay_even_when_empty() {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 1_000,
+            max_total_bytes: 2 * unit(),
+            ..MempoolLimits::default()
+        });
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(1, Vec::new())),
+            200,
+            400,
+            1,
+            1,
+            0,
+        ))
+        .expect("low");
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(2, Vec::new())),
+            200,
+            800,
+            1,
+            1,
+            0,
+        ))
+        .expect("high");
+        crate::eviction::evict_lowest_fee_packages(&mut pool, unit()).expect("eviction");
+        assert_eq!(pool.min_fee_sat_per_kvb(1_000), 3_000);
+        pool.remove_for_block(&crate::settlement::TransitionFacts::from_txs(&[]), 8, 1_000);
+        assert_eq!(pool.min_fee_sat_per_kvb(1_000 + 12 * 60 * 60), 1_500);
+    }
+
+    // MPL-02
+    #[test]
+    fn expire_removes_stale_root_with_descendants() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let parent = tx(41, Vec::new());
+        let parent_txid = parent.txid();
+        let child = tx(42, vec![OutPoint::new(parent_txid, 0)]);
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 1, 0))
+            .expect("parent");
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(child),
+            100,
+            1_000,
+            crate::policy::MEMPOOL_EXPIRY_SECS,
+            1,
+            0,
+        ))
+        .expect("child");
+        let now = crate::policy::MEMPOOL_EXPIRY_SECS + 1;
+        assert!(pool.has_expired_entries(now));
+        let expired = pool.expire(now);
+        assert_eq!(expired.len(), 2);
+        assert!(
+            expired.changes.iter().all(|change| matches!(
+                change.outcome,
+                crate::mutation::MutationOutcome::Removed(crate::RemovalReason::Expiry)
+            )),
+            "every expiry change is tagged Expiry: {expired:?}"
+        );
+        assert!(pool.is_empty());
+        let sequence = pool.sequence_number();
+        assert!(pool.expire(now).is_empty());
+        assert_eq!(pool.sequence_number(), sequence);
+    }
+
+    #[test]
+    fn expire_keeps_entry_at_cutoff() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let now = crate::policy::MEMPOOL_EXPIRY_SECS + 1;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(43, Vec::new())),
+            100,
+            1_000,
+            1,
+            1,
+            0,
+        ))
+        .expect("at cutoff");
+        assert!(!pool.has_expired_entries(now));
+        assert!(pool.expire(now).is_empty());
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn expire_keeps_a_recycled_slot_with_a_fresh_timestamp() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let old = Arc::new(tx(51, Vec::new()));
+        let old_txid = old.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&old), 100, 1_000, 0, 1, 0))
+            .expect("old");
+        let recycled = pool.entry_id_by_txid(&old_txid).expect("old id resolves");
+        pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[old.as_ref()]),
+            1,
+            1,
+        );
+        let now = crate::policy::MEMPOOL_EXPIRY_SECS + 1;
+        let fresh = Arc::new(tx(52, Vec::new()));
+        let fresh_txid = fresh.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&fresh), 100, 1_000, now, 1, 0))
+            .expect("fresh");
+        assert_eq!(
+            pool.entry_id_by_txid(&fresh_txid),
+            Some(recycled),
+            "the vacated slot is reused"
+        );
+        assert!(!pool.has_expired_entries(now));
+        assert!(pool.expire(now).is_empty());
+        assert!(pool.contains_txid(&fresh_txid));
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn has_expired_entries_false_when_empty_or_cleared() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        assert!(!pool.has_expired_entries(crate::policy::MEMPOOL_EXPIRY_SECS + 1));
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(44, Vec::new())),
+            100,
+            1_000,
+            0,
+            1,
+            0,
+        ))
+        .expect("stale");
+        assert!(pool.has_expired_entries(crate::policy::MEMPOOL_EXPIRY_SECS + 1));
+        pool.clear();
+        assert!(!pool.has_expired_entries(crate::policy::MEMPOOL_EXPIRY_SECS + 1));
+    }
+
+    fn unit() -> u64 {
+        crate::pool::entry_memory_usage(&single_output_tx(
+            &[],
+            Sequence::MAX,
+            1_000,
+            vec![0x51].into(),
+        ))
+    }
+
+    fn single_output_tx(
+        previous_outputs: &[OutPoint],
+        sequence: Sequence,
+        value: u64,
+        script_pubkey: Script,
+    ) -> Tx {
+        Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: previous_outputs
+                .iter()
+                .map(|previous_output| TxIn {
+                    previous_output: *previous_output,
+                    script_sig: Script::new(),
+                    sequence,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            outputs: vec![TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey,
+            }],
+        }
+    }
+
+    fn tx(label: u8, previous_outputs: Vec<OutPoint>) -> Tx {
+        Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: previous_outputs
+                .into_iter()
+                .map(|previous_output| TxIn {
+                    previous_output,
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            outputs: vec![TxOut {
+                value: Amount::from_sat(5_000 + u64::from(label)),
+                script_pubkey: vec![label].into(),
+            }],
+        }
+    }
+
+    // POL-03
+    #[test]
+    fn pool_expiry_projection_releases_surviving_neighbor_link_sides() -> Result<(), MempoolError> {
+        fn seed(pool: &mut Mempool, entry: MempoolEntry) -> Result<(), MempoolError> {
+            let prepared =
+                pool.prepare_insert(entry, &HashSet::new(), LimitEnforcement::Deferred)?;
+            pool.commit_insert(prepared);
+            Ok(())
+        }
+        fn package_pool(
+            seeds: &[MempoolEntry],
+            max_total_bytes: u64,
+        ) -> Result<Mempool, MempoolError> {
+            let mut pool = Mempool::new(MempoolLimits {
+                min_relay_fee_sat_per_kvb: 0,
+                max_total_bytes,
+                ..MempoolLimits::default()
+            });
+            for entry in seeds {
+                seed(&mut pool, entry.clone())?;
+            }
+            Ok(pool)
+        }
+        let young = crate::policy::MEMPOOL_EXPIRY_SECS + 100;
+        let now = young + 1;
+        let boundary = link_memory_usage(1, 2);
+
+        let s_tx = single_output_tx(&[], Sequence::MAX, 90_000, vec![0x51].into());
+        let s_txid = s_tx.txid();
+        let p_tx = single_output_tx(
+            &[OutPoint::new(s_txid, 0)],
+            Sequence::MAX,
+            80_000,
+            vec![0x52].into(),
+        );
+        let x_tx = single_output_tx(
+            &[OutPoint::new(s_txid, 0)],
+            Sequence::MAX,
+            80_000,
+            vec![0x53].into(),
+        );
+        let seeds = [
+            MempoolEntry::new(Arc::new(s_tx.clone()), 100, 1_000, young, 7, 0),
+            MempoolEntry::new(Arc::new(p_tx.clone()), 100, 1_000, 1, 7, 0),
+        ];
+        let usage = package_pool(&seeds, 0)?.dynamic_memory_usage();
+        let bounded = package_pool(&seeds, usage)?;
+        let newcomer = MempoolEntry::new(Arc::new(x_tx), 100, 1_000, now, 7, 0);
+        bounded
+            .prepare_package(vec![newcomer], now)
+            .expect("removing the expired child frees its own and the parent's side records");
+
+        let s2_tx = single_output_tx(&[], Sequence::MAX, 90_000, vec![0x51].into());
+        let s2_txid = s2_tx.txid();
+        let p1_tx = single_output_tx(
+            &[OutPoint::new(s2_txid, 0)],
+            Sequence::MAX,
+            80_000,
+            vec![0x52].into(),
+        );
+        let p2_tx = single_output_tx(
+            &[OutPoint::new(s2_txid, 1)],
+            Sequence::MAX,
+            80_000,
+            vec![0x53].into(),
+        );
+        let fat_tx = single_output_tx(
+            &[OutPoint::new(s2_txid, 2)],
+            Sequence::MAX,
+            80_000,
+            Script::from_bytes(vec![0x54; 40]),
+        );
+        let seeds2 = [
+            MempoolEntry::new(Arc::new(s2_tx.clone()), 100, 1_000, young, 7, 0),
+            MempoolEntry::new(Arc::new(p1_tx.clone()), 100, 1_000, 1, 7, 0),
+            MempoolEntry::new(Arc::new(p2_tx.clone()), 100, 1_000, 1, 7, 0),
+        ];
+        let usage2 = package_pool(&seeds2, 0)?.dynamic_memory_usage();
+        let expired_memory = entry_memory_usage(&p1_tx) + entry_memory_usage(&p2_tx) + 2 * boundary;
+        let newcomer_memory = entry_memory_usage(&fat_tx) + boundary;
+        let bounded2 = package_pool(&seeds2, usage2 - expired_memory + newcomer_memory)?;
+        let fat = MempoolEntry::new(Arc::new(fat_tx.clone()), 100, 1_000, now, 7, 0);
+        bounded2
+            .prepare_package(vec![fat], now)
+            .expect("the exact release of both expired children fits the boundary");
+
+        let tighter = package_pool(&seeds2, usage2 - expired_memory + newcomer_memory - 1)?;
+        let oversized = MempoolEntry::new(Arc::new(fat_tx), 100, 1_000, now, 7, 0);
+        assert!(
+            matches!(
+                tighter.prepare_package(vec![oversized], now),
+                Err(crate::standardness::AcceptanceRejectReason::Mempool(
+                    MempoolError::Full
+                ))
+            ),
+            "one byte below the exact boundary must report mempool-full"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mining_snapshot_reuses_cache_until_mutation() -> Result<(), crate::test_error::TestError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let parent = tx(31, Vec::new());
+        let parent_id = OutPoint::new(parent.txid(), 0);
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7, 0))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(32, alloc::vec![parent_id])),
+            100,
+            2_000,
+            2,
+            7,
+            0,
+        ))?;
+        let first = pool.mining_snapshot();
+        let second = pool.mining_snapshot();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "an unchanged mempool reuses its mining snapshot"
+        );
+        assert_eq!(first.entries.len(), 2, "the snapshot holds both entries");
+        assert_eq!(
+            first.sequence,
+            pool.sequence_number(),
+            "the snapshot carries the current mempool sequence"
+        );
+        pool.prioritise(first.entries[0].txid, 500)?;
+        let third = pool.mining_snapshot();
+        assert!(
+            !Arc::ptr_eq(&second, &third),
+            "a fee delta mutation invalidates the snapshot"
+        );
+        assert_eq!(
+            third.fee_delta_sequence,
+            pool.fee_delta_sequence_number(),
+            "the rebuilt snapshot carries the current fee delta sequence"
+        );
+        let lone = tx(33, Vec::new());
+        let lone_txid = lone.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(lone), 100, 3_000, 3, 7, 0))?;
+        let fourth = pool.mining_snapshot();
+        assert!(
+            !Arc::ptr_eq(&third, &fourth),
+            "an entry mutation invalidates the snapshot"
+        );
+        assert_eq!(
+            fourth.entries.len(),
+            3,
+            "the rebuilt snapshot holds every entry"
+        );
+        assert_eq!(
+            fourth
+                .entries
+                .iter()
+                .map(|entry| entry.txid)
+                .collect::<HashSet<_>>(),
+            pool.iter_txids().into_iter().collect::<HashSet<_>>(),
+            "the rebuilt snapshot holds the pool contents after admission"
+        );
+        pool.remove_for_reorg(&[lone_txid]);
+        let fifth = pool.mining_snapshot();
+        assert!(
+            !Arc::ptr_eq(&fourth, &fifth),
+            "a removal invalidates the snapshot"
+        );
+        assert_eq!(
+            fifth.entries.len(),
+            2,
+            "the rebuilt snapshot drops the removed entry"
+        );
+        assert_eq!(
+            fifth
+                .entries
+                .iter()
+                .map(|entry| entry.txid)
+                .collect::<HashSet<_>>(),
+            pool.iter_txids().into_iter().collect::<HashSet<_>>(),
+            "the rebuilt snapshot holds the pool contents after removal"
+        );
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(33, Vec::new())),
+            100,
+            3_000,
+            3,
+            7,
+            0,
+        ))?;
+        let sixth = pool.mining_snapshot();
+        assert!(
+            !Arc::ptr_eq(&fifth, &sixth),
+            "a reorg resurrection invalidates the snapshot"
+        );
+        assert_eq!(
+            sixth.entries.len(),
+            3,
+            "the rebuilt snapshot holds the resurrected entry"
+        );
+        assert_eq!(
+            sixth
+                .entries
+                .iter()
+                .map(|entry| entry.txid)
+                .collect::<HashSet<_>>(),
+            pool.iter_txids().into_iter().collect::<HashSet<_>>(),
+            "the rebuilt snapshot holds the pool contents after resurrection"
+        );
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 #[expect(clippy::expect_used)]
-mod spend_index_tests;
+mod spend_index_tests {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+
+    use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxIn, TxOut};
+
+    use super::*;
+
+    fn tx_with(inputs: &[OutPoint], outputs: u32, tag: u64) -> Tx {
+        Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: inputs
+                .iter()
+                .map(|previous_output| TxIn {
+                    previous_output: *previous_output,
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            outputs: (0..outputs)
+                .map(|vout| TxOut {
+                    value: Amount::from_sat(
+                        10_000_u64
+                            .saturating_add(u64::from(vout))
+                            .saturating_add(tag.saturating_mul(1_000)),
+                    ),
+                    script_pubkey: alloc::vec![0x51].into(),
+                })
+                .collect(),
+        }
+    }
+
+    fn graph_pool() -> (Mempool, Txid) {
+        let confirmed = OutPoint::new(txid_of([7_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 3, 1);
+        let root_txid = root.txid();
+        let child_a = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
+        let child_a_txid = child_a.txid();
+        let child_b = tx_with(
+            &[OutPoint::new(root_txid, 1), OutPoint::new(root_txid, 2)],
+            1,
+            3,
+        );
+        let child_c = tx_with(&[OutPoint::new(child_a_txid, 0)], 1, 4);
+
+        let mut pool = Mempool::new(MempoolLimits::default());
+        for tx in [root, child_a, child_b, child_c] {
+            let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0);
+            let Ok(_id) = pool.insert_entry(entry) else {
+                panic!("mempool insert failed while building the fixture");
+            };
+        }
+        (pool, root_txid)
+    }
+
+    #[test]
+    fn a_cluster_holds_siblings_that_no_ancestor_walk_reaches() {
+        let (pool, root_txid) = graph_pool();
+        let child_a_txid = child_a_txid_of(&pool, root_txid);
+        let Some(child_a_id) = pool.entry_id_by_txid(&child_a_txid) else {
+            panic!("fixture child_a is missing");
+        };
+
+        let cluster = pool.cluster_ids_seeded_by(&[child_a_id], &HashSet::new());
+        let chain = pool.metadata_closure(&[child_a_id]);
+
+        assert_eq!(
+            cluster.len(),
+            pool.len(),
+            "the cluster must span the whole connected component"
+        );
+        assert!(
+            chain.len() < cluster.len(),
+            "this fixture must distinguish the two walks or it proves nothing: chain={} cluster={}",
+            chain.len(),
+            cluster.len()
+        );
+    }
+
+    fn child_a_txid_of(pool: &Mempool, root_txid: Txid) -> Txid {
+        let Some(root_id) = pool.entry_id_by_txid(&root_txid) else {
+            panic!("fixture root is missing");
+        };
+        for child in pool.links(root_id).expect("pooled").children.clone() {
+            if !pool.links(child).expect("pooled").children.is_empty()
+                && let Some(entry) = pool.entry(child)
+            {
+                return entry.txid;
+            }
+        }
+        panic!("fixture has no grandchild-bearing child");
+    }
+
+    #[test]
+    fn admission_refuses_a_transaction_over_the_cluster_count_limit() {
+        let confirmed = OutPoint::new(txid_of([9_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 4, 1);
+        let root_txid = root.txid();
+
+        let build = |limit: u32| {
+            let limits = MempoolLimits {
+                cluster_count: limit,
+                ..MempoolLimits::default()
+            };
+            let mut pool = Mempool::new(limits);
+            let root_entry = MempoolEntry::new(Arc::new(root.clone()), 100, 10_000, 1, 7, 0);
+            let Ok(_id) = pool.insert_entry(root_entry) else {
+                panic!("root must be admitted");
+            };
+            let mut outcomes = Vec::new();
+            for vout in 0..2_u32 {
+                let child = tx_with(
+                    &[OutPoint::new(root_txid, vout)],
+                    1,
+                    u64::from(vout).saturating_add(2),
+                );
+                let entry = MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7, 0);
+                outcomes.push(pool.insert_entry(entry));
+            }
+            outcomes
+        };
+
+        let refused = build(2);
+        assert!(refused[0].is_ok(), "the first sibling fits: {refused:?}");
+        assert!(
+            matches!(
+                refused[1],
+                Err(MempoolError::Policy(PolicyError::ClusterCountLimit))
+            ),
+            "the second sibling must be refused on cluster count: {refused:?}"
+        );
+
+        let accepted = build(3);
+        assert!(
+            accepted.iter().all(Result::is_ok),
+            "a limit of three admits the whole cluster: {accepted:?}"
+        );
+    }
+
+    #[test]
+    fn admission_counts_a_cousin_that_no_chain_through_the_parent_reaches() {
+        let confirmed = OutPoint::new(txid_of([17_u8; 32]), 0);
+        let a = tx_with(&[confirmed], 2, 1);
+        let a_txid = a.txid();
+        let b = tx_with(&[OutPoint::new(a_txid, 0)], 1, 2);
+        let b_txid = b.txid();
+        let c = tx_with(&[OutPoint::new(a_txid, 1)], 1, 3);
+        let d = tx_with(&[OutPoint::new(b_txid, 0)], 1, 4);
+
+        let limits = MempoolLimits {
+            cluster_count: 3,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+        for tx in [a, b, c] {
+            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))
+            else {
+                panic!("the three-member cluster must be admitted under a limit of three");
+            };
+        }
+
+        let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(d), 100, 10_000, 1, 7, 0));
+        assert!(
+            matches!(
+                outcome,
+                Err(MempoolError::Policy(PolicyError::ClusterCountLimit))
+            ),
+            "C is in D's cluster although no chain through B reaches it: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn admission_refuses_a_transaction_over_the_cluster_size_limit() {
+        let confirmed = OutPoint::new(txid_of([11_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 2, 1);
+        let root_txid = root.txid();
+
+        let limits = MempoolLimits {
+            cluster_count: 100,
+            cluster_size_vbytes: 250,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+
+        let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(root), 200, 10_000, 1, 7, 0))
+        else {
+            panic!("root must be admitted");
+        };
+        let child = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
+        let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7, 0));
+        assert!(
+            matches!(
+                outcome,
+                Err(MempoolError::Policy(PolicyError::ClusterSizeLimit))
+            ),
+            "200 + 100 vbytes exceeds a 250-vbyte cluster: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_cluster_includes_transactions_that_already_spend_the_candidate() {
+        let confirmed = OutPoint::new(txid_of([13_u8; 32]), 0);
+        let parent = tx_with(&[confirmed], 1, 1);
+        let parent_txid = parent.txid();
+        let child = tx_with(&[OutPoint::new(parent_txid, 0)], 1, 2);
+
+        let limits = MempoolLimits {
+            cluster_count: 1,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+
+        let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7, 0))
+        else {
+            panic!("the child must be admitted into an empty pool");
+        };
+        let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 10_000, 1, 7, 0));
+        assert!(
+            matches!(
+                outcome,
+                Err(MempoolError::Policy(PolicyError::ClusterCountLimit))
+            ),
+            "the pre-existing spender must count toward the cluster: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn cluster_limits_default_to_cores_values_and_follow_configuration() {
+        let pool = Mempool::new(MempoolLimits::default());
+        assert_eq!(pool.cluster_limits(), (64, 101_000));
+
+        let limits = MempoolLimits {
+            cluster_count: 7,
+            cluster_size_vbytes: 4_242,
+            ..MempoolLimits::default()
+        };
+        let configured = Mempool::new(limits);
+        assert_eq!(
+            configured.cluster_limits(),
+            (7, 4_242),
+            "the reader must follow configuration, or the RPC reports a constant"
+        );
+    }
+
+    #[test]
+    fn a_replacement_that_evicts_from_a_full_cluster_is_admitted() {
+        let confirmed = OutPoint::new(txid_of([21_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 2, 1);
+        let root_txid = root.txid();
+        let mut a = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
+        a.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
+        let a_txid = a.txid();
+        let b = tx_with(&[OutPoint::new(root_txid, 1)], 1, 3);
+
+        let limits = MempoolLimits {
+            cluster_count: 3,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+        for tx in [root, a, b] {
+            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))
+            else {
+                panic!("the three-member cluster must be admitted under a limit of three");
+            };
+        }
+
+        let replacement = tx_with(&[OutPoint::new(root_txid, 0)], 1, 4);
+        let result = pool.replace_transaction(
+            &crate::ReplacementCandidate::new(Arc::new(replacement), 100, 12_000, 1)
+                .with_sigop_cost(4),
+            4,
+            7,
+        );
+        assert!(
+            result.is_ok(),
+            "a replacement that evicts from a full cluster must be admitted, \
+             not rejected by the entries it removes: {result:?}"
+        );
+        assert!(
+            pool.entry_id_by_txid(&a_txid).is_none(),
+            "the replaced original must leave the pool"
+        );
+    }
+
+    #[test]
+    fn replacement_preview_rejects_a_cluster_only_violation() {
+        let confirmed = OutPoint::new(txid_of([23_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 3, 1);
+        let root_txid = root.txid();
+        let child_a = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
+        let child_b = tx_with(&[OutPoint::new(root_txid, 1)], 1, 3);
+
+        let limits = MempoolLimits {
+            cluster_count: 3,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+        for tx in [root, child_a, child_b] {
+            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))
+            else {
+                panic!("the three-member cluster must be admitted under a limit of three");
+            };
+        }
+
+        let child_c = tx_with(&[OutPoint::new(root_txid, 2)], 1, 4);
+        let preview = pool.check_replacement(&crate::ReplacementCandidate::new(
+            Arc::new(child_c.clone()),
+            100,
+            10_000,
+            1_000,
+        ));
+        assert!(
+            matches!(
+                preview,
+                Err(crate::RbfError::Mempool(MempoolError::Policy(
+                    PolicyError::ClusterCountLimit
+                )))
+            ),
+            "the preview must reject a cluster-only violation: {preview:?}"
+        );
+
+        let admission =
+            pool.insert_entry(MempoolEntry::new(Arc::new(child_c), 100, 10_000, 4, 7, 0));
+        assert!(
+            matches!(
+                admission,
+                Err(MempoolError::Policy(PolicyError::ClusterCountLimit))
+            ),
+            "admission must reject on cluster count: {admission:?}"
+        );
+        assert_eq!(
+            preview.map_err(crate::RbfError::into_pool_error).err(),
+            admission.err(),
+            "preview and admission must reject on the same error"
+        );
+    }
+
+    #[test]
+    fn replacement_preview_excludes_planned_evictions() {
+        let confirmed = OutPoint::new(txid_of([27_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 2, 1);
+        let root_txid = root.txid();
+        let mut a = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
+        a.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
+        let a_txid = a.txid();
+        let b = tx_with(&[OutPoint::new(root_txid, 1)], 1, 3);
+
+        let limits = MempoolLimits {
+            cluster_count: 3,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+        for tx in [root, a, b] {
+            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))
+            else {
+                panic!("the three-member cluster must be admitted under a limit of three");
+            };
+        }
+
+        let Some(a_id) = pool.entry_id_by_txid(&a_txid) else {
+            panic!("A must be in the pool");
+        };
+        let replacement = tx_with(&[OutPoint::new(root_txid, 0)], 1, 4);
+        let preview = pool
+            .check_replacement(&crate::ReplacementCandidate::new(
+                Arc::new(replacement.clone()),
+                100,
+                20_000,
+                1_000,
+            ))
+            .expect("replacement preview excludes its victim");
+        assert_eq!(preview.evicted, vec![a_id]);
+        assert_eq!(pool.len(), 3, "preview does not mutate");
+        assert_eq!(
+            pool.insert_entry(MempoolEntry::new(
+                Arc::new(replacement),
+                100,
+                20_000,
+                1,
+                7,
+                0
+            ))
+            .err(),
+            Some(MempoolError::Policy(PolicyError::ClusterCountLimit)),
+            "ordinary insertion cannot grow this full cluster"
+        );
+    }
+
+    #[test]
+    fn spender_txids_matches_a_scan_of_every_entrys_inputs() {
+        let (pool, _root_txid) = graph_pool();
+
+        let mut spenders_seen = 0_usize;
+        for (index, entry) in pool.entries.iter() {
+            let Ok(id) = EntryId::try_from(index) else {
+                panic!("entry index {index} does not fit an EntryId");
+            };
+
+            let mut expected: Vec<Txid> = Vec::new();
+            for (_other_index, candidate) in pool.entries.iter() {
+                if candidate
+                    .tx
+                    .inputs
+                    .iter()
+                    .any(|input| input.previous_output.txid == entry.txid)
+                {
+                    expected.push(candidate.tx.txid());
+                }
+            }
+            expected.sort_unstable();
+            spenders_seen = spenders_seen.saturating_add(expected.len());
+
+            let mut actual = pool.spender_txids(id);
+            actual.sort_unstable();
+            assert_eq!(
+                actual, expected,
+                "spender_txids diverged from the scan for {}",
+                entry.txid
+            );
+        }
+
+        assert_eq!(
+            spenders_seen, 3,
+            "the fixture must exercise spenders: root has 2, child_a has 1"
+        );
+    }
+
+    #[test]
+    fn spender_txids_includes_an_out_of_range_prevout_inserted_before_its_parent() {
+        let confirmed = OutPoint::new(txid_of([8_u8; 32]), 0);
+        let parent = tx_with(&[confirmed], 1, 10);
+        let parent_txid = parent.txid();
+        let child = tx_with(&[OutPoint::new(parent_txid, u32::MAX)], 1, 11);
+        let child_txid = child.txid();
+        let mut pool = Mempool::new(MempoolLimits::default());
+
+        let child_entry = MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7, 0);
+        assert!(
+            pool.insert_entry(child_entry).is_ok(),
+            "child insertion failed"
+        );
+        let parent_entry = MempoolEntry::new(Arc::new(parent), 100, 10_000, 1, 7, 0);
+        assert!(
+            pool.insert_entry(parent_entry).is_ok(),
+            "parent insertion failed"
+        );
+        let parent_id = pool
+            .entry_id_by_txid(&parent_txid)
+            .expect("parent id resolves");
+
+        assert_eq!(pool.spender_txids(parent_id), vec![child_txid]);
+    }
+
+    #[test]
+    fn a_transaction_reached_through_two_outputs_is_reported_once() {
+        let (pool, root_txid) = graph_pool();
+        let Some(root_id) = pool.entry_id_by_txid(&root_txid) else {
+            panic!("root missing from the fixture pool");
+        };
+        let spenders = pool.spender_txids(root_id);
+        let mut deduped = spenders.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(
+            spenders.len(),
+            deduped.len(),
+            "child_b spends two of the root's outputs and must still appear once"
+        );
+        assert_eq!(spenders.len(), 2, "the root has two distinct spenders");
+    }
+
+    #[test]
+    fn block_inclusion_removes_root_but_leaves_descendants() {
+        let (mut pool, root_txid) = graph_pool();
+        let Some(root) = pool.entry_by_txid(&root_txid) else {
+            panic!("root missing from the fixture pool");
+        };
+        let root_tx = root.tx.clone();
+        let before = pool.len();
+        let removed = pool.remove_for_block(
+            &crate::settlement::TransitionFacts::from_txs(&[&root_tx]),
+            8,
+            1,
+        );
+        assert_ne!(removed.len(), 0);
+        assert!(pool.entry_id_by_txid(&root_txid).is_none());
+        assert_eq!(pool.len(), before - 1);
+        assert_ne!(pool.len(), 0);
+    }
+}
 
 #[cfg(test)]
 mod dynamic_memory_usage_tests {
@@ -2743,4 +7205,587 @@ mod entry_overhead_tests {
 
 #[cfg(test)]
 #[expect(clippy::expect_used)]
-mod graph_tests;
+mod graph_tests {
+    use super::*;
+
+    const TIME: u64 = 1_700_000_000;
+    const HEIGHT: u32 = 900;
+
+    fn graph_tx(nonce: u32, inputs: &[OutPoint], rbf: bool) -> Tx {
+        Tx {
+            version: 2,
+            lock_time: LockTime::from_consensus(nonce),
+            inputs: inputs
+                .iter()
+                .map(|previous_output| TxIn {
+                    previous_output: *previous_output,
+                    script_sig: Script::new(),
+                    sequence: if rbf {
+                        Sequence::from_consensus(0xFFFF_FFFD)
+                    } else {
+                        Sequence::MAX
+                    },
+                    witness: Witness::new(),
+                })
+                .collect(),
+            outputs: alloc::vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: alloc::vec![0x51; 8].into(),
+            }],
+        }
+    }
+
+    fn fuzzer_pool() -> Mempool {
+        Mempool::new(MempoolLimits {
+            max_total_bytes: 0,
+            min_relay_fee_sat_per_kvb: 0,
+            cluster_count: 64,
+            ..MempoolLimits::default()
+        })
+    }
+
+    fn insert_ok(pool: &mut Mempool, nonce: u32, inputs: &[OutPoint], vsize: u32) -> Txid {
+        let tx = graph_tx(nonce, inputs, false);
+        let txid = tx.txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx),
+            vsize,
+            1_000,
+            TIME,
+            HEIGHT,
+            0,
+        ))
+        .expect("fixture insert must pass validation");
+        txid
+    }
+
+    #[test]
+    fn batched_removal_of_two_thousand_independent_entries_settles() {
+        const COUNT: u32 = 2000;
+        let count = usize::try_from(COUNT).expect("test count fits");
+        let mut pool = Mempool::new(MempoolLimits {
+            max_total_bytes: 0,
+            ..MempoolLimits::default()
+        });
+        let mut txids = Vec::with_capacity(count);
+        for nonce in 0..COUNT {
+            let mut seed = [0xD1_u8; 32];
+            seed[..4].copy_from_slice(&nonce.to_le_bytes());
+            let funding = OutPoint::new(Txid::from(Hash256::from_le_bytes(&seed)), 0);
+            txids.push(insert_ok(&mut pool, nonce, &[funding], 100));
+        }
+        assert_eq!(pool.len(), count);
+        let mut removals = Vec::with_capacity(count);
+        for txid in &txids {
+            removals.push((
+                pool.entry_id_by_txid(txid).expect("inserted id resolves"),
+                RemovalReason::BlockInclusion,
+            ));
+        }
+        let mut changes = Vec::new();
+        pool.remove_entries_with_reasons(&removals, &mut changes);
+        assert_eq!(pool.len(), 0, "every independent entry leaves");
+        assert_eq!(changes.len(), count);
+        for (change, txid) in changes.iter().zip(txids.iter()) {
+            assert_eq!(change.txid, Hash256::from(*txid));
+            assert!(
+                matches!(
+                    change.outcome,
+                    MutationOutcome::Removed(RemovalReason::BlockInclusion)
+                ),
+                "unexpected outcome for {txid}: {:?}",
+                change.outcome
+            );
+        }
+        assert!(
+            pool.chunks_by_feerate().next().is_none(),
+            "no component linearization survives the batch"
+        );
+    }
+
+    fn reference_components(pool: &Mempool) -> Vec<Vec<EntryId>> {
+        let mut seen: HashSet<EntryId> = HashSet::new();
+        let mut components = Vec::new();
+        let live: Vec<EntryId> = pool
+            .derived
+            .by_txid
+            .values()
+            .map(|indexed| indexed.id)
+            .collect();
+        for seed in live {
+            if !seen.insert(seed) {
+                continue;
+            }
+            let mut part = vec![seed];
+            let mut queue = vec![seed];
+            while let Some(id) = queue.pop() {
+                let entry = pool.entry(id).expect("entry must exist in pool");
+                let parents = entry
+                    .tx
+                    .inputs
+                    .iter()
+                    .filter_map(|input| pool.entry_id_by_txid(&input.previous_output.txid));
+                let start = (
+                    SpendingKey::from(OutPoint::new(entry.txid, u32::MIN)),
+                    EntryId::MIN,
+                );
+                let end = (
+                    SpendingKey::from(OutPoint::new(entry.txid, u32::MAX)),
+                    EntryId::MAX,
+                );
+                let children = pool
+                    .derived
+                    .spending
+                    .range(start..=end)
+                    .map(|(_, child)| *child)
+                    .collect::<Vec<_>>();
+                for neighbour in parents.chain(children) {
+                    if seen.insert(neighbour) {
+                        part.push(neighbour);
+                        queue.push(neighbour);
+                    }
+                }
+            }
+            part.sort_unstable();
+            components.push(part);
+        }
+        components.sort();
+        components
+    }
+
+    fn assert_graph_exact(pool: &Mempool) {
+        let mut cached: Vec<Vec<EntryId>> = Vec::new();
+        let mut by_component: HashMap<u32, Vec<EntryId>> = HashMap::new();
+        for (index, _entry) in pool.entries.iter() {
+            let id = EntryId::try_from(index).expect("slot index fits u32");
+            let component = pool.component_id(id).expect("live entry has a component");
+            by_component.entry(component).or_default().push(id);
+        }
+        for members in by_component.values_mut() {
+            members.sort_unstable();
+            cached.push(members.clone());
+        }
+        cached.sort();
+        assert_eq!(cached, reference_components(pool), "component partition");
+
+        for (component, members) in &by_component {
+            let summary = pool
+                .component_summary(*component)
+                .expect("component id names a live summary");
+            let vsize = members.iter().fold(0_u64, |total, member| {
+                total.saturating_add(
+                    pool.entry(*member)
+                        .map_or(0, |entry| u64::from(entry.vsize)),
+                )
+            });
+            assert_eq!(
+                summary.member_count,
+                u32::try_from(members.len()).unwrap_or(u32::MAX)
+            );
+            assert_eq!(
+                summary.weight,
+                vsize * 4,
+                "summary vsize for component {component}"
+            );
+        }
+
+        for (index, _entry) in pool.entries.iter() {
+            let id = EntryId::try_from(index).expect("slot index fits u32");
+            let links = pool.links(id).expect("live entry has links");
+            let mut sorted_parents = links.parents.clone();
+            sorted_parents.sort_unstable();
+            sorted_parents.dedup();
+            assert_eq!(
+                sorted_parents, links.parents,
+                "parents of {id} sorted+dedup"
+            );
+            let mut sorted_children = links.children.clone();
+            sorted_children.sort_unstable();
+            sorted_children.dedup();
+            assert_eq!(
+                sorted_children, links.children,
+                "children of {id} sorted+dedup"
+            );
+            for parent in &links.parents {
+                let back = pool.links(*parent).expect("parent link names a live entry");
+                assert!(back.children.contains(&id), "link symmetry for {id}");
+            }
+            for child in &links.children {
+                let back = pool.links(*child).expect("child link names a live entry");
+                assert!(back.parents.contains(&id), "link symmetry for {id}");
+            }
+        }
+    }
+
+    fn graph_steps(pool: &Mempool) -> u64 {
+        pool.graph_steps.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn component_merges_and_splits_track_the_reference() {
+        let mut pool = fuzzer_pool();
+        let a1 = insert_ok(&mut pool, 1, &[], 100);
+        let a2 = insert_ok(&mut pool, 2, &[OutPoint::new(a1, 0)], 100);
+        let a3 = insert_ok(&mut pool, 3, &[OutPoint::new(a2, 0)], 100);
+        let b1 = insert_ok(&mut pool, 4, &[], 110);
+        let b2 = insert_ok(&mut pool, 5, &[OutPoint::new(b1, 0)], 110);
+        assert_graph_exact(&pool);
+        assert_eq!(reference_components(&pool).len(), 2, "two disjoint chains");
+
+        let bridge = insert_ok(
+            &mut pool,
+            6,
+            &[OutPoint::new(a3, 0), OutPoint::new(b2, 0)],
+            120,
+        );
+        assert_graph_exact(&pool);
+        let merged = reference_components(&pool);
+        assert_eq!(merged.len(), 1, "bridge joins the chains: {merged:?}");
+        assert_eq!(merged[0].len(), 6);
+
+        let bridge_id = pool.entry_id_by_txid(&bridge).expect("bridge is pooled");
+        let mut changes = Vec::new();
+        pool.remove_entries_with_reasons(
+            &[(bridge_id, RemovalReason::PolicyEviction)],
+            &mut changes,
+        );
+        assert_graph_exact(&pool);
+        assert_eq!(
+            reference_components(&pool).len(),
+            2,
+            "bridge removal splits"
+        );
+    }
+
+    #[test]
+    fn recycled_slots_do_not_inherit_links_or_transaction_indexes() {
+        let mut pool = fuzzer_pool();
+        let parent = insert_ok(&mut pool, 1, &[], 100);
+        let child = insert_ok(&mut pool, 2, &[OutPoint::new(parent, 0)], 100);
+        let leaf = insert_ok(&mut pool, 3, &[OutPoint::new(child, 0)], 100);
+        let child_id = pool.entry_id_by_txid(&child).expect("pooled child");
+        let child_wtxid = pool.entry(child_id).expect("pooled child").wtxid;
+        pool.remove_entries_with_reasons(
+            &[(child_id, RemovalReason::PolicyEviction)],
+            &mut Vec::new(),
+        );
+
+        let replacement = insert_ok(&mut pool, 4, &[], 100);
+        assert_eq!(pool.entry_id_by_txid(&replacement), Some(child_id));
+        assert!(pool.entry_by_txid(&child).is_none());
+        assert!(pool.entry_by_wtxid(&child_wtxid).is_none());
+        let links = pool.links(child_id).expect("reused slot");
+        assert_eq!(links.parents, Vec::<u32>::new());
+        assert_eq!(links.children, Vec::<u32>::new());
+        let parent_id = pool.entry_id_by_txid(&parent).expect("pooled parent");
+        let leaf_id = pool.entry_id_by_txid(&leaf).expect("pooled leaf");
+        assert_eq!(
+            pool.links(parent_id).expect("parent links").children,
+            Vec::<u32>::new()
+        );
+        assert_eq!(
+            pool.links(leaf_id).expect("leaf links").parents,
+            Vec::<u32>::new()
+        );
+        assert_graph_exact(&pool);
+
+        let retained_slots = pool.entries.capacity();
+        let _ = pool.clear();
+        assert_eq!(pool.entries.capacity(), retained_slots);
+        let fresh = insert_ok(&mut pool, 5, &[], 100);
+        assert_eq!(pool.entry_id_by_txid(&fresh), Some(0));
+        assert_eq!(pool.len(), 1);
+        for retired in [parent, leaf, replacement] {
+            assert!(pool.entry_by_txid(&retired).is_none());
+        }
+        assert_graph_exact(&pool);
+    }
+
+    #[test]
+    fn wtxid_lookups_track_mutations() {
+        let mut pool = fuzzer_pool();
+        let first = insert_ok(&mut pool, 1, &[], 100);
+        let wtxid = pool.entry_by_txid(&first).map(|entry| entry.wtxid);
+        assert!(pool.contains_wtxid(&wtxid.expect("pooled")));
+        assert_eq!(
+            pool.entry_by_wtxid(&wtxid.expect("pooled"))
+                .map(|entry| entry.txid),
+            Some(first)
+        );
+
+        let first_id = pool.entry_id_by_txid(&first).expect("pooled");
+        let mut changes = Vec::new();
+        pool.remove_entries_with_reasons(
+            &[(first_id, RemovalReason::PolicyEviction)],
+            &mut changes,
+        );
+        assert!(!pool.contains_wtxid(&wtxid.expect("pooled")));
+        assert!(pool.entry_by_wtxid(&wtxid.expect("pooled")).is_none());
+
+        let second = insert_ok(&mut pool, 2, &[], 100);
+        let second_wtxid = pool.entry_by_txid(&second).map(|entry| entry.wtxid);
+        assert_ne!(wtxid, second_wtxid);
+        assert!(pool.contains_wtxid(&second_wtxid.expect("pooled")));
+    }
+
+    #[test]
+    fn plain_admission_enforces_cluster_limits_through_the_cache() {
+        let mut pool = Mempool::new(MempoolLimits {
+            max_total_bytes: 0,
+            min_relay_fee_sat_per_kvb: 0,
+            cluster_count: 4,
+            cluster_size_vbytes: 1_000_000,
+            ..MempoolLimits::default()
+        });
+        let a = insert_ok(&mut pool, 1, &[], 100);
+        let b = insert_ok(&mut pool, 2, &[OutPoint::new(a, 0)], 100);
+        let c = insert_ok(&mut pool, 3, &[], 100);
+        let d = insert_ok(&mut pool, 4, &[OutPoint::new(c, 0)], 100);
+
+        let joiner = graph_tx(5, &[OutPoint::new(b, 0), OutPoint::new(d, 0)], false);
+        let entry = MempoolEntry::new(Arc::new(joiner.clone()), 100, 1_000, TIME, HEIGHT, 0);
+        let error = pool
+            .insert_entry(entry)
+            .expect_err("cluster of five is over the limit");
+        assert!(matches!(
+            error,
+            MempoolError::Policy(PolicyError::ClusterCountLimit)
+        ));
+        assert_eq!(pool.len(), 4, "rejection commits nothing");
+        assert!(!pool.contains_txid(&joiner.txid()));
+
+        assert!(matches!(
+            pool.check_replacement(&crate::ReplacementCandidate::new(
+                Arc::new(joiner),
+                100,
+                1_000,
+                1_000
+            )),
+            Err(crate::RbfError::Mempool(MempoolError::Policy(
+                PolicyError::ClusterCountLimit
+            )))
+        ));
+
+        let _e = insert_ok(&mut pool, 6, &[OutPoint::new(a, 0)], 100);
+        assert_graph_exact(&pool);
+    }
+
+    #[test]
+    fn check_cluster_limits_cached_matches_walk_across_graph_shapes() {
+        fn agrees(pool: &Mempool, tx: &Tx, weight: u64, expected: Result<(), PolicyError>) {
+            let excluded: HashSet<EntryId> = HashSet::new();
+            assert_eq!(
+                pool.check_cluster_limits_cached(tx, weight),
+                expected,
+                "cached verdict must match the pinned outcome"
+            );
+            assert_eq!(
+                pool.check_cluster_limits_by_walk(tx, weight, &excluded),
+                expected,
+                "walk verdict must match the pinned outcome"
+            );
+        }
+
+        fn shape_pool(count: u32) -> Mempool {
+            Mempool::new(MempoolLimits {
+                max_total_bytes: 0,
+                min_relay_fee_sat_per_kvb: 0,
+                cluster_count: count,
+                cluster_size_vbytes: 1_000_000,
+                ..MempoolLimits::default()
+            })
+        }
+
+        let mut pool = shape_pool(4);
+        let parent_one = insert_ok(&mut pool, 1, &[], 100);
+        let child_one = insert_ok(&mut pool, 2, &[OutPoint::new(parent_one, 0)], 100);
+        let parent_two = insert_ok(&mut pool, 3, &[], 100);
+        let child_two = insert_ok(&mut pool, 4, &[OutPoint::new(parent_two, 0)], 100);
+        let joiner = graph_tx(
+            5,
+            &[OutPoint::new(child_one, 0), OutPoint::new(child_two, 0)],
+            false,
+        );
+        agrees(&pool, &joiner, 400, Err(PolicyError::ClusterCountLimit));
+
+        let mut pool = shape_pool(4);
+        let probe = insert_ok(&mut pool, 1, &[], 100);
+        let c1 = insert_ok(&mut pool, 2, &[OutPoint::new(probe, 0)], 100);
+        let _c2 = insert_ok(&mut pool, 3, &[OutPoint::new(probe, 0)], 100);
+        let sibling_spender = graph_tx(4, &[OutPoint::new(c1, 0)], false);
+        agrees(&pool, &sibling_spender, 400, Ok(()));
+
+        let mut pool = shape_pool(3);
+        let split_root = insert_ok(&mut pool, 1, &[], 100);
+        let split_mid = insert_ok(&mut pool, 2, &[OutPoint::new(split_root, 0)], 100);
+        let _split_tail = insert_ok(&mut pool, 3, &[OutPoint::new(split_mid, 0)], 100);
+        let split_mid_id = pool
+            .entry_id_by_txid(&split_mid)
+            .expect("middle entry resolves");
+        pool.remove_entries_with_reasons(
+            &[(split_mid_id, RemovalReason::Conflict)],
+            &mut Vec::new(),
+        );
+        let rejoiner = graph_tx(4, &[OutPoint::new(split_root, 0)], false);
+        agrees(&pool, &rejoiner, 400, Ok(()));
+
+        let mut pool = Mempool::new(MempoolLimits {
+            max_total_bytes: 0,
+            min_relay_fee_sat_per_kvb: 0,
+            cluster_count: 8,
+            cluster_size_vbytes: 200,
+            ..MempoolLimits::default()
+        });
+        let oversize_root = insert_ok(&mut pool, 1, &[], 100);
+        let oversize_mid = insert_ok(&mut pool, 2, &[OutPoint::new(oversize_root, 0)], 100);
+        let overweight = graph_tx(3, &[OutPoint::new(oversize_mid, 0)], false);
+        agrees(&pool, &overweight, 400, Err(PolicyError::ClusterSizeLimit));
+
+        let mut pool = shape_pool(4);
+        let parent_tx = graph_tx(1, &[], false);
+        let parent_txid = parent_tx.txid();
+        let _child = insert_ok(&mut pool, 2, &[OutPoint::new(parent_txid, 0)], 100);
+        agrees(&pool, &parent_tx, 400, Ok(()));
+        assert_eq!(pool.len(), 1, "the fixture pools the child only");
+    }
+
+    #[test]
+    fn removal_splits_repartition_by_bounded_walk() {
+        let mut pool = Mempool::new(MempoolLimits {
+            max_total_bytes: 0,
+            min_relay_fee_sat_per_kvb: 0,
+            cluster_count: 8,
+            cluster_size_vbytes: 1_000_000,
+            ..MempoolLimits::default()
+        });
+        let root = insert_ok(&mut pool, 1, &[], 100);
+        let left = insert_ok(&mut pool, 2, &[OutPoint::new(root, 0)], 100);
+        let right = insert_ok(&mut pool, 3, &[OutPoint::new(root, 0)], 100);
+        let sink = insert_ok(
+            &mut pool,
+            4,
+            &[OutPoint::new(left, 0), OutPoint::new(right, 0)],
+            100,
+        );
+        let tail = insert_ok(&mut pool, 5, &[OutPoint::new(sink, 0)], 100);
+        let end = insert_ok(&mut pool, 6, &[OutPoint::new(tail, 0)], 100);
+        assert_graph_exact(&pool);
+        assert_eq!(reference_components(&pool)[0].len(), 6);
+
+        let sink_id = pool.entry_id_by_txid(&sink).expect("pooled");
+        let mut changes = Vec::new();
+        pool.remove_entries_with_reasons(&[(sink_id, RemovalReason::PolicyEviction)], &mut changes);
+        assert_graph_exact(&pool);
+        let parts = reference_components(&pool);
+        assert_eq!(parts.len(), 2, "the sink held the two halves: {parts:?}");
+        assert_eq!(parts[0].len() + parts[1].len(), 5);
+
+        let root_id = pool.entry_id_by_txid(&root).expect("pooled");
+        assert_eq!(pool.links(root_id).expect("pooled").children.len(), 2);
+        let _ = end;
+    }
+
+    #[test]
+    fn graph_work_stays_local_on_worst_case_shapes() {
+        let mut pool = Mempool::new(MempoolLimits {
+            max_total_bytes: 0,
+            min_relay_fee_sat_per_kvb: 0,
+            cluster_count: 64,
+            cluster_size_vbytes: 1_000_000,
+            ..MempoolLimits::default()
+        });
+        let mut nonce = 0_u32;
+        for _chain in 0..40 {
+            let mut parent = insert_ok(&mut pool, nonce, &[], 100);
+            nonce += 1;
+            for _depth in 0..9 {
+                parent = insert_ok(&mut pool, nonce, &[OutPoint::new(parent, 0)], 100);
+                nonce += 1;
+            }
+        }
+        assert_eq!(pool.len(), 400);
+
+        pool.graph_steps.store(0, Ordering::Relaxed);
+        let _ = insert_ok(&mut pool, nonce, &[], 100);
+        nonce += 1;
+        assert!(graph_steps(&pool) < 8, "isolated insert walked the pool");
+
+        let live = pool.iter_txids();
+        let anchor = live[live.len() / 2];
+        pool.graph_steps.store(0, Ordering::Relaxed);
+        let _ = insert_ok(&mut pool, nonce, &[OutPoint::new(anchor, 0)], 100);
+        assert!(
+            graph_steps(&pool) < 4 * 10 + 48,
+            "leaf insert walked beyond its cluster: {}",
+            graph_steps(&pool)
+        );
+
+        let middle = live[live.len() / 4];
+        let middle_id = pool.entry_id_by_txid(&middle).expect("pooled");
+        pool.graph_steps.store(0, Ordering::Relaxed);
+        let mut changes = Vec::new();
+        pool.remove_entries_with_reasons(
+            &[(middle_id, RemovalReason::PolicyEviction)],
+            &mut changes,
+        );
+        assert!(
+            graph_steps(&pool) < 4 * 10 + 64,
+            "split recompute walked beyond the broken cluster: {}",
+            graph_steps(&pool)
+        );
+        assert_graph_exact(&pool);
+    }
+
+    #[test]
+    fn a_surviving_node_is_measured_from_the_links_the_exclusion_keeps() {
+        let mut pool = fuzzer_pool();
+        let root = insert_ok(&mut pool, 1, &[], 100);
+        let first = insert_ok(&mut pool, 2, &[OutPoint::new(root, 0)], 100);
+        let second = insert_ok(&mut pool, 3, &[OutPoint::new(root, 0)], 100);
+        let root_id = pool.entry_id_by_txid(&root).expect("pooled");
+        let first_id = pool.entry_id_by_txid(&first).expect("pooled");
+        let second_id = pool.entry_id_by_txid(&second).expect("pooled");
+        assert_eq!(pool.entry_memory(root_id).expect("pooled"), {
+            let sides = pool.links(root_id).expect("pooled").children.len();
+            entry_memory_usage(&pool.entry(root_id).expect("pooled").tx)
+                .saturating_add(link_memory_usage(sides, 1))
+        });
+
+        let (before, after) = pool
+            .projected_graphs(&[], &[first_id, second_id], ProjectionScope::AllEntries)
+            .expect("projection");
+        let root_before = before
+            .nodes
+            .iter()
+            .find(|node| node.id == Some(root_id))
+            .expect("the root is projected");
+        let root_after = after
+            .nodes
+            .iter()
+            .find(|node| node.id == Some(root_id))
+            .expect("the root survives");
+        assert_eq!(
+            root_after.memory,
+            entry_memory_usage(&pool.entry(root_id).expect("pooled").tx),
+            "a root whose children all leave keeps no link memory"
+        );
+        assert!(
+            root_after.memory < root_before.memory,
+            "the projection must stop charging the evicted links"
+        );
+
+        let mut changes = Vec::new();
+        pool.remove_entries_with_reasons(
+            &[
+                (first_id, RemovalReason::PolicyEviction),
+                (second_id, RemovalReason::PolicyEviction),
+            ],
+            &mut changes,
+        );
+        assert_eq!(
+            root_after.memory,
+            pool.entry_memory(root_id).expect("pooled"),
+            "the projection must equal the accounting after the removals"
+        );
+    }
+}

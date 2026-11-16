@@ -455,7 +455,7 @@ Nothing below the owner facade can interpret or copy the same data again.
 - Execution can reserve against the full `I` owner cap. Saturated image admission must not consume the distinct raw receive allowance or prevent an otherwise-admissible control message.
 - Zero or tiny quotas remain valid. A request that cannot fit must receive a local resource refusal, not an uncharged allocation.
 
-Proof: `crates/node/src/budget/tests.rs::saturated_ingress_preserves_execution_headroom_and_recovers_after_release` checks execution credit at ingress saturation and resumed ingress admission after release. `crates/node/src/budget/tests.rs::receive_partition_preserves_total_for_default_small_and_zero_quotas` checks the receive/image partition preserves the configured total for default, small, and zero quotas.
+Proof: `crates/node/src/budget.rs::saturated_ingress_preserves_execution_headroom_and_recovers_after_release` checks execution credit at ingress saturation and resumed ingress admission after release. `crates/node/src/budget.rs::receive_partition_preserves_total_for_default_small_and_zero_quotas` checks the receive/image partition preserves the configured total for default, small, and zero quotas.
 
 ### `BUD-06`: Unified retained memory budget
 

@@ -110,17 +110,17 @@ noise_sv2.workspace = true
 
 [[test]]
 name = "suite"
-path = "tests/suite.rs"
+path = "tests.rs"
 
 # Self-spawns exact-name crash workers and installs process-global tracing.
 [[test]]
 name = "crash_recovery"
-path = "tests/crash_recovery.rs"
+path = "crash_recovery_tests.rs"
 
 [[test]]
 name = "pool_ledger"
-path = "tests/pool_ledger.rs"
+path = "pool_ledger_tests.rs"
 
 [[test]]
 name = "global_pool"
-path = "tests/global_pool.rs"
+path = "global_pool_tests.rs"

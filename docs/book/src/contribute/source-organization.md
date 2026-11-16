@@ -14,17 +14,17 @@ One authority owns each invariant, mutation, and durable format. A split does no
 
 ## Where a test lives
 
-Owner-local behavior uses a short inline `#[cfg(test)] mod tests`. A larger suite for one owner lives in `src/owner/tests.rs`, declared by the owner with `#[cfg(test)]`. Further behavioral splits go under `src/owner/tests/`. Crate-root behavior goes in `src/tests.rs`.
+Owner-local behavior uses an inline `#[cfg(test)]` module inside its source owner file. Keep the module's name, configuration conditions, and visibility. File length alone does not justify a separate test module file.
 
-A crate-consumer boundary or an independent oracle uses one explicitly registered `tests/suite.rs` per crate. Put behavior modules beside it and one shared `tests/support/` owner for fixtures and helpers. Do not create one integration test file per case.
+A crate-consumer boundary or an independent oracle uses the crate-root `tests.rs` file, registered as the `suite` integration target. Put behavior modules inside that file. Do not create one integration test file per case, and do not create test-only source directories under `crates/` — including `tests/`.
 
-A separate executable is justified by a current process, platform, or compilation boundary. Daemon lifecycle, restart, or cross-process behavior uses the existing process harness at the owning package or `e2e` boundary, because that harness preserves real process and persistence evidence. A socket read or a store reopen alone does not need an integration target.
+Keep a separate crate-root test executable only when a process, platform, allocator, global counter, or artifact boundary requires it; preserve each target name and its Cargo configuration. Daemon lifecycle, restart, or cross-process behavior uses the existing process harness at the owning package or `e2e` boundary, because that harness preserves real process and persistence evidence. A socket read or a store reopen alone does not need a separate executable.
 
-Files under `tests/unit/` that are pulled in with `#[path]` remain unit tests. Keep classification, dispatcher policy, transport behavior, and state transitions with the proof owner that already covers them. Two tests may share an input when their oracle or failure boundary differs; the overlap is the point.
+Inline a test helper in the test module that uses it. A helper shared by independent test executables uses one crate-root helper file; do not copy it into each executable. Two tests may share an input when their oracle or failure boundary differs; the overlap is the point.
 
 ## Fixtures
 
-A fixture belongs to the smallest scope that uses it. Keep it local to its suite, put an intra-crate fixture in `tests/support/`, and use an existing cross-crate domain fixture or harness when multiple crates need the same bytes. Never copy a fixture into a second owner. Never reach into another package's private test tree.
+Reference data belongs under `testdata/<owner>/`, outside `crates/`. A fixture belongs to the smallest scope that uses it. Use an existing cross-crate domain fixture or harness when multiple crates need the same bytes. Preserve external vectors, provenance, and fixture bytes when paths change. Never copy a fixture into a second owner. Never reach into another package's private test tree.
 
 Do not build a shared framework to make every path look the same. The smallest shared boundary that actual consumers need is the right one.
 

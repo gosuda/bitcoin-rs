@@ -125,7 +125,10 @@ mod vector_tests {
 
     impl Csv {
         fn load(name: &str) -> Result<Self, TestError> {
-            let path = format!("{}/tests/data/bip324/{name}", env!("CARGO_MANIFEST_DIR"));
+            let path = format!(
+                "{}/../../testdata/wire/data/bip324/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            );
             let text = std::fs::read_to_string(path)?;
             let mut lines = text
                 .lines()

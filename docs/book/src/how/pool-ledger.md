@@ -4,7 +4,7 @@ The ledger is the pool's only financial memory. A share earns credit once, a rou
 
 The runtime that drives the ledger, including the Stratum listeners and the external signer, is described in [mining and the native pool](../use/mining-and-pool.md). Financial rules are owned by [docs/contracts/pool.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/pool.md) (`POOL-01` to `POOL-09`).
 
-The HEAD build used for this book was compiled without the `pool` feature, so no pool run appears here. The evidence is the node pool-ledger tests in `crates/node/tests/pool_ledger.rs` with `--features pool,test-seam`, run against this tree. Two of them appear in the worked trace.
+The HEAD build used for this book was compiled without the `pool` feature, so no pool run appears here. The evidence is the node pool-ledger tests in `crates/node/pool_ledger_tests.rs` with `--features pool,test-seam`, run against this tree. Two of them appear in the worked trace.
 
 ## What the ledger stores
 
@@ -138,7 +138,7 @@ The audit table is a hash chain. `append_audit` hashes `"btcrs.pool.audit.v1" ||
 | restart | balances, audit, and sequence continue byte for byte | `state_survives_a_restart_byte_for_byte` |
 | tampering | audit chain detects it | `the_audit_chain_is_deterministic_and_detects_tampering` |
 
-All four live in `crates/node/tests/support/pool_ledger_cases.rs`, which is compiled once per backend; the current suite runs it against RocksDB (`crates/node/tests/pool_ledger.rs`).
+All four live in `crates/node/pool_ledger_tests.rs`, compiled behind a single `mod rocksdb`; the current suite runs it against RocksDB (`crates/node/pool_ledger_tests.rs`).
 
 ## Retirement after an applied block
 
@@ -177,10 +177,10 @@ That test records a share on job 7 and one on job 8, retires job 7, asserts the 
 $ env -u CARGO_BUILD_BUILD_DIR RUSTC_WRAPPER= \
     cargo test --offline --locked -p bitcoin-rs-serving \
     --features pool,test-seam --test suite \
-    pool_sv1::applied_block_retires_job -- --nocapture
+    mining_pool_sv1::applied_block_retires_job -- --nocapture
 
 running 1 test
-test pool_sv1::applied_block_retires_job_and_second_submit_is_stale ... ok
+test mining_pool_sv1::applied_block_retires_job_and_second_submit_is_stale ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 103 filtered out; finished in 0.01s
 ```
@@ -218,7 +218,7 @@ That test submits one winning nonce over a real SV1 connection, asserts the job 
 | [`POOL-07`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/pool.md#pool-07-hash-keyed-reorg-reconciliation-and-conservation) | hash-keyed reorg handling, reversal, conservation |
 | [`POOL-08`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/pool.md#pool-08-external-signing-without-wallet-custody) | reservations, receipts, no wallet custody |
 
-Tests that pin the financial behavior, all in `crates/node/tests/support/pool_ledger_cases.rs` unless noted:
+Tests that pin the financial behavior, all in `crates/node/pool_ledger_tests.rs` unless noted:
 
 | Invariant | Test |
 | :--- | :--- |
@@ -237,8 +237,8 @@ Tests that pin the financial behavior, all in `crates/node/tests/support/pool_le
 | a reorged payout reverts then reconfirms | `a_reorged_out_confirmation_reverts_the_payout_and_a_new_block_reconfirms_it` |
 | fail is conclusive only for all txs | `a_batch_fails_only_when_every_signed_transaction_is_conclusively_double_spent` |
 | bounded pages advance by cursor | `bounded_pages_advance_via_cursor_without_rescanning_head` |
-| SV1 retirement and stale/duplicate codes | `pool_sv1::applied_block_retires_job_and_second_submit_is_stale` in `crates/serving/tests/mining_pool_sv1.rs` |
-| job book stale and duplicate identity | `accepted_block_retirement_makes_second_same_job_nonce_stale` in `crates/serving/tests/mining_pool_jobs.rs` |
+| SV1 retirement and stale/duplicate codes | `mining_pool_sv1::applied_block_retires_job_and_second_submit_is_stale` in `crates/serving/tests.rs` |
+| job book stale and duplicate identity | `accepted_block_retirement_makes_second_same_job_nonce_stale` in `crates/serving/tests.rs` |
 
 ## What is not established
 
