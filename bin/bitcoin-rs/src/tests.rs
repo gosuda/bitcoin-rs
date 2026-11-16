@@ -1,4 +1,4 @@
-﻿#[test]
+#[test]
 fn asmap_path_uses_the_existing_configuration_precedence() {
     let config = resolved(
         &[

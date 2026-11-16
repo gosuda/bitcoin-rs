@@ -1,4 +1,4 @@
-﻿pub trait BlockSyncObserver: Send + Sync {
+pub trait BlockSyncObserver: Send + Sync {
     fn announce_block(
         &self,
         source: crate::PeerSource,

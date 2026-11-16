@@ -1,4 +1,4 @@
-﻿/-
+/-
 Safety invariants of the ServingView query lifecycle machine
 (Rust owners `crates/rpc` and `crates/index`).
 

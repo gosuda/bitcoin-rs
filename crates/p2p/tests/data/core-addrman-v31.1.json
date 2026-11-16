@@ -1,4 +1,4 @@
-﻿{
+{
   "reference": "Bitcoin Core v31.1",
   "source_commit": "9be056a8a72b624dae9623b2f7bded92c2a21c91",
   "construction": "Calls actual unmodified AddrInfo methods linked from pinned Core sources; no candidate code or candidate-derived placement implementation. Official legacy tried40/new786 anchors asserted by executable.",

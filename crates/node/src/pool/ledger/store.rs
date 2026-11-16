@@ -1,4 +1,4 @@
-﻿use super::kv::{Database, Table, TableDefinition, WriteTransaction};
+use super::kv::{Database, Table, TableDefinition, WriteTransaction};
 use bitcoin_rs_storage::KvStore;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};

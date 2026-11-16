@@ -1,4 +1,4 @@
-﻿use std::net::SocketAddr;
+use std::net::SocketAddr;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;

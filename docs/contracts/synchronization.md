@@ -1,4 +1,4 @@
-﻿# Synchronization contract
+# Synchronization contract
 
 Node-level, cross-crate synchronization contract.
 Each domain owns its local mechanics.

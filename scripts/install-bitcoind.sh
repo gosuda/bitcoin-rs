@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Install the pinned Bitcoin Core 31.1 bitcoind used by the live differential.
 #
 # Downloads the official tarball for this platform from bitcoincore.org,

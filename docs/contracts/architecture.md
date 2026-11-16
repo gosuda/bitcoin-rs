@@ -1,4 +1,4 @@
-﻿# Architecture contract
+# Architecture contract
 
 The normative contract for workspace crate layering, one-way dependency direction, storage engine confinement, and composition boundaries.
 

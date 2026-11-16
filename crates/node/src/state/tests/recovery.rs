@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::state::open::NodeOpenError;
 use crate::test_support::TestError;
 use sonic_rs::JsonValueTrait as _;

@@ -1,4 +1,4 @@
-﻿#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum TestError {
     #[error(transparent)]
     Chain(#[from] bitcoin_rs_chain::chain::ChainError),

@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 #[test]
 fn chain_frontier_uses_captured_applied_tip_during_advance() -> TestResult {

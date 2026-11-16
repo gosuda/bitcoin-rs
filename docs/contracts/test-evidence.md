@@ -1,4 +1,4 @@
-﻿# Test evidence ownership
+# Test evidence ownership
 
 Tests protect an observable contract or an independently checked result.
 A test that only restates a constructor, field layout, historical task plan, lookup count, or private call order is not a permanent compatibility rule.

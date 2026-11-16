@@ -1,4 +1,4 @@
-﻿# Validation
+# Validation
 
 Scripts run on the native Rust interpreter by default. A build with the optional `kernel` feature can also run scripts on Bitcoin Core's C++ engine, but compiling the capability does not select it: `validation.engine = "native"` stays the production default (`VAL-01`, [validation-default contract](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/validation-default.md#val-01-the-production-default-engine-is-a-measured-decision)).
 

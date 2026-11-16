@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Bounded fuzz-seed transformations used by import-qa-assets.sh.
 
 The shell owns acquisition, the byte budget, minimization, and provenance.

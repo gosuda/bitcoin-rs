@@ -1,4 +1,4 @@
-﻿# Optional compact-filter interoperability
+# Optional compact-filter interoperability
 
 Run this opt-in evidence lane on Linux (including WSL), with Python 3.10 or newer,
 from the repository root.

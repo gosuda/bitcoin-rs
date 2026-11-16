@@ -1,4 +1,4 @@
-﻿# Embedded node lifecycle
+# Embedded node lifecycle
 
 The typed in-process surface provides `Node::start`, gateway broadcast, and consuming shutdown. Typed reads include `Node::snapshot`, `Node::sync_progress`, `Node::capabilities`, `Node::tx_by_id`, `Node::block_by_hash`, `Node::block_header`, `Node::mempool_info`, `Node::fee_estimate`, and `Node::chainstates_summary`. Settled reads include `Node::settled_snapshot`, `Node::subscribe_chain`/`Node::poll_chain`, and `Node::pin_chain`/`Node::replay_chain`. The daemon runner is the first embedder: one lifecycle implementation, not two.
 

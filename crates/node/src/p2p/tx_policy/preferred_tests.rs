@@ -1,4 +1,4 @@
-﻿use super::tests::{CountingInventory, item, register_ready, registered_source, select, source};
+use super::tests::{CountingInventory, item, register_ready, registered_source, select, source};
 use super::*;
 use std::sync::{
     Arc,

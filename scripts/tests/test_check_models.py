@@ -1,4 +1,4 @@
-﻿"""Offline tests of formal evidence custody, bounds and failure handling, not model proofs."""
+"""Offline tests of formal evidence custody, bounds and failure handling, not model proofs."""
 
 from __future__ import annotations
 

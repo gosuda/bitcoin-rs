@@ -1,4 +1,4 @@
-﻿//! Transient decode allocation stays inside the pre-charged decode reservation.
+//! Transient decode allocation stays inside the pre-charged decode reservation.
 #![expect(clippy::expect_used, reason = "fixture construction must fail loudly")]
 
 use std::alloc::{GlobalAlloc, Layout, System};

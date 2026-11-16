@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 #[test]
 fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult {

@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 // SYNC-06
 #[test]

@@ -1,4 +1,4 @@
-﻿# Recovery contract
+# Recovery contract
 
 This contract specifies how the node recovers an authoritative chainstate.
 Recovery handles crashes, lost writes, reorganizations, and incompatible datadirs.

@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 use crate::{EXAMPLE_PRIVATE_KEY_HEX, Network, NodeConfig, RETAINED_TEMPLATES, RuntimeInputs};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolObserver, MutationEnvelope};

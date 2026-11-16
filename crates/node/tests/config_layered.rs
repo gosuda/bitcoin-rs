@@ -1,4 +1,4 @@
-﻿use std::str::FromStr as _;
+use std::str::FromStr as _;
 
 use bitcoin_rs_node::test_support::TestError;
 

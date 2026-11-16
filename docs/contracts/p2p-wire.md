@@ -1,4 +1,4 @@
-﻿# P2P wire contract
+# P2P wire contract
 
 Ownership and proof follow the [contracts precedence rule](README.md). `crates/p2p/src/compat.rs` owns the decoded command inventory and pinned Core version. [p2p-compatibility](../policies/p2p-compatibility.md) owns handshake fields, the reject-or-ignore matrix, and the deviation ledger (§7). It also owns the verification process (§5 table is a checked projection of `COMMANDS`).
 

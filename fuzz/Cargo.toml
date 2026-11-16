@@ -1,4 +1,4 @@
-﻿[workspace]
+[workspace]
 
 [package.metadata]
 cargo-fuzz = true

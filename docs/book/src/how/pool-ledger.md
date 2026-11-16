@@ -1,4 +1,4 @@
-﻿# The pool ledger
+# The pool ledger
 
 The ledger is the pool's only financial memory. A share earns credit once, a round pays exactly the coinbase value the chain shows, and a payout batch holds a reservation until the chain confirms it or the operator cancels it with a stated basis. Every one of those facts is written by one `Ledger` method as one store transaction.
 

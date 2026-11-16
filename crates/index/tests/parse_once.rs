@@ -1,4 +1,4 @@
-﻿//! `PRJ-01` and `BLK-01`: the derived-index write path parses a block at most
+//! `PRJ-01` and `BLK-01`: the derived-index write path parses a block at most
 //! once on the fallback body path and never on the committed-facts path.
 //! The parse counter is process-global, so this binary holds one test.
 

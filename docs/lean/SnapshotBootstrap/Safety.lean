@@ -1,4 +1,4 @@
-﻿/-
+/-
 Safety invariants of the SnapshotBootstrap lifecycle machine
 (Rust owners `crates/storage`, `crates/chain`, and `crates/index`).
 

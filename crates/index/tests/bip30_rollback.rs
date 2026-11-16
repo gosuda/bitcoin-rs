@@ -1,4 +1,4 @@
-﻿//! BIP30 rollback: a block whose coinbase repeats an earlier unspent coinbase
+//! BIP30 rollback: a block whose coinbase repeats an earlier unspent coinbase
 //! overwrites that coin's ScriptLive row, because both coins share one key.
 //! Disconnecting the later block restores the earlier coin in the chainstate,
 //! so rolling the later block back must leave exactly that coin's row, at the

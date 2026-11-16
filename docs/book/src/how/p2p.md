@@ -1,4 +1,4 @@
-﻿# Peer-to-peer networking
+# Peer-to-peer networking
 
 Inbound peers enter through a listener; outbound peers are redialed by one drain thread from the address book, feelers, and pinned peers. Both paths end in the same handshake and peer machine, and the node negotiates BIP324 v2 transport by default.
 

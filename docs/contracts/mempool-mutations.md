@@ -1,4 +1,4 @@
-﻿# Mempool mutations contract
+# Mempool mutations contract
 
 This document defines the single mutation gateway in front of the mempool.
 It defines the records that the gateway emits.

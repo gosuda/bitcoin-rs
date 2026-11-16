@@ -1,4 +1,4 @@
-﻿# Reference set contract
+# Reference set contract
 
 This page provides a readable projection of the `[reference]` record in `crates/rpc/core-compat.toml`.
 It projects the typed validation in `e2e/src/reference_set.rs`.

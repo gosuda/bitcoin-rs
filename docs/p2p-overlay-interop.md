@@ -1,4 +1,4 @@
-﻿# P2P overlay interoperability test specification
+# P2P overlay interoperability test specification
 
 This document specifies the end-to-end integration and verification harness for Tor (onion v3) and I2P overlay networking in `bitcoin-rs` (#1601), implemented by `scripts/run-p2p-overlay-interop.sh`.
 

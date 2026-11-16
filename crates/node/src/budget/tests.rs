@@ -1,4 +1,4 @@
-﻿use super::{BudgetCaps, NodeBudget, STAGED_IMAGE_BUDGET_BYTES};
+use super::{BudgetCaps, NodeBudget, STAGED_IMAGE_BUDGET_BYTES};
 use crate::budget_model::{self, Action, AllocationOwner};
 use bitcoin_rs_chain::WindowLimits;
 use bitcoin_rs_storage::budget::{BudgetError, BudgetOwner, BudgetRefusal, ChargeHandle};

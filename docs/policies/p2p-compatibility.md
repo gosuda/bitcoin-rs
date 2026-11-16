@@ -1,4 +1,4 @@
-﻿# P2P Compatibility Policy
+# P2P Compatibility Policy
 
 This document declares bitcoin-rs's peer-wire compatibility contract with Bitcoin Core and the rules for keeping it pinned.
 

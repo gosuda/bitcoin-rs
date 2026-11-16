@@ -1,4 +1,4 @@
-﻿# Mempool policy contracts
+# Mempool policy contracts
 
 The mempool owner implements the selected Core 31.1 replacement and preview profile.
 [The policy matrix](../policies/mempool-policy.md) records behavior, reference evidence, and intentional unsupported cases.

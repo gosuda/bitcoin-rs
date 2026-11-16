@@ -1,4 +1,4 @@
-﻿# Verification: tests, fuzzing, proofs
+# Verification: tests, fuzzing, proofs
 
 No layer proves the node correct. Each layer names a property it covers and a property it cannot cover. Run the smallest layer that covers your change, then read its result at the scope it claims.
 

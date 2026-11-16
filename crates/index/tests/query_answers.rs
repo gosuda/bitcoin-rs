@@ -1,4 +1,4 @@
-﻿use bitcoin_rs_index::segment::bulk_builder::BulkSegmentBuilder;
+use bitcoin_rs_index::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_index::{IndexReader, Indexer, ScriptHash};
 use bitcoin_rs_storage::budget::UnboundedBudget;
 use bitcoin_rs_storage::committed_facts::{CommittedBlock, CreatedOutput, TxFacts};

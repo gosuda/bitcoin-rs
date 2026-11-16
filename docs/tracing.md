@@ -1,4 +1,4 @@
-﻿# USDT tracepoints (Bitcoin Core-compatible)
+# USDT tracepoints (Bitcoin Core-compatible)
 bitcoin-rs emits USDT probes whose provider names, probe names, and argument ABI match Bitcoin Core's `doc/tracing.md`, so Core-oriented tooling consumes a bitcoin-rs node unchanged. Per-event payload detail belongs in probe arguments and MUST NOT pollute metrics cardinality ([observability.md](observability.md), OBS-03). Probes compile in only with the `usdt` cargo feature (default **off**):
 ```bash
 cargo build --release --features usdt -p bitcoin-rs

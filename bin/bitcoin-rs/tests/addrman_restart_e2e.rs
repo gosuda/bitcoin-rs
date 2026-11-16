@@ -1,4 +1,4 @@
-﻿#![expect(clippy::expect_used, reason = "process fixture assertions")]
+#![expect(clippy::expect_used, reason = "process fixture assertions")]
 
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

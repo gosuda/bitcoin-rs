@@ -1,4 +1,4 @@
-﻿#![no_main]
+#![no_main]
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};

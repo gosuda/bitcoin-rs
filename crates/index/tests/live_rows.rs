@@ -1,4 +1,4 @@
-﻿//! Committed-facts rows and the batch byte limit: `PRJ-05`.
+//! Committed-facts rows and the batch byte limit: `PRJ-05`.
 
 use crate::support::TestError;
 use std::sync::Arc;

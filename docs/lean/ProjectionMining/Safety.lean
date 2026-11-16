@@ -1,4 +1,4 @@
-﻿/-
+/-
 Safety invariants of the projection and mining machine (Rust owners
 `crates/index/src/projection_model.rs` and
 `crates/rpc/src/mining/projection_model.rs`): the projection never leads the

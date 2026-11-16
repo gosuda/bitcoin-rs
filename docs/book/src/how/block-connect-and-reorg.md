@@ -1,4 +1,4 @@
-﻿# Block connect and reorg
+# Block connect and reorg
 
 The connect path turns admitted blocks into a durably committed chain tip: it checks each block in a fixed order, groups the writes of consecutive blocks into one commit, and keeps an undo record so any later reorg can roll back. Reorgs and invalidations run through the same machinery in reverse. Read [how/validation.md](validation.md) for the script rules and [run/sync-and-recovery.md](../run/sync-and-recovery.md) for what the operator sees; this page is the code-level view.
 

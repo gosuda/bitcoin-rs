@@ -1,4 +1,4 @@
-﻿use bitcoin_rs_rpc::manifest::{Entry, SurfaceKind};
+use bitcoin_rs_rpc::manifest::{Entry, SurfaceKind};
 
 use super::fixture::Fixture;
 

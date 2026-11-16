@@ -1,4 +1,4 @@
-﻿# Architecture
+# Architecture
 
 A block moves through six stages: the peer connection, the sync loop, the block stager, the chainstate transition, the durable-head commit, and the node followers. Chainstate owns the authoritative mutation; every other stage either feeds it or observes its committed result (`ARCH-07`, [architecture contract](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/architecture.md#arch-07-chainstate-owns-authoritative-applied-chain-mutation)).
 

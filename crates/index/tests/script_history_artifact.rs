@@ -1,4 +1,4 @@
-﻿#![expect(
+#![expect(
     clippy::expect_used,
     reason = "test: fixture setup failures abort the test with context"
 )]

@@ -1,4 +1,4 @@
-﻿use crate::support::{common, error::TestError};
+use crate::support::{common, error::TestError};
 
 use bitcoin::{Block, consensus::serialize, hashes::Hash as _};
 use bitcoin_rs_index::{

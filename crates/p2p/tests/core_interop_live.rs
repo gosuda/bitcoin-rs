@@ -1,4 +1,4 @@
-﻿#![cfg(unix)]
+#![cfg(unix)]
 
 use std::path::PathBuf;
 

@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 use crate::test_support::TestError;
 use bitcoin_rs_consensus::primitives::BlockImage;

@@ -1,4 +1,4 @@
-﻿use std::sync::Arc;
+use std::sync::Arc;
 #[cfg(any(test, feature = "test-seam"))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 

@@ -1,4 +1,4 @@
-﻿# Concepts
+# Concepts
 
 Shared domain vocabulary for this project: entities, named processes, and status concepts with project-specific meaning. Glossary only, not a spec or changelog; measured numbers belong in the PR that produced them.
 

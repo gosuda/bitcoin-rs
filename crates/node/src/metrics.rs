@@ -1,4 +1,4 @@
-﻿use std::io::{Read, Write};
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};

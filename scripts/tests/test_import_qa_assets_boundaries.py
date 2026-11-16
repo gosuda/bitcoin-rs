@@ -1,4 +1,4 @@
-﻿"""QAC-01 boundary regressions for seed ingress and publication.
+"""QAC-01 boundary regressions for seed ingress and publication.
 
 `docs/contracts/qa-corpus.md` QAC-01 and QAC-04 and the framing in
 `fuzz/fuzz_targets/p2p_message.rs` require a selector followed by the payload,

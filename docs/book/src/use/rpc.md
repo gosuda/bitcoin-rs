@@ -1,4 +1,4 @@
-﻿# RPC
+# RPC
 
 Send JSON-RPC over HTTP POST to the management listener. On mainnet the default bind is `127.0.0.1:8332`. On regtest it is `127.0.0.1:18443`. `--rpc-bind` changes it. `--public-bind` moves REST and Esplora reads to a second listener, and the first keeps JSON-RPC only.
 

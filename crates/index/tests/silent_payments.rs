@@ -1,4 +1,4 @@
-﻿#![cfg(feature = "silent-payments")]
+#![cfg(feature = "silent-payments")]
 
 use crate::support::error::TestError;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};

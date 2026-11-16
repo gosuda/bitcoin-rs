@@ -1,4 +1,4 @@
-﻿use alloc::sync::Arc;
+use alloc::sync::Arc;
 use std::io::{Read as _, Write as _};
 use std::net::SocketAddr;
 

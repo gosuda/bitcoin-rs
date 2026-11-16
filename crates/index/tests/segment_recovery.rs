@@ -1,4 +1,4 @@
-﻿use bitcoin_rs_index::segment::bulk_builder::BulkSegmentBuilder;
+use bitcoin_rs_index::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_index::segment::{
     IndexGeneration, NoSealedTxOrdinals, RetireFault, SealFault, TailWriterState,
     append_tail_block, arm_retire_fault, arm_seal_fault, meta_gen_key, publish_sealed,

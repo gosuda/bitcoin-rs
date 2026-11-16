@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use bitcoin_rs_consensus::primitives::BlockImage;
 
 #[test]

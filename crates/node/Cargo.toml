@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 autotests = false
 name = "bitcoin-rs-node"
 edition.workspace = true

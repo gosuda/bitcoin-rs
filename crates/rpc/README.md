@@ -1,4 +1,4 @@
-﻿# bitcoin-rs-rpc
+# bitcoin-rs-rpc
 
 This crate provides the synchronous, Bitcoin Core-compatible JSON-RPC and REST surface. It covers method dispatch, HTTP Basic and cookie authentication, and a wallet-free method surface. Every RPC that needs private key material is absent.
 

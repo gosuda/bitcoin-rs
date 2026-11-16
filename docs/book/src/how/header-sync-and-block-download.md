@@ -1,4 +1,4 @@
-﻿# Header sync and block download
+# Header sync and block download
 
 The node learns about new blocks in two stages. Headers flow through a peer-by-peer pipeline that refuses cheap fake chains, then bodies download through a budgeted window and get applied in order. This page covers the header pipeline (`crates/chain/src/chain/header_sync.rs`, `crates/node/src/p2p/sync/headers_presync.rs`), difficulty and deployment state (`crates/chain/src/chain/deployment.rs`, `progress.rs`), the download window and stager (`crates/node/src/p2p/download_window.rs`, `block_stager.rs`), stale tips and peer eviction (`crates/node/src/p2p/sync/stale_tips.rs`, `staletip.rs`, `eviction.rs`), historical sync for assumeutxo (`crates/node/src/p2p/sync/historical.rs`), and the frontier that drives all of it (`crates/node/src/p2p/sync/frontier.rs`). [how/p2p.md](p2p.md) covers the wire protocol; [run/sync-and-recovery.md](../run/sync-and-recovery.md) covers operator-facing behavior. Contract clauses: `P2P-10` in `docs/contracts/p2p-wire.md`, `SYNC-01`, `SYNC-02`, `SYNC-06` in `docs/contracts/synchronization.md`.
 

@@ -1,4 +1,4 @@
-﻿# Snapshots and assumeutxo
+# Snapshots and assumeutxo
 
 Assumeutxo lets a node start from a UTXO snapshot instead of scanning every block. The node activates immediately on a snapshot whose bytes match a commitment compiled into the binary, serves the chain from it, and revalidates history in the background from genesis. Trust comes from the compiled commitment, never from the file: a snapshot whose base is not pinned is refused even if every byte decodes cleanly.
 

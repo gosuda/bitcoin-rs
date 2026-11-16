@@ -1,4 +1,4 @@
-﻿/-
+/-
 Decode reservation bound for the borrowed wire layout in
 `crates/consensus/src/primitives/layout.rs`.
 -/

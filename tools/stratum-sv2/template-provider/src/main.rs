@@ -1,4 +1,4 @@
-﻿mod server;
+mod server;
 mod template;
 
 use bitcoin_rs_rpc::mining::{

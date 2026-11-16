@@ -1,4 +1,4 @@
-﻿# bitcoin-rs-p2p
+# bitcoin-rs-p2p
 
 This crate owns the Bitcoin peer-to-peer surface: wire messages and codecs, peer handshakes and state machines, BIP324 transport, connection management, peer sessions, discovery/address management, and inbound dispatch. Cross-subsystem sync, block download, and transaction-relay orchestration belong to `node::p2p`.
 

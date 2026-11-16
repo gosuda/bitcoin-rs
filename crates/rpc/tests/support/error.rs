@@ -1,4 +1,4 @@
-﻿#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum TestError {
     #[error(transparent)]
     Load(#[from] super::fixture::LoadError),

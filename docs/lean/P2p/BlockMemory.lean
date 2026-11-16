@@ -1,4 +1,4 @@
-﻿/-
+/-
 Block decoding admission accounting for `crates/p2p/src/inbound/block_memory.rs`.
 -/
 

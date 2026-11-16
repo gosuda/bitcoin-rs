@@ -1,4 +1,4 @@
-﻿# Bitcoin Core differential contract
+# Bitcoin Core differential contract
 
 libbitcoinkernel oracle tests prove consensus-script parity. This page owns live Bitcoin Core node comparisons: observable chain identity after a real P2P sync and curated acceptance through public RPCs. The reference is a running pinned binary, not a replay of captured JSON.
 

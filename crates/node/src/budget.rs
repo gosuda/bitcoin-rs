@@ -1,4 +1,4 @@
-﻿//! Node-wide byte and CPU accounting for every retained allocation.
+//! Node-wide byte and CPU accounting for every retained allocation.
 //!
 //! One accountant owns the totals; all subsystem charges linearize through
 //! its single ledger lock, so every reader observes a whole reservation or

@@ -1,4 +1,4 @@
-﻿# Wallet-facing public surface
+# Wallet-facing public surface
 
 Target contract for the surface an external wallet consumes.
 The node exposes public transports only.

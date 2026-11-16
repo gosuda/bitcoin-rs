@@ -1,4 +1,4 @@
-﻿/-
+/-
 Safety invariants of the CommittedFacts handoff queue and projection worker
 (Rust owners `crates/storage/src/committed_facts.rs`, `crates/node/src/facts_queue.rs`,
 and `crates/index/src/runtime/catch_up.rs`).

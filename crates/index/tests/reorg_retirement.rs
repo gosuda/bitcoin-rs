@@ -1,4 +1,4 @@
-﻿use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
 use bitcoin_rs_index::IndexCapability;
 use bitcoin_rs_index::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_index::segment::{

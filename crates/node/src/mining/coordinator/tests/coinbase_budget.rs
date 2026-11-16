@@ -1,4 +1,4 @@
-﻿use super::fee_revision::service_over;
+use super::fee_revision::service_over;
 use super::*;
 use bitcoin_rs_consensus::primitives::{BlockImage, Sequence, TxIn, Witness};
 use bitcoin_rs_mempool::MempoolEntry;

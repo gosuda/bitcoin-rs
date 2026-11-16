@@ -1,4 +1,4 @@
-﻿#[cfg(any(test, feature = "test-seam"))]
+#[cfg(any(test, feature = "test-seam"))]
 #[derive(Debug, thiserror::Error)]
 pub enum TestError {
     #[error(transparent)]

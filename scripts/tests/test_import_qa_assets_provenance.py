@@ -1,4 +1,4 @@
-﻿"""End-to-end failure and provenance-publication tests for the QA corpus importer.
+"""End-to-end failure and provenance-publication tests for the QA corpus importer.
 
 Contract: docs/contracts/qa-corpus.md#qac-03-importer-acquisition-and-provenance-publication.
 Injected nonzero statuses below are test sentinels proving pass-through; the contract owns

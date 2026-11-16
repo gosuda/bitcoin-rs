@@ -1,4 +1,4 @@
-﻿extern crate alloc;
+extern crate alloc;
 
 use alloc::sync::Arc;
 use std::io::{BufRead, BufReader, Read, Write};

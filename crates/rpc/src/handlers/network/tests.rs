@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use alloc::sync::Arc;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, json};
 

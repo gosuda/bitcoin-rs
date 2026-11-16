@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 #[test]
 fn tick_retries_expired_pending_before_new_heights() -> TestResult {

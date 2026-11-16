@@ -1,4 +1,4 @@
-﻿# name	package	lane	args
+# name	package	lane	args
 # Owner of the supported feature combinations (FEAT-01).
 # lane=pure: no C++ / libbitcoinkernel / rocksdb engines. Build scripts in the
 # dependency graph may still invoke cc (e.g. usdt -> dtrace-parser -> pest 2.9.3

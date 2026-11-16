@@ -1,4 +1,4 @@
-﻿# Post-quantum migration feasibility
+# Post-quantum migration feasibility
 
 ## Decision
 

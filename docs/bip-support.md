@@ -1,4 +1,4 @@
-﻿# BIP support matrix
+# BIP support matrix
 
 Capabilities in the merged default branch, grouped by area. Support describes
 the implementation for the stated scope; external evidence is a separate axis.

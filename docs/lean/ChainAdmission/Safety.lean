@@ -1,4 +1,4 @@
-﻿/-
+/-
 Safety invariants of the chain-admission machine (Rust owner
 `crates/chain/src/admission_model.rs`). The state abstraction keeps the
 fields the ordered-commit rules constrain: retry and job budgets, the commit

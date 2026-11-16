@@ -1,4 +1,4 @@
-﻿# Validation tooling and evidence index
+# Validation tooling and evidence index
 Operator entry point to the validation, verification, and differential evidence lanes. Each lane is owned by its scripts, crates, suites, and contracts; this index adds no runner, framework, or test-only state.
 ## Evidence tier distinction
 Per [ecosystem-compatibility](contracts/ecosystem-compatibility.md) (`ECO-02`, `ECO-08`, `ECO-09`): **externally verified** means an unmodified external program exercises `bitcoin-rs` via public P2P/RPC/REST/ZMQ/CLI. **implemented / tested** means in-tree reference vectors, differentials, oracles, fuzz, and fault-injection suites.

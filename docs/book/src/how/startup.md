@@ -1,4 +1,4 @@
-﻿# Startup
+# Startup
 
 The binary parses the CLI, resolves config, opens the data directory under a lock, restores chainstate from an accepted checkpoint or cold, verifies the recent tip, then binds services in a fixed order: metrics, RPC, P2P, and finally the event loop. Most steps log one INFO or DEBUG line you can match against a real run; the metrics bind and ZMQ bind emit no line. This page walks that order with the owning file and function for each step. [run/first-start.md](../run/first-start.md) covers the operator procedure, [embed/lifecycle.md](../embed/lifecycle.md) covers embedding, and `EVT-02` in `docs/contracts/architecture.md` owns the event contract.
 

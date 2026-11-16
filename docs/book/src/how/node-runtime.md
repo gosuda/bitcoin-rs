@@ -1,4 +1,4 @@
-﻿# Node runtime internals
+# Node runtime internals
 
 One boot path and one teardown path run every node: the daemon `run()` and the embedded `Node::start` both enter `crates/node/src/lifecycle.rs::start_node`, and both stop through `NodeServices::teardown` (`crates/node/src/lifecycle.rs`). Inside that frame, the event loop is the only block-sync poller, the chain feed hands out settled snapshots, transaction ingress is the single writer that moves P2P transactions into the mempool, and a small metrics server answers Prometheus scrapes. This chapter names each worker, where it starts and stops, and what the shutdown order depends on.
 

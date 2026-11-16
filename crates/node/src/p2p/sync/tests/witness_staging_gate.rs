@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
 use bitcoin_rs_p2p::InboundBlock;
 

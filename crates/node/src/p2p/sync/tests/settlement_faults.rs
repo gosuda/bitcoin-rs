@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 #[test]
 fn fatal_settlement_halts_further_apply_attempts() -> TestResult {

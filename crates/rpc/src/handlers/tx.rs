@@ -1,4 +1,4 @@
-﻿use alloc::sync::Arc;
+use alloc::sync::Arc;
 use core::str::FromStr as _;
 use hashbrown::HashSet;
 

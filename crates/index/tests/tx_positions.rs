@@ -1,4 +1,4 @@
-﻿#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used)]
 
 use crate::support::common;
 

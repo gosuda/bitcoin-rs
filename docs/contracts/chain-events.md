@@ -1,4 +1,4 @@
-﻿# Chain events contract
+# Chain events contract
 
 
 Owners:

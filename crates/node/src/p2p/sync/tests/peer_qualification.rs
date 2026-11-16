@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 #[test]
 fn non_witness_peer_not_counted_toward_fanout_threshold() -> TestResult {

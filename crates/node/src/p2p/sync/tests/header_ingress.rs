@@ -1,4 +1,4 @@
-﻿use super::super::headers::{MAX_HEADER_BATCHES_PER_TICK, MAX_HEADERS_PER_TICK};
+use super::super::headers::{MAX_HEADER_BATCHES_PER_TICK, MAX_HEADERS_PER_TICK};
 use super::*;
 
 // P2P-07

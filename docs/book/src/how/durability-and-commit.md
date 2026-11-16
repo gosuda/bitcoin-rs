@@ -1,4 +1,4 @@
-﻿# Atomic durability
+# Atomic durability
 
 The node commits a block when one atomic key-value batch writes the head, undo records, body locators, attestation, and coin replacements into the storage engine. Bodies reach disk before that batch; the published tip comes after it. A crash before the batch leaves the previous head, a crash after it leaves the new one, and the next start reads the committed head and coins directly from the engine.
 

@@ -1,4 +1,4 @@
-﻿#![no_main]
+#![no_main]
 
 use bitcoin_rs_index::block_log::{BlockLog, BlockRecord, cumulative_tx_count_through};
 use bitcoin_rs_index::{

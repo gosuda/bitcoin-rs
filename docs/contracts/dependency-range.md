@@ -1,4 +1,4 @@
-﻿# Dependency range contract
+# Dependency range contract
 
 Declared Cargo ranges are the versions that this workspace claims to support.
 The committed `Cargo.lock` is one point inside that range, not the contract.

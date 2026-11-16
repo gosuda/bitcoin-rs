@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use alloc::sync::Arc;
 use bitcoin_rs_consensus::primitives::Block;
 use core::sync::atomic::Ordering;

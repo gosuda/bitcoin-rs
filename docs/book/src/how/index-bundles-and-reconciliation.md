@@ -1,4 +1,4 @@
-﻿# Index state, reconciliation, and bundles
+# Index state, reconciliation, and bundles
 
 An index row is only readable when the same store batch also moved that capability's watermark. Three mechanisms enforce that rule: the writer fences every commit against a revision and a reset marker, reconciliation rewrites rows until the watermark reaches the applied tip, and a portable bundle refuses to import rows it cannot re-prove against the receiver's own chain.
 

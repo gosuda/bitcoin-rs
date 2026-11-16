@@ -1,4 +1,4 @@
-﻿use std::sync::Arc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bitcoin_rs_consensus::primitives::encode::double_sha256;

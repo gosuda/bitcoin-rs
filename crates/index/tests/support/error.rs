@@ -1,4 +1,4 @@
-﻿#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum TestError {
     #[error(transparent)]
     Index(#[from] bitcoin_rs_index::IndexError),

@@ -1,4 +1,4 @@
-﻿use std::cell::RefCell;
+use std::cell::RefCell;
 use std::io::Cursor;
 use std::sync::Arc;
 

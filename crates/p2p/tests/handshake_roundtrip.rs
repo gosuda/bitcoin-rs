@@ -1,4 +1,4 @@
-﻿use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read, Write};
 
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::p2p::{Magic, ServiceFlags};

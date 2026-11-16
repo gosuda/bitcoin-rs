@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Run the pinned formal evidence lane, independently of Cargo tests.
 
 Requires Python 3.11+, the pinned formal toolchain, and its Java runtime.

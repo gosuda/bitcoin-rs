@@ -1,4 +1,4 @@
-﻿# Indexes
+# Indexes
 
 Indexes are optional derived state. Every index is off by default, and when one is enabled a single worker thread maintains all of them from committed chain events. The node's applied tip never waits for index writes.
 

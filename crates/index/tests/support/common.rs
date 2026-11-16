@@ -1,4 +1,4 @@
-﻿#![allow(dead_code)]
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::ops::Bound;

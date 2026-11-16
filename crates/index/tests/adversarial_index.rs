@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bitcoin_rs_consensus::primitives::{Hash256, encode};

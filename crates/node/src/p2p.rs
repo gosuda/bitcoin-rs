@@ -1,4 +1,4 @@
-﻿pub mod block_announce;
+pub mod block_announce;
 pub mod block_stager;
 pub mod chain_query;
 pub mod download_window;

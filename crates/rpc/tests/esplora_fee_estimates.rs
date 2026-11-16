@@ -1,4 +1,4 @@
-﻿use std::collections::BTreeMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bitcoin_rs_consensus::primitives::{

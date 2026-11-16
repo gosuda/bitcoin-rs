@@ -1,4 +1,4 @@
-﻿use bitcoin::p2p::Magic;
+use bitcoin::p2p::Magic;
 use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use bitcoin_rs_p2p::listener::{ConnectionShared, ListenerError, bind_listener, serve};
 use bitcoin_rs_p2p::{ListenerExtras, NetworkActivity, PeerTable};

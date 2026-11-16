@@ -1,4 +1,4 @@
-﻿# Node lifecycle
+# Node lifecycle
 
 `Node::start` returns a running node. `Node::shutdown` stops it and publishes the clean checkpoint. Dropping the node without calling `shutdown` runs the same ordered teardown in startup-abort mode and publishes no checkpoint (`EMB-07`).
 

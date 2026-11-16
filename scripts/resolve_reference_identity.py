@@ -1,4 +1,4 @@
-﻿"""Emit the pinned reference-fixture identity tuple for this host.
+"""Emit the pinned reference-fixture identity tuple for this host.
 
 usage: scripts/resolve_reference_identity.py {core|formal} <repo-root>
 

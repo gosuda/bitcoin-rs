@@ -1,4 +1,4 @@
-﻿# AddrMan reference fixtures
+# AddrMan reference fixtures
 
 The `core-addrman-*.cpp` programs call unmodified Bitcoin Core31.1
 translation units from commit `9be056a8a72b624dae9623b2f7bded92c2a21c91`.

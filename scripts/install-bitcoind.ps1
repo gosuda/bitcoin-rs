@@ -1,4 +1,4 @@
-﻿# Install the pinned Bitcoin Core bitcoind used by the live differential —
+# Install the pinned Bitcoin Core bitcoind used by the live differential —
 # the native-Windows entry point mirroring install-bitcoind.sh.
 #
 # Reads the win64 artifact pins from crates/rpc/core-compat.toml (the

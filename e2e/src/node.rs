@@ -1,4 +1,4 @@
-﻿use std::collections::VecDeque;
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write as _};
 use std::net::{SocketAddr, TcpListener};

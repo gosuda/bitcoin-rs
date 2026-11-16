@@ -1,4 +1,4 @@
-﻿mod auth;
+mod auth;
 mod core_compat;
 mod core_parity;
 mod esplora_fee_estimates;

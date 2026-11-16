@@ -1,4 +1,4 @@
-﻿//! The bytes a prepared batch plans bound every write the commit hands the
+//! The bytes a prepared batch plans bound every write the commit hands the
 //! store. The fixture spends an output created earlier in the same batch and
 //! pays a script the chain already used, so the tail append writes a spend
 //! row and an undo-log prior that a plan built from an empty tail would miss.

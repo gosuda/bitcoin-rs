@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_consensus::primitives::Hash256;
 use crossbeam_channel::bounded;

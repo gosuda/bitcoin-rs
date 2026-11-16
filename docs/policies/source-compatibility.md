@@ -1,4 +1,4 @@
-﻿# Source and toolchain compatibility policy
+# Source and toolchain compatibility policy
 ## 1. Scope and authority
 Applies to every crate in `crates/*` and the node binary (`bin/bitcoin-rs`).
 ## 2. Toolchain and language edition

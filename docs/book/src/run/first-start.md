@@ -1,4 +1,4 @@
-﻿# First start
+# First start
 
 Start a regtest node with an explicit data directory and loopback listeners, then drive it over RPC. Regtest needs no peers and mines locally. `$DATA` below stands for the data directory you pass to `--data-dir`.
 

@@ -1,4 +1,4 @@
-﻿use crate::chain_effects::{ChainFollowers, ConnectMutationError};
+use crate::chain_effects::{ChainFollowers, ConnectMutationError};
 use alloc::sync::Arc;
 use bitcoin_rs_chain::ApplyError;
 use bitcoin_rs_chain::Chainstate;

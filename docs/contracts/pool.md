@@ -1,4 +1,4 @@
-﻿# Native pool contract
+# Native pool contract
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** express requirement levels as defined in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119.txt). Operator use: [Native pool operation](../pool.md).
 ## Owners
 

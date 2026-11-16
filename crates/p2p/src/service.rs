@@ -1,4 +1,4 @@
-﻿use bitcoin_rs_consensus::primitives::PeerEndpoint;
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::collections::VecDeque;
 use std::io;
 #[cfg(test)]

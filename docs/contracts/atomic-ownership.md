@@ -1,4 +1,4 @@
-﻿# Atomic ownership contract
+# Atomic ownership contract
 
 This contract defines atomic ownerships, single-owner representations, window execution, durability boundaries, and snapshot qualification for bitcoin-rs.
 Writing standard: ASD-STE100 (Simplified Technical English).

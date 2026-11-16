@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Reference-corpora seed transforms used by import-reference-corpora.sh.
 
 The shell owns acquisition, the byte budget, minimization, and provenance.

@@ -1,4 +1,4 @@
-﻿# Lightning Interoperability Verification Matrix
+# Lightning Interoperability Verification Matrix
 
 *Scope*: Issue #1488, Plan Step 30 (`ENG-94`).  
 *Authoritative Policy*: [`docs/contracts/ecosystem-compatibility.md`](contracts/ecosystem-compatibility.md) (`ECO-01`–`ECO-09`).  

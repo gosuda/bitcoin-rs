@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 #[test]
 fn round_trip_replays_consensus_validated_active_chain() -> TestResult {

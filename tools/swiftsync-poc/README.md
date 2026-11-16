@@ -1,4 +1,4 @@
-﻿# SwiftSync prototype
+# SwiftSync prototype
 
 Research record for SwiftSync-style synchronization hints, measured against a
 pinned regtest chain. The prototype is offline. It never enters a node build and

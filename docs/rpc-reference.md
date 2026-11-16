@@ -1,4 +1,4 @@
-﻿# External API Compatibility Reference
+# External API Compatibility Reference
 
 <!-- GENERATED FILE - do not edit by hand.
      Source of truth: REGISTRY in crates/rpc/src/registry.rs.

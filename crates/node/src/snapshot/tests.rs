@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::test_support::TestError;
 use bitcoin_rs_storage::utxo::core_snapshot::{SnapshotError, read_and_verify};
 impl From<SnapshotExportError> for TestError {

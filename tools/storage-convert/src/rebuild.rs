@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};

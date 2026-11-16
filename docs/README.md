@@ -1,4 +1,4 @@
-﻿# Documentation
+# Documentation
 ## Entry points
 | Need | Owner |
 | --- | --- |

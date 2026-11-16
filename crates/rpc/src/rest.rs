@@ -1,4 +1,4 @@
-﻿use alloc::sync::Arc;
+use alloc::sync::Arc;
 use std::str::FromStr;
 
 use bitcoin::hex::{DisplayHex as _, FromHex as _};

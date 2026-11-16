@@ -1,4 +1,4 @@
-﻿use std::time::Duration;
+use std::time::Duration;
 
 use super::*;
 use crate::p2p::download_window::MINIMUM_CONNECT_TIME;

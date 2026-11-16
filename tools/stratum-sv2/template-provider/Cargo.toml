@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "bitcoin-rs-sv2-template-provider"
 version = "0.1.0"
 edition = "2024"

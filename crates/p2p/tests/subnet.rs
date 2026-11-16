@@ -1,4 +1,4 @@
-﻿#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used)]
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, SystemTime};

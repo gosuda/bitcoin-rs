@@ -1,4 +1,4 @@
-﻿use std::path::Path;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use crate::support::TestError;

@@ -1,4 +1,4 @@
-﻿use alloc::sync::Arc;
+use alloc::sync::Arc;
 
 use bitcoin_rs_chain::chain::NodeStatus;
 use sonic_rs::{JsonValueTrait, json};

@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use bitcoin::hashes::Hash as _;
 use bitcoin_rs_rpc::mining::{
     BlockValidationResult, CoinbaseBudget, GenerateRequest, GenerateSelection, solve_block,

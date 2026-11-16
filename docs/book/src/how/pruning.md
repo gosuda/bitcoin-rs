@@ -1,4 +1,4 @@
-﻿# Pruning
+# Pruning
 
 Pruning deletes block-body locator rows and undo rows below a requested height, plus whole block files whose highest block is below that line. The deletions and three metadata keys commit in one atomic batch, so a crash leaves either the old line or the new one. Two independent bounds decide the effective line: the RPC refuses a height within 288 blocks of the applied tip, and the storage layer never prunes inside the margin of the last published checkpoint.
 

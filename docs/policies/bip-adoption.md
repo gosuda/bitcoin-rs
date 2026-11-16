@@ -1,4 +1,4 @@
-﻿# BIP adoption policy
+# BIP adoption policy
 This policy selects, prototypes, verifies, promotes, and retires BIP-based capabilities. Per-surface status lives in [ecosystem-compat.toml](../api/ecosystem-compat.toml); the wire matrix in [p2p-compatibility.md](p2p-compatibility.md); the RPC surface in `REGISTRY` (`crates/rpc/src/registry.rs`).
 ## 1. Classification
 | Class | Rule |

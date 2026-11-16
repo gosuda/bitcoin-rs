@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 #[test]
 fn apply_cache_invalidated_on_chain_tip_move() -> TestResult {

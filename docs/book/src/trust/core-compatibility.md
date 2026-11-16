@@ -1,4 +1,4 @@
-﻿# Compatibility with Bitcoin Core
+# Compatibility with Bitcoin Core
 
 bitcoin-rs claims compatibility one surface at a time. Consensus validity, the RPC and REST surface, the peer handshake, and mempool policy each have a pinned reference, a named evidence lane, and a limit. A claim on one surface does not carry to another.
 

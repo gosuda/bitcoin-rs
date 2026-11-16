@@ -1,4 +1,4 @@
-﻿# bitcoin-rs-chain::chain
+# bitcoin-rs-chain::chain
 
 Owns the in-memory block tree: header acceptance with proof-of-work validation, best-tip
 selection, and reorganization planning. It tracks how far valid headers are known (the header

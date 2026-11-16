@@ -1,4 +1,4 @@
-﻿# Python startup hook for the core-functional lane. Activated by run.sh via
+# Python startup hook for the core-functional lane. Activated by run.sh via
 # PYTHONPATH=<this directory>; sitecustomize is imported automatically by the
 # interpreter before any test code runs.
 #

@@ -1,4 +1,4 @@
-﻿[workspace]
+[workspace]
 resolver = "3"
 members = [
     "crates/consensus",

@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     collections::VecDeque,
     time::{Duration, Instant},
 };

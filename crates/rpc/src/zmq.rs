@@ -1,4 +1,4 @@
-﻿use bitcoin_rs_consensus::primitives::{Hash256, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, Txid};
 
 #[cfg(test)]
 use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};

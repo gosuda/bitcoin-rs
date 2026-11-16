@@ -1,4 +1,4 @@
-﻿use bitcoin_rs_mempool::SubmitError;
+use bitcoin_rs_mempool::SubmitError;
 
 use crate::context::TxQueryError;
 use crate::rest::{Response, bad_request, internal_error, not_found, service_unavailable};

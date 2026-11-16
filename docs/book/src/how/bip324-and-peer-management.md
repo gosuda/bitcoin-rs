@@ -1,4 +1,4 @@
-﻿# BIP324 v2 transport and peer management
+# BIP324 v2 transport and peer management
 
 A connection becomes a peer only after two handshakes finish inside one deadline: the BIP324 v2 transport handshake, then the version and verack exchange. This chapter follows that path at code level: the key exchange and garbage terminator, packet encryption and length handling, the `v2transport` flag with its v1 fallback, the handshake-ordering rules that are stricter than Bitcoin Core, and the peer management around the connection: inbound eviction, netgroup keying and asmap, discouragement and ban timers, SOCKS dialing, and the relay offers the handshake negotiates. The wire contract is [docs/contracts/p2p-wire.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/p2p-wire.md) (`P2P-01`, `P2P-08`, `P2P-11`), and the Core comparison is [docs/policies/p2p-compatibility.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/p2p-compatibility.md). The [peer-to-peer overview](p2p.md) owns the listener and drain threads; this chapter stays inside one connection and the table behind it.
 

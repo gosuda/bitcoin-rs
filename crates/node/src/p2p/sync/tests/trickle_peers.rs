@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 #[test]
 fn slow_trickle_front_peer_observable_but_never_disconnected() -> TestResult {

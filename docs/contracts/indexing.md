@@ -1,4 +1,4 @@
-﻿# Indexing contract
+# Indexing contract
 
 **Contract version: 1.7** (2026-10-31)
 

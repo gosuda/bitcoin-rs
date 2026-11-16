@@ -1,4 +1,4 @@
-﻿use crate::test_support::TestError;
+use crate::test_support::TestError;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 

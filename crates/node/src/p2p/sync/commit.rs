@@ -1,4 +1,4 @@
-﻿use super::BlockSync;
+use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::SchedulerState;

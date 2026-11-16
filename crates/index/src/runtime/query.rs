@@ -1,4 +1,4 @@
-﻿use super::{
+use super::{
     Arc, Block, BlockBodySource, BlockTree, DerivedIndexInfo, DerivedIndexQuery,
     DerivedIndexRuntime, Generation, Hash256, IndexCapabilities, IndexCapability, IndexReader,
     IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES, Ordering, OutPoint, PrefixScanLimit,

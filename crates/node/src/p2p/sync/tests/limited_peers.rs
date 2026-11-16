@@ -1,4 +1,4 @@
-﻿use std::sync::Arc;
+use std::sync::Arc;
 
 use bitcoin::p2p::ServiceFlags;
 

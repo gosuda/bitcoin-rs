@@ -1,4 +1,4 @@
-﻿use std::str::FromStr as _;
+use std::str::FromStr as _;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},

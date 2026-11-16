@@ -1,4 +1,4 @@
-﻿# RPC server internals
+# RPC server internals
 
 One hand-written HTTP/1.1 listener serves JSON-RPC, REST, and Esplora on the same socket. There is no HTTP framework: `crates/rpc/src/server.rs` parses the request line and headers byte by byte, applies Core-shaped authentication and framing rules, and hands the body to a single dispatcher. The registry in `crates/rpc/src/registry.rs` is the only table that decides whether a method exists, how it executes, and what it claims about Core compatibility. This chapter follows one request from the accept loop to the handler, then the shutdown drain, then the boundaries to REST, Esplora, and ZMQ.
 

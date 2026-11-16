@@ -1,4 +1,4 @@
-﻿"""Offline QA import regressions for QAC-01 and the harness input contracts.
+"""Offline QA import regressions for QAC-01 and the harness input contracts.
 
 See docs/contracts/qa-corpus.md, fuzz/CORPUS_PROVENANCE.md, and the framing
 comments in fuzz/fuzz_targets/{p2p_message,script_eval}.rs. Fixtures here are

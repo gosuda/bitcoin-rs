@@ -1,4 +1,4 @@
-﻿use std::time::Duration;
+use std::time::Duration;
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_consensus::primitives::Network;

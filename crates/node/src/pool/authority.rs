@@ -1,4 +1,4 @@
-﻿use std::io::{self, Read as _};
+use std::io::{self, Read as _};
 use std::path::Path;
 
 use bitcoin_rs_rpc::mining::pool::stratum::sv2::AuthorityKeypair;

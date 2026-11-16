@@ -1,4 +1,4 @@
-﻿use super::{
+use super::{
     Arc, Block, BlockTree, DerivedIndexQueryEngine, Hash256, MAX_SERIALIZED_BLOCK_BYTES, OutPoint,
     QueryBudget, ReadPrefix, Tx, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError,
     TxUnavailableCause, Txid, deserialize,

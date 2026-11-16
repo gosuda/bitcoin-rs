@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 #[test]
 fn tick_retries_when_all_selected_peers_have_expired_pending() -> TestResult {

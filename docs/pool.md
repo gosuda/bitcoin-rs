@@ -1,4 +1,4 @@
-﻿# Native pool operation
+# Native pool operation
 The native pool combines SV1 and optional SV2 mining listeners with PPLNS accounting and an external payout signer. It is disabled by default. The node builds mining candidates in process; it does not use a separate template-provider service. The additive `PoolLedger` storage family and local integration are approved. This approval does not authorize a production deployment or an existing-data cutover. Backend verification MUST use disposable stores, including old-schema fixtures. Existing operator databases MUST remain untouched by this work. Pool operation remains opt-in. See the [pool contract](contracts/pool.md) for the financial and lifecycle requirements.
 ## Prerequisites
 - The binary MUST include the `pool` feature. An SV2 listener additionally requires `pool-sv2`. These features do not enable the runtime by themselves.

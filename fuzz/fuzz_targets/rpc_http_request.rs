@@ -1,4 +1,4 @@
-﻿#![no_main]
+#![no_main]
 
 use std::io::{self, BufReader, Read};
 

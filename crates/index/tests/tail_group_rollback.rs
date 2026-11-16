@@ -1,4 +1,4 @@
-﻿//! The shared tail rolls back as one group. Rolling back `ScriptHistory` at
+//! The shared tail rolls back as one group. Rolling back `ScriptHistory` at
 //! height `h` moves `TxLookup`, `ScriptHistory`, and `CompactFilters` to `h-1`
 //! together, and the reads those capabilities serve equal a bulk build of the
 //! chain truncated at `h-1`. Re-forwarding `h` restores the bulk build at `h`.

@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::test_support::TestResult;
 use bitcoin_rs_p2p::listener::{ConnectionShared, test_shared};
 use std::time::{Duration, Instant};

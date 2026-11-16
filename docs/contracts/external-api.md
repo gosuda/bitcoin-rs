@@ -1,4 +1,4 @@
-﻿# External API contract
+# External API contract
 
 `API-01`–`API-37` govern RPC, REST, Esplora and ZMQ under the
 [contracts precedence rule](README.md). The clauses below own each behavior.

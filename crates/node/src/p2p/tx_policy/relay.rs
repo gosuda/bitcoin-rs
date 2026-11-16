@@ -1,4 +1,4 @@
-﻿#[cfg(test)]
+#[cfg(test)]
 use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};

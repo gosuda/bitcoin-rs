@@ -1,4 +1,4 @@
-﻿use std::time::{Duration, Instant};
+use std::time::{Duration, Instant};
 
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockImage, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,

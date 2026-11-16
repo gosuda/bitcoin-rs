@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 #[test]
 fn tick_skips_getheaders_when_header_tip_matches_peer_height() -> TestResult {

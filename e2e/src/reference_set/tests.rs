@@ -1,4 +1,4 @@
-﻿#![expect(clippy::expect_used, reason = "reference identity rejection tests")]
+#![expect(clippy::expect_used, reason = "reference identity rejection tests")]
 
 use super::{CorpusCustody, ReferenceError, load_reference_set, reference_set};
 use bitcoin::hashes::{Hash, sha256};

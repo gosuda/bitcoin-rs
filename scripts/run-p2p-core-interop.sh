@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Live Bitcoin Core differential for observable node behavior (#174).
 #
 # Starts Bitcoin Core (regtest) and a bitcoin-rs node, connects them over the

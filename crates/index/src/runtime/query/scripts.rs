@@ -1,4 +1,4 @@
-﻿use super::{
+use super::{
     DerivedIndexQueryEngine, OccurrenceCursor, OutPoint, QueryBudget, ReadPrefix, ScriptHash,
     ScriptHistoryPage, ScriptHistoryRecord, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan,
     SpendingRecord, Tx, TxIndexScanRow, TxIndexSnapshot, TxQueryError, TxUnavailableCause, Txid,

@@ -1,4 +1,4 @@
-﻿#[path = "../support/dependency_graph.rs"]
+#[path = "../support/dependency_graph.rs"]
 mod dependency_graph;
 
 #[path = "../support/capability_compile.rs"]

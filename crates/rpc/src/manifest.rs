@@ -1,4 +1,4 @@
-﻿use std::format;
+use std::format;
 use std::string::String;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]

@@ -1,4 +1,4 @@
-﻿# External ecosystem compatibility contract
+# External ecosystem compatibility contract
 
 bitcoin-rs does not prove Bitcoin compatibility with in-tree tests and self-authored documents alone.
 Existing ecosystem software that consumes bitcoin-rs provides stronger evidence.

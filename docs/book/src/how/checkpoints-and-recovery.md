@@ -1,4 +1,4 @@
-﻿# Checkpoints and recovery
+# Checkpoints and recovery
 
 A checkpoint is an engine image of the published chainstate: the block tree, the `coins` keyspace, and CoinStats, written to `$DATA/chainstate-checkpoints/` with a manifest. It is an accelerator for startup. It is never proof: a replayed suffix still rechecks identities against the durable head, and a checkpoint that disagrees with the durable head is refused, not trusted.
 

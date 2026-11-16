@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 fn answer_requests(
     rx: &bitcoin_rs_p2p::test_support::MessageReceiver,

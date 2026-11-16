@@ -1,4 +1,4 @@
-﻿# Observability boundary
+# Observability boundary
 
 The normative rule for where instrumentation lands in bitcoin-rs. The
 observability surface has three layers: `metrics::` counters/histograms/

@@ -1,4 +1,4 @@
-﻿//! Bounded CPU/projection probe. This synthetic index is not disk/sync evidence.
+//! Bounded CPU/projection probe. This synthetic index is not disk/sync evidence.
 
 use super::super::*;
 use std::sync::Barrier;

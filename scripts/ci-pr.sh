@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Gate commands shared by CI, pre-commit, and CONTRIBUTING.md.
 # PR lanes fail fast; deep collects every failure. Build/test lanes are
 # kernel-free; deny resolves the kernel graph without compiling it.

@@ -1,4 +1,4 @@
-﻿mod checkpoint;
+mod checkpoint;
 mod construction;
 mod data_dir_lock;
 mod events;

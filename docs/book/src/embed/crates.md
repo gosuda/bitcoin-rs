@@ -1,4 +1,4 @@
-﻿# Crate map
+# Crate map
 
 The workspace has five layers. A crate may depend only on crates in its own layer or a lower one, and the `g17_dependency_direction` gate fails the build on an upward edge or a cycle (`ARCH-01`, [architecture contract](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/architecture.md#arch-01-five-layer-one-way-dependency-direction)).
 

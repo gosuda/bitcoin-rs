@@ -1,4 +1,4 @@
-﻿# Mempool policy
+# Mempool policy
 | Policy | Implemented behavior | Evidence |
 | --- | --- | --- |
 | Full RBF | Signaling does not determine admission; explicit/inherited BIP125 metadata remains for reporting | `replacement_signaling_matches_pinned_core` |

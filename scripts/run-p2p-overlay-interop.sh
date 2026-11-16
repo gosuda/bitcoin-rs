@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Live Tor/I2P overlay interop for bitcoin-rs (#1601).
 #
 # Starts a private Tor net (loopback ControlPort plus SOCKS) and a private

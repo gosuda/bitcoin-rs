@@ -1,4 +1,4 @@
-﻿# Chain state and storage
+# Chain state and storage
 
 One row decides what survives a crash: the durable head. A committed block is real only after the head row names it and the batch that wrote it returns. Persistent chain state either supports that row or can be rebuilt from the block bodies.
 

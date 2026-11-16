@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::p2p::download_window::default_sync_budget;
 
 type HistoricalFixture = (SyncHarness, Arc<TestChain>, Vec<Block>);
