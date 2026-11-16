@@ -1,6 +1,8 @@
 use super::*;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+
+mod namespace_reset;
 #[test]
 fn abandoned_open_outcomes_poison_the_namespace_before_release() -> std::io::Result<()> {
     for error in [

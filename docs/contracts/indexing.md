@@ -1,6 +1,6 @@
 # Indexing contract
 
-**Contract version: 1.7** (2026-10-31)
+**Contract version: 1.8** (2026-11-16)
 
 The normative contract for node-owned indexing runtimes, capability gating, and asynchronous reconciliation across restarts, reorganizations, and selective rebuilds.
 
@@ -185,7 +185,20 @@ Owners:
 - This format provides newest-first history-occurrence rows with inverted heights, 43-byte live rows, and 6-byte positions.
 - The row format is owned by this clause; any format change requires a new durability marker.
 - Every older marker returns `IndexError::UnsupportedTxIndexFormatVersion`.
-- In that case, `open_writer` in `crates/projection/src/runtime/startup.rs` full-resets the derived store for rebuild without an in-place upgrade path.
+- In that case, worker startup MUST close the rejected store and recreate only its dedicated namespace before it opens the replacement store.
+- An unversioned populated store and a valid interrupted full-capability reset claim use the same path.
+- Startup MUST publish and sync a `.txindex.reset` intent in the data root before it removes the namespace.
+- A pending intent MUST complete recreation before the backend opens.
+- Startup MUST remove and sync the intent only after the replacement store opens successfully.
+- A failed or cancelled recreation MUST retain the intent for the next start.
+- Startup MUST refuse an unknown intent and preserve its bytes.
+- Recreation MUST refuse a namespace outside the named direct child of the data root or a namespace that is a link.
+- A backend error or malformed reset claim MUST NOT authorize namespace removal.
+- An abandoned opener MUST check cancellation before it starts a reset.
+- No serving reader or writer can hold the replaced store.
+- Startup recreation writes no deletion batches to the rejected store.
+- Live capability resets retain the conditional purge and monotonic fences.
+- Proof: `crates/projection/src/runtime/supervisor_tests.rs::incompatible_populated_index_reopens_without_writing_obsolete_rows` and the recovery and refusal tests in `crates/projection/src/runtime/startup/tests/namespace_reset.rs`.
 - Selective reset under `IDX-04` covers corrupt watermarks, not versions.
 - Reset recovery accepts only current 17-byte claims and 9-byte Idle states.
 - Idle versions MUST remain monotonic generations to prevent ABA races.

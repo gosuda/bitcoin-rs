@@ -555,3 +555,139 @@ fn batch_deadline_cancellation_wakes_and_joins_promptly() {
     assert_eq!(result, super::catch_up::BatchWait::Stopped);
     assert!(join_thread.join().is_ok());
 }
+
+// IDX-05
+#[test]
+fn incompatible_populated_index_reopens_without_writing_obsolete_rows()
+-> Result<(), crate::portable::TestError> {
+    assert_namespace_rebuild(bitcoin_rs_storage::StorageBackend::RocksDb, |path| {
+        bitcoin_rs_storage::RocksDbStore::open_with_cache(path, 8 * 1024 * 1024)
+    })
+}
+
+// IDX-05
+#[test]
+#[cfg(feature = "surrealkv")]
+fn surrealkv_incompatible_populated_index_reopens_without_writing_obsolete_rows()
+-> Result<(), crate::portable::TestError> {
+    assert_namespace_rebuild(bitcoin_rs_storage::StorageBackend::SurrealKv, |path| {
+        bitcoin_rs_storage::SurrealKvStore::open_with_cache(path, 8 * 1024 * 1024)
+    })
+}
+
+// IDX-05
+#[test]
+#[cfg(feature = "mdbx")]
+fn mdbx_incompatible_populated_index_reopens_without_writing_obsolete_rows()
+-> Result<(), crate::portable::TestError> {
+    assert_namespace_rebuild(bitcoin_rs_storage::StorageBackend::Mdbx, |path| {
+        bitcoin_rs_storage::MdbxStore::open_with_cache(path, 8 * 1024 * 1024)
+    })
+}
+
+fn assert_namespace_rebuild<S: bitcoin_rs_storage::KvStore>(
+    backend: bitcoin_rs_storage::StorageBackend,
+    open_store: fn(&std::path::Path) -> Result<S, bitcoin_rs_storage::StorageError>,
+) -> Result<(), crate::portable::TestError> {
+    use bitcoin_rs_storage::{ColumnFamily, PersistFault};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for marker in [Some(5_u32), None, Some(9_u32)] {
+        let dir = tempfile::tempdir()?;
+        let index_dir = dir.path().join("txindex");
+        let sibling = dir.path().join("chainstate-evidence");
+        std::fs::write(&sibling, b"authoritative bytes")?;
+        {
+            let store = open_store(&index_dir)?;
+            let mut batch = store.new_batch();
+            for family in [
+                ColumnFamily::TxConfirmed,
+                ColumnFamily::Funding,
+                ColumnFamily::Spending,
+                ColumnFamily::ScriptLive,
+            ] {
+                for index in 0..32_000_u32 {
+                    batch.put(family, &index.to_be_bytes(), &[0xa5; 16]);
+                }
+            }
+            if let Some(marker) = marker {
+                batch.put(ColumnFamily::UtxoMeta, &[0, b'V'], &marker.to_le_bytes());
+                if marker == 9 {
+                    let mut claim = vec![0b1111];
+                    claim.extend_from_slice(&1_u64.to_le_bytes());
+                    claim.extend_from_slice(&0_u64.to_le_bytes());
+                    batch.put(ColumnFamily::UtxoMeta, &[0, b'R'], &claim);
+                }
+            }
+            store.write_durable(batch)?;
+        }
+        let obsolete_file = index_dir.join("obsolete-layout");
+        std::fs::write(&obsolete_file, b"obsolete")?;
+        let mut inputs = build_worker_inputs(dir.path(), 1780);
+        inputs.spec.storage_backend = backend;
+        let opens = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&opens);
+        inputs.spec.open_store = Arc::new(move |path| {
+            let attempt = observed.fetch_add(1, Ordering::SeqCst);
+            let store = Arc::new(open_store(path)?);
+            if attempt == 0 {
+                store.arm_persist_fault(PersistFault::FailApply);
+            } else {
+                for family in [
+                    ColumnFamily::TxConfirmed,
+                    ColumnFamily::Funding,
+                    ColumnFamily::Spending,
+                    ColumnFamily::ScriptLive,
+                ] {
+                    assert!(store.iter_prefix(family, &[])?.next().is_none());
+                }
+            }
+            open_derived_index_store_on_worker(store, DEFAULT_BATCH_LIMITS, 1780)
+        });
+        let worker = DerivedIndexWorker::spawn_with_open(
+            Arc::clone(&inputs.runtime),
+            inputs.spec,
+            Arc::clone(&inputs.lifecycle),
+            inputs.generation.clone(),
+            bitcoin_rs_execution::chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+            None,
+            bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
+            None,
+            bitcoin_rs_storage::pruning::HistoryAccess::new(
+                Arc::new(bitcoin_rs_storage::pruning::RetentionRegistry::new()),
+                bitcoin_rs_storage::pruning::RetentionBudget::Unlimited,
+            ),
+            None,
+            Arc::clone(&inputs.chain_events),
+            RecordedIndexAhead::new(),
+            inputs.shutdown.reader(),
+            inputs.wake_rx,
+        )
+        .expect("spawn");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while matches!(**inputs.lifecycle.load(), DerivedIndexLifecycle::Opening)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let final_lifecycle = inputs.lifecycle.load_full();
+        let serving = matches!(**inputs.lifecycle.load(), DerivedIndexLifecycle::Serving(_));
+        let failure = match final_lifecycle.as_ref() {
+            DerivedIndexLifecycle::Failed(reason) => reason.as_str(),
+            DerivedIndexLifecycle::Opening => "still opening",
+            DerivedIndexLifecycle::ShutdownAbandoned => "shutdown abandoned",
+            DerivedIndexLifecycle::Serving(_) => "serving",
+        };
+        inputs.shutdown.trigger();
+        worker.join();
+        assert!(
+            serving,
+            "obsolete rows must not be deleted through durable writes: {failure}"
+        );
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
+        assert!(!obsolete_file.exists());
+        assert_eq!(std::fs::read(&sibling)?, b"authoritative bytes");
+        assert!(!NAMESPACE_REGISTRY.is_poisoned(&index_dir));
+    }
+    Ok(())
+}

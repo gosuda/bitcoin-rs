@@ -4,6 +4,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum IndexError {
+    #[error("interrupted full index reset requires namespace recreation")]
+    FullResetRequired,
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
     #[error("invalid serialized block: {0:?}")]
