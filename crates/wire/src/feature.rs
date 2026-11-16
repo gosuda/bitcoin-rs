@@ -402,7 +402,18 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig { cases: feature_cases(), ..ProptestConfig::default() })]
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/wire/regressions/feature.txt"
+            )),
+        )),
+        ..(ProptestConfig {
+            cases: feature_cases(),
+            ..ProptestConfig::default()
+        })
+    })]
 
         #[test]
         fn feature_announcement_roundtrip_and_canonical_invariants(

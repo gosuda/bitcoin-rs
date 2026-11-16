@@ -25,7 +25,7 @@
 - The native owner retains owned outputs against an immutable borrowed transaction after this check.
 - Block preparation transfers resolved outputs into that owner.
 - Borrowed callers clone their outputs when constructing the owner.
-- Core `script_tests.json`, `tx_valid.json`, and `tx_invalid.json` native columns pin zero mismatches on **runnable** rows in `crates/consensus/tests/script_core_vectors.rs`.
+- Core `script_tests.json`, `tx_valid.json`, and `tx_invalid.json` native columns pin zero mismatches on **runnable** rows in `crates/consensus/tests.rs`.
 - The columns pin skip counts **and** skip-reason allow-lists so silent coverage loss cannot remain green.
 - The only accepted `script_tests` skip is a one-string prose/section header.
 - The only accepted `tx_invalid` skip is `BADTX`, which fails `CheckTransaction` before script verification.
@@ -72,7 +72,7 @@
 - Spends with nonempty scriptSig are rejected.
 - Correctly signed nondefault hash modes are accepted.
 - Network activation heights, flag definitions, and the default validation engine are unchanged.
-- `crates/consensus/tests/script_taproot_spend_rules.rs` tests rust-bitcoin signatures and control blocks against both complete-prevout entry points.
+- `crates/consensus/tests.rs` tests rust-bitcoin signatures and control blocks against both complete-prevout entry points.
 - The tests verify flag activation, wrapped-v1 rules, and error-order cases.
 - `overhaul_process_harness::taproot_spend_cases` compares 40 transaction signature and scriptSig cases, 28 `OP_SUCCESS` cases, and 48 opcode-position signature cases.
 - The harness runs native and Core 31.1 block validation over identical funded regtest histories.

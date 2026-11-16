@@ -29,7 +29,7 @@ let tip = node.snapshot();
 assert_eq!(tip.tip_height, 0, "fresh regtest chain holds genesis only");
 ```
 
-A node reopened on a cleanly shut down data directory returns the stored height. The in-process test [`embedded_node_lifecycle_round_trip`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/tests/embed.rs) seeds 100 regtest blocks, restarts, and asserts the resumed height.
+A node reopened on a cleanly shut down data directory returns the stored height. The in-process test [`embedded_node_lifecycle_round_trip`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/tests.rs) seeds 100 regtest blocks, restarts, and asserts the resumed height.
 
 ## Bound addresses
 
@@ -78,7 +78,7 @@ Cannot obtain a lock on directory /path/to/data. bitcoin-rs is probably already 
 
 `DataDirLockError::InUse` maps to `NodeError::Startup`. The lock is carried as a `StoreGuard` by every store handle, so the directory stays locked until the last handle drops, not merely until `shutdown()` returns.
 
-The lock file opens without following symlinks, and a non-regular `.lock` is refused as `NotRegularFile`. Tests cover both cases: `second_open_while_first_lives_refuses_and_reopen_succeeds_after_drop` and `symlinked_lock_file_refuses_start_without_following` in [`crates/node/src/state/tests/data_dir_lock.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state/tests/data_dir_lock.rs).
+The lock file opens without following symlinks, and a non-regular `.lock` is refused as `NotRegularFile`. Tests cover both cases: `second_open_while_first_lives_refuses_and_reopen_succeeds_after_drop` and `symlinked_lock_file_refuses_start_without_following` in [`crates/node/src/state.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state.rs).
 
 ## Failure settlement
 
