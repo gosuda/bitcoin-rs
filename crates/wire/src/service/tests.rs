@@ -1122,6 +1122,7 @@ fn shutdown_releases_parked_automatic_claims_before_restart() {
         .outbound_tx
         .try_send(OutboundDial::auto(address))
         .expect("queue");
+    let outbound_rx = service.outbound_rx.lock().clone();
     service
         .start(
             None,
