@@ -250,7 +250,7 @@ mod tests {
             }
         }
         let (mut sender, mut reader) = pair();
-        let packet = sender.seal(&vec![9; 1024], &[], false)?;
+        let packet = sender.seal(&vec![9; MAX_RECV_CONTENTS_LEN], &[], false)?;
         let mut stream = Dribble(packet[..103].iter().copied().collect());
         let stalled = reader.read_contents(&mut stream);
         assert!(stalled.as_ref().is_err_and(is_poll_timeout));
@@ -264,7 +264,8 @@ mod tests {
             reader
                 .body
                 .as_ref()
-                .is_none_or(|body| body.bytes.capacity() <= 206)
+                .is_none_or(|body| body.bytes.capacity() <= 2 * 103),
+            "a cancelled packet must not retain an allocation sized by the declared contents"
         );
         Ok(())
     }

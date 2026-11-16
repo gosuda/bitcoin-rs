@@ -1276,10 +1276,10 @@ mod tests {
     -> Result<(), PeerError> {
         use crate::test_support::{Inbound, StallingStream};
         use std::io::ErrorKind;
-        let mut frame = Vec::new();
-        write_message(&mut frame, Magic::REGTEST, &super::Message::Ping(42))?;
+        let dribble = [7u8; 3];
         let mut stream = StallingStream::new([
-            Inbound::Bytes(frame[..HEADER_LEN + 3].to_vec()),
+            Inbound::Bytes(header_declaring(MAX_MESSAGE_PAYLOAD)?),
+            Inbound::Bytes(dribble.to_vec()),
             Inbound::Stall(ErrorKind::ConnectionAborted),
         ]);
         let mut receiver = super::V1Receiver::default();
@@ -1292,7 +1292,8 @@ mod tests {
             receiver
                 .body
                 .as_ref()
-                .is_none_or(|body| body.payload.capacity() <= 8)
+                .is_none_or(|body| body.payload.capacity() <= 2 * dribble.len()),
+            "a cancelled frame must not retain an allocation sized by the declared payload"
         );
         Ok(())
     }
