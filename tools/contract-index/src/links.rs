@@ -251,8 +251,8 @@ mod tests {
     #[test]
     fn citation_suffixes_and_symbols_split_cleanly() {
         assert_eq!(
-            strip_line_suffix("crates/node/src/chain_effects/tests.rs:519"),
-            "crates/node/src/chain_effects/tests.rs"
+            strip_line_suffix("crates/node/src/chain_effects.rs:519"),
+            "crates/node/src/chain_effects.rs"
         );
         assert_eq!(
             strip_line_suffix("crates/node/src/lib.rs:510-520"),

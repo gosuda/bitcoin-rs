@@ -614,7 +614,15 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(proptest_config(1024))]
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/storage/regressions/utxo/compress.txt"
+            )),
+        )),
+        ..(proptest_config(1024))
+    })]
 
         #[test]
         fn varint_round_trips(

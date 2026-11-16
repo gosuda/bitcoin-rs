@@ -170,7 +170,7 @@ Readiness is event-driven. A new block or pool snapshot calls `chain_changed(par
 
 - A single transaction calls `submit_transaction` with `AdmissionOrigin::Peer`. A `Committed` result is announced to the relay queue with its mutation sequence, and mining generation advances. `AlreadyConfirmed` forgets the peer's known-transaction entry. A `Held` result requests missing parents, or asks for an ancestor package when the peer advertised package relay.
 - A package calls `submit_peer_package`. Accepted members are announced once each; the subject determines whether the package counts as useful traffic.
-- `process_retries` runs orphan maintenance and retries before reading the next body (`tx_ingress.rs:185`). The loop polls every 100 ms (`TX_INGRESS_POLL`) when there is no work.
+- `process_retries` runs orphan maintenance and retries before reading the next body (`crates/node/src/tx_ingress.rs:194`). The loop polls every 100 ms (`TX_INGRESS_POLL`) when there is no work.
 
 A failed admission does not answer success to the peer. `POL-05` owns the acknowledgement boundary for the pool; for relay, the absence of an announce is the refusal.
 
@@ -269,25 +269,25 @@ Tests that pin these rules, verified in the tree:
 
 | Invariant | Test | File |
 | :--- | :--- | :--- |
-| single insertion indexes one chunk | `single_insertion_indexes_one_chunk` | `crates/mempool/src/pool/chunk_order_tests.rs` |
-| equal-rate parent sorts before child | `equal_rate_parent_sorts_before_its_child` | `crates/mempool/src/pool/chunk_order_tests.rs` |
-| max txid breaks cross-component ties | `max_txid_breaks_cross_component_ties` | `crates/mempool/src/chunk_index/tests.rs` |
-| lowest-fee package evicts first | `size_limit_eviction_removes_the_lowest_fee_package_first` | `crates/mempool/tests/policy_contract.rs` |
-| rolling fee holds then halves | `mempool_min_fee_holds_until_a_block_connects_then_halves_each_half_life` | `crates/mempool/tests/policy_contract.rs` |
-| eviction raises the preview floor | `mempool_min_fee_remembers_a_capacity_eviction_and_the_preview_enforces_it` | `crates/mempool/tests/policy_contract.rs` |
-| 100 clusters is the boundary | `one_hundred_conflicting_clusters_is_the_exact_boundary` | `crates/mempool/tests/replacement_profile.rs` |
-| evicted dependency fails | `an_evicted_dependency_fails_without_narrowing_representable_fees` | `crates/mempool/tests/replacement_profile.rs` |
-| TRUC sizes and sibling eviction | `truc_sizes_versions_and_sibling_eviction_match_bip431` | `crates/mempool/tests/replacement_profile.rs` |
-| replacement refusal preserves state | `replace_transaction_rejection_preserves_pool_state` | `crates/mempool/tests/rbf_bip125.rs` |
-| stale policy verdict is retryable | `stale_policy_verdict_becomes_retryable` | `crates/mempool/tests/admission.rs` |
-| caller sigops are ignored | `caller_sigop_cost_is_ignored_in_stored_entry` | `crates/mempool/tests/admission.rs` |
-| sibling eviction admits with no direct conflict | `v3_sibling_eviction_with_empty_direct_conflicts_admits_through_the_replacement_door` | `crates/mempool/tests/admission.rs` |
-| package commits atomically in any input order | `native_package_aggregates_cpfp_atomically_and_ignores_input_order` | `crates/mempool/src/package/tests.rs` |
-| resident parent fees do not subsidize | `native_package_resident_parent_fees_do_not_subsidize_child` | `crates/mempool/src/package/tests.rs` |
-| package refusal keeps membership and overlay | `native_package_failure_keeps_membership_sequence_overlay_and_estimator` | `crates/mempool/src/package/tests.rs` |
-| orphan readiness is deduplicated | `readiness_is_deduplicated_and_removed_with_eviction` | `crates/mempool/src/orphan/tests.rs` |
-| orphan eviction trims the noisy peer | `eviction_trims_the_highest_peer_score_before_protected_peer` | `crates/mempool/src/orphan/tests.rs` |
-| rejects are bounded and cleared on chain reset | `rejects_are_bounded_and_chain_reset_clears_both_indexes` | `crates/mempool/src/orphan/tests.rs` |
+| single insertion indexes one chunk | `single_insertion_indexes_one_chunk` | `crates/mempool/src/pool.rs` |
+| equal-rate parent sorts before child | `equal_rate_parent_sorts_before_its_child` | `crates/mempool/src/pool.rs` |
+| max txid breaks cross-component ties | `max_txid_breaks_cross_component_ties` | `crates/mempool/src/chunk_index.rs` |
+| lowest-fee package evicts first | `size_limit_eviction_removes_the_lowest_fee_package_first` | `crates/mempool/tests.rs` |
+| rolling fee holds then halves | `mempool_min_fee_holds_until_a_block_connects_then_halves_each_half_life` | `crates/mempool/tests.rs` |
+| eviction raises the preview floor | `mempool_min_fee_remembers_a_capacity_eviction_and_the_preview_enforces_it` | `crates/mempool/tests.rs` |
+| 100 clusters is the boundary | `one_hundred_conflicting_clusters_is_the_exact_boundary` | `crates/mempool/tests.rs` |
+| evicted dependency fails | `an_evicted_dependency_fails_without_narrowing_representable_fees` | `crates/mempool/tests.rs` |
+| TRUC sizes and sibling eviction | `truc_sizes_versions_and_sibling_eviction_match_bip431` | `crates/mempool/tests.rs` |
+| replacement refusal preserves state | `replace_transaction_rejection_preserves_pool_state` | `crates/mempool/tests.rs` |
+| stale policy verdict is retryable | `stale_policy_verdict_becomes_retryable` | `crates/mempool/tests.rs` |
+| caller sigops are ignored | `caller_sigop_cost_is_ignored_in_stored_entry` | `crates/mempool/tests.rs` |
+| sibling eviction admits with no direct conflict | `v3_sibling_eviction_with_empty_direct_conflicts_admits_through_the_replacement_door` | `crates/mempool/tests.rs` |
+| package commits atomically in any input order | `native_package_aggregates_cpfp_atomically_and_ignores_input_order` | `crates/mempool/src/package.rs` |
+| resident parent fees do not subsidize | `native_package_resident_parent_fees_do_not_subsidize_child` | `crates/mempool/src/package.rs` |
+| package refusal keeps membership and overlay | `native_package_failure_keeps_membership_sequence_overlay_and_estimator` | `crates/mempool/src/package.rs` |
+| orphan readiness is deduplicated | `readiness_is_deduplicated_and_removed_with_eviction` | `crates/mempool/src/orphan.rs` |
+| orphan eviction trims the noisy peer | `eviction_trims_the_highest_peer_score_before_protected_peer` | `crates/mempool/src/orphan.rs` |
+| rejects are bounded and cleared on chain reset | `rejects_are_bounded_and_chain_reset_clears_both_indexes` | `crates/mempool/src/orphan.rs` |
 
 ## Differences from Core
 

@@ -39,7 +39,7 @@ test sync::tests::headers_presync::sufficient_work_chain_syncs_presync_then_redo
 
 ## Difficulty, deployments, and progress
 
-`next_work_required` (`header_sync.rs:202`) computes retarget bits on interval boundaries and `expected_non_retarget_bits` otherwise; the algorithm is pinned by clause `DAA-01` of `docs/contracts/validation-default.md` ("Bitcoin Core 31.1 difficulty adjustment"). Forks inherit their own retarget path, exercised by `crates/node/src/p2p/sync/tests/fork_retargeting.rs`.
+`next_work_required` (`header_sync.rs:202`) computes retarget bits on interval boundaries and `expected_non_retarget_bits` otherwise; the algorithm is pinned by clause `DAA-01` of `docs/contracts/validation-default.md` ("Bitcoin Core 31.1 difficulty adjustment"). Forks inherit their own retarget path, exercised by `crates/node/src/p2p/sync.rs`.
 
 Deployment state comes from `softfork_state` (`crates/execution/src/chain/deployment.rs:88`): CSV and segwit are evaluated per block tree via `deployment_active`, falling back to the static network schedule when signalling data is unavailable. `signalling_deployments` (`deployment.rs:118`) reports which named deployments (`csv`, `segwit`, `deployment.rs:114`) are `Started` or `LockedIn` at a height. The connect path reads this per block to pick witness rules and version gates (`validation_contexts`, `crates/execution/src/connect.rs:179`).
 
@@ -95,15 +95,15 @@ After a snapshot load, the node must backfill and fully validate the block range
 
 | Invariant | Test | Location |
 |---|---|---|
-| Presync transitions to redownload on sufficient work | `sufficient_work_chain_syncs_presync_then_redownload` | `crates/node/src/p2p/sync/tests/headers_presync.rs:465` |
-| Low-work chains never reach the block tree | `low_work_headers_do_not_reach_block_tree` | `crates/node/src/p2p/sync/tests/headers_presync.rs:403` |
-| A substituted redownload header disconnects | `a_substituted_redownload_header_disconnects_the_connection` | `crates/node/src/p2p/sync/tests/headers_presync.rs:577` |
-| Continuity break spends the sync state | `a_midbatch_continuity_break_spends_the_sync` | `crates/node/src/p2p/sync/tests/headers_presync.rs:980` |
-| Stale-tip behavior | `crates/node/src/p2p/sync/tests/stale_tip.rs` and `crates/wire/src/staletip/tests.rs` |
+| Presync transitions to redownload on sufficient work | `sufficient_work_chain_syncs_presync_then_redownload` | `crates/node/src/p2p/sync.rs` |
+| Low-work chains never reach the block tree | `low_work_headers_do_not_reach_block_tree` | `crates/node/src/p2p/sync.rs` |
+| A substituted redownload header disconnects | `a_substituted_redownload_header_disconnects_the_connection` | `crates/node/src/p2p/sync.rs` |
+| Continuity break spends the sync state | `a_midbatch_continuity_break_spends_the_sync` | `crates/node/src/p2p/sync.rs` |
+| Stale-tip behavior | `crates/node/src/p2p/sync.rs` and `crates/wire/src/staletip.rs` |
 | Eviction selection | `crates/wire/src/eviction.rs` `tests` module |
 
 ## Limits
 
 - The exact `minimum_chain_work` byte values per network live in `crates/consensus/src/primitives` network parameters; this page does not restate them.
 - The `staletip` relay behavior against real Core peers is UNMEASURED; Core does not implement this message, so it only helps bitcoin-rs peers.
-- Per-peer EWMA stall recovery is exercised by `crates/node/src/p2p/sync/tests/pending_retries.rs` and `window_recovery.rs`, not by a live multi-peer run on this page.
+- Per-peer EWMA stall recovery is exercised by `crates/node/src/p2p/sync.rs` and `window_recovery.rs`, not by a live multi-peer run on this page.
