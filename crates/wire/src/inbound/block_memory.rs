@@ -1100,9 +1100,18 @@ mod tests {
     fn decode_admission_refuses_without_waiting_on_retained_raw_memory() -> TestResult {
         for make_peer in [legacy_receive_peer, encrypted_receive_peer] {
             let memory = Arc::new(BlockMemory::default());
-            let held = memory.reserve(memory.ledger().capacity(), || false)?;
+            let mut peer = make_peer()?;
+            let end = peer.stream.pause_at;
+            peer.stream.max_read = 17;
+            peer.stream.pause_at = end - 1;
+            assert!(
+                matches!(peer.read_message_bounded(&memory, || false), Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut)
+            );
+            let raw_charge = *memory.used.lock();
+            assert!(raw_charge >= end);
+            let held = memory.reserve(memory.ledger().capacity() - raw_charge, || false)?;
+            peer.stream.pause_at = end;
             let (sender, receiver) = crossbeam_channel::bounded(1);
-            let peer = make_peer()?;
             std::thread::scope(|scope| -> TestResult {
                 let memory = Arc::clone(&memory);
                 let worker = scope.spawn(move || {
@@ -1116,7 +1125,11 @@ mod tests {
                     .join()
                     .map_err(|_| TestError::Panicked("decoder waiter"))?;
                 let refused = result?;
-                assert!(matches!(&refused, Ok(None)), "{refused:?}");
+                assert!(
+                    matches!(&refused, Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::Other),
+                    "{refused:?}",
+                );
+                assert!(!refused.as_ref().err().is_some_and(PeerError::is_misbehavior));
                 Ok(())
             })?;
             assert_eq!(*memory.used.lock(), 0);
