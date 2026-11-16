@@ -128,6 +128,8 @@ Empty backend markers on non-storage crates are not combinations.
 - Scope: operator `bitcoin-rs` and `bitcoin-rs-node` backend and kernel flags plus reached storage and consensus crates.
 - Each row is one combination CI MUST `cargo check` independently.
 - The `pure` lane covers engine-free crates such as `bitcoin-rs-consensus` (`--no-default-features`, and `--features usdt`).
+- These consensus rows check only the library target. Their test dependencies require the RocksDB native prerequisites.
+- The `native` lane checks all consensus targets for both combinations and runs the feature-off and feature-on `sdt_notes` tests.
 - `lane=native` requires cmake, libboost (kernel), or C storage engines.
 - Kernel rows (`portable-kernel`, `full-node`, `consensus-kernel`) are capability builds with `kernel` compiled in.
 - Engine selection stays runtime via `validation.engine`.
