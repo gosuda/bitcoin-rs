@@ -7,11 +7,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  echo "usage: $0 {fmt|clippy|test-crates|test-binary|test-workspace|test|deny|contracts|book|deep|all|proofs}" >&2
+  echo "usage: $0 {fmt|clippy|test-crates [lane]|test-binary|test-workspace|test|deny|contracts|book|deep|all|proofs}" >&2
   exit 2
 }
 
-[[ $# -eq 1 ]] || usage
+[[ $# -ge 1 && $# -le 2 ]] || usage
 
 failures=0
 collect_failures=false
@@ -79,7 +79,7 @@ clippy_profiles() {
       --no-default-features --features silent-payments
 }
 
-test_crates_profiles() {
+test_crates_silent_payments() {
   profile "test: bitcoin-rs-serving (silent-payments adapter)" \
     cargo_test -p bitcoin-rs-serving --features silent-payments --lib handlers::silent_payments
   profile "test: bitcoin-rs (silent-payments process)" \
@@ -88,16 +88,9 @@ test_crates_profiles() {
     cargo_test -p bitcoin-rs --no-default-features --features silent-payments --test suite block_inputs::
   profile "test: bitcoin-rs-projection (silent-payments codec)" \
     cargo_test -p bitcoin-rs-projection --features silent-payments --test suite silent_payments::
-  # Per-crate profiles may use checked-in fixtures but need no pinned Core
-  # daemon. Tests launching that daemon run in the workspace lane below.
-  # Smallest first.
-  # consensus owns the QAC-05 corpus-decoder gate (BITCOIN_RS_FUZZ_CORPUS);
-  # it must run in the PR lane, not only the merge-only workspace lane.
-  profile "test: bitcoin-rs-consensus" \
-    cargo_test -p bitcoin-rs-consensus
-  # The offline CLI uses the checked-in Core snapshot, not a running daemon.
-  profile "test: bitcoin-rs-snapshot" \
-    cargo_test -p bitcoin-rs-snapshot
+}
+
+test_crates_storage() {
   profile "test: bitcoin-rs-storage-convert" \
     cargo_test -p bitcoin-rs-storage-convert
   profile "test: bitcoin-rs-storage-convert (surrealkv, mdbx)" \
@@ -108,12 +101,28 @@ test_crates_profiles() {
     cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx --test mdbx_bounded_read_allocation
   profile "test: bitcoin-rs-storage utxo_query_lifetime" \
     cargo_test -p bitcoin-rs-storage --test utxo_query_lifetime
+}
+
+test_crates_consensus_execution() {
+  # Per-crate profiles may use checked-in fixtures but need no pinned Core
+  # daemon. Tests launching that daemon run in the workspace lane below.
+  # Smallest first.
+  # consensus owns the QAC-05 corpus-decoder gate (BITCOIN_RS_FUZZ_CORPUS);
+  # it must run in the PR lane, not only the merge-only workspace lane.
+  profile "test: bitcoin-rs-consensus" \
+    cargo_test -p bitcoin-rs-consensus
+  # The offline CLI uses the checked-in Core snapshot, not a running daemon.
+  profile "test: bitcoin-rs-snapshot" \
+    cargo_test -p bitcoin-rs-snapshot
   profile "test: bitcoin-rs-consensus (native)" \
     cargo_test -p bitcoin-rs-consensus --no-default-features
   profile "test: bitcoin-rs-execution (native)" \
     cargo_test -p bitcoin-rs-execution
   profile "test: bitcoin-rs-wire" \
     cargo_test -p bitcoin-rs-wire
+}
+
+test_crates_node_serving() {
   profile "test: bitcoin-rs-node (zmq)" \
     cargo_test -p bitcoin-rs-node \
       --no-default-features --features zmq
@@ -122,6 +131,34 @@ test_crates_profiles() {
     cargo_test -p bitcoin-rs-serving --no-default-features
   profile "test: bitcoin-rs-serving (pool, pool-sv2)" \
     cargo_test -p bitcoin-rs-serving --features pool,pool-sv2
+}
+
+test_crates_profiles() {
+  local lane="${1:-all}"
+  case "$lane" in
+    all)
+      test_crates_silent_payments
+      test_crates_storage
+      test_crates_consensus_execution
+      test_crates_node_serving
+      ;;
+    silent-payments)
+      test_crates_silent_payments
+      ;;
+    storage)
+      test_crates_storage
+      ;;
+    consensus-execution)
+      test_crates_consensus_execution
+      ;;
+    node-serving)
+      test_crates_node_serving
+      ;;
+    *)
+      echo "unknown test-crates lane: $lane" >&2
+      exit 2
+      ;;
+  esac
 }
 
 test_binary_profiles() {
@@ -366,7 +403,7 @@ case "$1" in
     ;;
 
   test-crates)
-    test_crates_profiles
+    test_crates_profiles "${2:-all}"
     ;;
 
   test-binary)
@@ -416,7 +453,7 @@ case "$1" in
   deep)
     collect_failures=true
     clippy_profiles
-    test_crates_profiles
+    test_crates_profiles all
     test_binary_profiles
     test_workspace_profiles
     finish
