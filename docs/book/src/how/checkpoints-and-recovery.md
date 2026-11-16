@@ -81,9 +81,9 @@ A reorg disconnect is the one operation that moves the coin set backward. If a c
 checkpoint refused while disconnect of block {hash} at height {height} is in flight
 ```
 
-The refusal leaves the marker armed and `CURRENT` unchanged. It creates no generation directory. The test in `crates/execution/src/lib.rs` (`tests::checkpoint_debt_tests::checkpoint_refuses_inflight_disconnect_and_preserves_state`) arms a disconnect marker, calls `publish_checkpoint`, and asserts the error plus byte-identical `CURRENT` and directory listing.
+The refusal leaves the marker armed and `CURRENT` unchanged. It creates no generation directory. The test `tests::checkpoint_debt_tests::checkpoint_refuses_inflight_disconnect_and_preserves_state` (checked source citation: `crates/execution/src/lib.rs::checkpoint_refuses_inflight_disconnect_and_preserves_state`) arms a disconnect marker, calls `publish_checkpoint`, and asserts the error plus byte-identical `CURRENT` and directory listing.
 
-After the disconnect completes, `CheckpointPublisher::settle_disconnect_debt` in `crates/execution/src/checkpoint/publisher.rs` finds the marker is no longer in flight and calls ordinary checkpoint publication. Successful ordinary publication retires the marker with `undo_store.disarm_disconnect()`.
+Normal successful disconnects disarm their marker immediately in `crates/execution/src/disconnect.rs`. For a persisted `DisconnectPhase::RolledBack` marker left by a crash, `CheckpointPublisher::settle_disconnect_debt` in `crates/execution/src/checkpoint/publisher.rs` requests ordinary checkpoint publication. A successful publication clears the marker through `undo_store.disarm_disconnect()`.
 
 ## Header checkpoint file
 
@@ -143,8 +143,9 @@ The matching live IBD case (checkpoint restore) is documented with verified outp
 
 - [`RCV-10`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md): a checkpoint is not recovery authority; the durable head is. Enforcement lives in the publish-time refusals above.
 - [`RCV-14`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md): the publisher freezes the published state before writing and reconciles against the durable head.
-- Crash-at-every-boundary coverage: `crates/storage/src/checkpoint/publish.rs` accepts injected failpoints at each write, sync, and rename step (`CheckpointFailpoint`); `crates/execution/src/checkpoint.rs` (`checkpoint::tests::tip_transitions::failed_publication_preserves_current`) fails a publication and requires the old generation to stay intact.
-- Disconnect refusal and preservation: `crates/execution/src/lib.rs` (`tests::checkpoint_debt_tests::checkpoint_refuses_inflight_disconnect_and_preserves_state`).
+- Crash-at-every-boundary coverage: `crates/storage/src/checkpoint/publish.rs` accepts injected failpoints at each write, sync, and rename step (`CheckpointFailpoint`); `checkpoint::tests::tip_transitions::failed_publication_preserves_current` (checked source citation: `crates/execution/src/checkpoint.rs::failed_publication_preserves_current`) fails a publication and requires the old generation to stay intact.
+- Disconnect refusal and preservation: `tests::checkpoint_debt_tests::checkpoint_refuses_inflight_disconnect_and_preserves_state` (checked source citation: `crates/execution/src/lib.rs::checkpoint_refuses_inflight_disconnect_and_preserves_state`).
+- Source citations use `file.rs::function`, the notation checked by `contract-index`; the separate Rust path names the test.
 - Contract-clause and proof coverage counts live in [`docs/contracts/evidence-index.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/evidence-index.md).
 
 Difference from Bitcoin Core worth knowing: Core checkpoints the UTXO set only through `dumptxoutset`/assumeutxo machinery and rebuilds the block tree from headers on restart; bitcoin-rs writes the full tree including side branches into the checkpoint, so a restart preserves knowledge of competing fork tips without a network round trip.

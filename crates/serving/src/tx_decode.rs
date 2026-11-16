@@ -43,16 +43,19 @@ impl Admission {
         let bytes = bytes.max(1);
         let mut used = self.used.lock();
         if used.active >= MAX_ACTIVE || bytes > MAX_WIRE_BYTES - used.bytes {
+            drop(used);
             metrics::counter!("rpc.tx_decode.rejected_total").increment(1);
             return Err(RpcError::Misc(BUSY.to_owned()));
         }
         used.active += 1;
         used.bytes += bytes;
-        metrics::gauge!("rpc.tx_decode.active").increment(1.0);
-        Ok(Permit {
+        let permit = Permit {
             admission: self,
             bytes,
-        })
+        };
+        drop(used);
+        metrics::gauge!("rpc.tx_decode.active").increment(1.0);
+        Ok(permit)
     }
 }
 
@@ -66,6 +69,7 @@ impl Drop for Permit<'_> {
         let mut used = self.admission.used.lock();
         used.active -= 1;
         used.bytes -= self.bytes;
+        drop(used);
         metrics::gauge!("rpc.tx_decode.active").decrement(1.0);
     }
 }
