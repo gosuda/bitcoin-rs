@@ -61,7 +61,7 @@ surface = "BIP324 / P2P v2 transport"
 core_reference = "BIP324"
 status = "externally verified"
 representative_consumer = "unmodified Bitcoin Core 31.1 bitcoind in both connection directions (scripts/run-p2p-core-interop.sh, docs/contracts/core-differential.md CORE-06)"
-evidence = "Recorded regtest run: https://github.com/gosuda/bitcoin-rs/pull/1612 (commands, pinned Core, binary identity and results). Black-box outcomes only: a bitcoin-rs node dialing Core and Core dialing a bitcoin-rs node both negotiated v2, both ends' getpeerinfo reported the same session id, each v2 connection answered Core's ping and carried a full header and block sync to Core's tip, and a v2-off bitcoin-rs node synced over v1 from v2 Core (assert_transports in crates/wire/tests.rs). No claim is made from the live run for bitcoin-rs's v1 retry after an unanswered v2 dial, decoy packets or rekeying; those rest on in-tree vectors and listener/v2_transport_tests.rs."
+evidence = "Recorded regtest run: https://github.com/gosuda/bitcoin-rs/pull/1612 (commands, pinned Core, binary identity and results). Black-box outcomes only: a bitcoin-rs node dialing Core and Core dialing a bitcoin-rs node both negotiated v2, both ends' getpeerinfo reported the same session id, each v2 connection answered Core's ping and carried a full header and block sync to Core's tip, and a v2-off bitcoin-rs node synced over v1 from v2 Core (assert_transports in crates/wire/tests.rs). No claim is made from the live run for bitcoin-rs's v1 retry after an unanswered v2 dial, decoy packets or rekeying; those rest on in-tree vectors and the `v2_transport_tests` module in crates/wire/src/listener.rs."
 
 [[row]]
 surface = "Compact block relay (BIP152)"

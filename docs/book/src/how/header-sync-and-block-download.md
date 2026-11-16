@@ -99,7 +99,7 @@ After a snapshot load, the node must backfill and fully validate the block range
 | Low-work chains never reach the block tree | `low_work_headers_do_not_reach_block_tree` | `crates/node/src/p2p/sync.rs` |
 | A substituted redownload header disconnects | `a_substituted_redownload_header_disconnects_the_connection` | `crates/node/src/p2p/sync.rs` |
 | Continuity break spends the sync state | `a_midbatch_continuity_break_spends_the_sync` | `crates/node/src/p2p/sync.rs` |
-| Stale-tip behavior | `stale_tips` and `staletip` test modules | `crates/node/src/p2p/sync/stale_tips.rs`, `crates/wire/src/staletip.rs` |
+| Stale-tip behavior | `tests` modules | `crates/node/src/p2p/sync/stale_tips.rs`, `crates/wire/src/staletip.rs` |
 | Eviction selection | `tests` module | `crates/wire/src/eviction.rs` |
 
 ## Limits

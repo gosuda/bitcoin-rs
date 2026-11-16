@@ -267,16 +267,17 @@ mod tests {
     }
 
     fn join_timeout<T>(handle: JoinHandle<()>, rx: &Receiver<T>) -> T {
-        let res = rx.recv_timeout(Duration::from_secs(5));
-        assert!(
-            res.is_ok(),
-            "join deadline exceeded: thread did not complete within 5 seconds"
-        );
-        let join_res = handle.join();
-        assert!(join_res.is_ok(), "thread panicked");
-        match res {
-            Ok(val) => val,
-            Err(_) => unreachable!(),
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(val) => {
+                assert!(handle.join().is_ok(), "thread panicked");
+                val
+            }
+            Err(_) => {
+                if handle.is_finished() {
+                    assert!(handle.join().is_ok(), "thread panicked");
+                }
+                panic!("join deadline exceeded: thread did not complete within 5 seconds");
+            }
         }
     }
 

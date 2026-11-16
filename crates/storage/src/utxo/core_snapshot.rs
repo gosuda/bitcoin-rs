@@ -1657,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_cancellation_polls_every_5000_coins() {
+    fn writer_cancellation_polls_a_large_set() {
         let loaded = read_and_verify(
             &mut Cursor::new(CORE),
             Network::Regtest,
