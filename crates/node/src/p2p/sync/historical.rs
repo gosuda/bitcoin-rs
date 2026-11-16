@@ -51,7 +51,7 @@ impl HistoricalDownload {
         tree: &BlockTree,
         charged: impl Fn() -> u64,
     ) -> u64 {
-        let (evicted, freed) = self
+        let (evicted, progress) = self
             .stager
             .evict_for_reclaim(self.next_expected, bytes, charged);
         for hash in &evicted {
@@ -61,7 +61,7 @@ impl HistoricalDownload {
                 .map(|node| node.height);
             self.window.requeue_for_retry(hash, height, now);
         }
-        freed
+        progress.released_bytes
     }
 }
 

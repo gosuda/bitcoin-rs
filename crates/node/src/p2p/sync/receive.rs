@@ -689,7 +689,7 @@ impl BlockSync {
         let target = usize::try_from(bytes).unwrap_or(usize::MAX);
         let charged =
             || budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages);
-        let (evicted, mut freed) = {
+        let (evicted, progress) = {
             let mut scheduler = self.scheduler.lock();
             scheduler
                 .stager
@@ -707,8 +707,10 @@ impl BlockSync {
                 scheduler.window.requeue_for_retry(hash, height, now);
             }
         }
-        if freed < bytes {
-            let remaining = usize::try_from(bytes - freed).unwrap_or(usize::MAX);
+        let mut freed = progress.released_bytes;
+        let consumed = freed.max(progress.evicted_bytes);
+        if consumed < bytes {
+            let remaining = usize::try_from(bytes - consumed).unwrap_or(usize::MAX);
             let mut historical = self.historical.lock();
             freed =
                 freed.saturating_add(historical.evict_for_reclaim(remaining, now, &tree, charged));

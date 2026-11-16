@@ -24,6 +24,12 @@ pub(crate) struct BlockStager {
     gate_pending_count: usize,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct ReclaimProgress {
+    pub(crate) released_bytes: u64,
+    pub(crate) evicted_bytes: u64,
+}
+
 #[derive(Debug)]
 struct ReceivedBlock {
     payload: BlockImage,
@@ -390,31 +396,35 @@ impl BlockStager {
         Some(*hash)
     }
 
-    /// The protected frontier stays staged. Reclaim stops when the owning
-    /// ledger records the requested release, including backing capacity.
+    /// The protected frontier stays staged. Ledger release or attributed
+    /// eviction work ends the pass at the requested target. Attribution only
+    /// caps evictions when concurrent admissions or shared backing mask release.
     pub(crate) fn evict_for_reclaim(
         &mut self,
         protected: Option<Hash256>,
         bytes: usize,
         charged: impl Fn() -> u64,
-    ) -> (Vec<Hash256>, u64) {
+    ) -> (Vec<Hash256>, ReclaimProgress) {
         let mut evicted = Vec::new();
-        let mut freed = 0u64;
+        let mut progress = ReclaimProgress::default();
         let before = charged();
         let target = u64::try_from(bytes).unwrap_or(u64::MAX);
-        while freed < target {
+        while progress.released_bytes.max(progress.evicted_bytes) < target {
             let Some(hash) = self.oldest_unprotected_candidate(protected) else {
                 break;
             };
             let Some(entry) = self.received.remove(&hash) else {
                 break;
             };
+            progress.evicted_bytes = progress.evicted_bytes.saturating_add(
+                u64::try_from(entry.bytes.saturating_add(entry.decoded_bytes)).unwrap_or(u64::MAX),
+            );
             self.release(&entry);
             drop(entry);
-            freed = before.saturating_sub(charged());
+            progress.released_bytes = before.saturating_sub(charged());
             evicted.push(hash);
         }
-        (evicted, freed)
+        (evicted, progress)
     }
 
     pub(crate) fn discard(&mut self, hash: &Hash256) -> bool {
@@ -1517,6 +1527,66 @@ mod tests {
         assert_eq!(stager.received_bytes(), wire);
     }
 
+    // BUD-07, SYNC-03
+    #[test]
+    fn reclaim_work_stays_bounded_when_admissions_replace_released_credit() {
+        use bitcoin_rs_wire::test_support::OrFail;
+        use std::cell::{Cell, RefCell};
+
+        let payload = BlockImage::from_local(Network::Regtest.genesis_block());
+        let retained = payload.bytes().len() + payload.retained_heap_bytes();
+        let budget = std::sync::Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            bitcoin_rs_storage::split_chainstate_cache_budget(64 * 1024 * 1024),
+            4,
+        ));
+        let memory = std::sync::Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
+            std::sync::Arc::new(crate::budget::BudgetedIngressLedger::new(budget.clone())),
+        ));
+        let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
+        let hashes = [0x61_u8, 0x62, 0x63].map(|seed| Hash256::from_le_bytes(&[seed; 32]));
+        for hash in hashes {
+            stager.insert_with_credit(
+                hash,
+                None,
+                payload.clone(),
+                None,
+                Instant::now(),
+                Some(memory.reserve(retained, || false).or_fail("staged credit")),
+            );
+        }
+        let (evicted, progress) = stager.evict_for_reclaim(None, 0, || {
+            budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages)
+        });
+        assert!(evicted.is_empty());
+        assert_eq!(progress.released_bytes, 0);
+        assert_eq!(progress.evicted_bytes, 0);
+        assert_eq!(stager.received_len(), 3);
+
+        let first_observation = Cell::new(true);
+        let replacement_credits = RefCell::new(Vec::new());
+        let charged = || {
+            if !first_observation.replace(false) {
+                replacement_credits.borrow_mut().push(
+                    memory
+                        .reserve(retained, || false)
+                        .or_fail("concurrent ingress credit"),
+                );
+            }
+            budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages)
+        };
+        let (evicted, progress) = stager.evict_for_reclaim(None, retained, charged);
+        assert_eq!(evicted, vec![hashes[0]]);
+        assert_eq!(progress.released_bytes, 0);
+        assert_eq!(
+            progress.evicted_bytes,
+            u64::try_from(retained).or_fail("retained byte count")
+        );
+        assert_eq!(replacement_credits.borrow().len(), 1);
+        assert!(stager.contains(&hashes[1]));
+        assert!(stager.contains(&hashes[2]));
+        assert_eq!(stager.received_len(), 2);
+    }
+
     // BUD-07
     #[test]
     fn reclaim_eviction_protects_frontier_and_frees_retained() {
@@ -1564,9 +1634,12 @@ mod tests {
         }
         assert_eq!(stager.received_len(), 4);
         let two_blocks = retained_per_block.saturating_mul(2);
-        let (evicted, freed) = stager.evict_for_reclaim(Some(frontier), two_blocks, charged);
+        let (evicted, progress) = stager.evict_for_reclaim(Some(frontier), two_blocks, charged);
         assert_eq!(evicted, successors[..2].to_vec());
-        assert_eq!(freed, u64::try_from(two_blocks).unwrap_or(u64::MAX));
+        assert_eq!(
+            progress.released_bytes,
+            u64::try_from(two_blocks).unwrap_or(u64::MAX)
+        );
         assert!(stager.contains(&frontier));
         assert!(stager.contains(&successors[2]));
         assert_eq!(stager.received_len(), 2);

@@ -4435,7 +4435,20 @@ mod tests {
     #[cfg(test)]
     mod headroom_throttling {
         use super::*;
+        use crate::budget::{BudgetedIngressLedger, NodeBudget};
         use bitcoin_rs_consensus::primitives::BlockImage;
+        use bitcoin_rs_wire::inbound::block_memory::{BlockMemory, BlockMemoryCredit};
+
+        fn image_budget() -> (Arc<NodeBudget>, Arc<BlockMemory>) {
+            let budget = Arc::new(NodeBudget::from_chainstate_cache_budget(
+                split_chainstate_cache_budget(64 * 1024 * 1024),
+                4,
+            ));
+            let memory = Arc::new(BlockMemory::new(Arc::new(BudgetedIngressLedger::new(
+                Arc::clone(&budget),
+            ))));
+            (budget, memory)
+        }
 
         #[test]
         fn tick_caps_requests_at_staged_byte_headroom() -> TestResult {
@@ -5043,15 +5056,7 @@ mod tests {
         #[test]
         fn reclaimed_successor_is_requeued_with_height_for_refetch() -> TestResult {
             let (sync, peers, _block_tree, _applied_tip, expected) = sync_with_header_chain(4)?;
-            let budget = Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
-                split_chainstate_cache_budget(64 * 1024 * 1024),
-                4,
-            ));
-            let memory = Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
-                Arc::new(crate::budget::BudgetedIngressLedger::new(Arc::clone(
-                    &budget,
-                ))),
-            ));
+            let (budget, memory) = image_budget();
             install_budget(&sync, super::super::default_sync_budget(Network::Regtest));
             let addr = test_addr(9471, 0)?;
             let rx = connect_peer(&peers, synthetic_peer(addr, 100));
@@ -5114,15 +5119,7 @@ mod tests {
             const CREDIT: usize = 64 * 1024;
             const REQUESTED: u64 = 32 * 1024;
             let (sync, _, _, _, expected) = sync_with_header_chain(4)?;
-            let budget = Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
-                split_chainstate_cache_budget(64 * 1024 * 1024),
-                4,
-            ));
-            let memory = Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
-                Arc::new(crate::budget::BudgetedIngressLedger::new(Arc::clone(
-                    &budget,
-                ))),
-            ));
+            let (budget, memory) = image_budget();
             let successor = BlockImage::from_local(super::header_chain_block(&expected, 2)?);
             let historical = BlockImage::from_local(super::header_chain_block(&expected, 3)?);
             let successor_hash = Hash256::from(successor.block_hash());
@@ -5154,6 +5151,89 @@ mod tests {
             );
             assert!(!sync.scheduler.lock().stager.contains(&successor_hash));
             assert!(sync.historical.lock().stager.contains(&historical_hash));
+            assert_eq!(
+                budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages),
+                64 * 1024,
+            );
+            Ok(())
+        }
+
+        // BUD-06, BUD-07, SYNC-03
+        #[test]
+        fn shared_staged_backing_bounds_reclaim_before_historical_eviction() -> TestResult {
+            struct ChargedBytes {
+                raw: Vec<u8>,
+                _credit: BlockMemoryCredit,
+            }
+
+            impl AsRef<[u8]> for ChargedBytes {
+                fn as_ref(&self) -> &[u8] {
+                    &self.raw
+                }
+            }
+
+            const CREDIT: usize = 64 * 1024;
+            let (sync, _, _, _, expected) = sync_with_header_chain(4)?;
+            let (budget, memory) = image_budget();
+            let mut raw = Vec::with_capacity(CREDIT);
+            raw.extend_from_slice(
+                BlockImage::from_local(super::header_chain_block(&expected, 2)?).bytes(),
+            );
+            let backing_charge = raw.capacity();
+            let successor = BlockImage::from_raw(bytes::Bytes::from_owner(ChargedBytes {
+                raw,
+                _credit: memory
+                    .reserve(backing_charge, || false)
+                    .or_fail("shared backing credit"),
+            }))
+            .or_fail("charged successor");
+            let requested = u64::try_from(
+                successor.bytes().len() + successor.retained_heap_bytes(),
+            )
+            .or_fail("retained byte count");
+            let successor_hash = Hash256::from(successor.block_hash());
+            sync.scheduler.lock().stager.insert_with_credit(
+                successor_hash,
+                None,
+                successor,
+                None,
+                Instant::now(),
+                None,
+            );
+            let shared = sync
+                .scheduler
+                .lock()
+                .stager
+                .staged_body(successor_hash)
+                .or_fail("shared staged body");
+            let historical = BlockImage::from_local(super::header_chain_block(&expected, 3)?);
+            let historical_hash = Hash256::from(historical.block_hash());
+            sync.historical.lock().stager.insert_with_credit(
+                historical_hash,
+                None,
+                historical,
+                None,
+                Instant::now(),
+                Some(
+                    memory
+                        .reserve(CREDIT, || false)
+                        .or_fail("historical credit"),
+                ),
+            );
+            let expected_charge =
+                u64::try_from(backing_charge + CREDIT).or_fail("combined credit");
+            assert_eq!(
+                budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages),
+                expected_charge,
+            );
+            assert_eq!(sync.reclaim_staged_for_ingress(requested, &budget), 0);
+            assert!(!sync.scheduler.lock().stager.contains(&successor_hash));
+            assert!(sync.historical.lock().stager.contains(&historical_hash));
+            assert_eq!(
+                budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages),
+                expected_charge,
+            );
+            drop(shared);
             assert_eq!(
                 budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages),
                 64 * 1024,

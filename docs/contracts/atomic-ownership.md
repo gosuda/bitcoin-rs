@@ -472,6 +472,7 @@ Proof: `crates/node/src/budget.rs::saturated_ingress_preserves_execution_headroo
 - A refused receive allocation must end the connection with a local resource error and release partial backing. It must not report a resumable socket poll timeout or blame the peer.
 - A completed receive frame that cannot reserve distinct decoder memory must be refused as terminal local resource exhaustion. It must not wait while holding raw memory, blame the peer, or report a resumable poll timeout after consuming the frame.
 - A refused coin-cache charge MUST release eligible resident records before one retry. Eviction MUST release their ledger charges before the retry.
+- Staged-image reclamation must stop once the requested ledger release or attributed eviction work is reached. Active and historical stagers share this work limit. Attributed eviction bytes are not released credit; admission still requires the ledger's reservation retry.
 - The component must not add unbounded memory buffering.
 
 ### `MPS-01`: Mempool dependency graph and settlement
