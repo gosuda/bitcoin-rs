@@ -225,7 +225,7 @@ Owners:
 - It emits one transaction row per indexed transaction.
 - For `ScriptHistory`, it emits one occurrence per `(script, height, transaction)` without duplicate hash-prefix rows.
 - Script history includes an empty script; only an OP_RETURN script is excluded.
-- Pinned tests in `crates/projection/tests.rs` and `crates/projection/tests.rs` own these cardinalities.
+- Pinned tests in `crates/projection/tests.rs` (`index_roundtrip` and `script_history_occurrences` modules) own these cardinalities.
 - `NodeState::open` restores the authenticated checkpoint.
 - It then replays the certified committed suffix from canonical block files and undo records (`docs/contracts/recovery.md`).
 - This replay finishes before `NodeState::start_index_workers()` spawns worker threads in `crates/node/src/run.rs`.

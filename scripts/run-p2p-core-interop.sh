@@ -7,8 +7,8 @@
 # RPCs (height, best block hash, chain name). Two fresh bitcoin-rs nodes then
 # sync Core's chain over BIP324 v2: one dials Core, and Core dials the other.
 # Records Core's view of the bitcoin-rs peer and both ends' view of each
-# transport into an evidence JSON and runs
-# `crates/wire/tests.rs` against it.
+# transport into an evidence JSON and runs the `core_interop_live`
+# module of `crates/wire/tests.rs` against it.
 #
 # usage: run-p2p-core-interop.sh --bitcoind-command <command>
 #            [--bitcoin-rs-command <command>] [--workdir <dir>] [--evidence <path>]

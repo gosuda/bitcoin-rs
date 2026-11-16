@@ -1283,10 +1283,17 @@ mod tests {
             "actual: {verdict:?}"
         );
 
+        let balanced_parsed = test_block_parse(&balanced_txs);
         let mut view = block_view_for(&balanced_txs, resolved);
-        let balanced =
-            super::prepare_block_script_checks(&mut view, 0, 0, VerifyFlags::NONE, &parsed, None)
-                .unwrap_or_else(|error| panic!("fixture prevouts resolve: {error}"));
+        let balanced = super::prepare_block_script_checks(
+            &mut view,
+            0,
+            0,
+            VerifyFlags::NONE,
+            &balanced_parsed,
+            None,
+        )
+        .unwrap_or_else(|error| panic!("fixture prevouts resolve: {error}"));
         assert!(super::verify_prepared_units(core::slice::from_ref(&balanced)).is_ok());
     }
 

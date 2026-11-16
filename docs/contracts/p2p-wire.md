@@ -356,7 +356,7 @@ Proof for header ingress:
 - It covers bounded queue occupancy, body application, full-queue ordering, cancellation, and disconnection.
 - `crates/node/src/p2p/sync.rs` covers message and header work limits.
 - It also covers block application and request scheduling while headers remain queued.
-- `headers_presync.rs` test `sufficient_work_chain_syncs_presync_then_redownload` defers a continuation across the batch budget before completing both passes.
+- `crates/node/src/p2p/sync.rs` test `sufficient_work_chain_syncs_presync_then_redownload` defers a continuation across the batch budget before completing both passes.
 - These are local behavioral proofs, not a live-network throughput or multi-peer fairness campaign.
 
 ### `P2P-08`: Inbound admission and the outbound service gate

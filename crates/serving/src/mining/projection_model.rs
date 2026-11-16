@@ -323,7 +323,7 @@ mod tests {
         failure_persistence: Some(std::boxed::Box::new(
             proptest::test_runner::FileFailurePersistence::Direct(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../testdata/serving/regressions/mining/projection_model.txt"
+                "/../../testdata/serving/regressions/mining/projection_safety.txt"
             )),
         )),
         ..(ProptestConfig {

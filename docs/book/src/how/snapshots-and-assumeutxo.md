@@ -117,7 +117,7 @@ That refusal is the pin check doing its job: regtest pins describe one determini
 
 - `ARCH-07b` owns the roles and the single-active-authority invariant; the pin, commitment, and attestation rules above implement it.
 - Snapshot reader: `crates/storage/src/utxo/core_snapshot.rs`, including `forged_collision_families_never_enter_the_utxo_hash_table` (a collision family staged in the stream cannot enter the UTXO hash table), `all_limits_are_enforced_including_aggregate_scripts_and_header_bytes`, and `structure_and_record_semantics_fail_closed`.
-- Activation and attestation: `crates/execution/src/assumeutxo.rs` (unsettled-tip refusal pinned at line 740) and `crates/execution/src/durable.rs`.
+- Activation and attestation: `crates/execution/src/assumeutxo.rs` (unsettled-tip refusal pinned by `snapshot_refuses_work_comparison_when_durable_and_applied_tips_differ`) and `crates/execution/src/durable.rs`.
 - Contract and proof counts live in [`docs/contracts/evidence-index.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/evidence-index.md).
 
 Differences from Bitcoin Core worth knowing: Core 31.1 accepts a snapshot whose per-txid coin groups contain repeated txids in ways this reader rejects as `TransactionOrder`, and Core derives the chain tip from the stream while bitcoin-rs derives it from the pinned anchor; recorded side by side in `docs/contracts/architecture.md` (API-33 evidence). Core also lets the background validation window reassign freely, while bitcoin-rs refuses disconnects below the snapshot base outright.

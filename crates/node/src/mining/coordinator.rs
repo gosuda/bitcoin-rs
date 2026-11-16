@@ -97,6 +97,8 @@ struct CoordinatorState {
     seed: u64,
     #[cfg(any(test, feature = "test-seam"))]
     parked_long_poll_waiters: usize,
+    #[cfg(any(test, feature = "test-seam"))]
+    budgeted_waiters: usize,
     cache: HashMap<CandidateKey, Arc<Candidate>>,
     cache_order: VecDeque<CandidateKey>,
     signalling_rules: Option<(Hash256, u32, Vec<AvailableMiningRule>)>,
@@ -319,6 +321,12 @@ impl MiningService {
     #[must_use]
     pub fn parked_long_poll_waiters(&self) -> usize {
         self.state.lock().parked_long_poll_waiters
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn budgeted_waiters(&self) -> usize {
+        self.state.lock().budgeted_waiters
     }
 
     fn live_tip_hash(&self) -> Hash256 {
@@ -833,7 +841,15 @@ impl MiningService {
             if now >= until {
                 return Err(assembly_busy());
             }
+            #[cfg(any(test, feature = "test-seam"))]
+            {
+                state.budgeted_waiters += 1;
+            }
             let _timed_out = self.wake.wait_for(&mut state, until - now);
+            #[cfg(any(test, feature = "test-seam"))]
+            {
+                state.budgeted_waiters -= 1;
+            }
         };
         let _slot = BudgetedSlot {
             service: self,
@@ -2131,7 +2147,14 @@ mod tests {
             let holder = spawn_budgeted(&service, generation, BUDGET_A);
             wait_until_held(&pool);
             let joiner = spawn_budgeted(&service, generation, BUDGET_A);
-            std::thread::sleep(Duration::from_millis(50));
+            let deadline = Instant::now() + WAKE_PROOF_TIMEOUT;
+            while service.budgeted_waiters() == 0 {
+                assert!(
+                    Instant::now() < deadline,
+                    "the joiner never reached the occupied budget slot"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
             assert_eq!(pool.budgeted_calls(), 1, "a same-key caller must not walk");
             pool.release.store(true, Ordering::SeqCst);
             let first = holder.join().map_err(|_| "the holder panicked")??;
