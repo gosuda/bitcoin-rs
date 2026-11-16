@@ -101,7 +101,7 @@ mod tests {
     /// A comment at the limit is itself safe but composes a subversion over
     /// `MAX_SUBVERSION_LENGTH` — the node-level guard (`validate_ua_comments`)
     /// rejects it at startup; that enforcement is tested in
-    /// `crates/node/src/config/tests.rs`.
+    /// `crates/node/src/config.rs`.
     #[test]
     fn ua_comment_safety_matches_cores_bip14_subset() {
         for accepted in ["testnode0", "foo bar", "a.,;-_?@"] {

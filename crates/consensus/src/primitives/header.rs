@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn genesis_header_hash_matches_published_id() -> Result<()> {
-        let bytes = std::fs::read("tests/testdata/0.bin")?;
+        let bytes = std::fs::read("../../testdata/consensus/blocks/0.bin")?;
         let header = deserialize::<Header>(&bytes[..80])?;
 
         assert_eq!(header.version, 1);
@@ -90,7 +90,7 @@ mod tests {
 
     #[test]
     fn header_decode_rejects_trailing_bytes() -> Result<()> {
-        let bytes = std::fs::read("tests/testdata/0.bin")?;
+        let bytes = std::fs::read("../../testdata/consensus/blocks/0.bin")?;
         assert!(deserialize::<Header>(&bytes[..80]).is_ok());
 
         let mut trailing = bytes[..80].to_vec();

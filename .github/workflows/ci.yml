@@ -56,7 +56,13 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           cache-on-failure: true
-      - run: ./scripts/ci-pr.sh contracts
+      - id: contracts
+        run: ./scripts/ci-pr.sh contracts
+      - name: Show regenerated contract evidence
+        if: ${{ failure() && steps.contracts.outcome == 'failure' }}
+        run: |
+          cargo run --locked -p contract-index
+          git diff --no-ext-diff -- docs/contracts/evidence-index.md docs/contracts/README.md
 
   clippy:
     runs-on: ubuntu-latest

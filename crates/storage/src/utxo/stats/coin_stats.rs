@@ -809,7 +809,15 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(proptest_config(256))]
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/storage/regressions/utxo/stats/coin_stats.txt"
+            )),
+        )),
+        ..(proptest_config(256))
+    })]
 
         #[test]
         fn parallel_muhash_differential_and_order_independence(

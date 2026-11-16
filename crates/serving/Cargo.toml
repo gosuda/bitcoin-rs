@@ -86,4 +86,4 @@ cap-fs-ext.workspace = true
 
 [[test]]
 name = "suite"
-path = "tests/suite.rs"
+path = "tests.rs"

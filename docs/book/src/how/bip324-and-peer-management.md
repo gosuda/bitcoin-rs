@@ -22,7 +22,7 @@ both sides reach Step::Established with the same 32-byte session id
 
 Both sides call `shared_secret` with their party role (`crates/wire/src/bip324/keys.rs:17`), and `KeyMaterial::derive` expands seven outputs from HKDF-SHA256 salted with `bitcoin_v2_shared_secret` plus the 4-byte network magic (`keys.rs:45`): one length-cipher key and one packet-cipher key per direction, 32 bytes that split into the two 16-byte garbage terminators, and the session id (`keys.rs:69`). `Session::new` (`keys.rs:84`) hands each side its own direction and keeps the peer's terminator for scanning.
 
-The garbage is not trusted by itself. The first sealed packet uses the sender's own garbage as its AEAD associated data, so a peer that fabricates garbage or sends none fails authentication on the version packet (`the_first_packet_must_authenticate_the_garbage_sent` in `crates/wire/src/bip324/handshake/tests.rs:440`). The terminator scan itself reads each inbound byte at most once: `partial_match` keeps only the longest suffix that could still complete the terminator (`handshake.rs:270`), and garbage longer than 4095 bytes fails with `BIP324 garbage terminator not found within the garbage limit` (`MAX_GARBAGE_LEN` at `handshake.rs:18`, `TransportError::TerminatorNotFound` at `crates/wire/src/bip324.rs`).
+The garbage is not trusted by itself. The first sealed packet uses the sender's own garbage as its AEAD associated data, so a peer that fabricates garbage or sends none fails authentication on the version packet (`the_first_packet_must_authenticate_the_garbage_sent` in `crates/wire/src/bip324/handshake.rs`). The terminator scan itself reads each inbound byte at most once: `partial_match` keeps only the longest suffix that could still complete the terminator (`handshake.rs:270`), and garbage longer than 4095 bytes fails with `BIP324 garbage terminator not found within the garbage limit` (`MAX_GARBAGE_LEN` at `handshake.rs:18`, `TransportError::TerminatorNotFound` at `crates/wire/src/bip324.rs`).
 
 The session id is the only man-in-the-middle check BIP324 has. Both sides derive the same 32 bytes (`keys.rs:69`), comparing them out of band is the only detection there is, and BIP324 authenticates no peer, so a failed handshake never becomes a misbehavior report (`crates/wire/src/transport.rs`). `getpeerinfo` publishes the negotiated id in hex for exactly that comparison (`P2P-11`).
 
@@ -65,7 +65,7 @@ Every one of these is `PeerError::Misbehavior`, the class that can discourage an
 
 ## The peer table and inbound eviction
 
-`PeerTable` is one write-locked map keyed by endpoint identity: canonical IP, Tor v3, or I2P destination; a loopback SOCKS or SAM hop is never the identity (policy section on overlay transports). Reservation, live inbound count, and eviction are one table operation: `try_register_inbound` (`crates/wire/src/peer_table.rs:202`) counts live inbound sessions against `max_inbound` and runs eviction in the same critical section. A newcomer whose address holds a live inbound session replaces that predecessor without growing the count; a live outbound session at the same address makes the newcomer count as growth, so a full table refuses it rather than dropping two connections for one (`a_full_table_refuses_an_inbound_newcomer_at_a_live_outbound_address` in `crates/wire/src/peer_table/tests.rs:628`).
+`PeerTable` is one write-locked map keyed by endpoint identity: canonical IP, Tor v3, or I2P destination; a loopback SOCKS or SAM hop is never the identity (policy section on overlay transports). Reservation, live inbound count, and eviction are one table operation: `try_register_inbound` (`crates/wire/src/peer_table.rs:248`) counts live inbound sessions against `max_inbound` and runs eviction in the same critical section. A newcomer whose address holds a live inbound session replaces that predecessor without growing the count; a live outbound session at the same address makes the newcomer count as growth, so a full table refuses it rather than dropping two connections for one (`a_full_table_refuses_an_inbound_newcomer_at_a_live_outbound_address` in `crates/wire/src/peer_table.rs`).
 
 Eviction has a fixed candidate filter: inbound, live, and not `noban` (`peer_table.rs:312`). If no candidate survives the filter, or the newcomer itself would replace a live outbound, the socket closes before any handshake thread exists. The chosen victim's lease is cancelled, so its reads fail mid-payload, and the table logs `inbound slots full; evicted a connection for a new inbound peer` at debug level (`peer_table.rs:308`).
 
@@ -167,17 +167,17 @@ The in-tree proofs behind this chapter, each verified in the tree at this commit
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| An outbound v2 dial negotiates BIP324 | `an_outbound_v2_dial_negotiates_bip324` | `crates/wire/src/listener/v2_transport_tests.rs` |
-| An unanswered v2 dial retries once over v1 | `an_unanswered_v2_dial_retries_once_over_v1` | `crates/wire/src/listener/v2_transport_tests.rs` |
-| A silent responder ends at the deadline | `a_silent_responder_ends_at_the_handshake_deadline` | `crates/wire/src/listener/v2_transport_tests.rs` |
-| A v1 starter hands back to the v1 decoder | `responder_hands_a_v1_peer_back_after_sixteen_bytes` | `crates/wire/src/bip324/handshake/tests.rs` |
-| Garbage beyond the limit is refused | `garbage_beyond_the_limit_is_refused` | `crates/wire/src/bip324/handshake/tests.rs` |
-| Decoys before the version packet are skipped | `decoys_before_the_version_packet_are_skipped` | `crates/wire/src/bip324/handshake/tests.rs` |
+| An outbound v2 dial negotiates BIP324 | `an_outbound_v2_dial_negotiates_bip324` | `crates/wire/src/listener.rs` |
+| An unanswered v2 dial retries once over v1 | `an_unanswered_v2_dial_retries_once_over_v1` | `crates/wire/src/listener.rs` |
+| A silent responder ends at the deadline | `a_silent_responder_ends_at_the_handshake_deadline` | `crates/wire/src/listener.rs` |
+| A v1 starter hands back to the v1 decoder | `responder_hands_a_v1_peer_back_after_sixteen_bytes` | `crates/wire/src/bip324/handshake.rs` |
+| Garbage beyond the limit is refused | `garbage_beyond_the_limit_is_refused` | `crates/wire/src/bip324/handshake.rs` |
+| Decoys before the version packet are skipped | `decoys_before_the_version_packet_are_skipped` | `crates/wire/src/bip324/handshake.rs` |
 | A tag failure poisons the reader | `tag_failure_poisons_reader_so_subsequent_packets_are_never_accepted` | `crates/wire/src/bip324/reader.rs` |
 | A flooding netgroup loses its newest member | `the_flooding_netgroup_loses_its_newest_member` | `crates/wire/src/eviction.rs` |
-| A full table yields to a different netgroup | `one_host_filling_every_inbound_slot_gives_way_to_another_netgroup` | `crates/wire/src/peer_table/tests.rs` |
-| `noban` inbound connections are never evicted | `noban_inbound_connections_are_never_evicted` | `crates/wire/src/peer_table/tests.rs` |
-| Manual and protected peers never discourage | `manual_and_protected_local_connections_never_discourage_an_ip` | `crates/wire/src/listener/discouragement_tests.rs` |
+| A full table yields to a different netgroup | `one_host_filling_every_inbound_slot_gives_way_to_another_netgroup` | `crates/wire/src/peer_table.rs` |
+| `noban` inbound connections are never evicted | `noban_inbound_connections_are_never_evicted` | `crates/wire/src/peer_table.rs` |
+| Manual and protected peers never discourage | `manual_and_protected_local_connections_never_discourage_an_ip` | `crates/wire/src/listener.rs` |
 
 The peer_table tests above exercise `PeerTable` directly with leases and offers; the eviction unit tests in `eviction.rs` cover the pure selection function with synthetic candidates. Neither loads an asmap; `different_prefixes_in_one_asn_share_a_group_and_invalid_files_fall_back` in `netgroup.rs:391` covers the asmap interpreter against Core's published vectors.
 
