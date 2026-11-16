@@ -1113,6 +1113,7 @@ fn shutdown_releases_parked_automatic_claims_before_restart() {
         },
         bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
     );
+    let outbound_rx = service.outbound_rx.lock().clone();
     let address = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 8333));
     let now = crate::addrman::now();
     service.address_book.learn_dns("seed", &[address], now);
@@ -1130,18 +1131,11 @@ fn shutdown_releases_parked_automatic_claims_before_restart() {
         )
         .expect("start");
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if service
-            .outbound_rx
-            .try_lock()
-            .is_some_and(|rx| rx.is_empty())
-        {
-            break;
-        }
+    while !outbound_rx.is_empty() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
     assert!(
-        service.outbound_rx.lock().is_empty(),
+        outbound_rx.is_empty(),
         "worker must have parked the request"
     );
     assert_eq!(service.address_book.pending_count_excluding(&[]), 1);
