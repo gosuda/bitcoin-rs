@@ -59,7 +59,7 @@ class ProofsCratePathsTest(unittest.TestCase):
                     'edition = "2021"\nautotests = false\n'
                     "[features]\ndefault = []\nmdbx = []\n"
                     '[[test]]\nname = "mdbx_bounded_read_allocation"\n'
-                    'path = "tests/mdbx_bounded_read_allocation.rs"\n'
+                    'path = "mdbx_bounded_read_allocation_tests.rs"\n'
                     'required-features = ["mdbx"]\n'
                 ),
                 "crates/storage/src/lib.rs": (
