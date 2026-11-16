@@ -216,7 +216,7 @@ Commit details:
 - Only committed prefixes are published.
 - Group caps are stated constants or budget limits; a failure at block j commits the prefix before j (`WIN-08`).
 - An ambiguous storage failure closes mutation admission until recovery resolves the durable outcome (`CMT-04`).
-- Proof: `crates/chain/src/tests/` (grouped-window staging).
+- Proof: `crates/chain/src/tests/window_tx_count_tests.rs` (`a_grouped_window_publishes_each_blocks_own_prefix_count`, `a_grouped_window_stages_only_its_newest_block_before_the_sync`).
 - Proof: `crates/node/src/mining/coordinator/tests.rs` (receipt install, mismatch fallback, waiter release).
 
 Replay validation rules:
