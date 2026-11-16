@@ -8,10 +8,11 @@ use crate::types::{
     SpendingPrefixRow, TxPosition, TxPositionValue, TxidRow,
 };
 use crate::{
-    BasicFilter, IndexCapability, IndexError, IndexWatermark, ScriptLiveRow, ScriptLiveScan,
-    TxIndexPage, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
+    BasicFilter, FundingTransaction, FundingTransactionScan, IndexCapability, IndexError,
+    IndexWatermark, ScriptLiveRow, ScriptLiveScan, TxIndexPage, TxIndexScan, TxIndexScanRow,
+    TxIndexSnapshot,
 };
-use bitcoin_rs_consensus::primitives::{OutPoint, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, PrefixScan, PrefixScanLimit, StorageError};
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 use zerocopy::IntoBytes as _;
@@ -419,17 +420,27 @@ fn decode_tx_dir_row(
     scope: Scope,
     key: &[u8],
     value: &[u8],
-) -> Result<Option<(u32, u32, u32, u32)>, IndexError> {
-    let Some((_gen, _txid, height)) = format::decode_tx_dir_key(key) else {
+) -> Result<Option<(FundingTransaction, TxPosition)>, IndexError> {
+    let Some((generation, txid, height)) = format::decode_tx_dir_key(key) else {
         return Err(malformed("tx_dir key"));
     };
+    if generation != scope.segment_id() {
+        return Err(malformed("tx_dir generation"));
+    }
     if !scope.covers(height) {
         return Ok(None);
     }
-    let Some((_hash, ordinal, offset, len)) = format::decode_tx_dir_value(value) else {
+    let Some((hash, _, offset, len)) = format::decode_tx_dir_value(value) else {
         return Err(malformed("tx_dir value"));
     };
-    Ok(Some((height, ordinal, offset, len)))
+    Ok(Some((
+        FundingTransaction {
+            txid: Txid(Hash256::from_le_bytes(&txid)),
+            block_hash: Hash256::from_le_bytes(&hash),
+            height,
+        },
+        TxPosition::new(offset, len),
+    )))
 }
 
 fn collect_prefix_rows(
@@ -446,13 +457,13 @@ fn collect_prefix_rows(
         let Some((key, value)) = stream.rows.pop_front() else {
             return Ok(());
         };
-        let Some((height, _, offset, len)) = decode_tx_dir_row(stream.scope, &key, &value)? else {
+        let Some((transaction, position)) = decode_tx_dir_row(stream.scope, &key, &value)? else {
             continue;
         };
         by_height
-            .entry(height)
+            .entry(transaction.height)
             .or_default()
-            .push(TxPosition::new(offset, len));
+            .push(position);
     }
 }
 
@@ -519,11 +530,13 @@ impl<'a> SegmentSnapshot<'a> {
             let scan = self.scan(ColumnFamily::TxDir, &prefix, limit)?;
             complete &= scan.complete;
             for (key, value) in scan.rows {
-                let Some((height, _, offset, len)) = decode_tx_dir_row(scope, &key, &value)? else {
+                let Some((transaction, position)) = decode_tx_dir_row(scope, &key, &value)? else {
                     continue;
                 };
-                rows.entry(height)
-                    .or_insert_with(|| TxPosition::new(offset, len));
+                if transaction.txid != *txid {
+                    return Err(malformed("tx_dir transaction prefix"));
+                }
+                rows.entry(transaction.height).or_insert(position);
             }
         }
         Ok((rows.into_iter().collect(), complete))
@@ -1067,8 +1080,45 @@ impl TxIndexSnapshot for SegmentSnapshot<'_> {
         &self,
         txid: &Txid,
         limit: PrefixScanLimit,
-    ) -> Result<TxIndexScan, IndexError> {
-        self.transaction_rows_for(IndexCapability::ScriptHistory, txid, limit)
+    ) -> Result<FundingTransactionScan, IndexError> {
+        let mut result = FundingTransactionScan {
+            rows: Vec::new(),
+            examined_rows: 0,
+            encoded_bytes: 0,
+            complete: true,
+        };
+        for &scope in self.scopes(IndexCapability::ScriptHistory) {
+            let remaining = PrefixScanLimit {
+                max_rows: limit.max_rows.saturating_sub(result.examined_rows),
+                max_bytes: limit.max_bytes.saturating_sub(result.encoded_bytes),
+            };
+            if remaining.max_rows == 0 || remaining.max_bytes == 0 {
+                result.complete = false;
+                break;
+            }
+            let mut prefix = [0; format::TX_DIR_KEY_LEN - size_of::<u32>()];
+            prefix[..9].copy_from_slice(&scope.txid_prefix());
+            prefix[9..].copy_from_slice(txid.as_bytes());
+            let scan = self.scan(ColumnFamily::TxDir, &prefix, remaining)?;
+            result.complete &= scan.complete;
+            for (key, value) in scan.rows {
+                result.examined_rows = result.examined_rows.saturating_add(1);
+                result.encoded_bytes = result
+                    .encoded_bytes
+                    .saturating_add(key.len())
+                    .saturating_add(value.len());
+                if let Some((transaction, _)) = decode_tx_dir_row(scope, &key, &value)? {
+                    if transaction.txid != *txid {
+                        return Err(malformed("tx_dir transaction prefix"));
+                    }
+                    result.rows.push(transaction);
+                }
+            }
+            if !result.complete {
+                break;
+            }
+        }
+        Ok(result)
     }
 
     fn funding_rows(
@@ -1596,6 +1646,83 @@ mod tests {
             next.push(0);
             cursor = Some(next);
         }
+    }
+
+    // IDX-02, IDX-12
+    #[test]
+    fn funding_transaction_rows_preserve_full_identity_and_bound_all_scopes() {
+        let requested = txid(7);
+        let mut collision = requested;
+        collision[31] ^= 1;
+        let mut directory = BTreeMap::new();
+        for (generation, txid, height, hash) in [
+            (0, requested, 3, [3; 32]),
+            (0, requested, 4, [4; 32]),
+            (1, requested, 1, [1; 32]),
+            (0, collision, 3, [5; 32]),
+        ] {
+            directory.insert(
+                format::encode_tx_dir_key(generation, &txid, height).to_vec(),
+                format::encode_tx_dir_value(&hash, 0, 81, 100).to_vec(),
+            );
+        }
+        let mut published = std::array::from_fn(|_| None);
+        published[IndexCapability::ScriptHistory.index()] = Some(vec![
+            Scope::Tail { lo: 3, hi: 3 },
+            Scope::Sealed {
+                segment_id: 1,
+                coverage: Coverage {
+                    first_height: 1,
+                    last_height: 1,
+                    last_hash: [1; 32],
+                },
+            },
+        ]);
+        let snapshot = SegmentSnapshot {
+            kv: Box::new(CountingSnapshot {
+                rows: BTreeMap::from([(ColumnFamily::TxDir.index(), directory)]),
+                scans: Arc::new(AtomicUsize::new(0)),
+                reads: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }),
+            published,
+        };
+        let txid = Txid(Hash256::from_le_bytes(&requested));
+        let scan = snapshot
+            .funding_transaction_rows(&txid, unlimited_scan())
+            .expect("funding identities");
+        assert!(scan.complete);
+        assert_eq!(scan.examined_rows, 3);
+        assert_eq!(
+            scan.encoded_bytes,
+            3 * (format::TX_DIR_KEY_LEN + format::TX_DIR_VALUE_LEN),
+        );
+        assert_eq!(
+            scan.rows,
+            [
+                FundingTransaction {
+                    txid,
+                    block_hash: Hash256::from_le_bytes(&[3; 32]),
+                    height: 3,
+                },
+                FundingTransaction {
+                    txid,
+                    block_hash: Hash256::from_le_bytes(&[1; 32]),
+                    height: 1,
+                },
+            ],
+        );
+        let limited = snapshot
+            .funding_transaction_rows(
+                &txid,
+                PrefixScanLimit {
+                    max_rows: 2,
+                    max_bytes: usize::MAX,
+                },
+            )
+            .expect("bounded funding identities");
+        assert!(!limited.complete);
+        assert_eq!(limited.examined_rows, 2);
+        assert_eq!(limited.rows.len(), 1);
     }
 
     // PRJ-08

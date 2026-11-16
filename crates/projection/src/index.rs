@@ -22,7 +22,8 @@ pub use filters::BasicFilter;
 pub use prepared::{PreparedBatch, PreparedBatchLimits, PreparedBlock};
 pub use reader::Indexer;
 pub use snapshot::{
-    IndexReader, ScriptLiveScan, TxIndexPage, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
+    FundingTransaction, FundingTransactionScan, IndexReader, ScriptLiveScan, TxIndexPage,
+    TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
 };
 pub use state::{ConsumerCursorUpdate, IndexWriteFence};
 pub use write::IndexWriter;

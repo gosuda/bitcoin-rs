@@ -432,7 +432,10 @@ impl NodeState {
                 crate::facts_queue::DEFAULT_FACTS_QUEUE_CAPACITY,
                 charge,
             ));
-            budget.add_reclaimer(queue.reclaimer());
+            budget.add_reclaimer(
+                bitcoin_rs_storage::budget::BudgetOwner::FactsQueue,
+                queue.reclaimer(),
+            );
             let rx = queue.receiver();
             let charge = queue.charge_handle();
             let gap = queue.gap_handle();
@@ -757,7 +760,10 @@ impl NodeState {
         let block_memory = Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
             ingress_ledger,
         ));
-        budget.add_reclaimer(sync.staged_image_reclaimer(&budget));
+        budget.add_reclaimer(
+            bitcoin_rs_storage::budget::BudgetOwner::StagedImages,
+            sync.staged_image_reclaimer(&budget),
+        );
         let prune_service = if config.storage.prune_target_mb > 0 {
             Some(storage.deferred.prune_service(
                 Arc::clone(&block_files),
