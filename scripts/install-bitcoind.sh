@@ -85,7 +85,7 @@ cached_matches_pin() {
   version="$("${BITCOIND}" -version 2>/dev/null)" || return 1
   version="${version%%$'\n'*}"
   # Component-exact match against the canonical pin, mirroring
-  # crates/wire/tests/core_interop_live.rs version_is_pinned_line: the pinned
+  # crates/wire/tests.rs version_is_pinned_line: the pinned
   # "31.1" accepts 31.1(.N) but not 31.10(.N), 31.2(.N), or 30.1(.N).
   [[ "${version}" =~ ([0-9]+(\.[0-9]+)*) ]] || return 1
   local -a parsed=()

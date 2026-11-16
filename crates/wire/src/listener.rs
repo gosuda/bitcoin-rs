@@ -3715,7 +3715,1186 @@ mod writer_setup_cleanup_tests {
 
 #[cfg(test)]
 #[expect(clippy::expect_used)]
-mod writer_shutdown_tests;
+mod writer_shutdown_tests {
+    use bitcoin_rs_consensus::primitives::PeerEndpoint;
+    use std::cell::Cell;
+    use std::io;
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+
+    use bitcoin::p2p::Magic;
+
+    use super::{
+        collect_write_burst, run_connected_session, run_message_loop, run_writer_loop,
+        spawn_connection_writer, test_shared, write_ready_burst,
+    };
+    use crate::connection::OutboundBudget;
+    use crate::peer::{Peer, PeerState};
+
+    const FAILSAFE: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn inbound_handshake_failure_on_live_lease_returns_err() {
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let shared = test_shared(
+            Arc::new(crate::PeerTable::new()),
+            headers_tx,
+            crossbeam_channel::unbounded().0,
+        );
+        let (mut client, server, peer_addr) = loopback_pair();
+
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33]);
+        frame.extend_from_slice(b"version\0\0\0\0\0");
+        frame.extend_from_slice(&0_u32.to_le_bytes());
+        frame.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        io::Write::write_all(&mut client, &frame).expect("frame write");
+        drop(client);
+
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new_inbound(outbound_tx);
+        let lease = shared
+            .peer_table
+            .try_register_inbound(peer_addr, lease, &[], 1, 0, &shared.activity)
+            .expect("the test lease reserves its inbound slot");
+        let result = crate::listener::run_handshake(server, peer_addr, &shared, lease, outbound_rx);
+        let Err(error) = result else {
+            panic!("handshake failure on a live lease must not be masked as revoked");
+        };
+        assert!(
+            error.to_string().contains("magic"),
+            "unexpected handshake error: {error}"
+        );
+    }
+
+    fn loopback_pair() -> (TcpStream, TcpStream, PeerEndpoint) {
+        let listener = TcpListener::bind(
+            PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )
+        .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let client = TcpStream::connect(addr).expect("connect");
+        let (server, peer_addr) = listener.accept().expect("accept");
+        (client, server, peer_addr.into())
+    }
+
+    fn ping_len() -> usize {
+        crate::wire::wire_len(&crate::Message::Ping(9)).expect("ping encodes")
+    }
+
+    #[test]
+    fn unbacked_filter_service_bit_is_removed_from_handshake() {
+        let mut shared = test_shared(
+            Arc::new(crate::PeerTable::new()),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+        shared.local_services |= bitcoin::p2p::ServiceFlags::COMPACT_FILTERS;
+        assert!(
+            !shared
+                .advertised_services()
+                .has(bitcoin::p2p::ServiceFlags::COMPACT_FILTERS)
+        );
+    }
+
+    fn peer_info(addr: PeerEndpoint, start_height: i32) -> crate::PeerInfo {
+        crate::PeerInfo {
+            endpoint: Some(addr),
+            network: addr.net(),
+            addr: addr.into(),
+            version: 70_016,
+            wtxid_relay: false,
+            relay_transactions: true,
+            compact_block_relay: false,
+            send_headers: false,
+            services: 1,
+            user_agent: String::from("/test/"),
+            start_height,
+            conn_time: 0,
+            best_known_height: start_height,
+            inbound: false,
+            addr_bind: crate::TransportRemote::new(
+                addr.socket_addr()
+                    .unwrap_or_else(|| panic!("expected IP fixture")),
+            ),
+            time_offset: 0,
+            counters: std::sync::Arc::new(crate::PeerCounters::default()),
+            transport: crate::TransportProtocol::V1,
+        }
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        TryRecv(#[from] crossbeam_channel::TryRecvError),
+        #[error(transparent)]
+        Io(#[from] std::io::Error),
+        #[error(transparent)]
+        Primitives(#[from] bitcoin_rs_consensus::primitives::DecodeError),
+    }
+
+    #[test]
+    fn sinks_stamp_exact_connection_source() -> Result<(), TestError> {
+        let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
+        let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
+        let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 18_443));
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block_bytes = bitcoin::consensus::encode::serialize(&genesis);
+        let serialized = bytes::Bytes::from(block_bytes);
+        let payload = bitcoin_rs_consensus::primitives::BlockImage::from_raw(serialized.clone())?;
+        let source = lease.source(Some(addr));
+
+        shared.send_headers_response(&lease, source, Vec::new());
+        shared.send_block(&lease, addr, payload, None);
+
+        assert_eq!(headers_rx.try_recv()?.source, Some(source));
+        let received = blocks_rx.try_recv()?;
+        assert_eq!(received.source, Some(source));
+        assert_eq!(received.payload().bytes(), &serialized);
+        Ok(())
+    }
+
+    #[test]
+    fn send_block_forwards_the_blocks_header() -> Result<(), TestError> {
+        let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+        let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
+        let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 18_449));
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block_bytes = bitcoin::consensus::encode::serialize(&genesis);
+        let payload = bitcoin_rs_consensus::primitives::BlockImage::from_raw(bytes::Bytes::from(
+            block_bytes,
+        ))?;
+        let header = payload.header();
+        let source = lease.source(Some(addr));
+
+        shared.send_block(&lease, addr, payload, None);
+
+        let forwarded = headers_rx.try_recv()?;
+        assert_eq!(forwarded.source, Some(source));
+        assert_eq!(forwarded.headers, vec![header]);
+        assert!(
+            !forwarded.wire_response,
+            "a body-carried header is not a getheaders response"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn send_block_unblocks_when_session_is_cancelled() -> Result<(), TestError> {
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(1);
+        let mut shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
+        let session_cancel = bitcoin_rs_consensus::latch::LatchWriter::new();
+        shared.session_cancel = session_cancel.reader();
+        let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 18_448));
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let first_bytes = bitcoin::consensus::encode::serialize(&genesis);
+        let first = bitcoin_rs_consensus::primitives::BlockImage::from_raw(bytes::Bytes::from(
+            first_bytes,
+        ))?;
+        let second_bytes = first.bytes().clone();
+        let second = bitcoin_rs_consensus::primitives::BlockImage::from_raw(second_bytes)?;
+        shared.send_block(&lease, addr, first, None);
+
+        let blocked = std::thread::spawn(move || {
+            shared.send_block(&lease, addr, second, None);
+        });
+        let started = std::time::Instant::now();
+        while !blocked.is_finished() && started.elapsed() < Duration::from_millis(250) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !blocked.is_finished(),
+            "full inbound block channel must block until cancel"
+        );
+        session_cancel.trigger();
+        blocked
+            .join()
+            .map_err(|_| std::io::Error::other("send_block thread panicked"))?;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancelled send_block must not wait on the full queue"
+        );
+        drop(blocks_rx);
+        Ok(())
+    }
+
+    #[test]
+    fn message_loop_exits_before_read_when_cancelled() {
+        let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 18_444));
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        lease.cancel();
+        let mut peer = Peer::new(
+            ScriptedStream {
+                script: io::Cursor::new(Vec::new()),
+            },
+            Magic::BITCOIN,
+        );
+        peer.state = PeerState::Ready;
+
+        let shared = test_shared(
+            Arc::new(crate::PeerTable::new()),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+        assert!(run_message_loop(&mut peer, addr, &lease, &shared, None).is_ok());
+    }
+
+    #[test]
+    fn message_loop_exits_after_replacement_during_read() {
+        let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 18_445));
+        let table = Arc::new(crate::PeerTable::new());
+        let (old_tx, _old_rx) = crossbeam_channel::unbounded();
+        let old = crate::PeerLease::new(old_tx);
+        table.register(addr, old.clone());
+        let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();
+        let replacement = crate::PeerLease::new(replacement_tx);
+        table.register(addr, replacement.clone());
+
+        let mut wire = Vec::new();
+        crate::wire::write_message(
+            &mut wire,
+            Magic::BITCOIN,
+            &crate::Message::Headers(Vec::new()),
+        )
+        .expect("headers encodes");
+        let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
+        let shared = test_shared(
+            Arc::clone(&table),
+            headers_tx,
+            crossbeam_channel::unbounded().0,
+        );
+        let mut peer = Peer::new(
+            ScriptedStream {
+                script: io::Cursor::new(wire),
+            },
+            Magic::BITCOIN,
+        );
+        peer.state = PeerState::Ready;
+
+        assert!(run_message_loop(&mut peer, addr, &old, &shared, None).is_ok());
+        assert!(headers_rx.try_recv().is_err());
+        assert!(old.is_cancelled());
+        assert!(table.is_current(replacement.source(Some(addr))));
+    }
+
+    fn sendcmpct_scenario(send_compact: bool, version: u64, port: u16) -> bool {
+        let mut wire = Vec::new();
+        crate::wire::write_message(
+            &mut wire,
+            Magic::BITCOIN,
+            &crate::Message::SendCmpct(bitcoin::p2p::message_compact_blocks::SendCmpct {
+                send_compact,
+                version,
+            }),
+        )
+        .expect("sendcmpct encodes");
+        let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, port));
+        let table = Arc::new(crate::PeerTable::new());
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        table.register(addr, lease.clone());
+        assert!(
+            table.publish_info(
+                addr,
+                &lease,
+                crate::PeerInfo {
+                    endpoint: Some(addr),
+                    network: addr.net(),
+                    addr: addr.into(),
+                    version: 70_016,
+                    wtxid_relay: false,
+                    relay_transactions: true,
+                    compact_block_relay: false,
+                    send_headers: false,
+                    services: 0,
+                    user_agent: String::from("/test/"),
+                    start_height: 0,
+                    best_known_height: 0,
+                    conn_time: 0,
+                    inbound: false,
+                    addr_bind: crate::TransportRemote::new(
+                        addr.socket_addr()
+                            .unwrap_or_else(|| panic!("expected IP fixture")),
+                    ),
+                    time_offset: 0,
+                    counters: std::sync::Arc::new(crate::PeerCounters::default()),
+                    transport: crate::TransportProtocol::V1,
+                },
+            )
+        );
+        let mut peer = Peer::new(ScriptedEof(io::Cursor::new(wire)), Magic::BITCOIN);
+        peer.state = PeerState::Ready;
+        let shared = test_shared(
+            Arc::clone(&table),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+        assert!(run_message_loop(&mut peer, addr, &lease, &shared, None).is_err());
+        table.compact_relay_of(addr)
+    }
+
+    #[test]
+    fn sendcmpct_raises_published_compact_relay_preference() {
+        assert!(sendcmpct_scenario(true, 2, 18_448));
+        assert!(sendcmpct_scenario(false, 2, 18_449));
+        assert!(!sendcmpct_scenario(false, 1, 18_450));
+        assert!(!sendcmpct_scenario(false, 7, 18_451));
+    }
+
+    struct ScriptedEof(io::Cursor<Vec<u8>>);
+
+    impl io::Read for ScriptedEof {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match io::Read::read(&mut self.0, buf)? {
+                0 => Err(io::ErrorKind::UnexpectedEof.into()),
+                read => Ok(read),
+            }
+        }
+    }
+
+    impl io::Write for ScriptedEof {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ContinuingStream(Arc<AtomicUsize>);
+
+    impl io::Read for ContinuingStream {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                Err(io::ErrorKind::WouldBlock.into())
+            } else {
+                Err(io::ErrorKind::UnexpectedEof.into())
+            }
+        }
+    }
+
+    impl io::Write for ContinuingStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn message_loop_keeps_current_lease_running() {
+        let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 18_446));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        let mut peer = Peer::new(ContinuingStream(Arc::clone(&reads)), Magic::BITCOIN);
+        peer.state = PeerState::Ready;
+        let shared = test_shared(
+            Arc::new(crate::PeerTable::new()),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+
+        assert!(run_message_loop(&mut peer, addr, &lease, &shared, None).is_err());
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn message_loop_probes_a_fresh_peer_immediately_then_stays_quiet() {
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(outbound_tx);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut peer = Peer::new(ContinuingStream(Arc::clone(&reads)), Magic::BITCOIN);
+        peer.state = PeerState::Ready;
+        let shared = test_shared(
+            Arc::new(crate::PeerTable::new()),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+        let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 18_448));
+
+        assert!(run_message_loop(&mut peer, addr, &lease, &shared, None).is_err());
+        assert!(
+            matches!(
+                outbound_rx.try_recv().map(|frame| frame.message().clone()),
+                Ok(crate::Message::Ping(_))
+            ),
+            "the first pass after the handshake owes an immediate probe, like Core's epoch-initialized m_ping_start",
+        );
+        assert!(
+            matches!(
+                outbound_rx.try_recv(),
+                Err(crossbeam_channel::TryRecvError::Empty)
+            ),
+            "a peer already probed owes no second probe inside one interval",
+        );
+    }
+
+    #[test]
+    fn registration_cancels_replaced_lease() {
+        let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 18_447));
+        let table = crate::PeerTable::new();
+        let (old_tx, _old_rx) = crossbeam_channel::unbounded();
+        let old = crate::PeerLease::new(old_tx);
+        table.register(addr, old.clone());
+        let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();
+        let replacement = crate::PeerLease::new(replacement_tx);
+
+        assert!(table.register(addr, replacement.clone()));
+        table.publish_info(addr, &replacement, peer_info(addr, 2));
+        assert!(old.is_cancelled());
+        assert!(table.is_current(replacement.source(Some(addr))));
+        assert_eq!(table.infos(), vec![peer_info(addr, 2)]);
+    }
+
+    #[test]
+    fn stale_release_preserves_replacement_and_current_release_removes_it() {
+        let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 18_448));
+        let table = crate::PeerTable::new();
+        let (stale_tx, _stale_rx) = crossbeam_channel::unbounded();
+        let stale = crate::PeerLease::new(stale_tx);
+        let (current_tx, _current_rx) = crossbeam_channel::unbounded();
+        let current = crate::PeerLease::new(current_tx);
+        table.register(addr, current.clone());
+        table.publish_info(addr, &current, peer_info(addr, 2));
+
+        assert!(!table.remove_current(addr, &stale));
+        assert!(!current.is_cancelled());
+        assert!(table.is_current(current.source(Some(addr))));
+        assert!(table.remove_current(addr, &current));
+        assert!(current.is_cancelled());
+        assert!(table.is_empty());
+    }
+
+    struct BlockingTestWriter {
+        remaining: Cell<usize>,
+        unblock: crossbeam_channel::Receiver<()>,
+        blocked: crossbeam_channel::Sender<()>,
+    }
+
+    impl io::Write for BlockingTestWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let remaining = self.remaining.get();
+            if buf.len() <= remaining {
+                self.remaining.set(remaining - buf.len());
+                Ok(buf.len())
+            } else {
+                let _ = self.blocked.try_send(());
+                let _ = self.unblock.recv();
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    "test: unblocked",
+                ))
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct EventWriter {
+        events: crossbeam_channel::Sender<()>,
+    }
+
+    impl io::Write for EventWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let _ = self.events.send(());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ScriptedStream {
+        script: io::Cursor<Vec<u8>>,
+    }
+
+    impl io::Read for ScriptedStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match io::Read::read(&mut self.script, buf)? {
+                0 => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+                read => Ok(read),
+            }
+        }
+    }
+
+    impl io::Write for ScriptedStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cancel_wakes_writer_blocked_on_empty_queue_with_live_senders() {
+        let (_client, server, peer_addr) = loopback_pair();
+        let writer_stream = crate::CountingStream::new(
+            server.try_clone().expect("try_clone"),
+            std::sync::Arc::new(crate::PeerCounters::default()),
+        );
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(outbound_tx);
+        let lease_probe = lease.clone();
+
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let writer = spawn_connection_writer(
+            writer_stream,
+            crate::transport::SendTransport::V1(Magic::BITCOIN),
+            outbound_rx,
+            lease.close_signal(),
+            lease.budget_handle(),
+            peer_addr,
+            None,
+        )
+        .expect("spawn writer");
+        let waiter = std::thread::spawn(move || {
+            writer.join().expect("writer join");
+            let _ = done_tx.send(());
+        });
+
+        lease.cancel();
+        done_rx
+            .recv_timeout(FAILSAFE)
+            .expect("close signal must wake an idle writer with live senders");
+        waiter.join().expect("waiter join");
+        assert!(lease_probe.is_cancelled());
+    }
+
+    #[test]
+    fn writer_mid_write_exits_on_unblock_deterministically() {
+        let frame = ping_len();
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new_with_budget(
+            outbound_tx,
+            false,
+            OutboundBudget::with_block_reserve(100, 100 * frame, 0),
+        );
+
+        for _ in 0..5 {
+            lease
+                .send(crate::Message::Ping(9))
+                .expect("fresh queue admits a ping");
+        }
+        assert_eq!(lease.budget_handle().pending(), (5, 5 * frame));
+
+        let (unblock_tx, unblock_rx) = crossbeam_channel::bounded(1);
+        let (blocked_tx, blocked_rx) = crossbeam_channel::bounded(1);
+        let mut writer = BlockingTestWriter {
+            remaining: Cell::new(2 * frame),
+            unblock: unblock_rx,
+            blocked: blocked_tx,
+        };
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let close_rx = lease.close_signal();
+        let net_trace = crate::net_trace::NetTrace::outbound(
+            9,
+            "127.0.0.1:18444".parse().expect("valid socket address"),
+            crate::peer_info::PeerRole::BlockRelayOnly,
+        );
+        let worker = std::thread::spawn(move || {
+            run_writer_loop(
+                &outbound_rx,
+                close_rx,
+                &mut writer,
+                &mut crate::transport::SendTransport::V1(Magic::BITCOIN),
+                &crate::PeerCounters::default(),
+                Some(&net_trace),
+            );
+            let _ = done_tx.send(());
+        });
+
+        blocked_rx
+            .recv_timeout(FAILSAFE)
+            .expect("writer must exhaust its byte budget");
+        assert_eq!(
+            lease.budget_handle().pending(),
+            (5, 5 * frame),
+            "a burst in flight keeps its charge"
+        );
+
+        lease.cancel();
+        let _ = unblock_tx.send(());
+        done_rx
+            .recv_timeout(FAILSAFE)
+            .expect("unblock must release the blocked writer");
+        worker.join().expect("worker join");
+
+        assert_eq!(
+            lease.budget_handle().pending(),
+            (0, 0),
+            "a failed write drops its burst, and each frame returns its own charge"
+        );
+    }
+
+    #[test]
+    fn writer_releases_budget_after_write() {
+        let frame = ping_len();
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new_with_budget(
+            outbound_tx,
+            false,
+            OutboundBudget::with_block_reserve(100, 100 * frame, 0),
+        );
+        lease
+            .send(crate::Message::Ping(9))
+            .expect("fresh queue admits a ping");
+        assert_eq!(lease.budget_handle().pending(), (1, frame));
+
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut writer = EventWriter { events: event_tx };
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let budget = lease.budget_handle();
+        let close_rx = lease.close_signal();
+        let worker = std::thread::spawn(move || {
+            run_writer_loop(
+                &outbound_rx,
+                close_rx,
+                &mut writer,
+                &mut crate::transport::SendTransport::V1(Magic::BITCOIN),
+                &crate::PeerCounters::default(),
+                None,
+            );
+            let _ = done_tx.send(());
+        });
+
+        drop(lease);
+
+        event_rx
+            .recv_timeout(FAILSAFE)
+            .expect("writer must emit an event after write returns");
+        done_rx
+            .recv_timeout(FAILSAFE)
+            .expect("writer must exit after senders drop");
+        worker.join().expect("worker join");
+
+        assert_eq!(
+            budget.pending(),
+            (0, 0),
+            "written bytes must be fully released"
+        );
+    }
+
+    #[test]
+    fn writer_exit_shuts_down_the_reader_socket_clone() {
+        let (mut client, server, peer_addr) = loopback_pair();
+        let reader_stream = server.try_clone().expect("reader clone");
+        client.set_nonblocking(true).expect("nonblocking client");
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(outbound_tx);
+        let writer = spawn_connection_writer(
+            crate::CountingStream::new(server, std::sync::Arc::new(crate::PeerCounters::default())),
+            crate::transport::SendTransport::V1(Magic::BITCOIN),
+            outbound_rx,
+            lease.close_signal(),
+            lease.budget_handle(),
+            peer_addr,
+            None,
+        )
+        .expect("spawn writer");
+
+        lease.cancel();
+        writer.join().expect("writer join");
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            io::Read::read(&mut client, &mut byte).expect("shutdown must produce EOF"),
+            0
+        );
+        drop(reader_stream);
+    }
+
+    #[test]
+    fn run_connected_session_publishes_peer_relay_preference_and_joins_writer() {
+        for peer_requested_wtxid in [false, true] {
+            let (client, server, peer_addr) = loopback_pair();
+            drop(client);
+
+            let peer_table = Arc::new(crate::PeerTable::new());
+            let (published_tx, published_rx) = crossbeam_channel::bounded(1);
+            let observed_table = Arc::clone(&peer_table);
+            let mut shared = test_shared(
+                peer_table,
+                crossbeam_channel::unbounded().0,
+                crossbeam_channel::unbounded().0,
+            );
+            shared.peer_ready = Some(Arc::new(move |_source| {
+                let requested = observed_table.infos()[0].wtxid_relay;
+                let _ = published_tx.try_send(requested);
+            }));
+
+            let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+            let lease = crate::PeerLease::new(outbound_tx);
+            let lease_probe = lease.clone();
+            shared.peer_table.register(peer_addr, lease.clone());
+
+            let info = crate::PeerInfo {
+                endpoint: Some(peer_addr),
+                network: peer_addr.net(),
+                addr: crate::PeerRemote::Endpoint(peer_addr),
+                version: 70_016,
+                wtxid_relay: false,
+                relay_transactions: true,
+                compact_block_relay: false,
+                send_headers: false,
+                services: 0,
+                user_agent: String::from("/test/"),
+                start_height: 0,
+                best_known_height: 0,
+                conn_time: 0,
+                inbound: false,
+                addr_bind: crate::TransportRemote::new(
+                    peer_addr
+                        .socket_addr()
+                        .unwrap_or_else(|| panic!("expected IP fixture")),
+                ),
+                time_offset: 0,
+                counters: std::sync::Arc::new(crate::PeerCounters::default()),
+                transport: crate::TransportProtocol::V1,
+            };
+
+            let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+            let worker = std::thread::spawn(move || {
+                let mut peer = Peer::new(
+                    crate::CountingStream::new(
+                        server,
+                        std::sync::Arc::new(crate::PeerCounters::default()),
+                    ),
+                    Magic::BITCOIN,
+                );
+                if peer_requested_wtxid {
+                    peer.wtxid_relay.mark_peer_supported();
+                }
+                let result =
+                    run_connected_session(&mut peer, peer_addr, &shared, lease, outbound_rx, info);
+                let _ = done_tx.send(result);
+            });
+
+            let result = done_rx
+                .recv_timeout(FAILSAFE)
+                .expect("session must return while an external lease clone is alive");
+            worker.join().expect("worker join");
+            assert!(result.is_err(), "EOF on read must end the session");
+            assert!(lease_probe.is_cancelled());
+            assert_eq!(
+                published_rx.try_recv().expect("published ready metadata"),
+                peer_requested_wtxid
+            );
+        }
+    }
+
+    #[test]
+    fn session_disconnect_updates_full_relay_and_preserves_block_relay_privacy() {
+        for (block_relay, stale) in [(false, false), (true, false), (false, true)] {
+            let (client, server, peer_addr) = loopback_pair();
+            drop(client);
+
+            let peer_table = Arc::new(crate::PeerTable::new());
+            let mut shared = test_shared(
+                peer_table,
+                crossbeam_channel::unbounded().0,
+                crossbeam_channel::unbounded().0,
+            );
+            let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
+            book.learn_dns("seed", &[peer_addr], 5000);
+            shared.address_book = Some(Arc::clone(&book));
+
+            let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+            let lease = if block_relay {
+                crate::PeerLease::new_block_relay(outbound_tx)
+            } else {
+                crate::PeerLease::new(outbound_tx)
+            };
+            shared.peer_table.register(peer_addr, lease.clone());
+            if stale {
+                let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();
+                assert!(
+                    shared
+                        .peer_table
+                        .register(peer_addr, crate::PeerLease::new(replacement_tx),)
+                );
+            }
+
+            let info = crate::PeerInfo {
+                endpoint: Some(peer_addr),
+                network: peer_addr.net(),
+                addr: crate::PeerRemote::Endpoint(peer_addr),
+                version: 70_016,
+                wtxid_relay: false,
+                relay_transactions: true,
+                compact_block_relay: false,
+                send_headers: false,
+                services: 9,
+                user_agent: String::from("/test/"),
+                start_height: 0,
+                best_known_height: 0,
+                conn_time: 0,
+                inbound: false,
+                addr_bind: crate::TransportRemote::new(
+                    peer_addr
+                        .socket_addr()
+                        .unwrap_or_else(|| panic!("expected IP fixture")),
+                ),
+                time_offset: 0,
+                counters: std::sync::Arc::new(crate::PeerCounters::default()),
+                transport: crate::TransportProtocol::V1,
+            };
+
+            let mut peer = Peer::new(
+                crate::CountingStream::new(
+                    server,
+                    std::sync::Arc::new(crate::PeerCounters::default()),
+                ),
+                Magic::BITCOIN,
+            );
+            let _ = run_connected_session(&mut peer, peer_addr, &shared, lease, outbound_rx, info);
+
+            let last_seen = book.gossip(10_000)[0].time;
+            if block_relay || stale {
+                assert_eq!(
+                    last_seen, 5000,
+                    "block-relay or rejected ready session must never refresh last_seen"
+                );
+            } else {
+                assert_ne!(
+                    last_seen, 5000,
+                    "full-relay disconnect must refresh last_seen"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn message_loop_disconnects_saturated_peer() {
+        let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new_with_budget(
+            outbound_tx,
+            false,
+            OutboundBudget::new(1, ping_len()),
+        );
+
+        let mut wire = Vec::new();
+        crate::wire::write_message(&mut wire, Magic::BITCOIN, &crate::Message::Ping(41))
+            .expect("ping encodes");
+        crate::wire::write_message(&mut wire, Magic::BITCOIN, &crate::Message::Ping(42))
+            .expect("ping encodes");
+        let mut peer = Peer::new(
+            ScriptedStream {
+                script: io::Cursor::new(wire),
+            },
+            Magic::BITCOIN,
+        );
+        peer.state = PeerState::Ready;
+
+        let shared = test_shared(
+            Arc::new(crate::PeerTable::new()),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+        let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 18_447));
+
+        let result = run_message_loop(&mut peer, addr, &lease, &shared, None);
+        assert!(result.is_err(), "saturation must end the message loop");
+        assert!(lease.is_cancelled());
+    }
+
+    fn queued(
+        messages: &[crate::Message],
+    ) -> (
+        crate::PeerLease,
+        crossbeam_channel::Receiver<crate::QueuedFrame>,
+    ) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        for message in messages {
+            lease
+                .send(message.clone())
+                .expect("a fresh queue admits the message");
+        }
+        (lease, rx)
+    }
+
+    #[test]
+    fn collect_write_burst_coalesces_control_until_a_bulk_payload() {
+        let (lease, rx) = queued(&[
+            crate::Message::Ping(0),
+            crate::Message::Pong(1),
+            crate::Message::Block(bitcoin_rs_consensus::primitives::BlockImage::from_local(
+                bitcoin_rs_consensus::primitives::Block::default(),
+            )),
+            crate::Message::Ping(2),
+        ]);
+        let first = rx.try_recv().expect("the first queued frame");
+
+        let (burst, leftover) = collect_write_burst(first, &rx);
+
+        let messages: Vec<_> = burst.iter().map(|frame| frame.message().clone()).collect();
+        assert_eq!(
+            messages,
+            vec![crate::Message::Ping(0), crate::Message::Pong(1)]
+        );
+        assert!(matches!(
+            leftover.as_ref().map(crate::QueuedFrame::message),
+            Some(crate::Message::Block(_))
+        ));
+        assert_eq!(
+            lease.budget_handle().pending().0,
+            4,
+            "every frame keeps its charge while it is in the burst or the leftover"
+        );
+        drop((burst, leftover));
+        assert_eq!(
+            lease.budget_handle().pending().0,
+            1,
+            "dropping the burst returns exactly its frames' charges"
+        );
+        assert!(matches!(
+            rx.try_recv().map(crate::QueuedFrame::into_message),
+            Ok(crate::Message::Ping(2))
+        ));
+    }
+
+    #[test]
+    fn collect_write_burst_emits_a_bulk_payload_alone() {
+        let (_lease, rx) = queued(&[
+            crate::Message::Block(bitcoin_rs_consensus::primitives::BlockImage::from_local(
+                bitcoin_rs_consensus::primitives::Block::default(),
+            )),
+            crate::Message::Ping(1),
+        ]);
+        let first = rx.try_recv().expect("the bulk frame");
+        let (burst, leftover) = collect_write_burst(first, &rx);
+        assert_eq!(burst.len(), 1);
+        assert!(leftover.is_none());
+        assert!(matches!(
+            rx.try_recv().map(crate::QueuedFrame::into_message),
+            Ok(crate::Message::Ping(1))
+        ));
+    }
+
+    /// Accepts at most `budget` bytes per vectored call, then fails once the
+    /// budget is spent: a socket that took a prefix of the burst and broke.
+    struct BrokenAfter {
+        budget: usize,
+    }
+
+    impl io::Write for BrokenAfter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            panic!("the burst path must write vectored");
+        }
+        fn write_vectored(&mut self, buffers: &[io::IoSlice<'_>]) -> io::Result<usize> {
+            if self.budget == 0 {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "socket broke"));
+            }
+            let offered: usize = buffers.iter().map(|slice| slice.len()).sum();
+            let take = offered.min(self.budget);
+            self.budget -= take;
+            Ok(take)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Accepts at most `per_call` bytes per vectored call and never fails:
+    /// backpressure that spreads one burst over many partial accepts.
+    struct Dribble {
+        per_call: usize,
+    }
+
+    impl io::Write for Dribble {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            panic!("the burst path must write vectored");
+        }
+        fn write_vectored(&mut self, buffers: &[io::IoSlice<'_>]) -> io::Result<usize> {
+            let offered: usize = buffers.iter().map(|slice| slice.len()).sum();
+            Ok(offered.min(self.per_call))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_failed_burst_write_keeps_charges_only_for_fully_accepted_frames() {
+        let (_lease, rx) = queued(&[crate::Message::Ping(0), crate::Message::Pong(1)]);
+        let first = rx.try_recv().expect("the first queued frame");
+        let ping_len = crate::wire::wire_len(&crate::Message::Ping(0)).expect("ping encodes");
+        let mut writer = BrokenAfter { budget: ping_len };
+        let mut transport = crate::transport::SendTransport::V1(Magic::BITCOIN);
+        let counters = crate::PeerCounters::default();
+
+        let alive = write_ready_burst(first, &rx, &mut writer, &mut transport, &counters, None);
+
+        assert!(!alive, "a write error ends the writer");
+        assert_eq!(
+            counters.sent_per_message(),
+            vec![("ping", u64::try_from(ping_len).expect("fits u64"))],
+            "the frame the socket accepted in full keeps its charge; the torn one keeps none"
+        );
+    }
+
+    #[test]
+    fn partial_acceptance_across_calls_charges_every_frame() {
+        let (_lease, rx) = queued(&[crate::Message::Ping(0), crate::Message::Pong(1)]);
+        let first = rx.try_recv().expect("the first queued frame");
+        let ping_len = crate::wire::wire_len(&crate::Message::Ping(0)).expect("ping encodes");
+        let pong_len = crate::wire::wire_len(&crate::Message::Pong(1)).expect("pong encodes");
+        let mut writer = Dribble { per_call: 7 };
+        let mut transport = crate::transport::SendTransport::V1(Magic::BITCOIN);
+        let counters = crate::PeerCounters::default();
+
+        let alive = write_ready_burst(first, &rx, &mut writer, &mut transport, &counters, None);
+
+        assert!(alive, "partial acceptance is backpressure, not an error");
+        assert_eq!(
+            counters.sent_per_message(),
+            vec![
+                ("ping", u64::try_from(ping_len).expect("fits u64")),
+                ("pong", u64::try_from(pong_len).expect("fits u64")),
+            ],
+            "every fully written frame is charged exactly once across the retries"
+        );
+    }
+
+    #[test]
+    fn queued_frames_release_on_writer_exit() {
+        use crate::connection::{OutboundBudget, SharedOutboundBudget};
+
+        let shared = Arc::new(SharedOutboundBudget::with_limits(10_000, 500));
+        let (bystander_tx, _bystander_rx) = crossbeam_channel::unbounded();
+        let bystander = crate::PeerLease::new(bystander_tx).with_shared_budget(&shared);
+        let bystander_credit = bystander
+            .budget_handle()
+            .try_charge(100)
+            .expect("bystander charge");
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new_with_budget(
+            tx,
+            false,
+            OutboundBudget::with_block_reserve(100, 1_000_000, 500),
+        )
+        .with_shared_budget(&shared);
+        let frame = ping_len();
+        for nonce in 0..3 {
+            lease
+                .send(crate::Message::Ping(nonce))
+                .expect("queue admits a ping");
+        }
+        let reservation = lease
+            .try_reserve_production()
+            .expect("the session's live reservation");
+        assert_eq!(shared.pending(), 100 + 3 * frame + 500);
+
+        let exit = super::WriterExit {
+            budget: lease.budget_handle(),
+            outbound_rx: &rx,
+        };
+        drop(exit);
+
+        assert!(lease.budget_handle().writer_dead());
+        assert_eq!(
+            shared.pending(),
+            100 + 500,
+            "the three queued frames returned their own charge, nothing more"
+        );
+        assert_eq!(lease.budget_handle().pending(), (1, 500));
+        assert!(rx.is_empty());
+        assert!(matches!(
+            lease.send(crate::Message::Ping(9)),
+            Err(crate::OutboundRefusal::Closed(_))
+        ));
+        assert!(lease.is_cancelled());
+
+        drop(reservation);
+        assert_eq!(shared.pending(), 100);
+        assert_eq!(lease.budget_handle().pending(), (0, 0));
+        drop(bystander_credit);
+        assert_eq!(shared.pending(), 0);
+    }
+
+    #[test]
+    fn forward_block_cancels_promptly_on_latch() {
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::bounded(1);
+        let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
+        let mut shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
+        shared.session_cancel = latch.reader();
+        let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(outbound_tx);
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let first = bitcoin_rs_consensus::primitives::BlockImage::from_raw(bytes::Bytes::from(
+            bitcoin::consensus::encode::serialize(&genesis),
+        ))
+        .expect("payload");
+        let second = first.clone();
+        let source = lease.source(None);
+        assert!(shared.forward_block(first, source, None, None));
+        let (join_tx, join_rx) = crossbeam_channel::bounded(1);
+        let worker = std::thread::spawn(move || {
+            let result = shared.forward_block(second, source, None, None);
+            let _ = join_tx.send(result);
+        });
+        std::thread::sleep(Duration::from_millis(10));
+        latch.trigger();
+        let delivered = join_rx.recv_timeout(Duration::from_millis(40));
+        assert!(
+            delivered.is_ok(),
+            "forward_block must unblock promptly upon latch trigger without waiting for poll timeout"
+        );
+        assert!(!delivered.expect("result"));
+        let _ = worker.join();
+    }
+
+    #[test]
+    fn enqueue_headers_cancels_promptly_on_latch() {
+        let (headers_tx, _headers_rx) = crossbeam_channel::bounded(1);
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+        let latch = bitcoin_rs_consensus::latch::LatchWriter::new();
+        let mut shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
+        shared.session_cancel = latch.reader();
+        let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(outbound_tx);
+        let source = lease.source(None);
+        shared.send_headers_response(&lease, source, Vec::new());
+        let (join_tx, join_rx) = crossbeam_channel::bounded(1);
+        let worker = std::thread::spawn(move || {
+            shared.send_headers_response(&lease, source, Vec::new());
+            let _ = join_tx.send(());
+        });
+        std::thread::sleep(Duration::from_millis(10));
+        latch.trigger();
+        assert!(
+            join_rx.recv_timeout(Duration::from_millis(40)).is_ok(),
+            "enqueue_headers must unblock promptly upon latch trigger without waiting for poll timeout"
+        );
+        let _ = worker.join();
+    }
+}
 
 #[cfg(test)]
 mod ready_notify_tests {
@@ -4370,28 +5549,3589 @@ mod feeler_tests {
 }
 
 #[cfg(test)]
-mod discouragement_tests;
+mod discouragement_tests {
+    use super::*;
+    use crate::{Message, PeerError, PeerLease, PeerRole};
+    use bitcoin_rs_consensus::primitives::USER_AGENT;
+
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        Io(#[from] std::io::Error),
+        #[error(transparent)]
+        AddrParse(#[from] std::net::AddrParseError),
+        #[error(transparent)]
+        Peer(#[from] crate::PeerError),
+        #[error(transparent)]
+        TryFromInt(#[from] std::num::TryFromIntError),
+        #[error(transparent)]
+        Sonic(#[from] sonic_rs::Error),
+        #[error("missing: {0}")]
+        Missing(&'static str),
+    }
+
+    impl From<&'static str> for TestError {
+        fn from(msg: &'static str) -> Self {
+            Self::Missing(msg)
+        }
+    }
+
+    type TestResult = Result<(), TestError>;
+
+    fn shared() -> ConnectionShared {
+        let (headers, _) = crossbeam_channel::unbounded();
+        let (blocks, _) = crossbeam_channel::unbounded();
+        test_shared(Arc::new(crate::PeerTable::new()), headers, blocks)
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum LeaseOrigin {
+        Automatic,
+        Manual,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum BanProtection {
+        Protected,
+        Unprotected,
+    }
+
+    fn test_lease(origin: LeaseOrigin, protection: BanProtection) -> PeerLease {
+        let (tx, _) = crossbeam_channel::unbounded();
+        let lease = match origin {
+            LeaseOrigin::Manual => PeerLease::new_manual(tx, PeerRole::FullRelay),
+            LeaseOrigin::Automatic => PeerLease::new(tx),
+        };
+        lease.with_no_ban(protection == BanProtection::Protected)
+    }
+
+    struct ServiceUpdateScript {
+        bytes: std::io::Cursor<Vec<u8>>,
+        update_at: Option<u64>,
+        book: Arc<crate::addrman::AddressBook>,
+        addr: PeerEndpoint,
+    }
+    impl std::io::Read for ServiceUpdateScript {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if self.update_at.is_some_and(|at| self.bytes.position() >= at) {
+                self.update_at = None;
+                self.book.learn_peer(
+                    crate::PeerRemote::Endpoint(self.addr),
+                    &[(self.addr, 1024, unix_time_secs())],
+                    unix_time_secs(),
+                );
+            }
+            std::io::Read::read(&mut self.bytes, bytes)
+        }
+    }
+    impl std::io::Write for ServiceUpdateScript {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn accepted_version_updates_once_without_replaying_on_later_steps() -> TestResult {
+        for (repeated_version, protected) in
+            [(true, false), (true, true), (false, false), (false, true)]
+        {
+            let directory = tempfile::tempdir()?;
+            let address: PeerEndpoint = "8.8.8.8:8333".parse()?;
+            let mut shared = shared();
+            let book = crate::addrman::AddressBook::open(
+                Some(directory.path().join("peers.dat")),
+                shared.magic.to_bytes(),
+                false,
+                None,
+            );
+            book.learn_peer(
+                crate::PeerRemote::Endpoint(address),
+                &[(address, 9, unix_time_secs())],
+                unix_time_secs(),
+            );
+            shared.address_book = Some(Arc::clone(&book));
+            let lease = test_lease(
+                LeaseOrigin::Automatic,
+                if protected {
+                    BanProtection::Protected
+                } else {
+                    BanProtection::Unprotected
+                },
+            );
+            shared.peer_table.register(address, lease.clone());
+            let mut wire = Vec::new();
+            if protected {
+                crate::wire::write_message(&mut wire, shared.magic, &Message::Verack)?;
+            }
+            crate::wire::write_message(
+                &mut wire,
+                shared.magic,
+                &Message::Version(crate::handshake::version_message(
+                    42,
+                    0,
+                    PeerRole::FullRelay,
+                    ServiceFlags::from(9),
+                    USER_AGENT,
+                )),
+            )?;
+            let update_at = (!repeated_version).then_some(u64::try_from(wire.len())?);
+            if repeated_version {
+                crate::wire::write_message(
+                    &mut wire,
+                    shared.magic,
+                    &Message::Version(crate::handshake::version_message(
+                        43,
+                        0,
+                        PeerRole::FullRelay,
+                        ServiceFlags::from(1),
+                        USER_AGENT,
+                    )),
+                )?;
+            } else {
+                crate::wire::write_message(&mut wire, shared.magic, &Message::WtxidRelay)?;
+                crate::wire::write_message(&mut wire, shared.magic, &Message::Verack)?;
+            }
+            let mut peer = Peer::new(
+                ServiceUpdateScript {
+                    bytes: std::io::Cursor::new(wire),
+                    update_at,
+                    book: Arc::clone(&book),
+                    addr: address,
+                },
+                shared.magic,
+            );
+            let result = run_outbound_handshake(
+                &mut peer,
+                44,
+                0,
+                &lease,
+                Instant::now() + Duration::from_secs(1),
+                address,
+                &shared,
+            );
+            if repeated_version {
+                if protected {
+                    assert!(matches!(result, Err(PeerError::Io(_))));
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(PeerError::Misbehavior("duplicate version message"))
+                    ));
+                }
+            } else {
+                result?;
+                assert_eq!(peer.state, crate::PeerState::Ready);
+            }
+            book.save();
+            let bytes = std::fs::read(directory.path().join("peers-f9beb4d9.dat"))?;
+            let stored: sonic_rs::Value = sonic_rs::from_slice(&bytes[..bytes.len() - 32])?;
+            assert_eq!(
+                stored["records"][0]["services"],
+                if repeated_version { 9 } else { 1033 },
+                "accepted VERSION replaces flags; later feature/VERACK must preserve a fresh gossip update"
+            );
+            assert_eq!(stored["records"][0]["last_success"], 0);
+            assert_eq!(stored["records"][0]["tried"], false);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_wire_session_closes_and_refuses_the_link_with_reconnection_delay() -> TestResult {
+        let shared = shared();
+        let address: PeerEndpoint = "8.8.8.8:8333".parse()?;
+        let stale = test_lease(LeaseOrigin::Automatic, BanProtection::Unprotected);
+        shared.peer_table.register(address, stale.clone());
+        let current = test_lease(LeaseOrigin::Automatic, BanProtection::Unprotected);
+        shared.peer_table.register(address, current.clone());
+        let fault = PeerError::Incoming(Box::new(PeerError::BadChecksum));
+        shared.note_misbehavior(address, &stale, &fault);
+        assert!(!shared.banned.is_discouraged(address.address()));
+        for error in [
+            PeerError::Protocol("outbound queue closed"),
+            PeerError::Protocol("network inactive"),
+            PeerError::Protocol("p2p startup cancelled"),
+            PeerError::Protocol("outbound peer lacks desirable services"),
+            PeerError::PayloadTooLarge(usize::MAX),
+            PeerError::Io(io::Error::from(io::ErrorKind::TimedOut)),
+            PeerError::inbound(PeerError::WrongNetwork {
+                expected: Magic::BITCOIN,
+                actual: Magic::from_bytes([0x2f, 0x1a, 0x7c, 0x05]),
+            }),
+        ] {
+            shared.note_misbehavior(address, &current, &error);
+        }
+        assert!(
+            !shared.banned.is_discouraged(address.address()),
+            "local/backpressure/policy failures are not remote misbehavior"
+        );
+        shared.note_misbehavior(address, &current, &fault);
+        assert!(shared.banned.is_discouraged(address.address()));
+        assert!(
+            shared.banned.read().is_empty(),
+            "automatic avoidance must not become a manual ban"
+        );
+        assert!(matches!(
+            shared.check_automatic_destination(address),
+            Err(PeerError::DiscouragedDestination(_))
+        ));
+        assert!(
+            shared.check_manual_destination(address).is_ok(),
+            "manual dials bypass automatic avoidance"
+        );
+        assert!(
+            !shared
+                .banned
+                .automatic_snapshot(SystemTime::now())
+                .allows(address.address())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn manual_and_protected_local_connections_never_discourage_an_ip() -> TestResult {
+        for inbound in [false, true] {
+            let shared = shared();
+            let address: PeerEndpoint = "8.8.8.8:8333".parse()?;
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let mut sender = TcpStream::connect(listener.local_addr()?)?;
+            let (stream, _) = listener.accept()?;
+            configure_peer_stream(&stream)?;
+            let counters = Arc::new(crate::PeerCounters::default());
+            let local = stream.local_addr()?;
+            let mut peer = Peer::new(
+                crate::CountingStream::new(stream, Arc::clone(&counters)),
+                Magic::BITCOIN,
+            );
+            peer.state = crate::PeerState::Ready;
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let lease = if inbound {
+                PeerLease::new_inbound(tx)
+            } else {
+                PeerLease::new(tx)
+            };
+            let probe = lease.clone();
+            shared.peer_table.register(address, lease.clone());
+            let version = crate::handshake::version_message(
+                42,
+                0,
+                PeerRole::FullRelay,
+                ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                USER_AGENT,
+            );
+            let mut info =
+                crate::PeerInfo::outbound_from_version(address, local, &version, 0, 0, counters);
+            info.inbound = inbound;
+            let mut malformed = Vec::new();
+            crate::wire::write_message(&mut malformed, Magic::BITCOIN, &Message::Ping(7))?;
+            malformed[20] ^= 1;
+            io::Write::write_all(&mut sender, &malformed)?;
+            io::Write::write_all(&mut sender, &malformed)?;
+            let Err(error) = run_connected_session(&mut peer, address, &shared, lease, rx, info)
+            else {
+                return Err(TestError::Missing(
+                    "malformed frames must close the session with an error",
+                ));
+            };
+            assert!(matches!(error, PeerError::Incoming(_)));
+            assert!(probe.is_cancelled());
+            assert!(shared.peer_table.sessions().is_empty());
+            assert!(matches!(
+                shared.check_automatic_destination(address),
+                Err(PeerError::DiscouragedDestination(_))
+            ));
+            assert!(shared.banned.read().is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn protected_handshake_discards_bad_order_without_extending_deadline() -> TestResult {
+        for (ip, manual, noban) in [
+            ("8.8.8.8", true, false),
+            ("8.8.4.4", false, true),
+            ("127.0.0.1", false, false),
+            ("::ffff:127.0.0.1", false, false),
+            ("::1", false, false),
+        ] {
+            let shared = shared();
+            let address = PeerEndpoint::new(ip.parse::<std::net::IpAddr>()?, 8333);
+            let origin = if manual {
+                LeaseOrigin::Manual
+            } else {
+                LeaseOrigin::Automatic
+            };
+            let protection = if noban {
+                BanProtection::Protected
+            } else {
+                BanProtection::Unprotected
+            };
+            let lease = test_lease(origin, protection);
+            shared.peer_table.register(address, lease.clone());
+            let error = PeerError::Misbehavior("getheaders locator too large");
+            shared.note_misbehavior(address, &lease, &error);
+            assert!(!shared.banned.is_discouraged(address.address()), "{ip}");
+            assert_eq!(lease.ignores_protocol_error(&error), manual || noban);
+            assert!(
+                !lease.ignores_protocol_error(&PeerError::inbound(PeerError::WrongNetwork {
+                    expected: Magic::BITCOIN,
+                    actual: Magic::REGTEST
+                })),
+                "unread framing cannot be safely resumed"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn only_current_remote_protocol_faults_change_automatic_avoidance() -> TestResult {
+        for manual in [false, true] {
+            let origin = if manual {
+                LeaseOrigin::Manual
+            } else {
+                LeaseOrigin::Automatic
+            };
+            let protection = if manual {
+                BanProtection::Unprotected
+            } else {
+                BanProtection::Protected
+            };
+            let lease = test_lease(origin, protection);
+            let mut bytes = Vec::new();
+            crate::wire::write_message(&mut bytes, Magic::REGTEST, &Message::Verack)?;
+            crate::wire::write_message(
+                &mut bytes,
+                Magic::REGTEST,
+                &Message::Version(crate::handshake::version_message(
+                    42,
+                    0,
+                    PeerRole::FullRelay,
+                    ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                    USER_AGENT,
+                )),
+            )?;
+            crate::wire::write_message(&mut bytes, Magic::REGTEST, &Message::Verack)?;
+            let mut peer = Peer::new(std::io::Cursor::new(bytes), Magic::REGTEST);
+            let (accepted, _) = crate::handshake::next_handshake_step(
+                &mut peer,
+                &lease,
+                Instant::now() + Duration::from_secs(1),
+            )?;
+            assert!(matches!(accepted, Message::Version(_)));
+            let (accepted, _) = crate::handshake::next_handshake_step(
+                &mut peer,
+                &lease,
+                Instant::now() + Duration::from_secs(1),
+            )?;
+            assert!(matches!(accepted, Message::Verack));
+            assert_eq!(peer.state, crate::peer::PeerState::Ready);
+        }
+        Ok(())
+    }
+}
 
 #[cfg(test)]
-mod dial_cleanup_tests;
+mod dial_cleanup_tests {
+    #![expect(clippy::expect_used, reason = "fixture setup must fail loudly")]
+
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use super::{ConnectionOrigin, FailureAccounting, TransportChoice, dial, test_shared};
+    use crate::PeerRole;
+
+    #[test]
+    fn a_failed_cancel_guard_removes_the_registered_outbound_lease() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let shared = Arc::new(test_shared(
+            Arc::new(crate::PeerTable::new()),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        ));
+        shared.fail_cancel_clone.store(true, Ordering::Relaxed);
+
+        let outcome = dial(
+            address.into(),
+            &shared,
+            PeerRole::FullRelay,
+            ConnectionOrigin::Manual,
+            FailureAccounting::Ignore,
+            TransportChoice::ForceV1,
+        );
+
+        assert!(
+            matches!(
+                &outcome,
+                Err(crate::PeerError::Io(error))
+                    if error.to_string() == "test-injected cancel clone failure"
+            ),
+            "the injected cancel-guard failure must fail the dial: {outcome:?}"
+        );
+        assert!(
+            !shared.peer_table.is_connected(address),
+            "the dial must not leave the registered lease in the peer table"
+        );
+    }
+}
 
 #[cfg(test)]
-mod keepalive_loop_tests;
+mod keepalive_loop_tests {
+    #![expect(
+        clippy::expect_used,
+        reason = "fixture setup and frame reads must fail loudly"
+    )]
+
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use bitcoin::p2p::Magic;
+
+    use super::{run_connected_session, test_shared};
+    use crate::peer::PeerState;
+    use crate::test_support::synthetic_peer;
+    use crate::{Message, Peer, PeerEndpoint, PeerRemote};
+
+    #[test]
+    fn a_silent_outbound_peer_gets_the_keepalive_ping_and_is_expired() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let client = TcpStream::connect(address).expect("client connect");
+        let (server, _accepted_addr) = listener.accept().expect("accept");
+
+        let table = Arc::new(crate::PeerTable::new());
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+        let shared = Arc::new(test_shared(Arc::clone(&table), headers_tx, blocks_tx));
+        let _ = shared
+            .test_keepalive_intervals
+            .set((Duration::from_millis(100), Duration::from_millis(2_500)));
+
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(outbound_tx);
+        let source = PeerEndpoint::from(address);
+        table.register(source, lease.clone());
+
+        let counters = Arc::new(crate::PeerCounters::default());
+        let stream =
+            crate::CountingStream::from_connected(server, counters).expect("counting stream");
+        let negotiated = crate::transport::Negotiated::v1(shared.magic);
+        let mut peer = Peer::with_transport(stream, shared.magic, negotiated);
+        peer.state = PeerState::Ready;
+
+        let info = synthetic_peer(PeerRemote::Endpoint(source), 0);
+        let session_shared = Arc::clone(&shared);
+        let session = std::thread::spawn(move || {
+            run_connected_session(&mut peer, source, &session_shared, lease, outbound_rx, info)
+        });
+
+        let started = Instant::now();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("client read timeout");
+        let ping = read_ping(&client, shared.magic);
+        drop(ping);
+        assert!(
+            started.elapsed() <= Duration::from_secs(3),
+            "the keepalive ping must arrive at the first poll after the ping interval"
+        );
+
+        let exit = session.join().expect("session thread");
+        assert!(
+            exit.is_ok(),
+            "expiry closes the session without a transport error: {exit:?}"
+        );
+        assert!(
+            started.elapsed() <= Duration::from_secs(6),
+            "a silent peer is expired after the timeout interval, not held forever"
+        );
+    }
+
+    fn read_ping(client: &TcpStream, magic: Magic) -> Message {
+        loop {
+            let (message, _raw) = crate::wire::read_message(&mut &*client, magic)
+                .expect("client reads session frames");
+            if matches!(message, Message::Ping(_)) {
+                return message;
+            }
+        }
+    }
+}
 
 #[cfg(test)]
-mod v2_transport_tests;
+mod v2_transport_tests {
+    use bitcoin_rs_consensus::primitives::{PeerEndpoint, USER_AGENT};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use bitcoin::p2p::{Magic, ServiceFlags};
+    use bitcoin::secp256k1::rand::SeedableRng as _;
+    use bitcoin::secp256k1::rand::rngs::StdRng;
+
+    use super::configure_peer_stream;
+    use super::{
+        ConnectionShared, bind_listener, run_message_loop, run_outbound_handshake, serve,
+        spawn_pinned_outbound_connection, test_shared,
+    };
+    use crate::bip324::{Handshake, msg_type};
+    use crate::connection::QueuedFrame;
+    use crate::transport::{Negotiated, SendTransport, TransportProtocol, establish};
+    use crate::{Message, Peer, PeerError, PeerLease, PeerRole, PeerTable, wire};
+
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        Io(#[from] std::io::Error),
+        #[error(transparent)]
+        Peer(#[from] PeerError),
+        #[error(transparent)]
+        RecvTimeout(#[from] crossbeam_channel::RecvTimeoutError),
+        #[error(transparent)]
+        Listener(#[from] crate::listener::ListenerError),
+        #[error("missing: {0}")]
+        Missing(&'static str),
+        #[error("failure: {0}")]
+        Failure(String),
+    }
+
+    impl From<&'static str> for TestError {
+        fn from(msg: &'static str) -> Self {
+            Self::Failure(msg.to_string())
+        }
+    }
+
+    impl From<String> for TestError {
+        fn from(msg: String) -> Self {
+            Self::Failure(msg)
+        }
+    }
+
+    type TestResult = Result<(), TestError>;
+
+    const MAGIC: Magic = Magic::BITCOIN;
+
+    fn v1_shared() -> (ConnectionShared, Arc<PeerTable>) {
+        let table = Arc::new(PeerTable::new());
+        let mut shared = test_shared(
+            Arc::clone(&table),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+        shared.v2_transport = false;
+        (shared, table)
+    }
+
+    fn v2_shared() -> (ConnectionShared, Arc<PeerTable>) {
+        let table = Arc::new(PeerTable::new());
+        let mut shared = test_shared(
+            Arc::clone(&table),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+        shared.v2_transport = true;
+        shared.local_services |= ServiceFlags::P2P_V2;
+        (shared, table)
+    }
+
+    fn lease() -> PeerLease {
+        PeerLease::new(crossbeam_channel::unbounded().0)
+    }
+
+    fn lease_with_replies() -> (PeerLease, crossbeam_channel::Receiver<QueuedFrame>) {
+        let (outbound, replies) = crossbeam_channel::unbounded();
+        (PeerLease::new(outbound), replies)
+    }
+
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(20)
+    }
+
+    type Listening = (
+        PeerEndpoint,
+        bitcoin_rs_consensus::latch::LatchWriter,
+        std::thread::JoinHandle<()>,
+    );
+
+    fn listen(shared: ConnectionShared) -> Result<Listening, TestError> {
+        let listener = bind_listener(
+            PeerEndpoint::from(([127, 0, 0, 1], 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
+        let addr = listener.local_addr()?;
+        let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
+        let reader = shutdown.reader();
+        let handle = std::thread::spawn(move || {
+            let _ = serve(listener, reader, shared);
+        });
+        Ok((addr.into(), shutdown, handle))
+    }
+
+    fn connect(addr: PeerEndpoint) -> Result<TcpStream, TestError> {
+        let stream = TcpStream::connect(
+            addr.socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
+        configure_peer_stream(&stream)?;
+        Ok(stream)
+    }
+
+    fn read_until(peer: &mut Peer<TcpStream>, wanted: &Message) -> Result<(), TestError> {
+        let deadline = deadline();
+        while Instant::now() < deadline {
+            match peer.read_message() {
+                Ok(Some((message, _))) if &message == wanted => return Ok(()),
+                Ok(_) => {}
+                Err(PeerError::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(TestError::Missing("the wanted message never arrived"))
+    }
+
+    fn handshake_and_ping(
+        addr: PeerEndpoint,
+        stream: TcpStream,
+        negotiated: Negotiated,
+    ) -> TestResult {
+        let (client, _) = v1_shared();
+        let lease = lease();
+        let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
+        run_outbound_handshake(&mut peer, 7, 0, &lease, deadline(), addr, &client)?;
+        peer.send(&Message::Ping(41))?;
+        read_until(&mut peer, &Message::Pong(41))
+    }
+
+    #[test]
+    fn bip434_windows_preserve_bip332_and_package_negotiation_on_v1_and_v2() -> TestResult {
+        use crate::feature::{FEATURE_VERSION, FeatureAnnouncement};
+        use crate::packages::{PKG_RELAY_ANC, PKG_RELAY_PKGTXNS, SendPackages};
+        for v2 in [false, true] {
+            for version in [FEATURE_VERSION - 1, FEATURE_VERSION] {
+                let (mut listener_shared, table) = if v2 { v2_shared() } else { v1_shared() };
+                listener_shared.relay_offers = super::RelayOffers {
+                    package_relay: true,
+                    stale_tip_relay: true,
+                    stale_tip_prefers_blocks: true,
+                };
+                let (addr, shutdown, handle) = listen(listener_shared)?;
+                let result = (|| -> TestResult {
+                    let mut stream = connect(addr)?;
+                    let negotiated = if v2 {
+                        let mut handshake =
+                            Handshake::initiator(MAGIC, &mut StdRng::seed_from_u64(434));
+                        establish(&mut stream, &mut handshake, MAGIC, &lease(), deadline())?
+                    } else {
+                        Negotiated::v1(MAGIC)
+                    };
+                    let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
+                    let mut announcement = crate::handshake::version_message(
+                        434,
+                        0,
+                        PeerRole::FullRelay,
+                        ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                        USER_AGENT,
+                    );
+                    announcement.version = version;
+                    peer.send(&Message::Version(announcement))?;
+                    let until = deadline();
+                    let mut commands = Vec::new();
+                    loop {
+                        if Instant::now() >= until {
+                            return Err("server handshake timed out".into());
+                        }
+                        match peer.read_message() {
+                            Ok(Some((message, _))) => {
+                                commands.push(message.command().to_string());
+                                crate::fsm::step(&mut peer, &message)?;
+                                if message == Message::Verack {
+                                    break;
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(PeerError::Io(error)) if crate::recv::is_poll_timeout(&error) => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    let mut expected = vec!["version", "wtxidrelay", "sendaddrv2", "sendheaders"];
+                    if version >= FEATURE_VERSION {
+                        expected.push("feature");
+                    }
+                    expected.extend(["sendpackages", "verack"]);
+                    assert_eq!(commands, expected);
+                    assert_eq!(
+                        peer.remote_feature(b"BIP332"),
+                        (version >= FEATURE_VERSION).then_some([1].as_slice())
+                    );
+                    if version >= FEATURE_VERSION {
+                        peer.send(&Message::Feature(FeatureAnnouncement::bip332(true)))?;
+                    }
+                    peer.send(&Message::WtxidRelay)?;
+                    peer.send(&Message::SendPackages(SendPackages {
+                        versions: PKG_RELAY_PKGTXNS | PKG_RELAY_ANC,
+                    }))?;
+                    peer.send(&Message::Verack)?;
+                    assert!(matches!(
+                        peer.send(&Message::Feature(FeatureAnnouncement::bip332(true))),
+                        Err(PeerError::Protocol(_))
+                    ));
+                    peer.send(&Message::Ping(434))?;
+                    read_until(&mut peer, &Message::Pong(434))?;
+                    Ok(())
+                })();
+                table.cancel_all();
+                shutdown.trigger();
+                handle.join().map_err(|_| "listener panicked")?;
+                result?;
+            }
+        }
+        Ok(())
+    }
+
+    // P2P-11
+    #[test]
+    fn a_v2_listener_negotiates_bip324_with_a_v2_initiator() -> TestResult {
+        let (listener_shared, _) = v2_shared();
+        let (addr, shutdown, handle) = listen(listener_shared)?;
+
+        let mut stream = connect(addr)?;
+        let mut handshake = Handshake::initiator(MAGIC, &mut StdRng::seed_from_u64(1));
+        let negotiated = establish(&mut stream, &mut handshake, MAGIC, &lease(), deadline())?;
+        assert!(matches!(negotiated.protocol, TransportProtocol::V2 { .. }));
+        handshake_and_ping(addr, stream, negotiated)?;
+
+        shutdown.trigger();
+        handle.join().map_err(|_| "listener panicked")?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_v2_listener_still_serves_a_v1_peer() -> TestResult {
+        let (listener_shared, _) = v2_shared();
+        let (addr, shutdown, handle) = listen(listener_shared)?;
+
+        handshake_and_ping(addr, connect(addr)?, Negotiated::v1(MAGIC))?;
+
+        shutdown.trigger();
+        handle.join().map_err(|_| "listener panicked")?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
+        let server = TcpListener::bind(
+            PeerEndpoint::from(([127, 0, 0, 1], 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
+        let addr = server.local_addr()?;
+        let responder = std::thread::spawn(move || -> Result<TransportProtocol, String> {
+            let (stream, _) = server.accept().map_err(|error| error.to_string())?;
+            configure_peer_stream(&stream).map_err(|error| error.to_string())?;
+            let mut stream = stream;
+            let lease = lease();
+            let mut handshake = Handshake::responder(MAGIC, &mut StdRng::seed_from_u64(2));
+            let negotiated = establish(&mut stream, &mut handshake, MAGIC, &lease, deadline())
+                .map_err(|error| error.to_string())?;
+            let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
+            crate::handshake::run_inbound_handshake(
+                &mut peer,
+                9,
+                0,
+                ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                USER_AGENT,
+                &lease,
+                deadline(),
+            )
+            .map_err(|error| error.to_string())?;
+            peer.send(&Message::Ping(42))
+                .map_err(|error| error.to_string())?;
+            read_until(&mut peer, &Message::Pong(42)).map_err(|error| error.to_string())?;
+            Ok(peer.transport())
+        });
+
+        let (dialer, dialer_table) = v2_shared();
+        let dial = spawn_pinned_outbound_connection(addr.into(), dialer, PeerRole::FullRelay);
+        let protocol = responder.join().map_err(|_| "responder panicked")??;
+        assert!(matches!(protocol, TransportProtocol::V2 { .. }));
+
+        dialer_table.cancel_all();
+        let _ = dial.join().map_err(|_| "dialer panicked")?;
+        Ok(())
+    }
+
+    // P2P-11
+    #[test]
+    fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
+        let (listener_shared, listener_table) = v2_shared();
+        let (addr, shutdown, handle) = listen(listener_shared)?;
+
+        let (dialer, dialer_table) = v2_shared();
+        let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
+        let deadline = deadline();
+        let published = loop {
+            if let (Some(outbound), Some(inbound)) = (
+                dialer_table.infos().into_iter().next(),
+                listener_table.infos().into_iter().next(),
+            ) {
+                break Some((outbound, inbound));
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        dialer_table.cancel_all();
+        let _ = dial.join().map_err(|_| "dialer panicked")?;
+        shutdown.trigger();
+        handle.join().map_err(|_| "listener panicked")?;
+
+        let (outbound, inbound) = published.ok_or("the v2 connection never published both ends")?;
+        let TransportProtocol::V2 { session_id } = outbound.transport else {
+            return Err(format!("the dialer published {:?}", outbound.transport).into());
+        };
+        assert_eq!(
+            inbound.transport,
+            TransportProtocol::V2 { session_id },
+            "both ends derive the same session id"
+        );
+        Ok(())
+    }
+
+    // P2P-11
+    #[test]
+    fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
+        let (listener_shared, listener_table) = v1_shared();
+        let (addr, shutdown, handle) = listen(listener_shared)?;
+
+        let (dialer, dialer_table) = v2_shared();
+        let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
+        let deadline = deadline();
+        let dialed = loop {
+            let dialed = dialer_table.infos();
+            if !dialed.is_empty() && !listener_table.infos().is_empty() {
+                break Some(dialed);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let accepted = listener_table.len();
+
+        dialer_table.cancel_all();
+        let _ = dial.join().map_err(|_| "dialer panicked")?;
+        shutdown.trigger();
+        handle.join().map_err(|_| "listener panicked")?;
+
+        let dialed = dialed.ok_or("the v1 retry never completed its handshake")?;
+        assert_eq!(accepted, 1, "only the v1 retry stayed connected");
+        assert!(
+            dialed
+                .iter()
+                .all(|info| info.transport == TransportProtocol::V1),
+            "the retry publishes v1"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_silent_responder_ends_at_the_handshake_deadline() -> TestResult {
+        let server = TcpListener::bind(
+            PeerEndpoint::from(([127, 0, 0, 1], 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
+        let addr = server.local_addr()?;
+        let mut stream = connect(addr.into())?;
+        let (_held, _) = server.accept()?;
+        let mut handshake = Handshake::initiator(MAGIC, &mut StdRng::seed_from_u64(3));
+        let started = Instant::now();
+        let result = establish(
+            &mut stream,
+            &mut handshake,
+            MAGIC,
+            &lease(),
+            started + Duration::from_millis(1500),
+        );
+        assert!(
+            matches!(&result, Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut),
+            "{result:?}"
+        );
+        assert!(!handshake.received_any(), "a silent peer allows a v1 retry");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        Ok(())
+    }
+
+    fn wait_for_writer_done(done_wait: &crossbeam_channel::Receiver<()>) {
+        let started = Instant::now();
+        loop {
+            match done_wait.recv_timeout(Duration::from_millis(200)) {
+                Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the decoy writer never finished after the stop"
+            );
+        }
+    }
+
+    fn spawn_decoy_then_ping_writer(
+        server: TcpListener,
+        stop: Arc<AtomicBool>,
+        writer_lease: PeerLease,
+        done: crossbeam_channel::Sender<()>,
+    ) -> std::thread::JoinHandle<Result<(), String>> {
+        std::thread::spawn(move || -> Result<(), String> {
+            let (stream, _) = loop {
+                match server.accept() {
+                    Ok(pair) => break pair,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if stop.load(Ordering::Relaxed) {
+                            return Ok(());
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            };
+            configure_peer_stream(&stream).map_err(|error| error.to_string())?;
+            let mut stream = stream;
+            let mut handshake = Handshake::initiator(MAGIC, &mut StdRng::seed_from_u64(4));
+            let negotiated = establish(
+                &mut stream,
+                &mut handshake,
+                MAGIC,
+                &writer_lease,
+                deadline(),
+            )
+            .map_err(|error| error.to_string())?;
+            if !matches!(negotiated.protocol, TransportProtocol::V2 { .. }) {
+                return Err("expected a v2 transport".into());
+            }
+            let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
+            crate::handshake::run_inbound_handshake(
+                &mut peer,
+                9,
+                0,
+                ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                USER_AGENT,
+                &writer_lease,
+                deadline(),
+            )
+            .map_err(|error| error.to_string())?;
+            let mut cipher = match peer.take_send_transport() {
+                Some(SendTransport::V2(cipher)) => cipher,
+                _ => return Err("expected a v2 send transport".into()),
+            };
+            for _ in 0..2 {
+                let decoy = cipher
+                    .seal(&[0; 16], &[], true)
+                    .map_err(|error| error.to_string())?;
+                std::io::Write::write_all(&mut peer.stream, &decoy)
+                    .map_err(|error| error.to_string())?;
+            }
+            let payload =
+                wire::encode_payload(&Message::Ping(41)).map_err(|error| error.to_string())?;
+            let contents = msg_type::encode(&Message::Ping(41).command(), &payload);
+            let ping = cipher
+                .seal(&contents, &[], false)
+                .map_err(|error| error.to_string())?;
+            std::io::Write::write_all(&mut peer.stream, &ping)
+                .map_err(|error| error.to_string())?;
+
+            while !stop.load(Ordering::Relaxed) {
+                let decoy = cipher
+                    .seal(&[0; 16], &[], true)
+                    .map_err(|error| error.to_string())?;
+                match std::io::Write::write_all(&mut peer.stream, &decoy) {
+                    Ok(()) => {}
+                    Err(_) if stop.load(Ordering::Relaxed) => break,
+                    Err(error) => return Err(error.to_string()),
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = done.send(());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
+        let server = TcpListener::bind(
+            PeerEndpoint::from(([127, 0, 0, 1], 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
+        let addr = server.local_addr()?;
+        server.set_nonblocking(true)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let (writer_lease, _) = lease_with_replies();
+        let (done, done_wait) = crossbeam_channel::bounded(0);
+        let writer =
+            spawn_decoy_then_ping_writer(server, Arc::clone(&stop), writer_lease.clone(), done);
+
+        let result = (|| -> Result<(Result<(), PeerError>, Duration), TestError> {
+            let mut stream = connect(addr.into())?;
+            let mut handshake = Handshake::responder(MAGIC, &mut StdRng::seed_from_u64(5));
+            let negotiated = establish(&mut stream, &mut handshake, MAGIC, &lease(), deadline())?;
+            if !matches!(negotiated.protocol, TransportProtocol::V2 { .. }) {
+                return Err("expected a v2 transport".into());
+            }
+
+            let (client, _) = v1_shared();
+            let (lease, replies) = lease_with_replies();
+            let cancel_handle = lease.clone();
+            let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
+            run_outbound_handshake(&mut peer, 7, 0, &lease, deadline(), addr.into(), &client)?;
+            let loop_handle = std::thread::spawn(move || {
+                run_message_loop(&mut peer, addr, &lease, &client, None)
+            });
+            let arrived = Instant::now();
+            let pong = loop {
+                let frame = match replies.recv_timeout(Duration::from_millis(200)) {
+                    Ok(frame) => frame,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        if arrived.elapsed() >= Duration::from_secs(10) {
+                            return Err(
+                                "the loop never dispatched the peer's ping past the decoy run"
+                                    .into(),
+                            );
+                        }
+                        continue;
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        return Err("the loop dropped the reply queue".into());
+                    }
+                };
+                let message = frame.into_message();
+                if matches!(message, Message::Ping(_)) {
+                    // The loop originates its first keepalive probe right after
+                    // the handshake; it is this node's own traffic, not the
+                    // peer's real message crossing the decoy run.
+                    continue;
+                }
+                break message;
+            };
+            if pong != Message::Pong(41) {
+                return Err("the decoy run must precede exactly one real message".into());
+            }
+            if replies.try_recv().is_ok() {
+                return Err("the peer sent more than one real message".into());
+            }
+            let started = Instant::now();
+            cancel_handle.cancel();
+            let outcome = loop_handle
+                .join()
+                .map_err(|_| TestError::Missing("loop panicked"))?;
+            if started.elapsed() >= Duration::from_secs(2) {
+                return Err("lease cancel must end a decoy-only session promptly".into());
+            }
+            Ok((outcome, started.elapsed()))
+        })();
+        stop.store(true, Ordering::Relaxed);
+        writer_lease.cancel();
+        wait_for_writer_done(&done_wait);
+        let writer_failure = writer
+            .join()
+            .map_err(|_| TestError::Missing("decoy writer panicked"));
+        let (outcome, elapsed) = result?;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "lease cancel must end a decoy-only session promptly"
+        );
+        writer_failure?.map_err(TestError::Failure)?;
+        Ok(())
+    }
+}
 
 #[cfg(test)]
-mod getdata_pause_tests;
+mod getdata_pause_tests {
+    use bitcoin_rs_consensus::primitives::PeerEndpoint;
+    use std::io::{self, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
+
+    use bitcoin::bip152::BlockTransactionsRequest;
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::p2p::Magic;
+    use bitcoin::p2p::message_blockdata::Inventory;
+    use bitcoin_rs_consensus::primitives::{
+        Amount, Block, BlockHash, Hash256, Header, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut,
+        Txid, Witness, Wtxid,
+    };
+    use crossbeam_channel::{Receiver, Sender};
+
+    use super::{
+        ConnectionShared, Keepalive, ParkedStep, TIMEOUT_INTERVAL, WriterExit,
+        configure_peer_stream, parked_tail_expired, run_message_loop, run_writer_loop,
+        spawn_connection_writer, step_parked_getdata, test_shared,
+    };
+    use crate::connection::{OutboundBudget, SharedOutboundBudget};
+    use crate::transport::SendTransport;
+    use crate::{
+        ChainQuery, InventoryServing, Message, Peer, PeerError, PeerLease, PeerState, PeerTable,
+        TxInventory,
+    };
+
+    #[derive(Debug, thiserror::Error)]
+    pub(super) enum TestError {
+        #[error(transparent)]
+        Io(#[from] std::io::Error),
+        #[error(transparent)]
+        Peer(#[from] PeerError),
+        #[error(transparent)]
+        Consensus(#[from] bitcoin::consensus::encode::Error),
+        #[error("timeout: {0}")]
+        Timeout(String),
+        #[error("failure: {0}")]
+        Failure(String),
+        #[error("missing: {0}")]
+        Missing(&'static str),
+    }
+
+    impl From<String> for TestError {
+        fn from(msg: String) -> Self {
+            Self::Failure(msg)
+        }
+    }
+
+    impl From<&'static str> for TestError {
+        fn from(msg: &'static str) -> Self {
+            Self::Missing(msg)
+        }
+    }
+
+    pub(super) type TestResult = Result<(), TestError>;
+
+    pub(super) const MAGIC: Magic = Magic::BITCOIN;
+
+    pub(super) const FAILSAFE: Duration = Duration::from_secs(20);
+
+    pub(super) struct ScriptedChain {
+        pub(super) blocks: Vec<([u8; 32], bytes::Bytes)>,
+    }
+
+    impl ChainQuery for ScriptedChain {
+        fn stale_tip_announcement(
+            &self,
+            _tip: bitcoin_rs_consensus::primitives::Hash256,
+            _peer_tips: &[bitcoin_rs_consensus::primitives::Hash256],
+        ) -> Option<crate::dispatch::StaleTipHeaders> {
+            None
+        }
+        fn headers_after(
+            &self,
+            _locator_hashes: &[BlockHash],
+            _stop_hash: BlockHash,
+            _limit: usize,
+        ) -> Vec<Header> {
+            Vec::new()
+        }
+
+        fn serve_inventory_blocks(
+            &self,
+            items: &[Inventory],
+            _compact_version: Option<u64>,
+            headroom: &dyn Fn() -> bool,
+            serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+        ) -> Result<InventoryServing, PeerError> {
+            let mut outcome = InventoryServing::default();
+            for item in items {
+                let payload = match item {
+                    Inventory::Block(hash) | Inventory::WitnessBlock(hash) => self
+                        .blocks
+                        .iter()
+                        .find(|(known, _)| *known == hash.to_byte_array())
+                        .map(|(_, payload)| payload),
+                    _ => None,
+                };
+                let Some(payload) = payload else {
+                    outcome.not_found.push(*item);
+                    continue;
+                };
+                if !headroom() {
+                    outcome.halted = true;
+                    return Ok(outcome);
+                }
+                serve(Message::BlockBytes(payload.clone()))?;
+            }
+            Ok(outcome)
+        }
+
+        fn block_transactions(
+            &self,
+            _request: &BlockTransactionsRequest,
+            _compact_version: Option<u64>,
+            _headroom: &dyn Fn() -> bool,
+        ) -> Result<Option<Message>, PeerError> {
+            Ok(None)
+        }
+    }
+
+    pub(super) fn block(nonce: u32) -> Block {
+        let mut block = Block::default();
+        block.header.nonce = nonce;
+        block
+    }
+
+    pub(super) fn hash_of(block: &Block) -> [u8; 32] {
+        *block.block_hash().as_bytes()
+    }
+
+    pub(super) fn inventory_of(block: &Block) -> Inventory {
+        Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array(hash_of(block)))
+    }
+
+    pub(super) fn scripted(block: &Block) -> ([u8; 32], bytes::Bytes) {
+        (
+            hash_of(block),
+            bytes::Bytes::from(bitcoin_rs_consensus::primitives::consensus_bytes(block)),
+        )
+    }
+
+    pub(super) fn wire_len_of(message: &Message) -> Result<usize, PeerError> {
+        crate::wire::wire_len(message)
+    }
+
+    struct ScriptedTxs {
+        txs: Vec<Tx>,
+    }
+
+    impl TxInventory for ScriptedTxs {
+        fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool {
+            self.txs.iter().any(|tx| {
+                let identity = if hash_is_wtxid {
+                    *tx.wtxid().as_bytes()
+                } else {
+                    *tx.txid().as_bytes()
+                };
+                identity == *hash.as_byte_array()
+            })
+        }
+
+        fn get_tx(&self, txid: Txid) -> Option<Tx> {
+            self.txs
+                .iter()
+                .find(|tx| tx.txid().as_bytes() == txid.as_bytes())
+                .cloned()
+        }
+
+        fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+            self.txs
+                .iter()
+                .find(|tx| tx.wtxid().as_bytes() == wtxid.as_bytes())
+                .cloned()
+        }
+
+        fn resident_ancestor_package(&self, _wtxid: Wtxid) -> Option<Vec<Wtxid>> {
+            None
+        }
+
+        fn resident_package(&self, _wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
+            None
+        }
+    }
+
+    fn tiny_tx(byte: u8) -> Tx {
+        Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from(Hash256::from_le_bytes(&[byte; 32])),
+                    vout: 0,
+                },
+                script_sig: vec![byte].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x6A].into(),
+            }],
+            lock_time: LockTime::ZERO,
+        }
+    }
+
+    fn tx_inventory_of(tx: &Tx) -> Inventory {
+        Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()))
+    }
+
+    pub(super) fn shared_with(chain: ScriptedChain) -> ConnectionShared {
+        shared_with_query(chain)
+    }
+
+    pub(super) fn shared_with_query(chain: impl ChainQuery + 'static) -> ConnectionShared {
+        let mut shared = test_shared(
+            Arc::new(PeerTable::new()),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+        shared.chain_query = Some(Arc::new(chain));
+        shared
+    }
+
+    fn shared_with_txs(chain: ScriptedChain, txs: ScriptedTxs) -> ConnectionShared {
+        let mut shared = shared_with(chain);
+        shared.tx_inventory = Some(Arc::new(txs));
+        shared
+    }
+
+    struct GatedSocketWriter {
+        socket: TcpStream,
+        gate: Receiver<()>,
+    }
+
+    impl Write for GatedSocketWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let _ = self.gate.recv();
+            self.socket.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.socket.flush()
+        }
+    }
+
+    pub(super) enum WriterKind {
+        Gated,
+        Production { write_timeout: Duration },
+    }
+
+    pub(super) struct Served {
+        pub(super) client: Peer<TcpStream>,
+        pub(super) lease: PeerLease,
+        pub(super) budget: Arc<OutboundBudget>,
+        gate: Option<Sender<()>>,
+        outcome: Receiver<Result<(), PeerError>>,
+        session: Option<JoinHandle<()>>,
+        writer: Option<JoinHandle<()>>,
+    }
+
+    impl Served {
+        pub(super) fn start(
+            shared: ConnectionShared,
+            budget: OutboundBudget,
+            writer: &WriterKind,
+        ) -> Result<Self, TestError> {
+            Self::start_on(shared, budget, None, writer)
+        }
+
+        pub(super) fn start_on(
+            shared: ConnectionShared,
+            budget: OutboundBudget,
+            aggregate: Option<&Arc<SharedOutboundBudget>>,
+            writer: &WriterKind,
+        ) -> Result<Self, TestError> {
+            let listener = TcpListener::bind(
+                PeerEndpoint::from(([127, 0, 0, 1], 0))
+                    .socket_addr()
+                    .unwrap_or_else(|| panic!("expected IP fixture")),
+            )?;
+            let client_stream = TcpStream::connect(listener.local_addr()?)?;
+            let (server_stream, addr) = listener.accept()?;
+            configure_peer_stream(&client_stream)?;
+            configure_peer_stream(&server_stream)?;
+            if let WriterKind::Production { write_timeout } = writer {
+                server_stream.set_write_timeout(Some(*write_timeout))?;
+            }
+            let writer_socket = server_stream.try_clone()?;
+
+            let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+            let mut lease = PeerLease::new_with_budget(outbound_tx, true, budget);
+            if let Some(aggregate) = aggregate {
+                lease = lease.with_shared_budget(aggregate);
+            }
+            let handle = lease.budget_handle();
+            let close = lease.close_signal();
+
+            let (gate, writer_thread) = match writer {
+                WriterKind::Gated => {
+                    let (gate_tx, gate_rx) = crossbeam_channel::bounded::<()>(0);
+                    let writer_budget = Arc::clone(&handle);
+                    let thread = std::thread::spawn(move || {
+                        let _exit = WriterExit {
+                            budget: writer_budget,
+                            outbound_rx: &outbound_rx,
+                        };
+                        let mut gated = GatedSocketWriter {
+                            socket: writer_socket,
+                            gate: gate_rx,
+                        };
+                        run_writer_loop(
+                            &outbound_rx,
+                            close,
+                            &mut gated,
+                            &mut SendTransport::V1(MAGIC),
+                            &crate::PeerCounters::default(),
+                            None,
+                        );
+                        let _ = gated.socket.shutdown(Shutdown::Both);
+                    });
+                    (Some(gate_tx), thread)
+                }
+                WriterKind::Production { .. } => {
+                    let thread = spawn_connection_writer(
+                        crate::CountingStream::new(
+                            writer_socket,
+                            Arc::new(crate::PeerCounters::default()),
+                        )
+                        .recording_send_activity(lease.send_activity()),
+                        SendTransport::V1(MAGIC),
+                        outbound_rx,
+                        close,
+                        Arc::clone(&handle),
+                        addr,
+                        None,
+                    )?;
+                    (None, thread)
+                }
+            };
+
+            let mut peer = Peer::new(server_stream, MAGIC);
+            peer.state = PeerState::Ready;
+            let session_lease = lease.clone();
+            let (outcome_tx, outcome) = crossbeam_channel::bounded(1);
+            let session = std::thread::spawn(move || {
+                let result = run_message_loop(&mut peer, addr, &session_lease, &shared, None);
+                let _ = outcome_tx.send(result);
+            });
+            Ok(Self {
+                client: Peer::new(client_stream, MAGIC),
+                lease,
+                budget: handle,
+                gate,
+                outcome,
+                session: Some(session),
+                writer: Some(writer_thread),
+            })
+        }
+
+        pub(super) fn open_gate(&mut self) {
+            drop(self.gate.take());
+        }
+
+        pub(super) fn session_outcome(
+            &self,
+            within: Duration,
+        ) -> Result<Result<(), PeerError>, String> {
+            self.outcome
+                .recv_timeout(within)
+                .map_err(|_| format!("the session loop did not return within {within:?}"))
+        }
+    }
+
+    impl Drop for Served {
+        fn drop(&mut self) {
+            self.open_gate();
+            self.lease.cancel();
+            let _ = self.client.stream.shutdown(Shutdown::Both);
+            for thread in [self.session.take(), self.writer.take()]
+                .into_iter()
+                .flatten()
+            {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    pub(super) fn wait_until(what: &str, mut condition: impl FnMut() -> bool) -> TestResult {
+        let deadline = Instant::now() + FAILSAFE;
+        while !condition() {
+            if Instant::now() >= deadline {
+                return Err(TestError::Timeout(format!("timed out waiting for {what}")));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
+    pub(super) fn read_messages(
+        client: &mut Peer<TcpStream>,
+        count: usize,
+    ) -> Result<Vec<Message>, TestError> {
+        let deadline = Instant::now() + FAILSAFE;
+        let mut received = Vec::new();
+        while received.len() < count {
+            if Instant::now() >= deadline {
+                return Err(TestError::Timeout(format!(
+                    "only {received:?} arrived, wanted {count} messages"
+                )));
+            }
+            match client.read_message() {
+                Ok(Some((message, _))) => received.push(message),
+                Ok(None) => {}
+                Err(PeerError::Io(error))
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(received)
+    }
+
+    #[test]
+    fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
+        let (block_a, block_b) = (block(1), block(2));
+        let (entry_a, entry_b) = (scripted(&block_a), scripted(&block_b));
+        let unknown_tx = Inventory::Transaction(bitcoin::Txid::from_byte_array([7; 32]));
+        let block_len = wire_len_of(&Message::BlockBytes(entry_a.1.clone()))?;
+        let notfound_len = wire_len_of(&Message::NotFound(vec![unknown_tx]))?;
+        let ping_len = wire_len_of(&Message::Ping(3))?;
+        // Sized so block A plus the miss's notfound fill the data lane while
+        // block B and the pong park; the keepalive probe rides the bounded
+        // control lane and never enters these counts.
+        let budget = OutboundBudget::with_block_reserve(100, block_len + notfound_len, block_len);
+        let chain = ScriptedChain {
+            blocks: vec![entry_a, entry_b],
+        };
+        let mut served = Served::start(shared_with(chain), budget, &WriterKind::Gated)?;
+
+        served.client.send(&Message::GetData(vec![
+            unknown_tx,
+            inventory_of(&block_a),
+            inventory_of(&block_b),
+        ]))?;
+        served.client.send(&Message::Ping(7))?;
+
+        let parked = (2, block_len + notfound_len);
+        wait_until("block A and the notfound to be queued", || {
+            served.budget.pending() == parked && served.budget.control_pending() == (1, ping_len)
+        })?;
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            served.budget.pending(),
+            parked,
+            "a parked tail and an unread ping queue nothing more behind a saturated writer"
+        );
+        assert!(
+            !served.lease.is_cancelled(),
+            "saturation parks the peer instead of disconnecting it"
+        );
+
+        served.open_gate();
+        let received = read_messages(&mut served.client, 5)?;
+        let [probe, drained @ ..] = &received[..] else {
+            panic!("expected five drained messages, got {received:?}");
+        };
+        assert!(
+            matches!(probe, Message::Ping(_)),
+            "the originated keepalive probe drains first: {received:?}"
+        );
+        assert_eq!(
+            drained,
+            vec![
+                Message::Block(bitcoin_rs_consensus::primitives::BlockImage::from_local(
+                    block_a
+                )),
+                Message::NotFound(vec![unknown_tx]),
+                Message::Block(bitcoin_rs_consensus::primitives::BlockImage::from_local(
+                    block_b
+                )),
+                Message::Pong(7),
+            ],
+            "request order, the miss before the tail, and the waiting ping last"
+        );
+        assert!(!served.lease.is_cancelled());
+
+        served.lease.cancel();
+        let outcome = served.session_outcome(FAILSAFE)?;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn paused_peer_that_never_reads_ends_on_write_timeout() -> TestResult {
+        let flood = block(3);
+        let payload = bytes::Bytes::from(vec![0_u8; 1 << 20]);
+        let block_len = wire_len_of(&Message::BlockBytes(payload.clone()))?;
+        let budget = OutboundBudget::with_block_reserve(100_000, 3 * block_len, block_len);
+        let chain = ScriptedChain {
+            blocks: vec![(hash_of(&flood), payload)],
+        };
+        let mut served = Served::start(
+            shared_with(chain),
+            budget,
+            &WriterKind::Production {
+                write_timeout: Duration::from_millis(500),
+            },
+        )?;
+
+        served
+            .client
+            .send(&Message::GetData(vec![inventory_of(&flood); 256]))?;
+
+        let outcome = served.session_outcome(FAILSAFE)?;
+        assert!(
+            outcome.is_ok(),
+            "the writer's death ends the parked session cleanly: {outcome:?}"
+        );
+        assert!(served.budget.writer_dead());
+        wait_until("the dead writer's queued frames to release", || {
+            served.budget.pending() == (0, 0)
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn lease_cancel_ends_a_parked_session() -> TestResult {
+        let (block_a, block_b) = (block(4), block(5));
+        let (entry_a, entry_b) = (scripted(&block_a), scripted(&block_b));
+        let block_len = wire_len_of(&Message::BlockBytes(entry_a.1.clone()))?;
+        let ping_len = wire_len_of(&Message::Ping(3))?;
+        let budget = OutboundBudget::with_block_reserve(100, 2 * block_len - 1, block_len);
+        let chain = ScriptedChain {
+            blocks: vec![entry_a, entry_b],
+        };
+        let mut served = Served::start(shared_with(chain), budget, &WriterKind::Gated)?;
+        served.client.send(&Message::GetData(vec![
+            inventory_of(&block_a),
+            inventory_of(&block_b),
+        ]))?;
+        wait_until("block A to be queued", || {
+            served.budget.pending() == (1, block_len)
+                && served.budget.control_pending() == (1, ping_len)
+        })?;
+        std::thread::sleep(Duration::from_millis(200));
+
+        let started = Instant::now();
+        served.lease.cancel();
+        let outcome = served.session_outcome(FAILSAFE)?;
+
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a parked session wakes within its poll interval"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order() -> TestResult {
+        let txs: Vec<Tx> = (1..=5).map(tiny_tx).collect();
+        let tx_len = wire_len_of(&Message::Tx(tiny_tx(1)))?;
+        let budget = OutboundBudget::with_block_reserve(3, 1 << 20, tx_len);
+        let shared = shared_with_txs(
+            ScriptedChain { blocks: Vec::new() },
+            ScriptedTxs { txs: txs.clone() },
+        );
+        let mut served = Served::start(shared, budget, &WriterKind::Gated)?;
+        let unknown = Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array([9; 32]));
+        let mut items = vec![unknown];
+        items.extend(txs.iter().map(tx_inventory_of));
+
+        served.client.send(&Message::GetData(items))?;
+
+        // Regression guard: the originated keepalive probe rides the bounded
+        // control lane, so a saturated data queue still carries three whole
+        // transactions of useful outbound data instead of two behind a probe.
+        let ping_len = wire_len_of(&Message::Ping(0))?;
+        let full = (3, 3 * tx_len);
+        wait_until("the probe and three transactions to be queued", || {
+            served.budget.pending() == full && served.budget.control_pending() == (1, ping_len)
+        })?;
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            served.budget.pending(),
+            full,
+            "a full queue takes not even the parked miss's notfound"
+        );
+        assert!(
+            !served.lease.is_cancelled(),
+            "a queue full by item count parks the peer instead of disconnecting it"
+        );
+
+        served.open_gate();
+        let received = read_messages(&mut served.client, 7)?;
+        let [probe, drained @ ..] = &received[..] else {
+            panic!("expected seven drained messages, got {received:?}");
+        };
+        assert!(
+            matches!(probe, Message::Ping(_)),
+            "the originated keepalive probe drains first: {received:?}"
+        );
+        assert_eq!(
+            drained,
+            vec![
+                Message::Tx(txs[0].clone()),
+                Message::Tx(txs[1].clone()),
+                Message::Tx(txs[2].clone()),
+                Message::NotFound(vec![unknown]),
+                Message::Tx(txs[3].clone()),
+                Message::Tx(txs[4].clone()),
+            ],
+            "request order, with the miss reported once the queue could take it"
+        );
+        wait_until("the writer to release every frame", || {
+            served.budget.pending() == (0, 0)
+        })?;
+        served.client.send(&Message::Ping(9))?;
+        assert_eq!(
+            read_messages(&mut served.client, 1)?,
+            vec![Message::Pong(9)],
+            "the session reads again once the tail is served"
+        );
+        assert!(!served.lease.is_cancelled());
+
+        served.lease.cancel();
+        let outcome = served.session_outcome(FAILSAFE)?;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_getdata_that_fills_the_last_slot_parks_its_trailing_notfound_and_the_next_pong()
+    -> TestResult {
+        let txs: Vec<Tx> = (1..=3).map(tiny_tx).collect();
+        let tx_len = wire_len_of(&Message::Tx(tiny_tx(1)))?;
+        let budget = OutboundBudget::with_block_reserve(3, 1 << 20, tx_len);
+        let shared = shared_with_txs(
+            ScriptedChain { blocks: Vec::new() },
+            ScriptedTxs { txs: txs.clone() },
+        );
+        let mut served = Served::start(shared, budget, &WriterKind::Gated)?;
+        let unknown = Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array([9; 32]));
+
+        served.client.send(&Message::GetData(vec![
+            tx_inventory_of(&txs[0]),
+            tx_inventory_of(&txs[1]),
+            unknown,
+            tx_inventory_of(&txs[2]),
+        ]))?;
+        served.client.send(&Message::Ping(11))?;
+
+        // The keepalive probe rides the control lane; the data lane fills with
+        // the three request hits.
+        let ping_len = wire_len_of(&Message::Ping(0))?;
+        let full = (3, 3 * tx_len);
+        wait_until("the probe and three transactions to be queued", || {
+            served.budget.pending() == full && served.budget.control_pending() == (1, ping_len)
+        })?;
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            served.budget.pending(),
+            full,
+            "the full queue takes neither the trailing notfound nor the next pong"
+        );
+        assert!(
+            !served.lease.is_cancelled(),
+            "filling the last slot is not a reason to disconnect a reader"
+        );
+
+        served.open_gate();
+        let received = read_messages(&mut served.client, 6)?;
+        let [probe, drained @ ..] = &received[..] else {
+            panic!("expected six drained messages, got {received:?}");
+        };
+        assert!(
+            matches!(probe, Message::Ping(_)),
+            "the originated keepalive probe drains first: {received:?}"
+        );
+        assert_eq!(
+            drained,
+            vec![
+                Message::Tx(txs[0].clone()),
+                Message::Tx(txs[1].clone()),
+                Message::Tx(txs[2].clone()),
+                Message::NotFound(vec![unknown]),
+                Message::Pong(11),
+            ],
+            "the notfound follows the transactions and the pong follows the notfound"
+        );
+        assert!(!served.lease.is_cancelled());
+
+        served.lease.cancel();
+        let outcome = served.session_outcome(FAILSAFE)?;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_drained_getdata_holds_reads_until_the_queue_can_take_a_reply() -> TestResult {
+        let (outbound_tx, outbound_rx) = crate::test_support::message_channel();
+        let lease = PeerLease::new_with_budget(
+            outbound_tx,
+            true,
+            OutboundBudget::with_block_reserve(1, 1 << 20, 1),
+        );
+        lease
+            .send(Message::Ping(1))
+            .map_err(|_| "a fresh queue admits its one message")?;
+        let shared = shared_with(ScriptedChain { blocks: Vec::new() });
+        let mut peer = parked_peer(Vec::new());
+        let mut keepalive = Keepalive::starting(Instant::now());
+        let mut parked_since = Some(Instant::now());
+
+        let held = step_parked_getdata(
+            &mut peer,
+            &shared,
+            &lease,
+            &mut keepalive,
+            &mut parked_since,
+        )?;
+
+        assert_eq!(held, ParkedStep::StillParked, "the one slot is taken");
+        assert!(parked_since.is_some(), "the hold keeps its start");
+        assert!(!lease.is_cancelled());
+
+        assert_eq!(
+            outbound_rx.try_recv(),
+            Ok(Message::Ping(1)),
+            "the writer takes the queued ping, and its slot returns"
+        );
+        let released = step_parked_getdata(
+            &mut peer,
+            &shared,
+            &lease,
+            &mut keepalive,
+            &mut parked_since,
+        )?;
+
+        assert_eq!(released, ParkedStep::NotParked, "a slot is free again");
+        assert_eq!(parked_since, None, "reads resume and the marker clears");
+        assert!(outbound_rx.is_empty(), "the hold sends nothing");
+        Ok(())
+    }
+
+    #[test]
+    fn production_writer_marks_the_budget_dead_when_a_write_fails() -> TestResult {
+        let listener = TcpListener::bind(
+            PeerEndpoint::from(([127, 0, 0, 1], 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
+        let client = TcpStream::connect(listener.local_addr()?)?;
+        let (server, addr) = listener.accept()?;
+        drop(client);
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = PeerLease::new(outbound_tx);
+        let writer = spawn_connection_writer(
+            crate::CountingStream::new(server, Arc::new(crate::PeerCounters::default())),
+            SendTransport::V1(MAGIC),
+            outbound_rx,
+            lease.close_signal(),
+            lease.budget_handle(),
+            addr,
+            None,
+        )?;
+
+        let died = wait_until("the writer to die", || {
+            let _ = lease.send(Message::Ping(1));
+            lease.budget_handle().writer_dead()
+        });
+        lease.cancel();
+        let _ = writer.join();
+        died
+    }
+
+    #[test]
+    fn a_full_queue_keeps_the_misses_and_sends_nothing() -> TestResult {
+        let (outbound_tx, outbound_rx) = crate::test_support::message_channel();
+        let lease = PeerLease::new_with_budget(
+            outbound_tx,
+            true,
+            OutboundBudget::with_block_reserve(1, 1 << 20, 1),
+        );
+        lease
+            .send(Message::Ping(1))
+            .map_err(|_| "a fresh queue admits one message")?;
+        let shared = shared_with(ScriptedChain { blocks: Vec::new() });
+        let tail = vec![Inventory::WitnessBlock(
+            bitcoin::BlockHash::from_byte_array([2; 32]),
+        )];
+        let miss = Inventory::Transaction(bitcoin::Txid::from_byte_array([3; 32]));
+        let mut peer = parked_peer(tail.clone());
+        peer.pending_notfound = vec![miss];
+        let mut keepalive = Keepalive::starting(Instant::now());
+        let mut parked_since = None;
+
+        let step = step_parked_getdata(
+            &mut peer,
+            &shared,
+            &lease,
+            &mut keepalive,
+            &mut parked_since,
+        )?;
+
+        assert_eq!(step, ParkedStep::StillParked);
+        assert_eq!(
+            outbound_rx.try_iter().collect::<Vec<_>>(),
+            vec![Message::Ping(1)],
+            "nothing was sent into the full queue"
+        );
+        assert_eq!(peer.pending_notfound, vec![miss]);
+        assert_eq!(peer.pending_getdata, tail);
+        assert!(!lease.is_cancelled());
+        Ok(())
+    }
+
+    pub(super) fn parked_peer(tail: Vec<Inventory>) -> Peer<io::Cursor<Vec<u8>>> {
+        let mut peer = Peer::new(io::Cursor::new(Vec::new()), MAGIC);
+        peer.state = PeerState::Ready;
+        peer.pending_getdata = tail;
+        peer
+    }
+
+    #[test]
+    fn nothing_parked_clears_the_marker_and_reads_on() -> TestResult {
+        let lease = PeerLease::new(crossbeam_channel::unbounded().0);
+        let shared = shared_with(ScriptedChain { blocks: Vec::new() });
+        let mut peer = parked_peer(Vec::new());
+        let mut keepalive = Keepalive::starting(Instant::now());
+        let mut parked_since = Some(Instant::now());
+
+        let step = step_parked_getdata(
+            &mut peer,
+            &shared,
+            &lease,
+            &mut keepalive,
+            &mut parked_since,
+        )?;
+
+        assert_eq!(step, ParkedStep::NotParked);
+        assert_eq!(parked_since, None, "a drained tail forgets its start");
+        Ok(())
+    }
+
+    #[test]
+    fn a_dead_writer_ends_a_parked_step_without_waiting() -> TestResult {
+        let lease = PeerLease::new(crossbeam_channel::unbounded().0);
+        lease.budget_handle().mark_writer_dead();
+        let shared = shared_with(ScriptedChain { blocks: Vec::new() });
+        let tail = vec![Inventory::WitnessBlock(
+            bitcoin::BlockHash::from_byte_array([1; 32]),
+        )];
+        let mut peer = parked_peer(tail.clone());
+        let mut keepalive = Keepalive::starting(Instant::now());
+        let mut parked_since = None;
+
+        let started = Instant::now();
+        let step = step_parked_getdata(
+            &mut peer,
+            &shared,
+            &lease,
+            &mut keepalive,
+            &mut parked_since,
+        )?;
+
+        assert_eq!(step, ParkedStep::Ended);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(
+            parked_since.is_some(),
+            "the tail's age starts at its first park"
+        );
+        assert_eq!(
+            peer.pending_getdata, tail,
+            "ending the session drops nothing silently"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_tail_expires_only_after_the_timeout_interval() {
+        let parked = Instant::now();
+        assert!(!parked_tail_expired(parked, parked));
+        assert!(!parked_tail_expired(parked, parked + TIMEOUT_INTERVAL));
+        assert!(parked_tail_expired(
+            parked,
+            parked + TIMEOUT_INTERVAL + Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn an_open_queue_resumes_notfound_first_and_reparks_what_the_gate_stops() -> TestResult {
+        let (block_a, block_b) = (block(6), block(7));
+        let (entry_a, entry_b) = (scripted(&block_a), scripted(&block_b));
+        let block_len = wire_len_of(&Message::BlockBytes(entry_a.1.clone()))?;
+        let (outbound_tx, outbound_rx) = crate::test_support::message_channel();
+        let lease = PeerLease::new_with_budget(
+            outbound_tx,
+            true,
+            OutboundBudget::with_block_reserve(100, 2 * block_len - 1, block_len),
+        );
+        let shared = shared_with(ScriptedChain {
+            blocks: vec![entry_a.clone(), entry_b],
+        });
+        let miss = Inventory::Transaction(bitcoin::Txid::from_byte_array([8; 32]));
+        let mut peer = parked_peer(vec![inventory_of(&block_a), inventory_of(&block_b)]);
+        peer.pending_notfound = vec![miss];
+        let mut keepalive = Keepalive::starting(Instant::now());
+        let mut parked_since = None;
+
+        let step = step_parked_getdata(
+            &mut peer,
+            &shared,
+            &lease,
+            &mut keepalive,
+            &mut parked_since,
+        )?;
+
+        assert_eq!(step, ParkedStep::StillParked);
+        assert_eq!(
+            outbound_rx.try_iter().collect::<Vec<_>>(),
+            vec![
+                Message::NotFound(vec![miss]),
+                Message::BlockBytes(entry_a.1),
+            ],
+            "the earlier miss is reported before any resumed item"
+        );
+        assert_eq!(peer.pending_getdata, vec![inventory_of(&block_b)]);
+        assert_eq!(peer.pending_notfound, Vec::new());
+        assert!(!lease.is_cancelled(), "re-parking is not a disconnect");
+        Ok(())
+    }
+
+    /// A reader that replays concatenated framed pings, then paces its dry
+    /// reads with `WouldBlock`: inbound traffic stays live indefinitely while
+    /// this side of the connection never writes.
+    struct InboundPingStream {
+        script: io::Cursor<Vec<u8>>,
+    }
+
+    impl io::Read for InboundPingStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match io::Read::read(&mut self.script, buf) {
+                Ok(0) => {
+                    std::thread::sleep(Duration::from_millis(100));
+                    Err(io::Error::from(io::ErrorKind::WouldBlock))
+                }
+                Ok(read) => Ok(read),
+                Err(error) => Err(error),
+            }
+        }
+    }
+
+    impl io::Write for InboundPingStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The socket a healthy writer owns: accepts every offered byte.
+    struct AcceptsAll;
+
+    impl io::Write for AcceptsAll {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn write_vectored(&mut self, buffers: &[io::IoSlice<'_>]) -> io::Result<usize> {
+            Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn framed_pings(count: usize) -> Vec<u8> {
+        let mut script = Vec::new();
+        for nonce in 0..u64::try_from(count).unwrap_or(u64::MAX) {
+            crate::wire::write_message(&mut script, MAGIC, &Message::Ping(nonce))
+                .unwrap_or_else(|error| panic!("encode ping {nonce}: {error}"));
+        }
+        script
+    }
+
+    /// Backdates the lease's send-activity clock so `margin` of real time
+    /// separates `last_write` from the send-silence threshold.
+    fn backdated_send_clock(margin: Duration) -> Result<Instant, TestError> {
+        let since_last_write = TIMEOUT_INTERVAL
+            .checked_sub(margin)
+            .ok_or("the margin must stay under the timeout interval")?;
+        Instant::now()
+            .checked_sub(since_last_write)
+            .ok_or_else(|| "test instant underflow".into())
+    }
+
+    #[test]
+    fn blocked_writer_send_silence_expires_despite_inbound_traffic() -> TestResult {
+        // A stalled writer: no thread consumes the outbound queue, so the
+        // socket accepts nothing while the queue keeps admitting frames.
+        let margin = Duration::from_secs(10);
+        let last_write = backdated_send_clock(margin)?;
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = PeerLease::new(outbound_tx);
+        *lease.send_activity().lock() = last_write;
+        let shared = shared_with(ScriptedChain { blocks: Vec::new() });
+        let mut peer = crate::Peer::new(
+            InboundPingStream {
+                script: io::Cursor::new(framed_pings(64)),
+            },
+            MAGIC,
+        );
+        peer.state = PeerState::Ready;
+        let session_lease = lease.clone();
+        let (outcome_tx, outcome_rx) = crossbeam_channel::bounded(1);
+        let session = std::thread::spawn(move || {
+            let _ = outcome_tx.send(run_message_loop(
+                &mut peer,
+                PeerEndpoint::from(([127, 0, 0, 1], 18_449)),
+                &session_lease,
+                &shared,
+                None,
+            ));
+        });
+
+        // Below the threshold the session must stay up: inbound pings keep the
+        // receive clock fresh and the originated probe merely queues.
+        std::thread::sleep(margin / 2);
+        assert!(
+            matches!(
+                outcome_rx.try_recv(),
+                Err(crossbeam_channel::TryRecvError::Empty)
+            ),
+            "an admit-only probe and fresh inbound traffic must not expire the loop early"
+        );
+        let ping_len = wire_len_of(&Message::Ping(0))?;
+        assert_eq!(
+            lease.budget_handle().control_pending(),
+            (1, ping_len),
+            "the probe was admitted to the control lane while nothing was written"
+        );
+
+        let outcome = outcome_rx
+            .recv_timeout(FAILSAFE)
+            .map_err(|_| "the session did not expire within the failsafe")?;
+        session.join().map_err(|_| "session join")?;
+        assert!(
+            outcome.is_ok(),
+            "send-silence expiry at TIMEOUT_INTERVAL past the last actual write is a clean close: {outcome:?}"
+        );
+        assert!(
+            last_write.elapsed() >= margin,
+            "expiry must wait out the send clock, not fire on the first pass"
+        );
+        assert!(
+            matches!(
+                outbound_rx.try_recv().map(|frame| frame.into_message()),
+                Ok(Message::Ping(_))
+            ),
+            "the probe stayed queued ahead of the pongs: admitted, never written"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn healthy_writer_actual_writes_reset_the_send_silence_clock() -> TestResult {
+        let margin = Duration::from_secs(10);
+        let last_write = backdated_send_clock(margin)?;
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = PeerLease::new(outbound_tx);
+        *lease.send_activity().lock() = last_write;
+        let shared = shared_with(ScriptedChain { blocks: Vec::new() });
+
+        let counters = Arc::new(crate::PeerCounters::default());
+        let writer = {
+            let budget = lease.budget_handle();
+            let close = lease.close_signal();
+            let activity = lease.send_activity();
+            let counters = Arc::clone(&counters);
+            std::thread::spawn(move || {
+                let _exit = WriterExit {
+                    budget,
+                    outbound_rx: &outbound_rx,
+                };
+                let mut sink = crate::CountingStream::new(AcceptsAll, counters)
+                    .recording_send_activity(activity);
+                run_writer_loop(
+                    &outbound_rx,
+                    close,
+                    &mut sink,
+                    &mut SendTransport::V1(MAGIC),
+                    &crate::PeerCounters::default(),
+                    None,
+                );
+            })
+        };
+        let mut peer = crate::Peer::new(
+            InboundPingStream {
+                script: io::Cursor::new(framed_pings(64)),
+            },
+            MAGIC,
+        );
+        peer.state = PeerState::Ready;
+        let session_lease = lease.clone();
+        let (outcome_tx, outcome_rx) = crossbeam_channel::bounded(1);
+        let session = std::thread::spawn(move || {
+            let _ = outcome_tx.send(run_message_loop(
+                &mut peer,
+                PeerEndpoint::from(([127, 0, 0, 1], 18_450)),
+                &session_lease,
+                &shared,
+                None,
+            ));
+        });
+
+        // The writer's accepted bytes stamp the same send-activity clock the
+        // loop observes; without those stamps the backdated clock would
+        // expire the session `margin` after start.
+        wait_until(
+            "the writer's first accepted bytes to stamp the clock",
+            || lease.last_send() > last_write,
+        )?;
+        let started = Instant::now();
+        while started.elapsed() < margin + Duration::from_secs(3) {
+            assert!(
+                matches!(
+                    outcome_rx.try_recv(),
+                    Err(crossbeam_channel::TryRecvError::Empty)
+                ),
+                "actual writes (the probe included) must reset the send-silence clock"
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        lease.cancel();
+        let outcome = outcome_rx
+            .recv_timeout(FAILSAFE)
+            .map_err(|_| "the session did not end after cancel")?;
+        session.join().map_err(|_| "session join")?;
+        writer.join().map_err(|_| "writer join")?;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 #[cfg(test)]
-mod aggregate_budget_tests;
+mod aggregate_budget_tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use bitcoin::bip152::{BlockTransactionsRequest, HeaderAndShortIds, ShortId};
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::p2p::ServiceFlags;
+    use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
+    use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
+    use bitcoin::p2p::message_compact_blocks::{CmpctBlock, GetBlockTxn};
+    use bitcoin_rs_consensus::primitives::Header;
+
+    use super::getdata_pause_tests::{
+        FAILSAFE, MAGIC, ScriptedChain, Served, TestResult, WriterKind, block, inventory_of,
+        parked_peer, read_messages, scripted, shared_with, wait_until, wire_len_of,
+    };
+    use super::{
+        DeferredStep, Keepalive, KeepaliveAction, ParkedStep, ProductionSink, TIMEOUT_INTERVAL,
+        notfound_wire_bound, reply_bound, retry_deferred_request, step_parked_getdata,
+    };
+    use crate::connection::{OutboundBudget, Refusal, SharedOutboundBudget};
+    use crate::test_support::hog;
+    use crate::{Message, PeerLease};
+
+    #[test]
+    fn compact_completion_reserves_before_consuming_pending_and_transfers_image_credit()
+    -> TestResult {
+        struct EmptyHints;
+        impl crate::compact_blocks::CompactBlockHints for EmptyHints {
+            fn for_each_identity(
+                &self,
+                _: &mut dyn FnMut(
+                    bitcoin_rs_consensus::primitives::Txid,
+                    bitcoin_rs_consensus::primitives::Wtxid,
+                ),
+            ) {
+            }
+            fn get_tx_by_txid(
+                &self,
+                _: bitcoin_rs_consensus::primitives::Txid,
+            ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+                None
+            }
+            fn get_tx_by_wtxid(
+                &self,
+                _: bitcoin_rs_consensus::primitives::Wtxid,
+            ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+                None
+            }
+        }
+        for scenario in ["complete", "cancelled", "full"] {
+            let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+            let mut compact = HeaderAndShortIds::from_block(&block, 7, 2, &[])
+                .map_err(|_| "genesis compact block")?;
+            let keys = ShortId::calculate_siphash_keys(&block.header, 7);
+            compact.prefilled_txs.clear();
+            compact.short_ids = vec![ShortId::with_siphash_keys(
+                block.txdata[0].compute_wtxid().as_byte_array(),
+                keys,
+            )];
+            let mut reconstruction = crate::compact_blocks::Reconstruction::new();
+            assert!(matches!(
+                reconstruction.receive_cmpctblock(
+                    &CmpctBlock {
+                        compact_block: compact
+                    },
+                    2,
+                    &EmptyHints,
+                    Instant::now(),
+                ),
+                crate::compact_blocks::Outcome::RequestMissing(_)
+            ));
+            let message = Message::BlockTxn(bitcoin::p2p::message_compact_blocks::BlockTxn {
+                transactions: bitcoin::bip152::BlockTransactions {
+                    block_hash: block.block_hash(),
+                    transactions: block.txdata.clone(),
+                },
+            });
+            let (queue, _receiver) = crate::test_support::message_channel();
+            let lease = PeerLease::new(queue);
+            let sink = ProductionSink::new(&lease, None);
+            let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
+            let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(1);
+            shared.blocks_tx = blocks_tx;
+            let ledger = Arc::clone(shared.block_memory.ledger());
+            let capacity = ledger.capacity();
+            let held = if scenario == "full" {
+                Some(shared.block_memory.reserve(capacity, || false)?)
+            } else {
+                None
+            };
+            if scenario == "cancelled" {
+                lease.cancel();
+            }
+            super::process_compact_wire_message(
+                &message,
+                &mut reconstruction,
+                Some(2),
+                None,
+                &sink,
+                bitcoin_rs_consensus::primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333)),
+                &shared,
+                None,
+            );
+            if scenario != "complete" {
+                assert_eq!(reconstruction.pending_len(), 1);
+                assert!(blocks_rx.is_empty());
+            } else {
+                assert_eq!(reconstruction.pending_len(), 0);
+                let inbound = blocks_rx
+                    .recv_timeout(FAILSAFE)
+                    .map_err(|_| "reconstructed block was not delivered")?;
+                assert!(!ledger.try_take(capacity));
+                drop(inbound);
+            }
+            drop(reconstruction);
+            drop(held);
+            assert!(ledger.try_take(capacity));
+            ledger.give_back(capacity);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn headroom_retains_one_credit() -> TestResult {
+        let reserve = 1_000;
+        let aggregate = Arc::new(SharedOutboundBudget::with_limits(reserve + 64, 64));
+        let (queue, receiver) = crate::test_support::message_channel();
+        let lease = PeerLease::new_with_budget(
+            queue,
+            true,
+            OutboundBudget::with_block_reserve(100, 1 << 20, reserve),
+        )
+        .with_shared_budget(&aggregate);
+        let sink = ProductionSink::new(&lease, None);
+
+        assert!(sink.headroom());
+        assert!(
+            sink.headroom(),
+            "a second reservation would not fit; the held credit is reused"
+        );
+        assert!(sink.headroom());
+        assert_eq!(
+            aggregate.pending(),
+            reserve,
+            "repeated headroom charges the aggregate once"
+        );
+        assert!(
+            matches!(lease.try_reserve_production(), Err(Refusal::Shared)),
+            "the one credit the bulk limit allows is the sink's"
+        );
+        assert_eq!(sink.refusal(), None, "nothing was refused to the sink");
+
+        sink.send(Message::Pong(1))
+            .map_err(|_| "a send under the held reservation")?;
+        assert_eq!(
+            aggregate.pending(),
+            wire_len_of(&Message::Pong(1))?,
+            "the spent credit shrank to the frame it carries"
+        );
+        assert!(
+            !sink.headroom(),
+            "with the frame still queued, a new reservation no longer fits"
+        );
+        assert_eq!(sink.refusal(), Some(Refusal::Shared));
+
+        assert_eq!(receiver.try_recv(), Ok(Message::Pong(1)));
+        assert_eq!(
+            aggregate.pending(),
+            0,
+            "the writer's drop returns the frame"
+        );
+        assert!(sink.headroom(), "room is reserved again once it returns");
+        Ok(())
+    }
+
+    #[test]
+    fn parked_misses_reserved_before_build() -> TestResult {
+        let miss = Inventory::Transaction(bitcoin::Txid::from_byte_array([3; 32]));
+        let bound = notfound_wire_bound(1);
+        let aggregate = Arc::new(SharedOutboundBudget::with_limits(10 * bound, 0));
+        let hogged = 10 * bound - (bound - 1);
+        let hold = hog(&aggregate, hogged);
+        let (queue, receiver) = crate::test_support::message_channel();
+        let lease = PeerLease::new(queue).with_shared_budget(&aggregate);
+        let shared = shared_with(ScriptedChain { blocks: Vec::new() });
+        let mut peer = parked_peer(Vec::new());
+        peer.pending_notfound = vec![miss];
+        let mut keepalive = Keepalive::starting(Instant::now());
+        let mut parked_since = None;
+
+        let step = step_parked_getdata(
+            &mut peer,
+            &shared,
+            &lease,
+            &mut keepalive,
+            &mut parked_since,
+        )?;
+
+        assert_eq!(step, ParkedStep::StillParked);
+        assert_eq!(
+            peer.pending_notfound,
+            vec![miss],
+            "a refused reservation takes nothing out of the list"
+        );
+        assert!(receiver.is_empty());
+        assert_eq!(aggregate.pending(), hogged, "a refusal charges nothing");
+        assert!(
+            keepalive.shared_refused,
+            "the aggregate's refusal is a stall, not an error"
+        );
+        assert!(!lease.is_cancelled());
+
+        drop(hold);
+        step_parked_getdata(
+            &mut peer,
+            &shared,
+            &lease,
+            &mut keepalive,
+            &mut parked_since,
+        )?;
+
+        assert_eq!(peer.pending_notfound, Vec::new());
+        assert_eq!(receiver.try_recv(), Ok(Message::NotFound(vec![miss])));
+        assert_eq!(aggregate.pending(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn reply_bound_covers_actual_replies() -> TestResult {
+        assert_eq!(
+            reply_bound(&Message::Ping(1), false),
+            Some(wire_len_of(&Message::Pong(u64::MAX))?)
+        );
+
+        let get_headers = Message::GetHeaders(GetHeadersMessage::new(
+            Vec::new(),
+            bitcoin::BlockHash::all_zeros(),
+        ));
+        let full_headers = Message::Headers(vec![
+            Header::default();
+            crate::wire::MAX_HEADERS_MESSAGE_COUNT
+        ]);
+        assert_eq!(
+            reply_bound(&get_headers, false),
+            Some(wire_len_of(&full_headers)?)
+        );
+
+        assert_eq!(reply_bound(&Message::GetAddr, false), None);
+        let socket = bitcoin_rs_consensus::primitives::PeerEndpoint::from(([1, 2, 3, 4], 8333));
+        let addr_v1 = Message::Addr(vec![
+            (
+                0,
+                Address::new(
+                    &socket
+                        .socket_addr()
+                        .unwrap_or_else(|| panic!("expected IP fixture")),
+                    ServiceFlags::NONE
+                )
+            );
+            crate::wire::MAX_ADDR_MESSAGE_COUNT
+        ]);
+        let addr_v2 = Message::AddrV2(vec![
+            AddrV2Message {
+                time: 0,
+                services: ServiceFlags::from(u64::MAX),
+                addr: AddrV2::Ipv6(std::net::Ipv6Addr::LOCALHOST),
+                port: 8333,
+            };
+            crate::wire::MAX_ADDR_MESSAGE_COUNT
+        ]);
+        let addr_bound = reply_bound(&Message::GetAddr, true).ok_or("an answerable getaddr")?;
+        assert!(addr_bound >= wire_len_of(&addr_v1)?);
+        assert!(addr_bound >= wire_len_of(&addr_v2)?);
+        Ok(())
+    }
+
+    #[test]
+    fn reply_bound_covers_compact_follow_ups() -> TestResult {
+        let slots = 3_000_u64;
+        let keys = (1, 2);
+        let short_ids = (0..slots)
+            .map(|slot| ShortId::with_siphash_keys(&[slot.to_le_bytes()[0]; 32], keys))
+            .collect();
+        let header: bitcoin::block::Header = bitcoin::consensus::deserialize(&[0_u8; 80])?;
+        let cmpct = Message::CmpctBlock(CmpctBlock {
+            compact_block: HeaderAndShortIds {
+                header,
+                nonce: 0,
+                short_ids,
+                prefilled_txs: Vec::new(),
+            },
+        });
+        let block_hash = bitcoin::BlockHash::all_zeros();
+        let worst_getblocktxn = Message::GetBlockTxn(GetBlockTxn {
+            txs_request: BlockTransactionsRequest {
+                block_hash,
+                indexes: (0..slots).map(|slot| slot * 70_000).collect(),
+            },
+        });
+        let fallback = Message::GetData(vec![Inventory::WitnessBlock(block_hash)]);
+        let cmpct_bound = reply_bound(&cmpct, false).ok_or("a reserved cmpctblock")?;
+        assert!(cmpct_bound >= wire_len_of(&worst_getblocktxn)?);
+        assert!(cmpct_bound >= wire_len_of(&fallback)?);
+
+        let blocktxn = Message::BlockTxn(bitcoin::p2p::message_compact_blocks::BlockTxn {
+            transactions: bitcoin::bip152::BlockTransactions {
+                block_hash,
+                transactions: Vec::new(),
+            },
+        });
+        let blocktxn_bound = reply_bound(&blocktxn, false).ok_or("a reserved blocktxn")?;
+        assert!(blocktxn_bound >= wire_len_of(&fallback)?);
+        Ok(())
+    }
+
+    #[test]
+    fn notfound_wire_bound_is_exact() -> TestResult {
+        for items in [1, 2, 252, 253, 1_000] {
+            let miss = Inventory::Transaction(bitcoin::Txid::from_byte_array([9; 32]));
+            assert_eq!(
+                notfound_wire_bound(items),
+                wire_len_of(&Message::NotFound(vec![miss; items]))?,
+                "{items} items"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stall_exclusion_removes_only_shared_refusals() {
+        let t0 = Instant::now();
+        let since = t0 + Duration::from_secs(10);
+        let long_after = t0 + TIMEOUT_INTERVAL + Duration::from_secs(100);
+
+        let mut shared = Keepalive::starting(t0);
+        let mut parked = Some(since);
+        shared.note_refusal(Refusal::Shared);
+        shared.settle_pass(since, &mut parked);
+        assert_eq!(
+            shared.stall,
+            Some(since),
+            "an aggregate refusal opens a stall"
+        );
+        assert_ne!(
+            shared.next_action(long_after),
+            KeepaliveAction::Expired,
+            "the open stall is not silence in either direction"
+        );
+        assert_ne!(
+            shared.next_action_while_parked(long_after),
+            KeepaliveAction::Expired
+        );
+
+        shared.note_refusal(Refusal::Shared);
+        shared.settle_pass(long_after, &mut parked);
+        assert_eq!(
+            shared.stall,
+            Some(since),
+            "a continued refusal keeps one stall"
+        );
+
+        shared.settle_pass(long_after, &mut parked);
+        assert_eq!(shared.stall, None, "a pass without a refusal closes it");
+        assert_eq!(
+            parked,
+            Some(long_after),
+            "the parked marker moves past the stalled time"
+        );
+        assert_ne!(
+            shared.next_action(long_after),
+            KeepaliveAction::Expired,
+            "the closed stall stays excluded from both directions"
+        );
+        assert_eq!(
+            shared.next_action(long_after + TIMEOUT_INTERVAL + Duration::from_secs(1)),
+            KeepaliveAction::Expired,
+            "silence after the stall is counted"
+        );
+
+        let mut local = Keepalive::starting(t0);
+        let mut none = None;
+        local.note_refusal(Refusal::Local);
+        local.settle_pass(since, &mut none);
+        assert_eq!(local.stall, None, "the connection's own queue is no stall");
+        assert_eq!(local.next_action(long_after), KeepaliveAction::Expired);
+    }
+
+    struct DeferredHarness {
+        lease: PeerLease,
+        peer: crate::Peer<std::io::Cursor<Vec<u8>>>,
+        keepalive: Keepalive,
+        parked_since: Option<Instant>,
+    }
+
+    impl DeferredHarness {
+        fn retry(&mut self, message: Option<Message>, now: Instant) -> DeferredStep {
+            self.peer.deferred_inbound = message;
+            retry_deferred_request(
+                &mut self.peer,
+                &self.lease,
+                &mut self.keepalive,
+                &mut self.parked_since,
+                false,
+                now,
+            )
+        }
+
+        fn retry_held(&mut self, now: Instant) -> DeferredStep {
+            retry_deferred_request(
+                &mut self.peer,
+                &self.lease,
+                &mut self.keepalive,
+                &mut self.parked_since,
+                false,
+                now,
+            )
+        }
+    }
+
+    #[test]
+    fn deferred_request_retries_and_keeps_the_existing_local_rules() -> TestResult {
+        let bound = reply_bound(&Message::Ping(1), false).ok_or("a reserved ping")?;
+        let aggregate = Arc::new(SharedOutboundBudget::with_limits(4 * bound, 0));
+        let hold = hog(&aggregate, 3 * bound + 1);
+        let (queue, _receiver) = crate::test_support::message_channel();
+        let t0 = Instant::now();
+        let mut harness = DeferredHarness {
+            lease: PeerLease::new(queue).with_shared_budget(&aggregate),
+            peer: parked_peer(Vec::new()),
+            keepalive: Keepalive::starting(t0),
+            parked_since: None,
+        };
+
+        assert!(matches!(harness.retry(None, t0), DeferredStep::NoneHeld));
+
+        assert!(matches!(
+            harness.retry(Some(Message::Ping(7)), t0),
+            DeferredStep::Waiting
+        ));
+        assert_eq!(harness.peer.deferred_inbound, Some(Message::Ping(7)));
+        assert!(
+            harness.keepalive.shared_refused,
+            "the refusal is reported as a stall"
+        );
+        assert!(harness.parked_since.is_some());
+        assert!(!harness.lease.is_cancelled());
+
+        drop(hold);
+        let DeferredStep::Ready(message, Some(credit)) = harness.retry_held(t0) else {
+            return Err("the reply is reserved once the aggregate has room".into());
+        };
+        assert_eq!(message, Message::Ping(7));
+        assert_eq!(credit.bytes(), bound);
+        assert_eq!(harness.parked_since, None);
+        assert_eq!(harness.peer.deferred_inbound, None);
+        drop(credit);
+
+        let (queue, _receiver) = crate::test_support::message_channel();
+        harness.lease = PeerLease::new_with_budget(
+            queue,
+            true,
+            OutboundBudget::with_block_reserve(1, 1 << 20, 1),
+        );
+        harness
+            .lease
+            .send(Message::Ping(1))
+            .map_err(|_| "a fresh queue admits one message")?;
+        assert!(matches!(
+            harness.retry(Some(Message::Ping(8)), t0),
+            DeferredStep::Ended
+        ));
+        assert!(harness.lease.is_cancelled());
+
+        let (queue, _receiver) = crate::test_support::message_channel();
+        harness.lease = PeerLease::new(queue);
+        harness.lease.budget_handle().mark_writer_dead();
+        assert!(matches!(
+            harness.retry(Some(Message::Ping(9)), t0),
+            DeferredStep::Ended
+        ));
+
+        let later = t0 + TIMEOUT_INTERVAL + Duration::from_secs(5);
+        let hold = hog(&aggregate, 3 * bound + 1);
+        let (queue, _receiver) = crate::test_support::message_channel();
+        harness.lease = PeerLease::new(queue).with_shared_budget(&aggregate);
+        harness.keepalive = Keepalive::starting(t0);
+        harness.parked_since = Some(t0);
+        assert!(matches!(
+            harness.retry(Some(Message::Ping(10)), later),
+            DeferredStep::Ended
+        ));
+        harness.keepalive = Keepalive::starting(t0);
+        harness.keepalive.stall = Some(t0);
+        harness.parked_since = Some(t0);
+        assert!(matches!(
+            harness.retry(Some(Message::Ping(11)), later),
+            DeferredStep::Waiting
+        ));
+        drop(hold);
+        Ok(())
+    }
+
+    fn answered_once_after_the_aggregate_drains(
+        request: &Message,
+        expected: Message,
+    ) -> TestResult {
+        let bound = reply_bound(request, true).ok_or("a request-scoped reply")?;
+        let aggregate = Arc::new(SharedOutboundBudget::with_limits(4 * bound, 0));
+        let hold = hog(&aggregate, 3 * bound + 1);
+        let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
+        shared.address_book = Some(crate::addrman::AddressBook::open(
+            None,
+            MAGIC.to_bytes(),
+            true,
+            None,
+        ));
+        let mut served = Served::start_on(
+            shared,
+            OutboundBudget::with_block_reserve(100, 1 << 20, 1),
+            Some(&aggregate),
+            &WriterKind::Gated,
+        )?;
+
+        served.client.send(request)?;
+        std::thread::sleep(Duration::from_millis(300));
+        let ping_len = wire_len_of(&Message::Ping(0))?;
+        assert!(
+            served.budget.pending() == (0, 0) && served.budget.control_pending() <= (1, ping_len),
+            "{request:?}: no reply is reserved or queued while the aggregate is full \
+         (only the originated control probe may sit, on its bounded lane): {:?}",
+            served.budget.pending()
+        );
+        assert!(
+            !served.lease.is_cancelled(),
+            "{request:?}: the aggregate never ends a session"
+        );
+
+        drop(hold);
+        served.open_gate();
+        // The message loop's first-pass keepalive probe met the same full
+        // aggregate as the deferred reply: whether it was refused or queued
+        // under the remaining room depends on the request's reply bound (the
+        // relaxed pending check above accepts either). With room again it
+        // drains first (top-of-pass), then the deferred reply follows.
+        assert!(
+            matches!(
+                read_messages(&mut served.client, 1)?.as_slice(),
+                [Message::Ping(_)]
+            ),
+            "{request:?}: the originated keepalive probe drains with the aggregate"
+        );
+        assert_eq!(
+            read_messages(&mut served.client, 1)?,
+            vec![expected],
+            "{request:?}: the deferred request was answered exactly once"
+        );
+        served.client.send(&Message::Ping(99))?;
+        assert_eq!(
+            read_messages(&mut served.client, 1)?,
+            vec![Message::Pong(99)],
+            "{request:?}: the session serves fresh traffic after the drain"
+        );
+
+        served.lease.cancel();
+        let outcome = served.session_outcome(FAILSAFE)?;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn request_deferred_not_reply() -> TestResult {
+        answered_once_after_the_aggregate_drains(&Message::Ping(7), Message::Pong(7))?;
+        answered_once_after_the_aggregate_drains(
+            &Message::GetHeaders(GetHeadersMessage::new(
+                Vec::new(),
+                bitcoin::BlockHash::all_zeros(),
+            )),
+            Message::Headers(Vec::new()),
+        )?;
+        answered_once_after_the_aggregate_drains(&Message::GetAddr, Message::Addr(Vec::new()))
+    }
+
+    #[test]
+    fn a_bulk_tail_parked_on_the_aggregate_leaves_the_margin_for_control() -> TestResult {
+        let block_a = block(11);
+        let entry = scripted(&block_a);
+        let block_len = wire_len_of(&Message::BlockBytes(entry.1.clone()))?;
+        let aggregate = Arc::new(SharedOutboundBudget::with_limits(10 * block_len, block_len));
+        let hold = hog(&aggregate, 8 * block_len + 1);
+        let mut served = Served::start_on(
+            shared_with(ScriptedChain {
+                blocks: vec![entry],
+            }),
+            OutboundBudget::with_block_reserve(100, 1 << 20, block_len),
+            Some(&aggregate),
+            &WriterKind::Gated,
+        )?;
+
+        served
+            .client
+            .send(&Message::GetData(vec![inventory_of(&block_a)]))?;
+        std::thread::sleep(Duration::from_millis(300));
+        let ping_len = wire_len_of(&Message::Ping(3))?;
+        wait_until("the originated keepalive probe to be queued", || {
+            served.budget.control_pending() == (1, ping_len)
+        })?;
+        served
+            .lease
+            .send(Message::Ping(3))
+            .map_err(|_| "the margin keeps control traffic flowing")?;
+        assert_eq!(served.budget.pending(), (1, ping_len));
+        assert_eq!(served.budget.control_pending(), (1, ping_len));
+        assert_eq!(aggregate.pending(), 8 * block_len + 1 + 2 * ping_len);
+        assert!(
+            !served.lease.is_cancelled(),
+            "a parked bulk tail never cancels the lease"
+        );
+
+        served.open_gate();
+        assert!(
+            matches!(
+                read_messages(&mut served.client, 2)?.as_slice(),
+                [Message::Ping(_), Message::Ping(3)],
+            ),
+            "the originated probe and the queued control ping drain in order"
+        );
+        drop(hold);
+        assert_eq!(
+            read_messages(&mut served.client, 1)?,
+            vec![Message::Block(
+                bitcoin_rs_consensus::primitives::BlockImage::from_local(block_a),
+            )],
+            "the tail is served once the aggregate has room"
+        );
+
+        served.lease.cancel();
+        let outcome = served.session_outcome(FAILSAFE)?;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn conditional_compact_defers_on_locally_full_queue() -> TestResult {
+        let mut served = Served::start(
+            shared_with(ScriptedChain { blocks: Vec::new() }),
+            OutboundBudget::with_block_reserve(1, 1 << 20, 1),
+            &WriterKind::Gated,
+        )?;
+        let ping_len = wire_len_of(&Message::Ping(1))?;
+        // The message loop's first-pass keepalive probe rides the bounded
+        // control lane; a data-path send fills the one slot the queue admits.
+        wait_until(
+            "the originated keepalive probe to take the control lane",
+            || served.budget.control_pending() == (1, ping_len),
+        )?;
+        served
+            .lease
+            .send(Message::Ping(1))
+            .map_err(|_| "a fresh queue admits its one message")?;
+        assert!(
+            !served.budget.writer_dead(),
+            "the gated writer is live while its gate stays shut"
+        );
+        assert!(!served.lease.is_cancelled());
+
+        let stray = Message::BlockTxn(bitcoin::p2p::message_compact_blocks::BlockTxn {
+            transactions: bitcoin::bip152::BlockTransactions {
+                block_hash: bitcoin::BlockHash::all_zeros(),
+                transactions: Vec::new(),
+            },
+        });
+        served.client.send(&stray)?;
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(
+            !served.lease.is_cancelled(),
+            "a locally full queue defers a conditional compact reply instead of closing"
+        );
+        assert_eq!(
+            served.budget.pending(),
+            (1, ping_len),
+            "an Idle compact outcome reserves and queues nothing while parked"
+        );
+
+        served.open_gate();
+        assert!(
+            matches!(
+                read_messages(&mut served.client, 2)?.as_slice(),
+                [Message::Ping(_), Message::Ping(1)]
+            ),
+            "the originated keepalive probe and the queued ping drain in order"
+        );
+        served.client.send(&Message::Ping(99))?;
+        assert_eq!(
+            read_messages(&mut served.client, 1)?,
+            vec![Message::Pong(99)],
+            "the deferred conditional was answered with nothing and the session still serves"
+        );
+
+        served.lease.cancel();
+        let outcome = served.session_outcome(FAILSAFE)?;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn conditional_local_retry_defers_then_readies_with_no_reply() -> TestResult {
+        let t0 = Instant::now();
+        let stray = Message::BlockTxn(bitcoin::p2p::message_compact_blocks::BlockTxn {
+            transactions: bitcoin::bip152::BlockTransactions {
+                block_hash: bitcoin::BlockHash::all_zeros(),
+                transactions: Vec::new(),
+            },
+        });
+        let bound = reply_bound(&stray, false).ok_or("a reserved blocktxn")?;
+        let (queue, receiver) = crate::test_support::message_channel();
+        let lease = PeerLease::new_with_budget(
+            queue,
+            true,
+            OutboundBudget::with_block_reserve(1, 1 << 20, 1),
+        );
+        lease
+            .send(Message::Ping(1))
+            .map_err(|_| "a fresh queue admits one message")?;
+        let ping_len = wire_len_of(&Message::Ping(1))?;
+        assert_eq!(lease.budget_handle().pending(), (1, ping_len));
+        assert!(!lease.budget_handle().writer_dead());
+        assert_eq!(lease.try_reserve_reply(bound).err(), Some(Refusal::Local));
+        let mut peer = parked_peer(Vec::new());
+        let mut keepalive = Keepalive::starting(t0);
+        let mut parked_since = None;
+        peer.deferred_inbound = Some(stray.clone());
+        assert!(matches!(
+            retry_deferred_request(
+                &mut peer,
+                &lease,
+                &mut keepalive,
+                &mut parked_since,
+                false,
+                t0
+            ),
+            DeferredStep::Waiting
+        ));
+        assert_eq!(peer.deferred_inbound, Some(stray.clone()));
+        assert!(!lease.is_cancelled());
+        assert!(parked_since.is_some());
+        assert_eq!(lease.budget_handle().pending(), (1, ping_len));
+        assert_eq!(receiver.try_recv(), Ok(Message::Ping(1)));
+        assert_eq!(lease.budget_handle().pending(), (0, 0));
+        let step = retry_deferred_request(
+            &mut peer,
+            &lease,
+            &mut keepalive,
+            &mut parked_since,
+            false,
+            t0,
+        );
+        let DeferredStep::Ready(message, Some(credit)) = step else {
+            return Err("the reply is reserved once the local queue has room".into());
+        };
+        assert_eq!(message, stray);
+        assert_eq!(peer.deferred_inbound, None);
+        assert_eq!(parked_since, None);
+        let mut recon = crate::compact_blocks::Reconstruction::new();
+        let outcome = super::process_compact_message(
+            &mut recon,
+            &message,
+            crate::peer::COMPACT_BLOCK_VERSION,
+            None,
+            Instant::now(),
+        );
+        assert!(matches!(outcome, crate::compact_blocks::Outcome::Idle));
+        let sink = ProductionSink::new(&lease, Some(credit));
+        let shared = shared_with(ScriptedChain { blocks: Vec::new() });
+        let addr = bitcoin_rs_consensus::primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
+        assert!(super::handle_compact_outcome(outcome, &sink, addr, &shared, None).is_none());
+        assert!(receiver.is_empty());
+        assert!(!lease.is_cancelled());
+        drop(sink);
+        assert_eq!(lease.budget_handle().pending(), (0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn unconditional_ping_on_locally_full_queue_ends() -> TestResult {
+        let t0 = Instant::now();
+        let (queue, _receiver) = crate::test_support::message_channel();
+        let lease = PeerLease::new_with_budget(
+            queue,
+            true,
+            OutboundBudget::with_block_reserve(1, 1 << 20, 1),
+        );
+        lease
+            .send(Message::Ping(1))
+            .map_err(|_| "a fresh queue admits one message")?;
+        let mut peer = parked_peer(Vec::new());
+        let mut keepalive = Keepalive::starting(t0);
+        let mut parked_since = None;
+        peer.deferred_inbound = Some(Message::Ping(8));
+        assert!(matches!(
+            retry_deferred_request(
+                &mut peer,
+                &lease,
+                &mut keepalive,
+                &mut parked_since,
+                false,
+                t0
+            ),
+            DeferredStep::Ended
+        ));
+        assert!(lease.is_cancelled());
+        Ok(())
+    }
+
+    #[test]
+    fn conditional_local_retry_with_dead_writer_ends() {
+        let t0 = Instant::now();
+        let stray = Message::BlockTxn(bitcoin::p2p::message_compact_blocks::BlockTxn {
+            transactions: bitcoin::bip152::BlockTransactions {
+                block_hash: bitcoin::BlockHash::all_zeros(),
+                transactions: Vec::new(),
+            },
+        });
+        let (queue, _receiver) = crate::test_support::message_channel();
+        let lease = PeerLease::new(queue);
+        lease.budget_handle().mark_writer_dead();
+        let mut peer = parked_peer(Vec::new());
+        let mut keepalive = Keepalive::starting(t0);
+        let mut parked_since = None;
+        peer.deferred_inbound = Some(stray);
+        assert!(matches!(
+            retry_deferred_request(
+                &mut peer,
+                &lease,
+                &mut keepalive,
+                &mut parked_since,
+                false,
+                t0
+            ),
+            DeferredStep::Ended
+        ));
+    }
+
+    #[test]
+    fn conditional_local_wait_expires_after_timeout_interval() -> TestResult {
+        let t0 = Instant::now();
+        let (queue, _receiver) = crate::test_support::message_channel();
+        let lease = PeerLease::new_with_budget(
+            queue,
+            true,
+            OutboundBudget::with_block_reserve(1, 1 << 20, 1),
+        );
+        lease
+            .send(Message::Ping(1))
+            .map_err(|_| "a fresh queue admits one message")?;
+        let mut peer = parked_peer(Vec::new());
+        let mut keepalive = Keepalive::starting(t0);
+        let mut parked_since = None;
+        peer.deferred_inbound = Some(Message::BlockTxn(
+            bitcoin::p2p::message_compact_blocks::BlockTxn {
+                transactions: bitcoin::bip152::BlockTransactions {
+                    block_hash: bitcoin::BlockHash::all_zeros(),
+                    transactions: Vec::new(),
+                },
+            },
+        ));
+        assert!(matches!(
+            retry_deferred_request(
+                &mut peer,
+                &lease,
+                &mut keepalive,
+                &mut parked_since,
+                false,
+                t0
+            ),
+            DeferredStep::Waiting
+        ));
+        keepalive.settle_pass(t0, &mut parked_since);
+        assert!(matches!(
+            retry_deferred_request(
+                &mut peer,
+                &lease,
+                &mut keepalive,
+                &mut parked_since,
+                false,
+                t0 + TIMEOUT_INTERVAL + Duration::from_secs(1)
+            ),
+            DeferredStep::Ended
+        ));
+        Ok(())
+    }
+
+    // P2P-02
+    #[test]
+    fn holding_maximum_share_leaves_room_for_second_connection() -> TestResult {
+        let aggregate = Arc::new(SharedOutboundBudget::new());
+        let (tx1, _rx1) = crate::test_support::message_channel();
+        let lease1 = PeerLease::new(tx1).with_shared_budget(&aggregate);
+        let (tx2, _rx2) = crate::test_support::message_channel();
+        let lease2 = PeerLease::new(tx2).with_shared_budget(&aggregate);
+
+        let budget1 = lease1.budget_handle();
+        let max_share = budget1.max_bytes();
+        let hold = budget1
+            .try_charge(max_share)
+            .map_err(|_| "independent oracle requires connection to hold its full share")?;
+        assert!(
+            matches!(budget1.try_charge(1), Err(Refusal::Local)),
+            "independent oracle: exceeding connection share must yield Local refusal"
+        );
+
+        let ping = Message::Ping(1);
+        lease2.send(ping).map_err(|refusal| {
+        format!("independent oracle violated: second connection starved by peer holding share: {refusal:?}")
+    })?;
+        assert!(
+            lease2.try_reserve_production().is_ok(),
+            "independent oracle: aggregate bulk headroom must remain open for other peers"
+        );
+
+        drop(hold);
+        Ok(())
+    }
+
+    // P2P-02
+    #[test]
+    fn aggregate_never_exceeds_cap_with_concurrent_reservers() -> TestResult {
+        let aggregate = Arc::new(SharedOutboundBudget::new());
+        let cap = aggregate.max_bytes();
+        let threads = 8;
+        let iterations = 200;
+        let barrier = Arc::new(std::sync::Barrier::new(threads));
+        let handles: Vec<_> = (0..threads)
+        .map(|i| {
+            let agg = Arc::clone(&aggregate);
+            let bar = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let (tx, _rx) = crate::test_support::message_channel();
+                let lease = PeerLease::new(tx).with_shared_budget(&agg);
+                let budget = lease.budget_handle();
+                bar.wait();
+                let mut held = Vec::new();
+                for step in 0..iterations {
+                    let size = ((i + step) % 5 + 1) * 1024 * 1024;
+                    if let Ok(credit) = budget.try_charge(size) {
+                        let used = agg.pending();
+                        assert!(
+                            used <= cap,
+                            "independent oracle violated: aggregate pending {used} exceeded cap {cap}"
+                        );
+                        held.push(credit);
+                    }
+                    if held.len() > 2 {
+                        let _ = held.remove(0);
+                    }
+                    let used = agg.pending();
+                    assert!(
+                        used <= cap,
+                        "independent oracle violated: aggregate pending {used} exceeded cap {cap}"
+                    );
+                }
+                drop(held);
+            })
+        })
+        .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| "reserver thread joined cleanly")?;
+        }
+
+        assert_eq!(
+            aggregate.pending(),
+            0,
+            "independent oracle: releasing all credits must return aggregate used bytes to 0"
+        );
+        Ok(())
+    }
+
+    // P2P-02
+    #[test]
+    fn releasing_credits_returns_used_to_zero() -> TestResult {
+        let aggregate = Arc::new(SharedOutboundBudget::new());
+        let (tx, _rx) = crate::test_support::message_channel();
+        let lease = PeerLease::new(tx).with_shared_budget(&aggregate);
+        let budget = lease.budget_handle();
+
+        let credit = budget
+            .try_charge(1_000_000)
+            .map_err(|_| "independent oracle: fresh budget admits reservation")?;
+        assert_eq!(
+            aggregate.pending(),
+            1_000_000,
+            "independent oracle: aggregate pending equals charged credit"
+        );
+        drop(credit);
+        assert_eq!(
+            aggregate.pending(),
+            0,
+            "independent oracle: dropping credit returns aggregate pending bytes to 0"
+        );
+        Ok(())
+    }
+}
 
 #[cfg(test)]
-mod aggregate_filter_tests;
+mod aggregate_filter_tests {
+    use bitcoin_rs_consensus::primitives::PeerEndpoint;
+    use std::io;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use bitcoin::bip152::BlockTransactionsRequest;
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::p2p::message_blockdata::Inventory;
+    use bitcoin::p2p::message_filter::{CFilter, GetCFilters};
+    use bitcoin_rs_consensus::primitives::{BlockHash, Header};
+
+    use super::getdata_pause_tests::{
+        FAILSAFE, MAGIC, Served, TestResult, WriterKind, read_messages, shared_with_query,
+    };
+    use super::run_message_loop;
+    use crate::connection::{OutboundBudget, SharedOutboundBudget};
+    use crate::peer::{FilterHalt, ParkedFilter};
+    use crate::test_support::hog;
+    use crate::{
+        ChainQuery, FilterRequest, FilterServing, InventoryServing, Message, Peer, PeerError,
+        PeerLease, PeerState,
+    };
+
+    const RESERVE: usize = 1_000;
+
+    struct FilterChain {
+        published: Arc<AtomicBool>,
+        cancel_after_refusal: Option<PeerLease>,
+    }
+
+    impl FilterChain {
+        fn published() -> Self {
+            Self {
+                published: Arc::new(AtomicBool::new(true)),
+                cancel_after_refusal: None,
+            }
+        }
+
+        fn unpublished() -> Self {
+            Self {
+                published: Arc::new(AtomicBool::new(false)),
+                cancel_after_refusal: None,
+            }
+        }
+    }
+
+    impl ChainQuery for FilterChain {
+        fn stale_tip_announcement(
+            &self,
+            _: bitcoin_rs_consensus::primitives::Hash256,
+            _: &[bitcoin_rs_consensus::primitives::Hash256],
+        ) -> Option<crate::dispatch::StaleTipHeaders> {
+            None
+        }
+        fn serve_compact_filters(
+            &self,
+            request: &FilterRequest,
+            headroom: &dyn Fn() -> bool,
+            send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+        ) -> Result<FilterServing, PeerError> {
+            if !headroom() {
+                if let Some(lease) = &self.cancel_after_refusal {
+                    lease.cancel();
+                }
+                return Ok(FilterServing::Pending(request.clone()));
+            }
+            if !self.published.load(Ordering::Acquire) {
+                return Ok(FilterServing::Pending(request.clone()));
+            }
+            send(Message::CFilter(CFilter {
+                filter_type: 0,
+                block_hash: bitcoin::BlockHash::all_zeros(),
+                filter: vec![0],
+            }))?;
+            Ok(FilterServing::Done)
+        }
+
+        fn headers_after(&self, _: &[BlockHash], _: BlockHash, _: usize) -> Vec<Header> {
+            Vec::new()
+        }
+
+        fn serve_inventory_blocks(
+            &self,
+            _: &[Inventory],
+            _: Option<u64>,
+            _: &dyn Fn() -> bool,
+            _: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+        ) -> Result<InventoryServing, PeerError> {
+            Ok(InventoryServing::default())
+        }
+
+        fn block_transactions(
+            &self,
+            _: &BlockTransactionsRequest,
+            _: Option<u64>,
+            _: &dyn Fn() -> bool,
+        ) -> Result<Option<Message>, PeerError> {
+            Ok(None)
+        }
+    }
+
+    fn get_cfilters() -> Message {
+        Message::GetCFilters(GetCFilters {
+            filter_type: 0,
+            start_height: 0,
+            stop_hash: bitcoin::BlockHash::all_zeros(),
+        })
+    }
+
+    fn small_aggregate() -> Arc<SharedOutboundBudget> {
+        Arc::new(SharedOutboundBudget::with_limits(4 * RESERVE, 0))
+    }
+
+    fn local_budget() -> OutboundBudget {
+        OutboundBudget::with_block_reserve(100, 1 << 20, RESERVE)
+    }
+
+    fn refuse_reservations(
+        aggregate: &Arc<SharedOutboundBudget>,
+    ) -> crate::connection::OutboundCredit {
+        hog(aggregate, 3 * RESERVE + RESERVE / 2)
+    }
+
+    #[test]
+    fn a_filter_request_waits_out_an_aggregate_refusal_longer_than_its_allowance() -> TestResult {
+        let aggregate = small_aggregate();
+        let hold = refuse_reservations(&aggregate);
+        let mut served = Served::start_on(
+            shared_with_query(FilterChain::published()),
+            local_budget(),
+            Some(&aggregate),
+            &WriterKind::Gated,
+        )?;
+        served.open_gate();
+
+        served.client.send(&get_cfilters())?;
+        std::thread::sleep(ParkedFilter::ALLOWANCE + Duration::from_secs(2));
+
+        if let Ok(ended) = served.session_outcome(Duration::from_millis(50)) {
+            return Err(
+                format!("the session ended while the aggregate refused it: {ended:?}").into(),
+            );
+        }
+        assert_eq!(
+            served.budget.pending(),
+            (0, 0),
+            "nothing is reserved or queued while the aggregate refuses"
+        );
+        assert!(!served.lease.is_cancelled());
+
+        drop(hold);
+        // The first-pass keepalive probe was refused with the aggregate full; it
+        // drains first, then the parked filter request is served.
+        let received = read_messages(&mut served.client, 2)?;
+        assert!(
+            matches!(&received[..], [Message::Ping(_), Message::CFilter(_)]),
+            "the probe and the parked request are served once there is room: {received:?}"
+        );
+
+        served.lease.cancel();
+        let outcome = served.session_outcome(FAILSAFE)?;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_filter_request_waiting_on_the_index_after_an_aggregate_refusal_still_times_out()
+    -> TestResult {
+        let aggregate = small_aggregate();
+        let hold = refuse_reservations(&aggregate);
+        let mut served = Served::start_on(
+            shared_with_query(FilterChain::unpublished()),
+            local_budget(),
+            Some(&aggregate),
+            &WriterKind::Gated,
+        )?;
+        served.open_gate();
+
+        served.client.send(&get_cfilters())?;
+        std::thread::sleep(Duration::from_millis(2_500));
+        if let Ok(ended) = served.session_outcome(Duration::from_millis(50)) {
+            return Err(
+                format!("the session ended while the aggregate refused it: {ended:?}").into(),
+            );
+        }
+
+        drop(hold);
+        let outcome = served.session_outcome(FAILSAFE)?;
+        assert!(
+            matches!(&outcome, Err(PeerError::Io(error))
+            if error.to_string().contains("publication timed out")),
+            "{outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_first_filter_pass_records_an_aggregate_refusal() -> TestResult {
+        let aggregate = small_aggregate();
+        let _hold = refuse_reservations(&aggregate);
+        let (queue, _receiver) = crate::test_support::message_channel();
+        let lease =
+            PeerLease::new_with_budget(queue, true, local_budget()).with_shared_budget(&aggregate);
+        let shared = shared_with_query(FilterChain {
+            cancel_after_refusal: Some(lease.clone()),
+            ..FilterChain::published()
+        });
+        let mut input = Vec::new();
+        crate::wire::write_message(&mut input, MAGIC, &get_cfilters())?;
+        let mut peer = Peer::new(io::Cursor::new(input), MAGIC);
+        peer.state = PeerState::Ready;
+        let addr = PeerEndpoint::from(([127, 0, 0, 1], 18_444));
+
+        run_message_loop(&mut peer, addr, &lease, &shared, None)?;
+
+        assert!(lease.is_cancelled(), "the chain closed the lease");
+        let parked = peer
+            .pending_filter_request
+            .as_ref()
+            .ok_or("the refused request was not parked")?;
+        assert_eq!(parked.last, FilterHalt::Shared);
+        assert_eq!(parked.allowance, ParkedFilter::ALLOWANCE);
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 #[cfg(test)]
 #[expect(clippy::expect_used)]
-mod anonymous_inbound_tests;
+mod anonymous_inbound_tests {
+    use super::*;
+
+    fn pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let client = TcpStream::connect(listener.local_addr().expect("address")).expect("connect");
+        (client, listener.accept().expect("accept").0)
+    }
+
+    #[test]
+    fn anonymous_admission_uses_capacity_without_learning_or_loopback_privilege() {
+        let table = Arc::new(crate::PeerTable::new());
+        let mut shared = test_shared(
+            Arc::clone(&table),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+        shared.overlay = Arc::new(crate::overlay::OverlayTransport::new(Arc::new(
+            crate::overlay::OverlayConfig {
+                onion_proxy: Some("127.0.0.1:9050".parse().expect("proxy")),
+                ..crate::overlay::OverlayConfig::default()
+            },
+        )));
+        shared.max_inbound = 2;
+        let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), false, None);
+        shared.address_book = Some(Arc::clone(&book));
+        let (first_client, first) = pair();
+        let (second_client, second) = pair();
+        let (third_client, third) = pair();
+        admit_anonymous_tor(first, &shared);
+        admit_anonymous_tor(second, &shared);
+        let sessions = table.sessions();
+        assert_eq!(sessions.len(), 2);
+        assert_ne!(sessions[0].addr, sessions[1].addr);
+        for session in &sessions {
+            assert_eq!(session.addr.endpoint(), None);
+            assert_eq!(session.addr.network(), crate::PeerNetwork::Onion);
+            assert!(!session.lease.is_no_ban());
+            assert_eq!(
+                session
+                    .addr
+                    .to_string()
+                    .parse::<crate::PeerRemote>()
+                    .expect("RPC handle"),
+                session.addr
+            );
+        }
+        admit_anonymous_tor(third, &shared);
+        assert_eq!(table.live_inbound_count(), 2);
+        let first = &sessions[0];
+        let mut allowance = 32;
+        let mut refill = crate::addrman::now();
+        learn_addresses(
+            &shared,
+            &first.lease,
+            first.addr,
+            &[("8.8.8.8:8333".parse().expect("destination"), 9, refill)],
+            &mut allowance,
+            &mut refill,
+        );
+        assert_eq!(book.len(), 0);
+        shared.note_misbehavior(
+            first.addr,
+            &first.lease,
+            &crate::PeerError::Protocol("invalid peer message"),
+        );
+        assert!(
+            !shared
+                .banned
+                .is_discouraged(std::net::IpAddr::from([127, 0, 0, 1]))
+        );
+        table.cancel_all();
+        drop((first_client, second_client, third_client));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !table.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(table.len(), 0);
+    }
+}

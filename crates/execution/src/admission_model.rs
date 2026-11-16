@@ -1553,10 +1553,21 @@ mod tests {
 
     // RCV-02, SYNC-05
     prop_state_machine! {
-        #![proptest_config(ProptestConfig {
-            cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/execution/regressions/admission_model.txt"
+            )),
+        )),
+        ..(ProptestConfig {
+            cases: std::env::var("PROPTEST_CASES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(256),
             ..ProptestConfig::default()
-        })]
+        })
+    })]
         #[test]
         fn chain_admission_matches_the_reference_model(sequential 1..20 => AdmissionMachine);
     }
