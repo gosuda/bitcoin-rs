@@ -12,6 +12,7 @@ usage() {
 }
 
 [[ $# -ge 1 && $# -le 2 ]] || usage
+[[ $# -eq 1 || "$1" == "test-crates" ]] || usage
 
 failures=0
 collect_failures=false
