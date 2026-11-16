@@ -152,14 +152,8 @@ impl BlockMemory {
         self: &Arc<Self>,
         bytes: usize,
     ) -> Result<BlockMemoryCredit, std::io::Error> {
-        if bytes > self.ledger.receive_capacity() {
+        if bytes > self.ledger.receive_capacity() || !self.ledger.try_take_receive(bytes) {
             return Err(std::io::Error::other(ResourceRefusal));
-        }
-        if !self.ledger.try_take_receive(bytes) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                ResourceRefusal,
-            ));
         }
         Ok(BlockMemoryCredit {
             owner: Arc::clone(self),
@@ -313,7 +307,7 @@ mod tests {
     use bitcoin::p2p::Magic;
     use bitcoin_rs_consensus::primitives::{BlockImage, Network, varint};
     use std::io::Cursor;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[derive(Debug, thiserror::Error)]
     enum TestError {
@@ -518,18 +512,17 @@ mod tests {
         Ok(())
     }
 
+    // BUD-01, BUD-07
     #[test]
     fn cancellation_precedes_typed_decode_and_malformed_decode_releases_credit() -> TestResult {
         let memory = Arc::new(BlockMemory::default());
-        let held = memory.reserve(BLOCK_INGRESS_BYTES, || false)?;
         let frame = framed(vec![0; 80])?;
         let mut peer = Peer::new(Cursor::new(frame.clone()), Magic::REGTEST);
         assert!(matches!(
             peer.read_message_bounded(&memory, || true),
-            Ok(None)
+            Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted
         ));
-        assert_eq!(*memory.used.lock(), BLOCK_INGRESS_BYTES);
-        drop(held);
+        assert_eq!(*memory.used.lock(), 0);
         let mut peer = Peer::new(Cursor::new(frame), Magic::REGTEST);
         assert!(peer.read_message_bounded(&memory, || false).is_err());
         assert_eq!(*memory.used.lock(), 0);
@@ -568,6 +561,16 @@ mod tests {
                 .min(self.pause_at - position)
                 .min(self.max_read);
             std::io::Read::read(&mut self.bytes, &mut output[..limit])
+        }
+    }
+
+    impl std::io::Write for ReceiveFrame {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 
@@ -628,6 +631,7 @@ mod tests {
         )
     }
 
+    // BUD-01, BUD-06
     #[test]
     fn partial_receive_backing_holds_quota_until_terminal_error_or_peer_drop() -> TestResult {
         for (index, make_peer) in [legacy_receive_peer, encrypted_receive_peer]
@@ -656,7 +660,7 @@ mod tests {
                 let capacity = memory.ledger().receive_capacity();
                 let competing = memory.reserve_receive(capacity);
                 assert!(
-                    matches!(&competing, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                    matches!(&competing, Err(error) if error.kind() == std::io::ErrorKind::Other),
                     "partial receive must own quota before {terminal:?}"
                 );
                 drop(memory.try_reserve(memory.ledger().capacity())?);
@@ -761,8 +765,6 @@ mod tests {
                 staged.push(received);
                 drop(peer);
             }
-            // Sixteen staged successors pin a full receive lane without the
-            // transfer; with it the lane stays free for the missing frontier.
             drop(memory.reserve_receive(memory.ledger().receive_capacity())?);
             let mut peer = make_peer(&image)?;
             let frontier = peer
@@ -839,6 +841,8 @@ mod tests {
         capacity: usize,
         used: Mutex<(usize, usize, usize)>,
         released: Condvar,
+        refusals: AtomicUsize,
+        cancel_on_retry: Option<crate::PeerLease>,
     }
 
     impl ReceiveProbe {
@@ -847,6 +851,8 @@ mod tests {
                 capacity,
                 used: Mutex::new((0, 0, 0)),
                 released: Condvar::new(),
+                refusals: AtomicUsize::new(0),
+                cancel_on_retry: None,
             }
         }
     }
@@ -881,6 +887,11 @@ mod tests {
         fn try_take_receive(&self, bytes: usize) -> bool {
             let mut used = self.used.lock();
             if used.1.saturating_add(bytes) > self.capacity {
+                if self.refusals.fetch_add(1, Ordering::Relaxed) != 0
+                    && let Some(lease) = &self.cancel_on_retry
+                {
+                    lease.cancel();
+                }
                 return false;
             }
             used.1 += bytes;
@@ -901,6 +912,57 @@ mod tests {
         }
     }
 
+    // BUD-03, BUD-07, SYNC-03, SYNC-04
+    #[test]
+    fn message_loop_refuses_receive_pressure_once_and_releases_partial_backing() -> TestResult {
+        let image = BlockImage::from_raw(bytes::Bytes::from(lean_big_block_bytes()))
+            .map_err(|_| TestError::Missing("large block"))?;
+        for make_peer in [legacy_receive_block, encrypted_receive_block] {
+            let (outbound, _receiver) = crossbeam_channel::unbounded();
+            let lease = crate::PeerLease::new(outbound);
+            let mut probe = ReceiveProbe::new(crate::recv::RECEIVE_CHUNK * 2);
+            probe.cancel_on_retry = Some(lease.clone());
+            let ledger = Arc::new(probe);
+            let memory = Arc::new(BlockMemory::new(ledger.clone()));
+            let shared = crate::listener::ConnectionShared::new(
+                Arc::new(crate::PeerTable::new()),
+                crate::BannedReader::fixture_empty(),
+                Arc::new(crate::NetworkActivity::from_shared(Arc::new(
+                    AtomicBool::new(true),
+                ))),
+                bitcoin_rs_consensus::latch::LatchWriter::new().reader(),
+                None,
+                Magic::REGTEST,
+                crossbeam_channel::unbounded().0,
+                crossbeam_channel::unbounded().0,
+                None,
+                None,
+                crate::listener::ListenerExtras {
+                    block_memory: Some(memory),
+                    ..Default::default()
+                },
+            );
+            let mut peer = make_peer(&image)?;
+            peer.state = crate::peer::PeerState::Ready;
+            let result = crate::listener::run_message_loop(
+                &mut peer,
+                crate::PeerEndpoint::from((std::net::Ipv4Addr::LOCALHOST, 18_444)),
+                &lease,
+                &shared,
+                None,
+            );
+            assert!(
+                matches!(&result, Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::Other)
+            );
+            assert!(!result.as_ref().err().is_some_and(PeerError::is_misbehavior));
+            assert_eq!(ledger.refusals.load(Ordering::Relaxed), 1);
+            assert_eq!(ledger.used.lock().1, 0);
+            assert!(!lease.is_cancelled());
+        }
+        Ok(())
+    }
+
+    // BUD-01, BUD-07
     #[test]
     fn receive_capacity_and_growth_overlap_are_admitted_before_consuming_more_bytes() -> TestResult
     {
@@ -952,7 +1014,7 @@ mod tests {
             let refused = peer.read_message_bounded(&memory, || false);
             assert!(matches!(
                 &refused,
-                Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
+                Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::Other
             ));
             assert!(
                 !refused
@@ -969,16 +1031,13 @@ mod tests {
             );
             assert!(received <= initial_chunk + crate::wire::HEADER_LEN);
             assert!(received < end);
-            let retained = ledger.used.lock().1;
-            assert!(
-                retained >= received_body && retained <= initial_chunk * 2,
-                "a refused growth retains only the admitted backing capacity"
-            );
+            assert_eq!(ledger.used.lock().1, 0);
             assert_eq!(ledger.used.lock().0, 0);
         }
         Ok(())
     }
 
+    // BUD-01, BUD-07
     #[test]
     fn raw_admission_refuses_before_reading_body_and_recovers_after_release() -> TestResult {
         for (index, make_peer) in [legacy_receive_peer, encrypted_receive_peer]
@@ -990,7 +1049,7 @@ mod tests {
             let mut peer = make_peer()?;
             let result = peer.read_message_bounded(&memory, || false);
             assert!(
-                matches!(&result, Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
+                matches!(&result, Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::Other)
             );
             assert_eq!(
                 peer.stream.bytes.position(),
@@ -1005,6 +1064,33 @@ mod tests {
                     .ok_or(TestError::Missing("block after release"))?,
             );
             assert_eq!(*memory.used.lock(), 0);
+        }
+        Ok(())
+    }
+
+    // P2P-01, BUD-07
+    #[test]
+    fn image_pressure_does_not_hide_pre_handshake_blocks() -> TestResult {
+        for make_peer in [legacy_receive_peer, encrypted_receive_peer] {
+            let memory = Arc::new(BlockMemory::default());
+            let _held = memory.reserve(memory.ledger().capacity(), || false)?;
+            let mut peer = make_peer()?;
+            let end = peer.stream.pause_at;
+            peer.stream.pause_at = 0;
+            assert!(
+                matches!(peer.read_message_bounded(&memory, || false), Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut)
+            );
+            peer.stream.pause_at = end;
+            let state = peer.state;
+            let result = peer.read_message_admitted(
+                |command, _| {
+                    assert_eq!(command, "block");
+                    crate::fsm::require_ready(state)
+                },
+                |_, _| panic!("a pre-handshake block cannot reserve decoder memory"),
+            );
+            assert!(result.as_ref().err().is_some_and(PeerError::is_misbehavior));
+            assert_eq!(*memory.used.lock(), memory.ledger().capacity());
         }
         Ok(())
     }

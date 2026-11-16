@@ -669,19 +669,31 @@ impl BlockSync {
             }
         }
     }
-    pub(crate) fn staged_image_reclaimer(self: &Arc<Self>) -> Arc<dyn BudgetReclaimer> {
+    pub(crate) fn staged_image_reclaimer(
+        self: &Arc<Self>,
+        budget: &Arc<crate::budget::NodeBudget>,
+    ) -> Arc<dyn BudgetReclaimer> {
         Arc::new(StagedImageReclaimer {
             sync: Arc::downgrade(self),
+            budget: Arc::downgrade(budget),
         })
     }
 
     /// The current frontier remains staged, and evicted known-header bodies remain requestable.
-    pub(super) fn reclaim_staged_for_ingress(&self, bytes: u64) -> u64 {
+    pub(super) fn reclaim_staged_for_ingress(
+        &self,
+        bytes: u64,
+        budget: &crate::budget::NodeBudget,
+    ) -> u64 {
         let expected = self.next_expected_block_hash();
         let target = usize::try_from(bytes).unwrap_or(usize::MAX);
+        let charged =
+            || budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages);
         let (evicted, mut freed) = {
             let mut scheduler = self.scheduler.lock();
-            scheduler.stager.evict_for_reclaim(expected, target)
+            scheduler
+                .stager
+                .evict_for_reclaim(expected, target, charged)
         };
         let tree = self.chain.block_tree();
         let now = Instant::now();
@@ -698,7 +710,8 @@ impl BlockSync {
         if freed < bytes {
             let remaining = usize::try_from(bytes - freed).unwrap_or(usize::MAX);
             let mut historical = self.historical.lock();
-            freed = freed.saturating_add(historical.evict_for_reclaim(remaining, now, &tree));
+            freed =
+                freed.saturating_add(historical.evict_for_reclaim(remaining, now, &tree, charged));
         }
         freed
     }
@@ -706,13 +719,15 @@ impl BlockSync {
 
 struct StagedImageReclaimer {
     sync: Weak<BlockSync>,
+    budget: Weak<crate::budget::NodeBudget>,
 }
 
 impl BudgetReclaimer for StagedImageReclaimer {
     fn reclaim(&self, bytes: u64) -> u64 {
-        self.sync
-            .upgrade()
-            .map_or(0, |sync| sync.reclaim_staged_for_ingress(bytes))
+        let (Some(sync), Some(budget)) = (self.sync.upgrade(), self.budget.upgrade()) else {
+            return 0;
+        };
+        sync.reclaim_staged_for_ingress(bytes, &budget)
     }
 }
 

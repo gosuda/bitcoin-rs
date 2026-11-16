@@ -469,6 +469,7 @@ Proof: `crates/node/src/budget.rs::saturated_ingress_preserves_execution_headroo
 ### `BUD-07`: Work refusal on budget exhaustion
 
 - When a resource budget is exhausted, the owner must release resources or refuse new work.
+- A refused receive allocation must end the connection with a local resource error and release partial backing. It must not report a resumable socket poll timeout or blame the peer.
 - A completed receive frame that cannot reserve distinct decoder memory must be refused as terminal local resource exhaustion. It must not wait while holding raw memory, blame the peer, or report a resumable poll timeout after consuming the frame.
 - A refused coin-cache charge MUST release eligible resident records before one retry. Eviction MUST release their ledger charges before the retry.
 - The component must not add unbounded memory buffering.

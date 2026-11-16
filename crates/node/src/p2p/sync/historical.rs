@@ -49,8 +49,11 @@ impl HistoricalDownload {
         bytes: usize,
         now: Instant,
         tree: &BlockTree,
+        charged: impl Fn() -> u64,
     ) -> u64 {
-        let (evicted, freed) = self.stager.evict_for_reclaim(self.next_expected, bytes);
+        let (evicted, freed) = self
+            .stager
+            .evict_for_reclaim(self.next_expected, bytes, charged);
         for hash in &evicted {
             let height = tree
                 .lookup(*hash)

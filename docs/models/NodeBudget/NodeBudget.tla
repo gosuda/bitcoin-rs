@@ -116,7 +116,6 @@ ApplyBlock(b, amt) ==
   /\ blockConsensusValid' = [blockConsensusValid EXCEPT ![b] = "valid"]
   /\ UNCHANGED << reserved, blockRefused >>
 
-\* Execution reserves staged_images outside ingress against the full I cap.
 ReserveStagedExecution(amt) ==
   /\ TotalCommitted + amt <= TotalBudget
   /\ NonReceiveCommitted + amt <= TotalBudget - ReceiveCap

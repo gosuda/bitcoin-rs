@@ -773,6 +773,7 @@ mod tests {
                 observed = true;
             },
             |_, _| Ok(()),
+            |_, _| Ok(()),
         );
         assert!(observed);
         assert!(matches!(received, Ok(Some(_))), "{received:?}");

@@ -464,6 +464,7 @@ pub fn read_message<R: Read>(
             expected_magic,
             |_, _, _| {},
             |_, _| Ok(()),
+            |_, _| Ok(()),
         )? {
             return Ok(message);
         }
@@ -516,9 +517,10 @@ impl V1Receiver {
         receiver
     }
 
-    /// Reads one message, then hands `(command, payload, framed length)` to
-    /// `observe`: the framed length is the v1 header plus payload bytes this
-    /// frame took from the wire.
+    /// `account` receives the command, payload, and v1 header-plus-payload
+    /// length of each checksum-valid frame, including a budget-refused frame.
+    /// `check` validates that frame before an image-budget refusal can drop it.
+    /// `admit` reserves decoder memory only for frames that will be delivered.
     ///
     /// `Ok(None)` means a completed `block` frame was dropped because the
     /// image lane refused its backing: the untouched receive charge releases
@@ -529,6 +531,7 @@ impl V1Receiver {
         reader: &mut R,
         expected_magic: Magic,
         mut account: impl FnMut(&str, &[u8], usize),
+        check: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
         admit: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
     ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         let mut body = if let Some(body) = self.body.take() {
@@ -556,6 +559,7 @@ impl V1Receiver {
             &body.payload,
             HEADER_LEN + body.payload.len(),
         );
+        check(&body.command, &body.payload)?;
         if body.command == "block" && !body.payload.transfer_to_image() {
             return Ok(None);
         }
@@ -1224,6 +1228,7 @@ mod tests {
                 observed = Some((command.to_owned(), payload.to_vec()));
             },
             |_, _| Ok(()),
+            |_, _| Ok(()),
         );
         assert!(matches!(result, Err(PeerError::Encode(_))));
         assert_eq!(observed, Some(("version".to_owned(), Vec::new())));
@@ -1236,6 +1241,7 @@ mod tests {
             |_, _, _| {
                 observed_bad_checksum = true;
             },
+            |_, _| Ok(()),
             |_, _| Ok(()),
         );
         assert!(matches!(result, Err(PeerError::BadChecksum)));
@@ -1266,6 +1272,7 @@ mod tests {
                 Magic::REGTEST,
                 |_, _, _| {},
                 |_, _| Ok(()),
+                |_, _| Ok(()),
             );
             assert!(
                 matches!(&result, Err(PeerError::Io(error)) if error.kind() == stall),
@@ -1273,11 +1280,23 @@ mod tests {
             );
         }
         let (first, _) = receiver
-            .read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()))?
+            .read_message_with(
+                &mut stream,
+                Magic::REGTEST,
+                |_, _, _| {},
+                |_, _| Ok(()),
+                |_, _| Ok(()),
+            )?
             .ok_or(PeerError::Protocol("ping frame dropped"))?;
         assert_eq!(first, super::Message::Ping(42));
         let (second, _) = receiver
-            .read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()))?
+            .read_message_with(
+                &mut stream,
+                Magic::REGTEST,
+                |_, _, _| {},
+                |_, _| Ok(()),
+                |_, _| Ok(()),
+            )?
             .ok_or(PeerError::Protocol("pong frame dropped"))?;
         assert_eq!(second, super::Message::Pong(7));
         Ok(())
@@ -1296,8 +1315,13 @@ mod tests {
             Inbound::Stall(ErrorKind::TimedOut),
         ]);
         let mut receiver = super::V1Receiver::default();
-        let empty =
-            receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()));
+        let empty = receiver.read_message_with(
+            &mut stream,
+            Magic::REGTEST,
+            |_, _, _| {},
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+        );
         assert!(matches!(
             empty,
             Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut
@@ -1309,8 +1333,13 @@ mod tests {
                 .map_or(0, |body| body.payload.capacity()),
             0
         );
-        let result =
-            receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()));
+        let result = receiver.read_message_with(
+            &mut stream,
+            Magic::REGTEST,
+            |_, _, _| {},
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+        );
         assert!(
             matches!(&result, Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut),
             "a stall surfaces as a retryable timeout, got {result:?}"
@@ -1346,8 +1375,13 @@ mod tests {
             lengths: Vec::new(),
         };
         let mut receiver = super::V1Receiver::default();
-        let result =
-            receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()));
+        let result = receiver.read_message_with(
+            &mut stream,
+            Magic::REGTEST,
+            |_, _, _| {},
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+        );
         assert!(matches!(
             result,
             Err(PeerError::Io(error)) if error.kind() == ErrorKind::ConnectionAborted
@@ -1378,11 +1412,22 @@ mod tests {
         let mut stream = Cursor::new([corrupt, valid].concat());
 
         let mut receiver = super::V1Receiver::default();
-        let rejected =
-            receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()));
+        let rejected = receiver.read_message_with(
+            &mut stream,
+            Magic::REGTEST,
+            |_, _, _| {},
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+        );
         assert!(matches!(rejected, Err(PeerError::BadChecksum)));
         let (message, _) = receiver
-            .read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()))?
+            .read_message_with(
+                &mut stream,
+                Magic::REGTEST,
+                |_, _, _| {},
+                |_, _| Ok(()),
+                |_, _| Ok(()),
+            )?
             .ok_or(PeerError::Protocol("pong frame dropped"))?;
         assert_eq!(message, super::Message::Pong(2));
         Ok(())

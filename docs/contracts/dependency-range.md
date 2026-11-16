@@ -131,7 +131,7 @@ Empty backend markers on non-storage crates are not combinations.
 - These consensus rows check only the library target. Their test dependencies require the RocksDB native prerequisites.
 - Proof: `scripts/check-feature-matrix.sh pure` executes the `consensus-native` and `consensus-usdt` rows in `scripts/feature-matrix.tsv` with `--lib`; the `feature-combinations` pure job in `.github/workflows/compatibility-campaign.yml` skips `.github/actions/native-deps`.
 - The `native` lane checks all consensus targets for both combinations and runs the feature-off and feature-on `sdt_notes` tests.
-- Proof: `scripts/check-feature-matrix.sh native` executes the `consensus-native-tests` and `consensus-usdt-tests` rows after native prerequisites, and `.github/workflows/compatibility-campaign.yml` runs `crates/consensus/tests/sdt_notes.rs::embedded_sdt_notes_match_core_layout` for both feature-off and feature-on builds.
+- Proof: `scripts/check-feature-matrix.sh native` executes the `consensus-native-tests` and `consensus-usdt-tests` rows after native prerequisites, and `.github/workflows/compatibility-campaign.yml` runs `crates/consensus/sdt_notes_tests.rs::embedded_sdt_notes_match_core_layout` for both feature-off and feature-on builds.
 - `lane=native` requires cmake, libboost (kernel), or C storage engines.
 - Kernel rows (`portable-kernel`, `full-node`, `consensus-kernel`) are capability builds with `kernel` compiled in.
 - Engine selection stays runtime via `validation.engine`.

@@ -392,11 +392,12 @@ impl<S: Read> Peer<S> {
     /// packet keeps the bytes already read, so retrying after `TimedOut` or
     /// `WouldBlock` continues it.
     pub fn read_message(&mut self) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
-        self.read_message_admitted(|_, _| Ok(()))
+        self.read_message_admitted(|_, _| Ok(()), |_, _| Ok(()))
     }
 
     pub(crate) fn read_message_admitted(
         &mut self,
+        check: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
         admit: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
     ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         let net_trace = self.net_trace.as_ref();
@@ -411,6 +412,7 @@ impl<S: Read> Peer<S> {
                         counters.record_msg_recv(command, wire_len);
                     }
                 },
+                check,
                 admit,
             )
             .map_err(PeerError::inbound)
@@ -436,26 +438,29 @@ impl<S: Read> Peer<S> {
             );
         }
         let mut credit = None;
-        let Some((message, raw)) = self.read_message_admitted(|command, payload| {
-            if crate::inbound::block_memory::expands_on_decode(command) {
-                if cancelled() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "decode cancelled",
-                    )
-                    .into());
+        let Some((message, raw)) = self.read_message_admitted(
+            |_, _| Ok(()),
+            |command, payload| {
+                if crate::inbound::block_memory::expands_on_decode(command) {
+                    if cancelled() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "decode cancelled",
+                        )
+                        .into());
+                    }
+                    let bound =
+                        bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len());
+                    let distinct = if command == "block" {
+                        bound.saturating_sub(payload.len())
+                    } else {
+                        bound
+                    };
+                    credit = Some(memory.try_reserve_decode(distinct)?);
                 }
-                let bound =
-                    bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len());
-                let distinct = if command == "block" {
-                    bound.saturating_sub(payload.len())
-                } else {
-                    bound
-                };
-                credit = Some(memory.try_reserve_decode(distinct)?);
-            }
-            Ok(())
-        })?
+                Ok(())
+            },
+        )?
         else {
             return Ok(None);
         };

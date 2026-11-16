@@ -1308,6 +1308,7 @@ mod tests {
         }
     }
 
+    // BUD-05
     #[test]
     fn saturated_image_and_other_owners_leave_the_bounded_receive_lane_available() {
         use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
@@ -1349,6 +1350,7 @@ mod tests {
         assert_eq!(budget.total_committed(), 0);
     }
 
+    // BUD-01, BUD-05
     #[test]
     fn default_image_lane_keeps_the_maximum_decoder_admission_floor() {
         use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
@@ -1370,8 +1372,7 @@ mod tests {
         ingress.give_back(decoder);
         assert_eq!(budget.total_committed(), 0);
     }
-    // BUD-07: a refused receive-to-image transfer reclaims staged image bytes
-    // and retries once; a final refusal leaves the receive charge untouched.
+    // BUD-07
     #[test]
     fn transfer_reclaims_staged_image_and_retries_once() {
         use bitcoin_rs_storage::budget::BudgetReclaimer;

@@ -5043,6 +5043,15 @@ mod tests {
         #[test]
         fn reclaimed_successor_is_requeued_with_height_for_refetch() -> TestResult {
             let (sync, peers, _block_tree, _applied_tip, expected) = sync_with_header_chain(4)?;
+            let budget = Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+                split_chainstate_cache_budget(64 * 1024 * 1024),
+                4,
+            ));
+            let memory = Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
+                Arc::new(crate::budget::BudgetedIngressLedger::new(Arc::clone(
+                    &budget,
+                ))),
+            ));
             install_budget(&sync, super::super::default_sync_budget(Network::Regtest));
             let addr = test_addr(9471, 0)?;
             let rx = connect_peer(&peers, synthetic_peer(addr, 100));
@@ -5060,6 +5069,7 @@ mod tests {
                 super::header_chain_block(&expected, 2)?,
             )];
             batch[0].source = Some(current_source(&peers, addr));
+            batch[0].memory_credit = Some(memory.reserve(4096, || false).or_fail("staged credit"));
             assert_eq!(
                 sync.buffer_received_block_chunk(
                     &mut batch,
@@ -5073,8 +5083,8 @@ mod tests {
                 "staging must consume the pending fetch"
             );
 
-            let freed = sync.reclaim_staged_for_ingress(u64::MAX);
-            assert!(freed > 0);
+            let freed = sync.reclaim_staged_for_ingress(u64::MAX, &budget);
+            assert_eq!(freed, 4096);
             assert!(!sync.scheduler.lock().stager.contains(&successor));
             assert!(
                 sync.scheduler.lock().window.request_cursor() <= 2,
@@ -5095,6 +5105,59 @@ mod tests {
                 }
             }
             assert!(refetched, "the evicted successor must be re-requested");
+            Ok(())
+        }
+
+        // BUD-07, SYNC-03
+        #[test]
+        fn reclaimed_credit_preserves_historical_bodies_after_the_target_is_met() -> TestResult {
+            const CREDIT: usize = 64 * 1024;
+            const REQUESTED: u64 = 32 * 1024;
+            let (sync, _, _, _, expected) = sync_with_header_chain(4)?;
+            let budget = Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+                split_chainstate_cache_budget(64 * 1024 * 1024),
+                4,
+            ));
+            let memory = Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
+                Arc::new(crate::budget::BudgetedIngressLedger::new(Arc::clone(
+                    &budget,
+                ))),
+            ));
+            let successor = BlockImage::from_local(super::header_chain_block(&expected, 2)?);
+            let historical = BlockImage::from_local(super::header_chain_block(&expected, 3)?);
+            let successor_hash = Hash256::from(successor.block_hash());
+            let historical_hash = Hash256::from(historical.block_hash());
+            assert!(successor.bytes().len() + successor.retained_heap_bytes() < 32 * 1024);
+            sync.scheduler.lock().stager.insert_with_credit(
+                successor_hash,
+                None,
+                successor,
+                None,
+                Instant::now(),
+                Some(memory.reserve(CREDIT, || false).or_fail("successor credit")),
+            );
+            sync.historical.lock().stager.insert_with_credit(
+                historical_hash,
+                None,
+                historical,
+                None,
+                Instant::now(),
+                Some(
+                    memory
+                        .reserve(CREDIT, || false)
+                        .or_fail("historical credit"),
+                ),
+            );
+            assert_eq!(
+                sync.reclaim_staged_for_ingress(REQUESTED, &budget),
+                64 * 1024
+            );
+            assert!(!sync.scheduler.lock().stager.contains(&successor_hash));
+            assert!(sync.historical.lock().stager.contains(&historical_hash));
+            assert_eq!(
+                budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages),
+                64 * 1024,
+            );
             Ok(())
         }
     }

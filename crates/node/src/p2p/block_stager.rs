@@ -390,17 +390,17 @@ impl BlockStager {
         Some(*hash)
     }
 
-    /// Evict the oldest entries the frontier does not protect until at
-    /// least `bytes` of retained image are freed, returning the evicted
-    /// hashes and the freed retained bytes. Freed image-lane bytes are at
-    /// least the freed retained bytes, since wire capacity covers length.
+    /// The protected frontier stays staged. Reclaim stops when the owning
+    /// ledger records the requested release, including backing capacity.
     pub(crate) fn evict_for_reclaim(
         &mut self,
         protected: Option<Hash256>,
         bytes: usize,
+        charged: impl Fn() -> u64,
     ) -> (Vec<Hash256>, u64) {
         let mut evicted = Vec::new();
         let mut freed = 0u64;
+        let before = charged();
         let target = u64::try_from(bytes).unwrap_or(u64::MAX);
         while freed < target {
             let Some(hash) = self.oldest_unprotected_candidate(protected) else {
@@ -409,10 +409,9 @@ impl BlockStager {
             let Some(entry) = self.received.remove(&hash) else {
                 break;
             };
-            freed = freed.saturating_add(
-                u64::try_from(entry.bytes.saturating_add(entry.decoded_bytes)).unwrap_or(u64::MAX),
-            );
             self.release(&entry);
+            drop(entry);
+            freed = before.saturating_sub(charged());
             evicted.push(hash);
         }
         (evicted, freed)
@@ -1518,62 +1517,82 @@ mod tests {
         assert_eq!(stager.received_bytes(), wire);
     }
 
+    // BUD-07
     #[test]
     fn reclaim_eviction_protects_frontier_and_frees_retained() {
+        use bitcoin_rs_wire::test_support::OrFail;
         let block = Network::Regtest.genesis_block();
         let payload = BlockImage::from_local(block.clone());
         let retained_per_block = payload.bytes().len() + payload.retained_heap_bytes();
+        let budget = std::sync::Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+            bitcoin_rs_storage::split_chainstate_cache_budget(64 * 1024 * 1024),
+            4,
+        ));
+        let memory = std::sync::Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
+            std::sync::Arc::new(crate::budget::BudgetedIngressLedger::new(budget.clone())),
+        ));
+        let charged =
+            || budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages);
+        let credit = || {
+            memory
+                .reserve(retained_per_block, || false)
+                .or_fail("staged credit")
+        };
         let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
         let now = Instant::now();
         let frontier = Hash256::from_le_bytes(&[0x41; 32]);
-        stager.insert(
+        stager.insert_with_credit(
             frontier,
             Some(frontier),
             BlockImage::from_local(block.clone()),
             None,
             now,
+            Some(credit()),
         );
         let mut successors = Vec::new();
         for seed in [0x42_u8, 0x43, 0x44] {
             let hash = Hash256::from_le_bytes(&[seed; 32]);
-            stager.insert(
+            stager.insert_with_credit(
                 hash,
                 Some(frontier),
                 BlockImage::from_local(block.clone()),
                 None,
                 now,
+                Some(credit()),
             );
             successors.push(hash);
         }
         assert_eq!(stager.received_len(), 4);
         let two_blocks = retained_per_block.saturating_mul(2);
-        let (evicted, freed) = stager.evict_for_reclaim(Some(frontier), two_blocks);
+        let (evicted, freed) = stager.evict_for_reclaim(Some(frontier), two_blocks, charged);
         assert_eq!(evicted, successors[..2].to_vec());
         assert_eq!(freed, u64::try_from(two_blocks).unwrap_or(u64::MAX));
         assert!(stager.contains(&frontier));
         assert!(stager.contains(&successors[2]));
         assert_eq!(stager.received_len(), 2);
         assert_eq!(stager.received_bytes(), 2 * payload.bytes().len());
-        let (evicted_all, _) = stager.evict_for_reclaim(Some(frontier), usize::MAX);
+        let (evicted_all, _) = stager.evict_for_reclaim(Some(frontier), usize::MAX, charged);
         assert_eq!(evicted_all, vec![successors[2]]);
         assert!(stager.contains(&frontier));
         assert_eq!(stager.received_len(), 1);
+        drop(stager);
         let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
         let mut staged = Vec::new();
         for seed in [0x51_u8, 0x52, 0x53] {
             let hash = Hash256::from_le_bytes(&[seed; 32]);
-            stager.insert(
+            stager.insert_with_credit(
                 hash,
                 Some(frontier),
                 BlockImage::from_local(block.clone()),
                 None,
                 now,
+                Some(credit()),
             );
             staged.push(hash);
         }
-        let (evicted, _) = stager.evict_for_reclaim(Some(frontier), two_blocks);
+        let (evicted, _) = stager.evict_for_reclaim(Some(frontier), two_blocks, charged);
         assert_eq!(evicted, staged[..2].to_vec());
-        let (rest, _) = stager.evict_for_reclaim(None, usize::MAX);
+        let (rest, _) = stager.evict_for_reclaim(None, usize::MAX, charged);
         assert_eq!(rest, vec![staged[2]]);
         assert_eq!(stager.received_len(), 0);
     }

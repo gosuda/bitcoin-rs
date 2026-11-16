@@ -96,6 +96,7 @@ impl RecvTransport {
     /// size for every frame observed on the wire: header plus payload for v1,
     /// or the BIP324 packet's ciphertext length for v2. It is infallible and
     /// runs for dropped frames too.
+    /// `check` validates frame state even when the image budget refuses it.
     /// `admit` runs only for a frame about to be delivered, and its error
     /// rejects the delivery.
     /// A `block` frame refused for image budget is also `None`, after
@@ -105,10 +106,11 @@ impl RecvTransport {
         reader: &mut R,
         magic: Magic,
         mut account: impl FnMut(&str, &[u8], usize),
+        check: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
         admit: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
     ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         match self {
-            Self::V1(receiver) => receiver.read_message_with(reader, magic, account, admit),
+            Self::V1(receiver) => receiver.read_message_with(reader, magic, account, check, admit),
             Self::V2(packets) => {
                 let contents = match packets.read_contents_with_transfer(reader) {
                     Err(TransportError::BudgetDrop {
@@ -117,6 +119,7 @@ impl RecvTransport {
                         wire_len,
                     }) => {
                         account(&command, &payload, wire_len);
+                        check(&command, &payload)?;
                         return Ok(None);
                     }
                     contents => contents.map_err(transport_error)?,
@@ -133,6 +136,7 @@ impl RecvTransport {
                     &payload,
                     crate::bip324::PACKET_OVERHEAD + contents.len(),
                 );
+                check(&command, &payload)?;
                 admit(&command, &payload)?;
                 let message = decode_payload(&command, &payload)?;
                 Ok(Some((message, payload)))
@@ -243,6 +247,7 @@ mod tests {
                     observed.push((command.to_owned(), payload.to_vec(), len));
                 },
                 |_, _| Ok(()),
+                |_, _| Ok(()),
             )
             .expect("an undefined type drops the message, never errors");
 
@@ -296,6 +301,7 @@ mod tests {
                     observed.push((command.to_owned(), payload.to_vec(), len));
                 },
                 |_, _| Ok(()),
+                |_, _| Ok(()),
             )
             .expect("a budget refusal drops the frame, never errors");
 
@@ -330,6 +336,7 @@ mod tests {
                 &mut Cursor::new(decoy),
                 Magic::BITCOIN,
                 |_, _, _| panic!("a decoy packet carries no message to account"),
+                |_, _| panic!("a decoy packet carries no message to check"),
                 |_, _| panic!("a decoy packet carries no message to admit"),
             )
             .expect("a decoy drops, never errors");
