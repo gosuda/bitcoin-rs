@@ -317,7 +317,9 @@ fn abandoned_open_cannot_start_a_late_namespace_reset() -> std::io::Result<()> {
         (result, spec)
     });
     assert!(started_rx.recv_timeout(Duration::from_secs(5)).is_ok());
-    let (result, spec) = opener.join().expect("open waiter must finish");
+    let (result, spec) = opener
+        .join()
+        .map_err(|_| std::io::Error::other("open waiter panicked"))?;
     assert!(matches!(
         result,
         Err(DerivedIndexWorkerError::OpenTimeout { .. })
