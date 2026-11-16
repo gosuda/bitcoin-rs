@@ -315,8 +315,12 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 ### `QRY-03`: Extension stability for historical queries
 
-- An ordinary chain extension must not invalidate a coherent historical query answer.
+- An ordinary chain extension must not invalidate a coherent historical answer from an immutable owner view.
 - An endpoint that requires current-tip data must verify that condition explicitly.
+- Composed HTTP responses must use a stable applied-tip publication when they combine index state with mempool data.
+- Public address and scripthash `txs/mempool` responses include confirmed prevout or unspent index state. They are not pure mempool reads.
+- If the publication changes during a composed read, the endpoint must return `503 Service Unavailable`. This includes extension, replacement, and ABA republication.
+- This fence must not invalidate immutable historical owner reads or change confirmed-occurrence identity. Pure mempool reads do not require this fence.
 
 ### `QRY-04`: Provenance metadata in query responses
 

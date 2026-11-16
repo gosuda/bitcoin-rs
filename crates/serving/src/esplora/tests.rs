@@ -1926,13 +1926,17 @@ fn joined_answer_refuses_a_same_height_tip_replacement() -> Result<(), TestError
 #[test]
 fn composed_history_and_mempool_routes_refuse_reorg_and_aba_publications() -> Result<(), TestError>
 {
-    for aba in [false, true] {
+    for (same_height, aba) in [(false, false), (true, false), (false, true)] {
         for (path, post) in [
             (
                 format!("/scripthash/{}/txs/summary", "00".repeat(32)),
                 false,
             ),
             (format!("/scripthash/{}/txs/chain", "00".repeat(32)), false),
+            (
+                format!("/scripthash/{}/txs/mempool", "00".repeat(32)),
+                false,
+            ),
             ("/internal/mempool/txs".to_owned(), false),
             ("/internal/mempool/txs".to_owned(), true),
         ] {
@@ -1956,8 +1960,10 @@ fn composed_history_and_mempool_routes_refuse_reorg_and_aba_publications() -> Re
             let handler = Handler::new(Arc::clone(&ctx));
             let stable = if post {
                 backend_route_post(&handler, &path, b"[]")
-            } else {
+            } else if path.starts_with("/internal/") {
                 backend_route(&handler, &path, "")
+            } else {
+                route(&handler, &path, "")
             };
             assert_eq!(stable.status, 200, "stable route {path}");
             let (entered_send, entered_recv) = channel();
@@ -1966,19 +1972,31 @@ fn composed_history_and_mempool_routes_refuse_reorg_and_aba_publications() -> Re
                 arm_route_gate(entered_send, release_recv);
                 if post {
                     backend_route_post(&handler, &path, b"[]")
-                } else {
+                } else if path.starts_with("/internal/") {
                     backend_route(&handler, &path, "")
+                } else {
+                    route(&handler, &path, "")
                 }
             });
             let entered = entered_recv.recv_timeout(GATE_TIMEOUT);
-            ctx.chain.applied_tip.store(Some(extended));
+            let publication = if same_height {
+                let mut replacement = (*tip).clone();
+                replacement.hash = extended.hash;
+                Arc::new(replacement)
+            } else {
+                extended
+            };
+            ctx.chain.applied_tip.store(Some(publication));
             if aba {
                 ctx.chain.applied_tip.store(Some(Arc::new((*tip).clone())));
             }
             let _ = release_send.send(());
             let response = request.join().map_err(|_| "route thread failed")?;
+            assert_eq!(
+                response.status, 503,
+                "composed read must refuse a changed publication (same_height={same_height}, aba={aba})"
+            );
             entered.map_err(|_| "request did not capture its publication")?;
-            assert_eq!(response.status, 503);
         }
     }
     Ok(())

@@ -121,7 +121,6 @@ fn needs_tip_fence(path: &str) -> bool {
             | ["internal", "block", _, "txs"]
             | ["mempool", ..]
             | ["fee-estimates"]
-            | ["address" | "scripthash", _, "txs", "mempool"]
     )
 }
 
