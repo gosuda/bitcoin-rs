@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::test_support::TestError;
-use bitcoin_rs_primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockImage;
 
 #[test]
 fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> Result<(), TestError> {
@@ -11,8 +11,9 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> Result
     config.p2p.listen.clear();
     config.storage.prune_target_mb = 0;
     let state = NodeState::open(config, None)?;
-    let payload = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
-    let hash = Hash256::from_le_bytes(payload.block().block_hash().as_bytes());
+    let payload =
+        BlockImage::from_local(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block());
+    let hash = Hash256::from_le_bytes(payload.block_hash().as_bytes());
 
     assert!(state.prune_service().is_none());
     state.apply_block(&payload)?;
@@ -39,9 +40,10 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> Result
 
 #[test]
 fn preserved_bytes_apply_matches_lazy_serialization() -> Result<(), TestError> {
-    let local = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
-    let hash = Hash256::from_le_bytes(local.block().block_hash().as_bytes());
-    let preserved = BlockPayload::from_raw(local.bytes().clone())
+    let local =
+        BlockImage::from_local(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block());
+    let hash = Hash256::from_le_bytes(local.block_hash().as_bytes());
+    let preserved = BlockImage::from_raw(local.bytes().clone())
         .map_err(|error| TestError::message(format!("genesis bytes are canonical: {error}")))?;
 
     let dir_a = tempfile::tempdir()?;
@@ -176,10 +178,9 @@ fn prune_refuses_after_apply_admission_closes() -> Result<(), TestError> {
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
 #[test]
 fn prune_to_height_advances_published_height() -> Result<(), TestError> {
-    use bitcoin_rs_rpc::context::PruneService;
+    use bitcoin_rs_serving::context::PruneService;
     use bitcoin_rs_storage::FlatFileBlockStore;
     use bitcoin_rs_storage::KvStore;
     use bitcoin_rs_storage::pruning::load_pruneheight;
@@ -193,11 +194,12 @@ fn prune_to_height_advances_published_height() -> Result<(), TestError> {
     publish_applied_tip_height(&authority_state, 12 + CORE_REORG_SAFETY_MARGIN);
     let data_dir = dir.path().join("node");
     std::fs::create_dir_all(data_dir.join("chainstate"))?;
-    let store = Arc::new(bitcoin_rs_storage::FjallStore::open(
+    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
         data_dir.join("chainstate"),
+        0,
     )?);
     let block_files = Arc::new(FlatFileBlockStore::open(&data_dir)?);
-    let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[10_u8; 32]);
+    let hash = bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[10_u8; 32]);
     let mut seed = store.new_batch();
     seed.put(
         bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
@@ -237,12 +239,10 @@ fn prune_to_height_advances_published_height() -> Result<(), TestError> {
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
 #[test]
 fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> Result<(), TestError> {
-    use bitcoin_rs_chainstate::AssumeUtxoManager;
-    use bitcoin_rs_primitives::Network;
-    use bitcoin_rs_rpc::context::PruneService;
+    use bitcoin_rs_consensus::primitives::Network;
+    use bitcoin_rs_execution::AssumeUtxoManager;
     use bitcoin_rs_storage::FlatFileBlockStore;
     use std::sync::atomic::AtomicU32;
 
@@ -253,15 +253,16 @@ fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> Resul
     let state = NodeState::open(config, None)?;
     publish_applied_tip_height(&state, 200 + CORE_REORG_SAFETY_MARGIN);
 
-    let store = Arc::new(bitcoin_rs_storage::FjallStore::open(
+    let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
         dir.path().join("chainstate"),
+        0,
     )?);
     let block_files = Arc::new(FlatFileBlockStore::open(dir.path())?);
 
     let pinned = Network::Regtest
         .assume_utxo_for_height(110)
         .ok_or_else(|| TestError::message("pinned 110 missing"))?;
-    let status = bitcoin_rs_chainstate::AssumeUtxoDiskStatus::Validating {
+    let status = bitcoin_rs_execution::AssumeUtxoDiskStatus::Validating {
         base_height: pinned.height,
         base_hash: pinned.block_hash,
         expected_hash_serialized: pinned.hash_serialized,
@@ -277,19 +278,26 @@ fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> Resul
         .chainstate()
         .applied_tip_snapshot()
         .ok_or_else(|| TestError::message("missing fixture tip"))?;
-    head_store.commit(
-        prior.as_ref(),
-        &bitcoin_rs_storage::DurableHead {
-            assumeutxo: status,
-            commit_id: 1,
-            tip: tip.hash,
-            height: tip.height,
-            chain_tx_count: tip.chain_tx_count.to_wire(),
-            body_extent: None,
-            undo_extent: None,
-        },
-        &bitcoin_rs_storage::CommitRecords::default(),
-    )?;
+    state
+        .chainstate()
+        .commit_authority()
+        .commit_prefix(bitcoin_rs_storage::AcceptedPrefix {
+            expected_head: prior,
+            next_head: bitcoin_rs_storage::DurableHead {
+                assumeutxo: status,
+                commit_id: 1,
+                tip: tip.hash,
+                height: tip.height,
+                chain_tx_count: tip.chain_tx_count.to_wire(),
+                body_extent: None,
+                undo_extent: None,
+            },
+            undo_rows: Vec::new(),
+            body_rows: Vec::new(),
+            attestation: None,
+            coin_delta: bitcoin_rs_storage::WindowDelta::default(),
+        })
+        .map_err(|error| bitcoin_rs_storage::StorageError::backend(error.to_string()))?;
     let _assumeutxo = AssumeUtxoManager::open(
         Network::Regtest,
         state.chainstate(),

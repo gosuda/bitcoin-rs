@@ -20,19 +20,19 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | :-- | :-- | :--: | :--: | :-- |
 | 9 | [Versionbits](../crates/consensus/src/bip9.rs) | ✅ | - | CSV/segwit deployment windows |
 | 125 | [Replacement policy](policies/mempool-policy.md) | ◐ | - | Full-RBF; signaling reported, not admission-gating |
-| 16 | [P2SH](../crates/consensus/src/verify_block.rs) | ✅ | - | Two [hash-pinned exceptions](../crates/primitives/src/network.rs) |
+| 16 | [P2SH](../crates/consensus/src/verify_block.rs) | ✅ | - | Two [hash-pinned exceptions](../crates/consensus/src/primitives/network.rs) |
 | 34 | [Coinbase height](../crates/consensus/src/bip34.rs) | ✅ | - | Core activation heights; BIP30 recheck limit |
 | 65 | [CLTV](../crates/consensus/src/verify_block.rs) | ✅ | - | Core activation heights |
 | 66 | [Strict DER](../crates/consensus/src/verify_block.rs) | ✅ | - | Core activation heights |
-| 68/112/113 | [Relative locks / MTP](../crates/consensus/src/bip68.rs) | ✅ | - | [Block connection](../crates/chainstate/src/connect.rs); BIP9 activation |
-| 94 | [Timewarp protection](../crates/chain/src/header_sync.rs) | ✅ | - | Testnet4 BIP94 candidate-timestamp floor at retarget boundaries |
+| 68/112/113 | [Relative locks / MTP](../crates/consensus/src/bip68.rs) | ✅ | - | [Block connection](../crates/execution/src/connect.rs); BIP9 activation |
+| 94 | [Timewarp protection](../crates/execution/src/chain/header_sync.rs) | ✅ | - | Testnet4 BIP94 candidate-timestamp floor at retarget boundaries |
 | 141 | [Segwit validation](../crates/consensus/tests/witness_commitment_rules.rs) | ✅ | - | Commitments, weight, [sigops](../crates/consensus/tests/witness_sigop_activation.rs) |
-| 143 | [Segwit v0 sighash](../crates/consensus/tests/shared_sighash.rs) | ✅ | - | [Reference vectors](../crates/primitives/tests/bip_vectors.rs) |
-| 147 | [NULLDUMMY](../crates/script/src/eval.rs) | ✅ | - | Enforced with WITNESS flag |
-| 320 | [General-purpose version bits](../crates/chain/src/deployment.rs) | ❌ | - | Candidates use versionbits; no general-purpose policy |
+| 143 | [Segwit v0 sighash](../crates/consensus/tests/shared_sighash.rs) | ✅ | - | [Reference vectors](../crates/consensus/tests/primitives_bip_vectors.rs) |
+| 147 | [NULLDUMMY](../crates/consensus/src/script/eval.rs) | ✅ | - | Enforced with WITNESS flag |
+| 320 | [General-purpose version bits](../crates/execution/src/chain/deployment.rs) | ❌ | - | Candidates use versionbits; no general-purpose policy |
 | 325 | [Signet block solution](../crates/consensus/src/signet.rs) | ◐ | - | Default challenge only; custom challenges unsupported |
-| 341 | [Taproot](../crates/script/src/taproot.rs) | ✅ | - | Height-gated; key and script paths |
-| 342 | [Tapscript](../crates/script/src/eval.rs) | ✅ | - | OP_SUCCESSx; [tagged hashes](../crates/script/src/taproot.rs) |
+| 341 | [Taproot](../crates/consensus/src/script/taproot.rs) | ✅ | - | Height-gated; key and script paths |
+| 342 | [Tapscript](../crates/consensus/src/script/eval.rs) | ✅ | - | OP_SUCCESSx; [tagged hashes](../crates/consensus/src/script/taproot.rs) |
 | 431 | [TRUC v3](../crates/mempool/src/truc.rs) | ✅ | - | Topology, sibling and ephemeral-spend rules |
 
 ## P2P and network
@@ -40,40 +40,40 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | BIP | Capability | Support | External evidence | Notes |
 | :-- | :-- | :--: | :--: | :-- |
 | 37 | [Bloom filters](policies/p2p-compatibility.md#5-message-surface) | ❌ | - | Commands decoded then ignored; no filter service |
-| 111 | [NODE_BLOOM](../crates/p2p/src/wire.rs) | ❌ | - | Service bit not advertised |
-| 130 | [Headers announcements](../crates/p2p/src/block_announce.rs) | ✅ | - | Up to 8 headers; [CORE-05 qualification pending](contracts/core-differential.md#core-05-proactive-block-announcements-across-a-live-reorg) |
-| 133 | [Fee filter](../crates/p2p/src/tx_policy/relay.rs) | ✅ | - | Per-peer inventory floor; rounded local refresh |
-| 144 | [Segwit relay](../crates/p2p/src/dispatch.rs) | ✅ | - | Witness block/transaction inventory preserves bytes |
-| 152 | [Compact blocks](../crates/p2p/src/compact_blocks.rs) | ✅ | ✓ | Announcements are implemented (see policy §7); only the CORE-05 live-reorg qualification is pending; [Core 31.1 request/response scope](api/ecosystem-compat.toml); reconstruction counts diagnostic |
-| 155 | [Address v2](../crates/p2p/src/wire.rs) | ◐ | - | Negotiation, IP receive path, and `addrv2` getaddr replies (IPv4/IPv6 rows only) |
-| 157/158 | [Compact filters](../crates/index/src/index/filters.rs) | ✅ | ✓ | Optional blockfilterindex; basic active-chain filters; [Kyoto regtest scope](api/ecosystem-compat.toml) |
+| 111 | [NODE_BLOOM](../crates/wire/src/wire.rs) | ❌ | - | Service bit not advertised |
+| 130 | [Headers announcements](../crates/node/src/p2p/block_announce.rs) | ✅ | - | Up to 8 headers; [CORE-05 qualification pending](contracts/core-differential.md#core-05-proactive-block-announcements-across-a-live-reorg) |
+| 133 | [Fee filter](../crates/node/src/p2p/tx_policy/relay.rs) | ✅ | - | Per-peer inventory floor; rounded local refresh |
+| 144 | [Segwit relay](../crates/wire/src/dispatch.rs) | ✅ | - | Witness block/transaction inventory preserves bytes |
+| 152 | [Compact blocks](../crates/wire/src/compact_blocks.rs) | ✅ | ✓ | Announcements are implemented (see policy §7); only the CORE-05 live-reorg qualification is pending; [Core 31.1 request/response scope](api/ecosystem-compat.toml); reconstruction counts diagnostic |
+| 155 | [Address v2](../crates/wire/src/wire.rs) | ◐ | - | Negotiation, IP receive path, and `addrv2` getaddr replies (IPv4/IPv6 rows only) |
+| 157/158 | [Compact filters](../crates/projection/src/index/filters.rs) | ✅ | ✓ | Optional blockfilterindex; basic active-chain filters; [Kyoto regtest scope](api/ecosystem-compat.toml) |
 | 159 | [Limited-network service](../crates/node/src/state/open.rs) | ✅ | - | Pruned nodes advertise NETWORK_LIMITED + WITNESS |
-| 324 | [v2 transport](../crates/p2p/src/transport.rs) | ✅ | ✓ | On by default (`--v2transport=false` opts out); [Core 31.1 interop in both directions](api/ecosystem-compat.toml) under [CORE-06](contracts/core-differential.md); [vectors](../crates/p2p/tests/data/bip324/) and [negotiation tests](../crates/p2p/src/listener/v2_transport_tests.rs) |
+| 324 | [v2 transport](../crates/wire/src/transport.rs) | ✅ | ✓ | On by default (`--v2transport=false` opts out); [Core 31.1 interop in both directions](api/ecosystem-compat.toml) under [CORE-06](contracts/core-differential.md); [vectors](../crates/wire/tests/data/bip324/) and [negotiation tests](../crates/wire/src/listener/v2_transport_tests.rs) |
 | 330 | [Erlay](https://github.com/gosuda/bitcoin-rs/issues/1501) | ❌ | - | Explicitly deferred backlog (#1501 tracks the deferral, so the policy keeps it `Unsupported` rather than `Planned`); sendtxrcncl ignored |
-| 339 | [Wtxid relay](../crates/p2p/src/peer.rs) | ✅ | - | Negotiation, announcements and getdata |
-| 434 | [Feature negotiation](../crates/p2p/src/feature.rs) | 🧪 | - | Draft-pinned `feature` codec and pre-`verack` negotiation at protocol 70017; no feature is announced; local proof pending; Core 31.1 does not support BIP434 ([policy §7](policies/p2p-compatibility.md#7-deviation-ledger)) |
-| 35 | [Mempool request](../crates/p2p/src/dispatch.rs) | ❌ | - | Command decoded then ignored |
+| 339 | [Wtxid relay](../crates/wire/src/peer.rs) | ✅ | - | Negotiation, announcements and getdata |
+| 434 | [Feature negotiation](../crates/wire/src/feature.rs) | 🧪 | - | Draft-pinned `feature` codec and pre-`verack` negotiation at protocol 70017; no feature is announced; local proof pending; Core 31.1 does not support BIP434 ([policy §7](policies/p2p-compatibility.md#7-deviation-ledger)) |
+| 35 | [Mempool request](../crates/wire/src/dispatch.rs) | ❌ | - | Command decoded then ignored |
 
 ## Mining
 
 | BIP | Capability | Support | External evidence | Notes |
 | :-- | :-- | :--: | :--: | :-- |
-| 22 | [GetBlockTemplate](../crates/mining/tests/template_shape.rs) | ✅ | - | Template contract; [mining evidence](api/ecosystem-compat.toml) in-tree only |
-| 23 | [GBT extensions](../crates/mining/src/coordinator.rs) | ◐ | - | Proposal mode, long-poll and version bits; no submitold/workid |
-| 141 | [Template witness commitment](../crates/mining/tests/coinbase_template.rs) | ✅ | - | Coinbase commitment and rules |
+| 22 | [GetBlockTemplate](../crates/serving/tests/mining_template_shape.rs) | ✅ | - | Template contract; [mining evidence](api/ecosystem-compat.toml) in-tree only |
+| 23 | [GBT extensions](../crates/node/src/mining/coordinator.rs) | ◐ | - | Proposal mode, long-poll and version bits; no submitold/workid |
+| 141 | [Template witness commitment](../crates/serving/tests/mining_coinbase_template.rs) | ✅ | - | Coinbase commitment and rules |
 
 ## Wallet, index, and application
 
 | BIP | Capability | Support | External evidence | Notes |
 | :-- | :-- | :--: | :--: | :-- |
-| 32 | [BIP32 derivation](../crates/rpc/src/handlers/util.rs) | ✅ | - | Ranged descriptor addresses; no key custody |
-| 173/350 | [Segwit addresses](../crates/rpc/src/convert.rs) | ✅ | - | Wallet-free script address rendering |
-| 380 | [Output descriptors](../crates/rpc/src/handlers/util.rs) | ✅ | - | getdescriptorinfo/deriveaddresses |
-| 380 | [scantxoutset public-descriptor scans](../crates/rpc/src/handlers/chain.rs) | ◐ | - | Bounded public `pkh`/`wpkh`/`sh(wpkh)`/key-only `tr` scans with ranges; private keys, Taproot trees and other descriptors refused ([API-35](contracts/external-api.md#api-35-bounded-public-descriptor-utxo-scans)) |
-| 389 | [Multipath descriptors](../crates/rpc/src/handlers/util.rs) | ✅ | - | Multipath key expressions in getdescriptorinfo/deriveaddresses |
-| 389 | [scantxoutset public multipath scans](../crates/rpc/src/handlers/chain.rs) | ◐ | - | Bounded wildcard and multipath expansion with inclusive ranges ([API-35](contracts/external-api.md#api-35-bounded-public-descriptor-utxo-scans)) |
-| 352 | [Silent Payments](../crates/index/src/silent_payments.rs) | 🧪 | - | Opt-in keyless codec and authenticated `getblocktweaks` extension; external wallet interoperability unverified; [docs](silent-payments.md) |
-| 337 | [Compressed transactions](../crates/rpc/src/compressed_tx.rs) | 🧪 | - | Default-off `--compressed-transactions` extension (`compressrawtransaction`/`decompressrawtransaction`, `-32603` while disabled); no consensus, relay, or mempool surface. Reference readings recorded in the codec docs: carry-aware Core VARINT over the 7-bit prose (`a608` = 5000). The six-bit input metadata carries the public-key-hash bit the prose table omits. Compressed signatures cover only P2TR key-path/P2PKH/P2WPKH/P2SH-P2WPKH with the uncompressed VARINT scriptSig/witness envelope for everything else. Minimum height follows the reference `locktime - 1` / `coin.height - 1` rule with the `u32::MAX` sentinel encoded as zero. A compressed outpoint is emitted only for a prevout with a confirmed height and a resolvable flat output index. Otherwise the raw outpoint is emitted with one `UTXO(i): <reason>` warning, and no outpoint is ever fabricated |
+| 32 | [BIP32 derivation](../crates/serving/src/handlers/util.rs) | ✅ | - | Ranged descriptor addresses; no key custody |
+| 173/350 | [Segwit addresses](../crates/serving/src/convert.rs) | ✅ | - | Wallet-free script address rendering |
+| 380 | [Output descriptors](../crates/serving/src/handlers/util.rs) | ✅ | - | getdescriptorinfo/deriveaddresses |
+| 380 | [scantxoutset public-descriptor scans](../crates/serving/src/handlers/chain.rs) | ◐ | - | Bounded public `pkh`/`wpkh`/`sh(wpkh)`/key-only `tr` scans with ranges; private keys, Taproot trees and other descriptors refused ([API-35](contracts/external-api.md#api-35-bounded-public-descriptor-utxo-scans)) |
+| 389 | [Multipath descriptors](../crates/serving/src/handlers/util.rs) | ✅ | - | Multipath key expressions in getdescriptorinfo/deriveaddresses |
+| 389 | [scantxoutset public multipath scans](../crates/serving/src/handlers/chain.rs) | ◐ | - | Bounded wildcard and multipath expansion with inclusive ranges ([API-35](contracts/external-api.md#api-35-bounded-public-descriptor-utxo-scans)) |
+| 352 | [Silent Payments](../crates/projection/src/silent_payments.rs) | 🧪 | - | Opt-in keyless codec and authenticated `getblocktweaks` extension; external wallet interoperability unverified; [docs](silent-payments.md) |
+| 337 | [Compressed transactions](../crates/serving/src/compressed_tx.rs) | 🧪 | - | Default-off `--compressed-transactions` extension (`compressrawtransaction`/`decompressrawtransaction`, `-32603` while disabled); no consensus, relay, or mempool surface. Reference readings recorded in the codec docs: carry-aware Core VARINT over the 7-bit prose (`a608` = 5000). The six-bit input metadata carries the public-key-hash bit the prose table omits. Compressed signatures cover only P2TR key-path/P2PKH/P2WPKH/P2SH-P2WPKH with the uncompressed VARINT scriptSig/witness envelope for everything else. Minimum height follows the reference `locktime - 1` / `coin.height - 1` rule with the `u32::MAX` sentinel encoded as zero. A compressed outpoint is emitted only for a prevout with a confirmed height and a resolvable flat output index. Otherwise the raw outpoint is emitted with one `UTXO(i): <reason>` warning, and no outpoint is ever fabricated |
 
 ## Out of scope by policy
 

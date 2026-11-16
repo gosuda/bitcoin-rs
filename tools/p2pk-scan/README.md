@@ -87,7 +87,7 @@ Core's `pk()` descriptor rejects a key that is not a curve point. A `pk()` cross
 
 ## Reported and missed outputs
 
-A reported output must match the workspace P2PK rule in `bitcoin_rs_script::is_p2pk`: one push of 33 or 65 bytes, followed by `OP_CHECKSIG`. A 33-byte key must start with `0x02` or `0x03`. A 65-byte key must start with `0x04`, `0x06` or `0x07`. The output must stay unspent at the tip of the file.
+A reported output must match the workspace P2PK rule in `bitcoin_rs_consensus::script::is_p2pk`: one push of 33 or 65 bytes, followed by `OP_CHECKSIG`. A 33-byte key must start with `0x02` or `0x03`. A 65-byte key must start with `0x04`, `0x06` or `0x07`. The output must stay unspent at the tip of the file.
 
 The scan reports some outputs that no one can spend.
 

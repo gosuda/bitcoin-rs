@@ -3,6 +3,9 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use bitcoin_rs_consensus::ValidationEngine;
+use bitcoin_rs_consensus::primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_mempool::standardness::{
     AcceptanceRejectReason, MAX_PACKAGE_COUNT, MAX_PACKAGE_WEIGHT, MAX_STANDARD_TX_WEIGHT,
     StandardnessError, StandardnessPolicy, is_standard_tx,
@@ -11,9 +14,6 @@ use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, LocalOrigin, Mempool, MempoolEntry,
     MempoolError, MempoolGateway, MempoolLimits, PolicyError, RbfError, ReplacementCandidate,
     SubmitError, SubmitOutcome, required_fee,
-};
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 
 use super::TestError;
@@ -39,7 +39,7 @@ impl AdmissionChain for FundedChain {
             height: 100,
             locktime_cutoff: 0,
             csv_active: false,
-            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+            next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
             confirmed: true,
         })
     }

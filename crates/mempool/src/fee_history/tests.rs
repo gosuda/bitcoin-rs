@@ -1,6 +1,6 @@
 use super::*;
 use crate::{MempoolEntry, MempoolLimits};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use std::sync::Arc;
@@ -37,9 +37,8 @@ fn seeded_pool() -> Arc<RwLock<Mempool>> {
             .insert_entry(MempoolEntry::new(Arc::clone(tx), 100, 10_000, 1, 100, 0))
             .expect("the seeded entries must be admissible");
     }
-    let txids: Vec<Txid> = txs.iter().map(|tx| tx.txid()).collect();
     let refs: Vec<&Tx> = txs.iter().map(AsRef::as_ref).collect();
-    let _ = guard.remove_for_block(&refs, &txids, 101, 1);
+    let _ = guard.remove_for_block(&crate::settlement::TransitionFacts::from_txs(&refs), 101, 1);
     drop(guard);
     mempool
 }

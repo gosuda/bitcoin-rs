@@ -34,8 +34,8 @@ The listener serves Prometheus text on any request path. It has no separate boun
 $ curl -s http://127.0.0.1:19100/
 # HELP storage_writes_total storage write batches applied, by backend and durability
 # TYPE storage_writes_total counter
-storage_writes_total{backend="fjall",durability="durable"} 1
-storage_writes_total{backend="fjall",durability="default"} 2
+storage_writes_total{backend="rocksdb",durability="durable"} 1
+storage_writes_total{backend="rocksdb",durability="default"} 2
 
 # HELP node_event_loop_sync_ticks block sync ticks
 # TYPE node_event_loop_sync_ticks counter
@@ -59,7 +59,7 @@ Enabling metrics also starts a readiness sampler that publishes the txindex capa
 
 USDT probes carry detailed per-event payloads such as block hashes, txids, and message bytes ([`OBS-03`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/observability.md)). The probe ABI is owned by [tracing](https://github.com/gosuda/bitcoin-rs/blob/main/docs/tracing.md).
 
-Measured hot-path histograms are grandfathered through the ledger, not added ad hoc ([`OBS-04`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/observability.md)). New instrumentation follows the decision table in [`OBS-05`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/observability.md), and renamed or removed metrics follow the migration table in [`OBS-06`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/observability.md).
+Measured hot-path histograms are the fixed exempt set of `OBS-04`, not added ad hoc ([`OBS-04`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/observability.md)). New instrumentation follows the decision table in [`OBS-05`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/observability.md), and renamed or removed metrics follow the migration table in [`OBS-06`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/observability.md).
 
 ## Capture a stalled node
 

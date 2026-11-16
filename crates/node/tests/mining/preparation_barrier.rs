@@ -4,13 +4,13 @@ use std::time::Duration;
 use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
-use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
-use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockBodyMetadata, BlockHash, CompactTarget, Hash256, Header, LockTime,
     OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, unix_time_secs,
 };
-use bitcoin_rs_script::push_int;
+use bitcoin_rs_consensus::script::push_int;
+use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
+use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 use bitcoin_rs_storage::block_body::{BlockBodyReader, BlockBodyStore};
 use bitcoin_rs_storage::{BlockFilePosition, BodyExtent, BoundedReadError, StorageError};
 
@@ -299,7 +299,9 @@ pub(crate) fn seed_fresh_chain(state: &NodeState, count: u32) -> Result<Hash256>
     if state.chainstate().applied_tip_snapshot().is_none() {
         let genesis = Network::Regtest.genesis_block();
         state
-            .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))
+            .apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+                genesis,
+            ))
             .map_err(|error| TestError::message(format!("genesis apply failed: {error}")))?;
     }
     let now = u64::from(wall_time()?);
@@ -310,7 +312,9 @@ pub(crate) fn seed_fresh_chain(state: &NodeState, count: u32) -> Result<Hash256>
             .map_err(|_| TestError::message("fresh seed time out of u32 range"))?;
         let block = fresh_child(tip.hash, height, time, Vec::new())?;
         state
-            .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block))
+            .apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
+                block,
+            ))
             .map_err(|error| {
                 TestError::message(format!("fresh seed block {height} failed: {error}"))
             })?;

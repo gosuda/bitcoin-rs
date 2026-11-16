@@ -5,8 +5,8 @@ use std::str::FromStr;
 
 use bitcoin::hex::FromHex;
 use bitcoin_rs_consensus::ConsensusError;
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, consensus_bytes, deserialize};
-use bitcoin_rs_script::{VerifyFlags, push_int};
+use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxOut, Txid, consensus_bytes, deserialize};
+use bitcoin_rs_consensus::script::{VerifyFlags, push_int};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
 use crate::support::error::{RowFault, RowFlagNames, TestError, TokenText};
@@ -55,7 +55,7 @@ fn parse_core_asm(asm: &str) -> Result<Vec<u8>, TestError> {
 }
 
 fn resolve_opcode(name: &str) -> Option<u8> {
-    use bitcoin_rs_script::opcode::*;
+    use bitcoin_rs_consensus::script::opcode::*;
     let bare = name.strip_prefix("OP_").unwrap_or(name);
     Some(match bare {
         "0" | "EMPTY" => OP_0,
@@ -184,7 +184,9 @@ fn is_policy_only_tx(row: &VectorRow) -> bool {
     }
     let mand_flags =
         VerifyFlags::from_bits_retain(row.flags.filled().bits() & VerifyFlags::MANDATORY.bits());
-    let Ok(prepared) = bitcoin_rs_script::PreparedTransaction::new(&row.tx, &row.prevouts) else {
+    let Ok(prepared) =
+        bitcoin_rs_consensus::script::PreparedTransaction::new(&row.tx, &row.prevouts)
+    else {
         return false;
     };
     for input_idx in 0..row.tx.inputs.len() {
@@ -304,7 +306,7 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, TestErr
             available_prevouts.push((
                 outpoint,
                 TxOut {
-                    value: bitcoin_rs_primitives::Amount::from_sat(amount),
+                    value: bitcoin_rs_consensus::primitives::Amount::from_sat(amount),
                     script_pubkey: script_pubkey.into(),
                 },
             ));
@@ -395,7 +397,8 @@ fn non_vacuous_wrong_verdict_goes_red() -> TestResult {
     );
 
     let mut tampered_tx = valid_row.tx.clone();
-    tampered_tx.inputs[0].script_sig = bitcoin_rs_primitives::Script::from_bytes(vec![0x00]);
+    tampered_tx.inputs[0].script_sig =
+        bitcoin_rs_consensus::primitives::Script::from_bytes(vec![0x00]);
     let tampered_verdict = kernel_verdict(&tampered_tx, &valid_row.prevouts, valid_row.flags)?;
     assert_eq!(
         tampered_verdict,

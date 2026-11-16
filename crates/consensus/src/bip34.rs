@@ -1,4 +1,4 @@
-use bitcoin_rs_script::push_int;
+use crate::script::push_int;
 
 use crate::ConsensusError;
 
@@ -15,7 +15,7 @@ pub fn check_bip34(height: u32, coinbase_script_sig: &[u8]) -> Result<(), Consen
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_script::push_int;
+    use crate::script::push_int;
 
     use super::check_bip34;
 

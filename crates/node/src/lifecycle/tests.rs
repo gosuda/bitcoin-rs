@@ -1,5 +1,5 @@
 use bitcoin_rs_consensus::ValidationEngine;
-use bitcoin_rs_primitives::{BlockBodyMetadata, BlockPayload, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockBodyMetadata, BlockImage, Hash256};
 use bitcoin_rs_storage::block_body::{BlockBodyReader, BlockBodyStore};
 use bitcoin_rs_storage::{BlockFilePosition, BodyExtent, BoundedReadError, StorageError};
 use std::io::{Read, Write};
@@ -41,10 +41,10 @@ fn split_rpc_listeners_start_and_join_through_node_services() -> Result<(), Test
         .ok_or(TestError::Missing("node services"))?;
     assert_eq!(services.rpc_threads.len(), 2);
     let management_address = services
-        .rpc_address(bitcoin_rs_rpc::RpcSurface::Management)
+        .rpc_address(bitcoin_rs_serving::RpcSurface::Management)
         .ok_or(TestError::Missing("management address"))?;
     let public_address = services
-        .rpc_address(bitcoin_rs_rpc::RpcSurface::Public)
+        .rpc_address(bitcoin_rs_serving::RpcSurface::Public)
         .ok_or(TestError::Missing("public address"))?;
     for (address, request, expected) in [
         (
@@ -99,8 +99,8 @@ fn public_bind_failure_rolls_back_management_binding_and_node_state() -> Result<
 
 #[test]
 fn timed_out_snapshot_worker_cannot_overwrite_the_next_runs_snapshot() -> Result<(), TestError> {
+    use bitcoin_rs_consensus::primitives::{Hash256, Network, Txid};
     use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, snapshot};
-    use bitcoin_rs_primitives::{Hash256, Network, Txid};
     use std::time::{Duration, Instant};
 
     let dir = tempfile::tempdir()?;
@@ -195,15 +195,16 @@ fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> Re
 {
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
-    let genesis = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
+    let genesis =
+        BlockImage::from_local(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block());
     state.apply_block(&genesis)?;
-    let mut previous = genesis.block().block_hash();
+    let mut previous = genesis.block_hash();
     for height in 1..=3 {
-        let block = BlockPayload::from_local(
-            bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
+        let block = BlockImage::from_local(
+            bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
         );
         state.apply_block(&block)?;
-        previous = block.block().block_hash();
+        previous = block.block_hash();
     }
     let control = RpcChainControl {
         handles: state.chainstate(),
@@ -211,7 +212,7 @@ fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> Re
         sync: state.sync(),
         snapshots: Arc::clone(&state.snapshots),
     };
-    let cancellation = bitcoin_rs_chain::LatchReader::fixture_never();
+    let cancellation = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     for check_level in 0..=4 {
         for nblocks in [0, 2, 100] {
             assert!(
@@ -228,12 +229,12 @@ fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> Re
 
 #[test]
 fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> Result<(), TestError> {
-    use bitcoin_rs_rpc::context::ChainControlError;
+    use bitcoin_rs_serving::context::ChainControlError;
 
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
-    state.apply_block(&BlockPayload::from_local(
-        bitcoin_rs_primitives::Network::Regtest.genesis_block(),
+    state.apply_block(&BlockImage::from_local(
+        bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
     ))?;
     assert_eq!(
         state
@@ -249,7 +250,7 @@ fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> Resul
         sync: state.sync(),
         snapshots: Arc::clone(&state.snapshots),
     };
-    let live = bitcoin_rs_chain::LatchReader::fixture_never();
+    let live = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     for check_level in 0..=4 {
         for nblocks in [0, 1, 6] {
             assert!(
@@ -268,7 +269,7 @@ fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> Resul
 
 #[test]
 fn verify_chain_reports_cancellation_and_recovery_closure() -> Result<(), TestError> {
-    use bitcoin_rs_rpc::context::ChainControlError;
+    use bitcoin_rs_serving::context::ChainControlError;
 
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
@@ -278,13 +279,13 @@ fn verify_chain_reports_cancellation_and_recovery_closure() -> Result<(), TestEr
         sync: state.sync(),
         snapshots: Arc::clone(&state.snapshots),
     };
-    let live = bitcoin_rs_chain::LatchReader::fixture_never();
+    let live = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
     assert!(
         matches!(control.verify_chain(3, 6, &live), Ok(true)),
         "an open chain must verify"
     );
     let fired = {
-        let trigger = bitcoin_rs_chain::LatchWriter::new();
+        let trigger = bitcoin_rs_consensus::latch::LatchWriter::new();
         trigger.trigger();
         trigger.reader()
     };
@@ -306,9 +307,99 @@ fn verify_chain_reports_cancellation_and_recovery_closure() -> Result<(), TestEr
     Ok(())
 }
 
+#[test]
+fn rpc_load_txoutset_follows_core_import_behavior_independent_of_filename() -> Result<(), TestError>
+{
+    use bitcoin_rs_execution::manifest::{ARTIFACT_SLOTS, SnapshotManifest, UTXO_SLOT};
+    use sha2::Digest;
+
+    let pinned = bitcoin_rs_consensus::primitives::Network::Regtest
+        .assume_utxo_for_height(200)
+        .ok_or(TestError::Missing("regtest height-200 anchor"))?;
+    let dir = tempfile::tempdir()?;
+    let mut config = isolated_config(dir.path());
+    config.data_dir = dir.path().join("node");
+    let state = NodeState::open(config, None)?;
+    state.apply_block(&BlockImage::from_local(
+        bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
+    ))?;
+    let headers: Vec<bitcoin_rs_consensus::primitives::Header> = sonic_rs::from_str::<Vec<String>>(
+        include_str!("../../../storage/tests/fixtures/core-v2/blocks200.json"),
+    )?
+    .iter()
+    .map(|hex| {
+        let block: bitcoin::Block = bitcoin::consensus::encode::deserialize_hex(hex)?;
+        bitcoin_rs_consensus::primitives::deserialize(&bitcoin::consensus::serialize(&block.header))
+            .map_err(TestError::from)
+    })
+    .collect::<Result<_, _>>()?;
+    state.chainstate().admit_headers(&headers)?;
+    let core_bytes =
+        include_bytes!("../../../storage/tests/fixtures/core-v2/core200.dat").as_slice();
+
+    let applied_tip = || {
+        state
+            .chainstate()
+            .applied_tip_snapshot()
+            .map(|tip| tip.height)
+    };
+    assert_eq!(applied_tip(), Some(0));
+
+    let control = RpcChainControl {
+        handles: state.chainstate(),
+        followers: state.chain_followers(),
+        sync: state.sync(),
+        snapshots: Arc::clone(&state.snapshots),
+    };
+
+    let mut sizes = [0_u64; ARTIFACT_SLOTS];
+    let mut hashes = [[0_u8; 32]; ARTIFACT_SLOTS];
+    sizes[UTXO_SLOT] = u64::try_from(core_bytes.len()).map_err(std::io::Error::other)?;
+    hashes[UTXO_SLOT] = sha2::Sha256::digest(core_bytes).into();
+    let manifest = SnapshotManifest {
+        manifest_version: 1,
+        network: "regtest".to_string(),
+        genesis: bitcoin_rs_consensus::primitives::Network::Regtest
+            .genesis_block_hash()
+            .to_le_bytes(),
+        base_hash: pinned.block_hash.to_le_bytes(),
+        base_height: pinned.height,
+        schema: bitcoin_rs_projection::index_format_version(),
+        utxo_commitment: pinned.hash_serialized.to_le_bytes(),
+        index_commitments: [None; 4],
+        coverage: [None; 4],
+        sizes,
+        hashes,
+        historical_verified_height: 0,
+    };
+    let manifest_path = dir.path().join("snapshot_manifest.json");
+    std::fs::write(&manifest_path, sonic_rs::to_vec_pretty(&manifest)?)?;
+
+    assert!(
+        control.load_txoutset(&manifest_path).is_err(),
+        "a valid manifest JSON must not activate through the RPC surface"
+    );
+    assert_eq!(
+        applied_tip(),
+        Some(0),
+        "the refused manifest attempt must install nothing"
+    );
+
+    let renamed = dir.path().join("core200.json");
+    std::fs::write(&renamed, core_bytes)?;
+    let imported = control.load_txoutset(&renamed)?;
+    assert_eq!(imported.base_height, 200);
+    assert_eq!(
+        applied_tip(),
+        Some(200),
+        "a Core binary named .json must follow the same Core import behavior as extensionless"
+    );
+    Ok(())
+}
+
 fn seed_checkpoint(state: &NodeState) -> Result<(PathBuf, Vec<u8>), TestError> {
-    state.apply_block(&BlockPayload::from_local(
-        bitcoin_rs_primitives::Network::Regtest.genesis_block(),
+    state.apply_block(&BlockImage::from_local(
+        bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
     ))?;
     let _ = state.publish_checkpoint()?;
     let current = state
@@ -464,7 +555,7 @@ fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> Result<(), TestEr
     let (_gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
     let (exited_tx, exited_rx) = std::sync::mpsc::channel();
     let worker = std::thread::Builder::new()
-        .name("bitcoin-rs-p2p-bootstrap".to_owned())
+        .name("bitcoin-rs-wire-bootstrap".to_owned())
         .spawn(move || {
             let _ = gate_rx.recv_timeout(std::time::Duration::from_secs(2));
             let _ = exited_tx.send(());
@@ -602,7 +693,7 @@ fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> Result<(), 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while matches!(
         node.state.derived_index_status().capability().state,
-        bitcoin_rs_index::CapabilityState::Opening
+        bitcoin_rs_projection::CapabilityState::Opening
     ) {
         assert!(
             std::time::Instant::now() < deadline,
@@ -687,15 +778,15 @@ fn recovery_closure_stops_the_node_run_loop() -> Result<(), TestError> {
 // SYNC-04
 #[test]
 fn fatal_settlement_teardown_skips_the_checkpoint_and_answers_an_error() -> Result<(), TestError> {
-    type CloseChain = Box<dyn Fn(&bitcoin_rs_chainstate::Chainstate)>;
+    type CloseChain = Box<dyn Fn(&bitcoin_rs_execution::Chainstate)>;
     let variants: Vec<(&str, CloseChain)> = vec![
         (
             "fatal-settlement",
-            Box::new(|chain: &bitcoin_rs_chainstate::Chainstate| chain.fail_closed_for_recovery()),
+            Box::new(|chain: &bitcoin_rs_execution::Chainstate| chain.fail_closed_for_recovery()),
         ),
         (
             "graceful-close",
-            Box::new(|chain: &bitcoin_rs_chainstate::Chainstate| {
+            Box::new(|chain: &bitcoin_rs_execution::Chainstate| {
                 drop(chain.close());
             }),
         ),
@@ -1052,7 +1143,7 @@ impl ServedWitness {
     fn serve(
         &mut self,
         server: RpcServer,
-        shutdown: bitcoin_rs_chain::LatchReader,
+        shutdown: bitcoin_rs_consensus::latch::LatchReader,
     ) -> Result<(), TestError> {
         self.server = Some(BoundedThread::spawn("verifychain-rpc-server", move || {
             server.serve_with_shutdown(shutdown)
@@ -1158,15 +1249,16 @@ fn assert_socket_error(response: &str, message: &str) -> Result<(), TestError> {
 }
 
 fn apply_regtest_chain(state: &NodeState) -> Result<(), TestError> {
-    let genesis = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
+    let genesis =
+        BlockImage::from_local(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block());
     state.apply_block(&genesis)?;
-    let mut previous = genesis.block().block_hash();
+    let mut previous = genesis.block_hash();
     for height in 1..=3 {
-        let block = BlockPayload::from_local(
-            bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
+        let block = BlockImage::from_local(
+            bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
         );
         state.apply_block(&block)?;
-        previous = block.block().block_hash();
+        previous = block.block_hash();
     }
     Ok(())
 }
@@ -1179,7 +1271,7 @@ fn bind_test_rpc(state: &NodeState) -> Result<RpcServer, TestError> {
         state.chain_followers(),
         super::final_payout_script(state.config()),
     ));
-    let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
+    let mining_control: Arc<dyn bitcoin_rs_serving::mining::MiningControl> = coordinator;
     let mut bindings = bind_rpc(state, &mining_control, state.block_body_source()?)?;
     assert_eq!(bindings.listeners.len(), 1);
     Ok(bindings.listeners.remove(0).0)
@@ -1200,8 +1292,10 @@ fn final_payout_script_prefers_pool_when_values_differ() {
         max_connections: 1,
         max_connections_per_ip: 1,
         share_difficulty: String::from("1"),
-        share_target: bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal("1")
-            .unwrap_or_else(|error| panic!("fixed test difficulty parses: {error}")),
+        share_target: bitcoin_rs_serving::mining::pool::ShareTarget::from_pool_difficulty_decimal(
+            "1",
+        )
+        .unwrap_or_else(|error| panic!("fixed test difficulty parses: {error}")),
         window_work: 1,
         fee_bps: 0,
         reward_script: vec![0x52],
@@ -1247,8 +1341,8 @@ fn verifychain_socket_cancels_in_flight_walk_on_node_shutdown() -> Result<(), Te
         ));
     }
     state.request_shutdown();
-    witness.finish_server()?;
     gate.release();
+    witness.finish_server()?;
     let response = witness.finish_client()?;
     assert_socket_error(&response, "Block verification interrupted")
 }
@@ -1261,7 +1355,7 @@ fn verifychain_socket_reports_recovery_closure() -> Result<(), TestError> {
     let server = bind_test_rpc(&state)?;
     let addr = server.local_addr()?;
 
-    let stop = Arc::new(bitcoin_rs_chain::LatchWriter::new());
+    let stop = Arc::new(bitcoin_rs_consensus::latch::LatchWriter::new());
     let mut witness = ServedWitness::new(
         {
             let stop = Arc::clone(&stop);

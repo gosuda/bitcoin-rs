@@ -1,6 +1,6 @@
 # P2P wire contract
 
-Ownership and proof follow the [contracts precedence rule](README.md). `crates/p2p/src/compat.rs` owns the decoded command inventory and pinned Core version. [p2p-compatibility](../policies/p2p-compatibility.md) owns handshake fields, the reject-or-ignore matrix, and the deviation ledger (§7). It also owns the verification process (§5 table is a checked projection of `COMMANDS`).
+Ownership and proof follow the [contracts precedence rule](README.md). `crates/wire/src/compat.rs` owns the decoded command inventory and pinned Core version. [p2p-compatibility](../policies/p2p-compatibility.md) owns handshake fields, the reject-or-ignore matrix, and the deviation ledger (§7). It also owns the verification process (§5 table is a checked projection of `COMMANDS`).
 
 ## Wire surface (checked projection of `COMMANDS`)
 
@@ -27,7 +27,7 @@ Handshake order: outbound sends `version`, `wtxidrelay` (BIP339), `sendaddrv2` (
 | `staletip` | negotiated, opt-in | BIP332 draft, no Core equivalent (`staletip.rs`); 12-byte name on both transports, no BIP324 short ID. Over-header-limit payload ignored without punishment; other malformed payloads are invalid decoded payloads. Relayed only when the node enabled it, the peer negotiated `BIP332`, and IBD is inactive. |
 | `ping`, `pong` | originated, served, ignored | `ping` answered with `pong` echoing the nonce on ready peers. This node also originates `ping` on every message-loop connection (VERSION-only feeler connections exit before the message loop and never probe): the first on the first message-loop pass after the handshake completes (both inbound and outbound establishments), matching Core 31.1's `MaybeSendPing` with `m_ping_start` epoch-initialized; then one probe per `PING_INTERVAL` (2 min) of send-or-receive silence, with a fresh nonce per probe; locally or aggregate-refused probes stay owed (the "Queue accounting" paragraph below owns the refusal, owed-probe, and control-lane rules). Deviations: Core pings unconditionally every 2 min on busy links, this node probes only on silence; no pong-nonce matching, so Core's pong-specific timeout (`net_processing.cpp`) is unenforced — liveness stays the `TIMEOUT_INTERVAL` (20 min) silence expiry (Core's `InactivityCheck` shape), with each side's silence judged from real progress: receive silence from the last decoded inbound message, send silence from the connection's last actual socket write (the writer's stream accounting feeds the clock; a queued-but-unwritten probe — or any admitted frame — is not send activity); no latency telemetry kept; `pong` body unused. |
 | `inv` | consumed | Bound 50,000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). Missing tx vectors enter the connection-bound owner; only the selected eligible source gets `getdata`; `wtxidrelay` peers get `MSG_WTX` with actual wtxid, others `MSG_TX`; `NODE_WITNESS` sources get `MSG_WITNESS_TX` requests, others `MSG_TX`. IBD never requests tx vectors. Block vectors are never answered with body `getdata` (P2P-07). Outbound block announce falls back to single-block `inv` (`MSG_BLOCK`) past `MAX_BLOCKS_TO_ANNOUNCE` (8) behind the tip. |
-| `getdata` | served | Bound 50,000. `MSG_BLOCK` streams stripped stored blocks, `MSG_WITNESS_BLOCK` witness-preserved (BIP144); tx from mempool, or orphan map only for resident-wtxid `MSG_WTX`; block-relay-only peers get tx vectors removed; `MSG_TX` stripped, `MSG_WITNESS_TX`/`MSG_WTX` witness form. `MSG_CMPCT_BLOCK` within 5 of the applied tip gets `cmpctblock`, deeper gets the full witness `block`. Misses trail as one `notfound`; items served in request order. Saturation pauses, never disconnects: no free item slot (4,096 queued) or no room for one worst-case block under the 64 MiB cap; parked `notfound` reserved at exact length; a 20-minute request or hold, or a dead writer, ends the session (aggregate-refused time excluded). |
+| `getdata` | served | Bound 50,000. `MSG_BLOCK` streams stripped stored blocks, `MSG_WITNESS_BLOCK` witness-preserved (BIP144); tx from the mempool only (a held orphan answers `notfound`; deviation: no announced-to-peer gate and no answer from the most recent block, both of which Core has); block-relay-only peers get tx vectors removed; `MSG_TX` stripped, `MSG_WITNESS_TX`/`MSG_WTX` witness form. `MSG_CMPCT_BLOCK` within 5 of the applied tip gets `cmpctblock`, deeper gets the full witness `block`. Misses trail as one `notfound`; items served in request order. Saturation pauses, never disconnects: no free item slot (4,096 queued) or no room for one worst-case block under the 64 MiB cap; parked `notfound` reserved at exact length; a 20-minute request or hold, or a dead writer, ends the session (aggregate-refused time excluded). |
 | `notfound` | tx fallback | Matching tx request releases only its actual source and reconsiders retained alternatives; block entries ignored; same 50,000 bound. |
 | `getheaders` | served | Answered from the active chain: first on-chain locator hash anchors, total miss anchors after genesis, stop hash truncates inclusively, at most 2,000 headers (Core per-message maximum); locator at most 101 hashes (`MAX_LOCATOR_SZ`); empty locator with zero stop answers nothing. |
 | `getblocks` | ignored | Legacy locator request (deviation; Core answers `inv`); same locator bound. |
@@ -82,14 +82,16 @@ Queue accounting:
 
 ### `P2P-01`: Protocol wire framing and handshake compatibility
 
-- **Owner**: `crates/p2p/src/compat.rs`: 42-command inventory (36 Core commands plus `feature`, four BIP331 package messages, `staletip`) and `PINNED_CORE_VERSION` (Core 31.1).
-- **Scope**: `crates/p2p` wire/handshake/FSM/policy, `chain_query.rs`, and node network flags.
+- **Owner**: `crates/wire/src/compat.rs`: 42-command inventory (36 Core commands plus `feature`, four BIP331 package messages, `staletip`) and `PINNED_CORE_VERSION` (Core 31.1).
+- **Scope**: `crates/wire` wire/handshake/FSM/policy, `crates/node/src/p2p/chain_query.rs`, and node network flags.
 - Package ingress charges the lower bound of the heap that a decoded package owns.
 - It sets no hard allocator ceiling.
 - Compact block responses draw a fresh BIP152 serving nonce for each block.
 - v1 handshake and inventory frames are byte-identical to rust-bitcoin `RawNetworkMessage`.
 - `getdata` validates the stored body.
-- `MSG_WITNESS_BLOCK` answers exact stored consensus bytes (`Message::BlockPayload`).
+- `getdata` answers a loose transaction from the mempool only. A held orphan answers `notfound`.
+- Deviation from Core `FindTxForGetData`: this node serves a mempool transaction before it announces the transaction to the peer. It does not answer from the most recent block's transactions.
+- `MSG_WITNESS_BLOCK` answers exact stored consensus bytes (`Message::BlockBytes`).
 - `MSG_BLOCK` copies checked header, tx count, and stripped spans (BIP144).
 - Neither format materializes scripts or witnesses.
 - Malformed bodies are never forwarded.
@@ -98,8 +100,8 @@ Queue accounting:
 - Response depth uses the applied frontier.
 - Locator `getheaders` walks the applied chain (`ActiveChainQuery::headers_after`).
 - Empty-locator single-header lookup stays header-best.
-- Inbound `block` decodes once via `BlockPayload::from_raw` (`Message::Block(BlockPayload)`).
-- Serving `Message::BlockPayload(Bytes)` stays raw-only.
+- Inbound `block` decodes once via `BlockImage::from_raw` (`Message::Block(BlockImage)`).
+- Serving `Message::BlockBytes(Bytes)` stays raw-only.
 - Before typed decoding on either transport, the connection loop reserves the parser bound.
 - The primitive layout conservative parser and materialization bound is reserved from one shared 512 MiB `BlockMemory` budget per `ConnectionShared`.
 - This budget is shared by the connections of the service.
@@ -126,11 +128,11 @@ Queue accounting:
 - Version reply sends offered sendpackages once pre-verack.
 - BIP434 windows preserve BIP332 and BIP331 on v1 and v2.
 - Local and loopback proofs apply, not live Core evidence.
-- Proof: `crates/primitives/src/version.rs` (`sub_version_composes_comments_in_cores_shape`, `ua_comment_safety_matches_cores_bip14_subset`) for the BIP-0014 formatter; `crates/node/src/config/tests.rs` (`ua_comments_are_validated_and_resolved_in_cores_shape`) for startup validation and resolution into the advertised subversion; `crates/p2p/src/listener.rs` handshake regressions (`ordinary_handshake_still_requires_services_and_verack`, `rejected_ordinary_version_updates_services_without_good`) drive `run_outbound_handshake`, which writes the version frame from the configured `shared.user_agent` through `handshake::version_message`.
+- Proof: `crates/consensus/src/primitives/version.rs` (`sub_version_composes_comments_in_cores_shape`, `ua_comment_safety_matches_cores_bip14_subset`) for the BIP-0014 formatter; `crates/node/src/config/tests.rs` (`ua_comments_are_validated_and_resolved_in_cores_shape`) for startup validation and resolution into the advertised subversion; `crates/wire/src/listener.rs` handshake regressions (`ordinary_handshake_still_requires_services_and_verack`, `rejected_ordinary_version_updates_services_without_good`) drive `run_outbound_handshake`, which writes the version frame from the configured `shared.user_agent` through `handshake::version_message`.
 
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
-- `crates/p2p` owns sessions and `PeerLease`.
+- `crates/wire` owns sessions and `PeerLease`; `crates/node/src/p2p` owns orchestration over them.
 - `PeerRemote` distinguishes a destination from an anonymous inbound Tor circuit (keeps `ConnectionId`).
 - Address book and dial take only `PeerEndpoint`.
 - Netgroup classification MUST NOT rewrite a dial endpoint.
@@ -160,7 +162,7 @@ Queue accounting:
 - A control-lane probe is the one `Local` refusal that does not cancel: lane-full or dead-writer congestion defers with the probe still owed (Keepalive below).
 - The aggregate never ends a session.
 - Shared-refusal stalls are not keepalive silence, parked-request age, or compact-filter allowance.
-- Keepalive: a message-loop connection's first pass after the handshake owes an immediate `ping` (Core 31.1 `MaybeSendPing` with epoch-initialized `m_ping_start`, both establishments); later probes follow `PING_INTERVAL` (2 min) of send-or-receive silence with a fresh nonce; probes charge the bounded control lane, never the data caps, so a saturated outbound queue neither delays the probe nor loses a data slot to it; a refused probe stays owed until sent, draining ahead of deferred replies once room returns (already-queued data keeps its FIFO order). Send silence is derived from actual writer progress, not queue admission: the writer's stream accounting stamps the lease's shared send-activity clock at the exact point the socket accepts bytes (any accepted write counts, data frames included), the message loop observes that clock each pass, and an admitted-but-unwritten probe never advances it — so with a stalled writer and live inbound traffic the connection still expires `TIMEOUT_INTERVAL` (20 min) after its last actual write, while a healthy writer's writes (probes included) keep resetting it. Refusal classification keeps the clock honest: aggregate (`Shared`) refusals are a stall, lane-full or dead-writer refusals are connection-local congestion that is not, so expiry stays the `TIMEOUT_INTERVAL` (20 min) silence rules of the ping row above and a wire-silent peer whose queue is stuck full still expires. Proof: `crates/p2p/src/listener.rs` (`first_probe_is_owed_immediately`, `probes_owe_one_ping_per_idle_interval`, `a_refused_probe_stays_owed_until_sent`, `refusal_classification_keeps_the_silence_clock_honest`, `an_admitted_probe_is_not_send_activity`), `crates/p2p/src/connection/tests.rs` (`control_lane_charges_no_data_slot_and_keeps_data_capacity`, `a_full_control_lane_refuses_local_and_returns_with_room`, `control_lane_refusal_follows_aggregate_backpressure`), `crates/p2p/src/counters/tests.rs` (`send_activity_advances_only_on_actual_socket_writes` for the stamp-what-the-socket-took wiring the writer-thread clone shares), `crates/p2p/src/listener/writer_shutdown_tests.rs` (`message_loop_probes_a_fresh_peer_immediately_then_stays_quiet`), `crates/p2p/src/listener/getdata_pause_tests.rs` (`blocked_writer_send_silence_expires_despite_inbound_traffic` — a writer that accepts nothing, live inbound pings, an admitted probe: expiry still `TIMEOUT_INTERVAL` after the last actual write; `healthy_writer_actual_writes_reset_the_send_silence_clock`; `tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order` for full data capacity and order under saturation with the probe not lost), and `crates/p2p/src/listener/aggregate_budget_tests.rs` (`request_deferred_not_reply`) for the refused probe staying owed and draining first.
+- Keepalive: a message-loop connection's first pass after the handshake owes an immediate `ping` (Core 31.1 `MaybeSendPing` with epoch-initialized `m_ping_start`, both establishments); later probes follow `PING_INTERVAL` (2 min) of send-or-receive silence with a fresh nonce; probes charge the bounded control lane, never the data caps, so a saturated outbound queue neither delays the probe nor loses a data slot to it; a refused probe stays owed until sent, draining ahead of deferred replies once room returns (already-queued data keeps its FIFO order). Send silence is derived from actual writer progress, not queue admission: the writer's stream accounting stamps the lease's shared send-activity clock at the exact point the socket accepts bytes (any accepted write counts, data frames included), the message loop observes that clock each pass, and an admitted-but-unwritten probe never advances it — so with a stalled writer and live inbound traffic the connection still expires `TIMEOUT_INTERVAL` (20 min) after its last actual write, while a healthy writer's writes (probes included) keep resetting it. Refusal classification keeps the clock honest: aggregate (`Shared`) refusals are a stall, lane-full or dead-writer refusals are connection-local congestion that is not, so expiry stays the `TIMEOUT_INTERVAL` (20 min) silence rules of the ping row above and a wire-silent peer whose queue is stuck full still expires. Proof: `crates/wire/src/listener.rs` (`first_probe_is_owed_immediately`, `probes_owe_one_ping_per_idle_interval`, `a_refused_probe_stays_owed_until_sent`, `refusal_classification_keeps_the_silence_clock_honest`, `an_admitted_probe_is_not_send_activity`), `crates/wire/src/connection/tests.rs` (`control_lane_charges_no_data_slot_and_keeps_data_capacity`, `a_full_control_lane_refuses_local_and_returns_with_room`, `control_lane_refusal_follows_aggregate_backpressure`), `crates/wire/src/counters/tests.rs` (`send_activity_advances_only_on_actual_socket_writes` for the stamp-what-the-socket-took wiring the writer-thread clone shares), `crates/wire/src/listener/writer_shutdown_tests.rs` (`message_loop_probes_a_fresh_peer_immediately_then_stays_quiet`), `crates/wire/src/listener/getdata_pause_tests.rs` (`blocked_writer_send_silence_expires_despite_inbound_traffic` — a writer that accepts nothing, live inbound pings, an admitted probe: expiry still `TIMEOUT_INTERVAL` after the last actual write; `healthy_writer_actual_writes_reset_the_send_silence_clock`; `tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order` for full data capacity and order under saturation with the probe not lost), and `crates/wire/src/listener/aggregate_budget_tests.rs` (`request_deferred_not_reply`) for the refused probe staying owed and draining first.
 - Scheduler keys on connection identity.
 - Each tick runs two sweeps over the live set.
 - A live ready event runs one sweep.
@@ -199,7 +201,7 @@ Queue accounting:
 - A `write`-only wrapper would re-split the frame.
 - Handshake, reader, and writer-thread clone share one `PeerCounters`.
 - The same accepted-byte point feeds the lease's send-activity clock (the keepalive send-silence feed, P2P-02), and the writer-thread clone carries both.
-- Per-message receive buckets: every command this node processes inbound — Core v31.1's known-command list plus this node's supported extensions (`feature`, BIP331 `sendpackages`/`ancpkginfo`/`getpkgtxns`/`pkgtxns`, BIP332 `staletip`) — counts under its own name; decoded-only (`alert`, `reject`) and unknown commands fold into `*other*`. A deliberate divergence from Core's internal whitelist: our supported extensions carry their own receive buckets, while the observable RPC contract (`bytesrecv_per_msg` shape, Core-known names, fixed map size) stays as pinned. Proof: `crates/p2p/src/counters/tests.rs` (`receive_buckets_cover_core_v31_known_commands`, `feature_counts_by_name_in_both_directions`, `received_extension_commands_count_under_their_own_names`, `unknown_and_send_only_receives_fold_into_other`).
+- Per-message receive buckets: every command this node processes inbound — Core v31.1's known-command list plus this node's supported extensions (`feature`, BIP331 `sendpackages`/`ancpkginfo`/`getpkgtxns`/`pkgtxns`, BIP332 `staletip`) — counts under its own name; decoded-only (`alert`, `reject`) and unknown commands fold into `*other*`. A deliberate divergence from Core's internal whitelist: our supported extensions carry their own receive buckets, while the observable RPC contract (`bytesrecv_per_msg` shape, Core-known names, fixed map size) stays as pinned. Proof: `crates/wire/src/counters/tests.rs` (`receive_buckets_cover_core_v31_known_commands`, `feature_counts_by_name_in_both_directions`, `received_extension_commands_count_under_their_own_names`, `unknown_and_send_only_receives_fold_into_other`).
 - Timeouts stay with the listener (handshake vs message-loop poll intervals differ).
 - A poll timeout never loses inbound bytes.
 - `Peer::read_message` reads via `wire::V1Receiver`.
@@ -263,7 +265,7 @@ Queue accounting:
 - They consume no pending slot (otherwise every body would redeem a silent peer).
 - Their one release is the recovery path.
 - An unattachable body-carried header frees its owner's gate so the motivated ancestry request reaches the wire with the delivery (P2P-05).
-- The stager holds one `BlockPayload` per entry.
+- The stager holds one `BlockImage` per entry.
 - Staged retries carry the delivering connection (`ReceivedBlock::source`).
 - An admitting retry credits that peer (`note_announced_tip`).
 - A peer-fault rejection discards the staged body (never re-queued; window record released at drain).
@@ -310,7 +312,7 @@ Queue accounting:
 - The connection is never disconnected for this bound alone.
 - Credit rides the payload and releases at sync take.
 - Ownership and credit are per-connection (no inheritance).
-- **Header ingress and tick fairness**: `P2pService` owns a shared channel capped at 64 header batches (`INBOUND_HEADER_QUEUE_LIMIT` in `crates/p2p/src/service.rs`).
+- **Header ingress and tick fairness**: `P2pService` owns a shared channel capped at 64 header batches (`INBOUND_HEADER_QUEUE_LIMIT` in `crates/wire/src/service.rs`).
 - Wire decoding bounds a batch to 2,000 headers.
 - Body and compact announcements carry one header.
 - Stale-tip pages carry at most 20.
@@ -338,10 +340,10 @@ Queue accounting:
 - It increments `node.sync.invalid_block_disconnects`.
 - `BodyMutated` and `Operational` stay retryable and non-punitive.
 - `Fatal` halts admission without peer blame.
-- An unrecoverable storage-engine failure settles `Fatal`: a failed undo write, a failed block-body write, a failed utxo or durable-head commit, a journal failure that retention backpressure does not own, and a failed recovery checkpoint publication.
+- An unrecoverable storage-engine failure settles `Fatal`: a failed undo write, a failed block-body write, a failed coin or durable-head commit, and a failed recovery checkpoint publication.
 - `Fatal` closes the chainstate for recovery through `fail_closed_for_recovery`: the commit loop schedules no retry, the event loop requests node shutdown, and the supervisor restart replays the durable state with a clean engine.
 - `getblockchaininfo` reports the closed chainstate as `is_apply_halted` until the process exits.
-- Journal backpressure from the retention limit stays `Operational`; compaction relieves it in-process.
+- A transient storage read or write refusal that the engine resolves stays `Operational`, and the caller retries under its owning mechanism.
 - `BodyMutated` names only delivered bytes (header stays valid, body re-fetched).
 - These include Merkle or witness mismatch.
 - They also include a coinbaseless body holding a 64-byte witness-stripped tx (`SixtyFourByteMutation`; CVE-2017-12842, Core `IsBlockMutated`).
@@ -350,9 +352,9 @@ Queue accounting:
 - Unresolved-body quota: hash-unresolvable staged bodies owe admission later (`gate_pending`), capped at `MAX_UNRESOLVED_STAGED_BODIES` (`sync/receive.rs`).
 
 Proof for header ingress:
-- `crates/p2p/src/listener/header_ingress_tests.rs` covers sustained wire and body forwarding into real sync ticks.
+- `crates/node/src/p2p/header_ingress_tests.rs` covers sustained wire and body forwarding into real sync ticks.
 - It covers bounded queue occupancy, body application, full-queue ordering, cancellation, and disconnection.
-- `crates/p2p/src/sync/tests/header_ingress.rs` covers message and header work limits.
+- `crates/node/src/p2p/sync/tests/header_ingress.rs` covers message and header work limits.
 - It also covers block application and request scheduling while headers remain queued.
 - `headers_presync.rs` test `sufficient_work_chain_syncs_presync_then_redownload` defers a continuation across the batch budget before completing both passes.
 - These are local behavioral proofs, not a live-network throughput or multi-peer fairness campaign.

@@ -10,45 +10,43 @@ use std::process::Command;
 #[path = "dependency_graph_tests.rs"]
 mod tests;
 
-pub(crate) const ENGINE_CRATES: [&str; 3] = ["fjall", "redb", "rust-rocksdb"];
+pub(crate) const ENGINE_CRATES: [&str; 6] = [
+    "fjall",
+    "redb",
+    "rust-rocksdb",
+    "surrealkv",
+    "signet-libmdbx",
+    "tokio",
+];
 pub(crate) const ZMQ_CRATE: &str = "zmq";
 
-pub(crate) const BACKEND_FEATURES: [&str; 3] = ["rocksdb", "fjall", "redb"];
-
 pub(crate) const STORAGE_CRATE: &str = "bitcoin-rs-storage";
+pub(crate) const CONVERTER_CRATE: &str = "bitcoin-rs-storage-convert";
 
-pub(crate) const RPC_CRATE: &str = "bitcoin-rs-rpc";
+pub(crate) const SERVING_CRATE: &str = "bitcoin-rs-serving";
 
 pub(crate) const NODE_CRATE: &str = "bitcoin-rs-node";
 
 pub(crate) const BIN_CRATE: &str = "bitcoin-rs";
 pub(crate) const MEMPOOL_CRATE: &str = "bitcoin-rs-mempool";
-pub(crate) const CHAINSTATE_CRATE: &str = "bitcoin-rs-chainstate";
+pub(crate) const CHAINSTATE_CRATE: &str = "bitcoin-rs-execution";
 
 pub(crate) const MEMPOOL_CONSUMER_CRATES: [&str; 4] =
-    ["bitcoin-rs-p2p", RPC_CRATE, NODE_CRATE, BIN_CRATE];
-pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 6] = [
-    STORAGE_CRATE,
-    CHAINSTATE_CRATE,
-    "bitcoin-rs-utxo",
-    "bitcoin-rs-index",
-    NODE_CRATE,
-    BIN_CRATE,
-];
+    ["bitcoin-rs-wire", SERVING_CRATE, NODE_CRATE, BIN_CRATE];
 
 pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
-        "bitcoin-rs-primitives" | "bitcoin-rs-script" | "bitcoin-rs-consensus" => 0,
+        "bitcoin-rs-consensus" => 0,
         STORAGE_CRATE => 1,
-        "bitcoin-rs-chain" | CHAINSTATE_CRATE | "bitcoin-rs-utxo" | "bitcoin-rs-p2p"
-        | "bitcoin-rs-mempool" | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,
-        RPC_CRATE => 3,
+        CHAINSTATE_CRATE | "bitcoin-rs-wire" | "bitcoin-rs-mempool" | "bitcoin-rs-projection" => 2,
+        SERVING_CRATE => 3,
         NODE_CRATE
         | BIN_CRATE
         | "bitcoin-rs-e2e"
         | "bitcoin-rs-storage-footprint"
         | "bitcoin-rs-snapshot"
         | "bitcoin-rs-p2pk-scan"
+        | CONVERTER_CRATE
         | "contract-index" => 4,
         other => panic!("unclassified workspace crate `{other}`: add it to the layer table"),
     }
@@ -220,56 +218,69 @@ impl WorkspaceGraph {
             }
         }
 
+        let execution_present = self.normal_deps.contains_key("bitcoin-rs-execution")
+            || self
+                .normal_deps
+                .values()
+                .any(|edges| edges.iter().any(|d| d == "bitcoin-rs-execution"));
+        if execution_present {
+            for (name, edges) in &self.normal_deps {
+                let layer = approved_layer(name);
+                for dep in edges {
+                    let dep_layer = approved_layer(dep);
+                    if dep_layer == layer
+                        && layer < 4
+                        && !(name == "bitcoin-rs-projection" && dep == "bitcoin-rs-execution")
+                    {
+                        violations.push(format!(
+                            "same-layer edge violation: `{name}` (layer {layer}) depends on `{dep}` (layer {dep_layer}); only projection -> execution is permitted"
+                        ));
+                    }
+                }
+            }
+        }
+
         let cycle_checked_crates = self.detect_cycles(&mut violations);
 
         let mut checked_engine_edges = 0_usize;
         for (name, engines) in &self.engine_deps {
-            if name != STORAGE_CRATE && !engines.is_empty() {
-                violations.push(format!(
-                    "engine dependencies {engines:?} must be named by `{STORAGE_CRATE}` only; \
-                     found on `{name}`"
-                ));
+            for engine in engines {
+                checked_engine_edges += 1;
+                match (name.as_str(), engine.as_str()) {
+                    (STORAGE_CRATE, "rust-rocksdb" | "surrealkv" | "signet-libmdbx" | "tokio") => {}
+                    (CONVERTER_CRATE, "fjall" | "redb") => {}
+                    (STORAGE_CRATE, other) => {
+                        violations.push(format!(
+                            "`{STORAGE_CRATE}` may only name `rust-rocksdb`, `surrealkv`, `signet-libmdbx`, or `tokio` as an engine; found `{other}`"
+                        ));
+                    }
+                    (CONVERTER_CRATE, other) => {
+                        violations.push(format!(
+                            "`{CONVERTER_CRATE}` may only name `fjall` and `redb` to read retired datadirs; found `{other}`"
+                        ));
+                    }
+                    (other, engine) => {
+                        violations.push(format!(
+                            "engine dependency `{engine}` must not be named by `{other}`"
+                        ));
+                    }
+                }
             }
-            checked_engine_edges += engines.len();
         }
 
-        if let Some(rpc_edges) = self.normal_deps.get(RPC_CRATE) {
-            for dep in rpc_edges {
-                if dep == STORAGE_CRATE {
-                    violations.push(
-                        "rpc must not depend on the storage crate; it consumes node capabilities \
-                         through query traits"
-                            .to_owned(),
-                    );
-                }
+        if let Some(serving_edges) = self.normal_deps.get(SERVING_CRATE) {
+            for dep in serving_edges {
                 if ENGINE_CRATES.contains(&dep.as_str()) {
-                    violations.push(format!("rpc must not name the engine dependency `{dep}`"));
-                }
-            }
-        }
-
-        let rpc_features = self.features.get(RPC_CRATE);
-        if let Some(rpc_features) = rpc_features {
-            for (feature, implies) in rpc_features {
-                let forwards = BACKEND_FEATURES.contains(&feature.as_str())
-                    || implies.iter().any(|entry| {
-                        BACKEND_FEATURES
-                            .iter()
-                            .any(|backend| entry.contains(backend))
-                    });
-                if forwards {
                     violations.push(format!(
-                        "rpc feature `{feature}` still forwards a storage backend"
+                        "serving must not name the engine dependency `{dep}`"
                     ));
                 }
             }
         }
 
         let mut checked_features = 0_usize;
-        checked_features += self.validate_backend_forwarding(&mut violations);
-
+        checked_features += self.validate_backend_features(&mut violations);
         checked_features += self.validate_zmq_surface(&mut violations);
-
         checked_features += self.validate_test_seam_isolation(&mut violations);
 
         if violations.is_empty() {
@@ -289,87 +300,42 @@ impl WorkspaceGraph {
         }
     }
 
-    fn validate_backend_forwarding(&self, violations: &mut Vec<String>) -> usize {
-        let mut checked_features = 0_usize;
-        for (name, feature_map) in &self.features {
-            for (feature, implies) in feature_map {
-                checked_features += 1;
-                if !BACKEND_FEATURES.contains(&feature.as_str()) {
-                    continue;
-                }
-                if !BACKEND_FORWARDING_CRATES.contains(&name.as_str()) {
-                    violations.push(format!(
-                        "`{name}` must not define or forward the backend feature `{feature}`"
-                    ));
-                    continue;
-                }
-                if implies.is_empty() {
-                    violations.push(format!(
-                        "`{name}` defines empty backend marker `{feature}`; backend features \
-                         must forward into storage or an approved adapter that does"
-                    ));
-                    continue;
-                }
-                let forwards = if name == STORAGE_CRATE {
-                    implies.iter().all(|entry| {
-                        let entry = entry.trim_start_matches("dep:");
-                        ENGINE_CRATES.contains(&entry)
-                    })
-                } else {
-                    implies.iter().all(|entry| {
-                        let entry = entry.trim_start_matches("dep:");
-                        let mut parts = entry.split('/');
-                        let target = parts.next().unwrap_or_default();
-                        let forwarded_feature = parts.next().unwrap_or_default();
-                        parts.next().is_none()
-                            && BACKEND_FORWARDING_CRATES.contains(&target)
-                            && forwarded_feature == feature.as_str()
-                    })
-                };
-                if !forwards {
-                    violations.push(format!(
-                        "`{name}` defines backend feature `{feature}` without matching \
-                         forwarding into an approved adapter or storage crate with the same \
-                         feature name"
-                    ));
-                }
-            }
-        }
-
-        checked_features
-    }
-
     fn validate_zmq_surface(&self, violations: &mut Vec<String>) -> usize {
         let mut checked = 0_usize;
         for (name, dependencies) in &self.zmq_deps {
-            if name != RPC_CRATE && !dependencies.is_empty() {
+            if name != SERVING_CRATE && !dependencies.is_empty() {
                 violations.push(format!(
-                    "the external ZMQ dependency must be owned by `{RPC_CRATE}`; found on `{name}`"
+                    "the external ZMQ dependency must be owned by `{SERVING_CRATE}`; found on `{name}`"
                 ));
             }
             checked += dependencies.len();
         }
         match self
             .features
-            .get(RPC_CRATE)
+            .get(SERVING_CRATE)
             .and_then(|feature_map| feature_map.get("zmq"))
         {
             Some(implies) if implies.iter().any(|entry| entry == "dep:zmq") => {
                 checked += 1;
             }
-            _ => violations
-                .push("the RPC `zmq` feature must enable its owned external dependency".to_owned()),
+            _ => violations.push(
+                "the serving `zmq` feature must enable its owned external dependency".to_owned(),
+            ),
         }
         let node_zmq = self
             .features
             .get(NODE_CRATE)
             .and_then(|feature_map| feature_map.get("zmq"));
         match node_zmq {
-            Some(implies) if implies.iter().any(|entry| entry == "bitcoin-rs-rpc/zmq") => {
+            Some(implies)
+                if implies
+                    .iter()
+                    .any(|entry| entry == "bitcoin-rs-serving/zmq") =>
+            {
                 checked += 1;
             }
             _ => violations
-                .push("the node `zmq` feature must forward the RPC surface feature".to_owned()),
+                .push("the node `zmq` feature must forward the serving surface feature".to_owned()),
         }
         match node_zmq {
             Some(implies) if implies.iter().all(|entry| entry != "dep:zmq") => {
@@ -378,6 +344,57 @@ impl WorkspaceGraph {
             _ => violations.push(
                 "the node `zmq` feature must not enable a direct external dependency".to_owned(),
             ),
+        }
+        checked
+    }
+
+    fn validate_backend_features(&self, violations: &mut Vec<String>) -> usize {
+        let mut checked = 0_usize;
+        checked += self.validate_storage_tokio_feature(violations);
+        checked += self.validate_backend_forwarding_allowlist(violations);
+        checked
+    }
+
+    fn validate_storage_tokio_feature(&self, violations: &mut Vec<String>) -> usize {
+        let Some(features) = self.features.get(STORAGE_CRATE) else {
+            return 0;
+        };
+        for (feature, implies) in features {
+            let enables_tokio = implies.iter().any(|entry| entry == "dep:tokio");
+            if enables_tokio && feature != "surrealkv" {
+                violations.push(format!(
+                    "`{STORAGE_CRATE}` feature `{feature}` must not enable `dep:tokio`; only `surrealkv` may enable tokio"
+                ));
+            }
+        }
+        features.len()
+    }
+
+    fn validate_backend_forwarding_allowlist(&self, violations: &mut Vec<String>) -> usize {
+        const ALLOWED: [&str; 6] = [
+            STORAGE_CRATE,
+            CHAINSTATE_CRATE,
+            "bitcoin-rs-projection",
+            NODE_CRATE,
+            BIN_CRATE,
+            CONVERTER_CRATE,
+        ];
+        let mut checked = 0;
+        for (crate_name, feature_map) in &self.features {
+            let crate_allowed = ALLOWED.contains(&crate_name.as_str());
+            for (feature, implies) in feature_map {
+                checked += 1;
+                let forwards = feature == "surrealkv"
+                    || feature == "mdbx"
+                    || implies
+                        .iter()
+                        .any(|entry| entry.ends_with("/surrealkv") || entry.ends_with("/mdbx"));
+                if forwards && !crate_allowed {
+                    violations.push(format!(
+                        "`{crate_name}` must not define or forward backend feature `{feature}`"
+                    ));
+                }
+            }
         }
         checked
     }

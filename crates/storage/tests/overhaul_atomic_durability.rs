@@ -1,8 +1,4 @@
-#![cfg_attr(
-    any(feature = "fjall", feature = "redb", feature = "rocksdb"),
-    expect(clippy::expect_used, reason = "test assertions")
-)]
-#![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
+#![expect(clippy::expect_used, reason = "test assertions")]
 
 use bitcoin_rs_storage::{
     BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PersistFault,
@@ -98,101 +94,10 @@ fn fault_name(fault: PersistFault) -> &'static str {
 }
 
 #[test]
-#[cfg(feature = "fjall")]
-fn fjall_injected_faults_never_mix_families() {
-    run_fault_matrix("fjall", |path| bitcoin_rs_storage::FjallStore::open(path));
-}
-
-#[test]
-#[cfg(feature = "redb")]
-fn redb_injected_faults_never_mix_families() {
-    run_fault_matrix("redb", |path| bitcoin_rs_storage::RedbStore::open(path));
-}
-
-#[test]
-#[cfg(feature = "rocksdb")]
 fn rocksdb_injected_faults_never_mix_families() {
     run_fault_matrix("rocksdb", |path| {
         bitcoin_rs_storage::RocksDbStore::open(path)
     });
-}
-
-#[test]
-#[cfg(feature = "redb")]
-fn redb_txindex_injected_faults_never_mix_families() {
-    let routes = [
-        Route::WriteDurable,
-        Route::WriteDurableIf,
-        Route::FlushDeferred,
-    ];
-    for route in &routes {
-        for fault in FAULTS {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let path = dir.path().to_path_buf();
-            let label = format!("redb-txindex/{}/{})", route.label(), fault_name(fault));
-
-            {
-                let store =
-                    bitcoin_rs_storage::open_redb_tx_index_store(&path).expect("open for seed");
-                let mut batch = store.new_batch();
-                batch.put(ColumnFamily::UtxoMeta, b"meta", b"old");
-                batch.put(ColumnFamily::TxConfirmed, &[7_u8; 12], b"old");
-                store.write_durable(batch).expect("seed write");
-            }
-
-            let outcome = {
-                let store =
-                    bitcoin_rs_storage::open_redb_tx_index_store(&path).expect("reopen to arm");
-                store.arm_persist_fault(fault);
-                let mut batch = store.new_batch();
-                batch.put(ColumnFamily::UtxoMeta, b"meta", b"new");
-                batch.put(ColumnFamily::TxConfirmed, &[7_u8; 12], b"new");
-                match route {
-                    Route::WriteDurable => store.write_durable(batch),
-                    Route::WriteDurableIf => store
-                        .write_durable_if(
-                            &[WriteCondition::Absent {
-                                cf: ColumnFamily::UtxoMeta,
-                                key: &[0xff],
-                            }],
-                            batch,
-                        )
-                        .map(|_| ()),
-                    Route::FlushDeferred => {
-                        store.write_deferred(batch).and_then(|()| store.flush())
-                    }
-                    Route::Write => unreachable!("write route excluded above"),
-                }
-            };
-
-            let store =
-                bitcoin_rs_storage::open_redb_tx_index_store(&path).expect("reopen to inspect");
-            let meta = store
-                .get(ColumnFamily::UtxoMeta, b"meta")
-                .expect("read meta");
-            let confirmed = store
-                .get(ColumnFamily::TxConfirmed, &[7_u8; 12])
-                .expect("read confirmed");
-            let both_old = meta.as_deref() == Some(b"old") && confirmed.as_deref() == Some(b"old");
-            let both_new = meta.as_deref() == Some(b"new") && confirmed.as_deref() == Some(b"new");
-            assert!(
-                both_old || both_new,
-                "{label}: families recovered as a mix: meta={meta:?} confirmed={confirmed:?}"
-            );
-
-            let completion_fault = match route {
-                Route::WriteDurable | Route::WriteDurableIf => fault == PersistFault::FailSync,
-                Route::FlushDeferred => fault == PersistFault::FailFlush,
-                Route::Write => false,
-            };
-            if completion_fault {
-                assert!(
-                    outcome.is_err(),
-                    "{label}: durable route reported success on a faulted completion"
-                );
-            }
-        }
-    }
 }
 
 fn run_fault_matrix<S, F>(backend: &str, open: F)
@@ -401,23 +306,6 @@ fn assert_fault_outcome(route: &Route, fault: PersistFault, reported_success: bo
 }
 
 #[test]
-#[cfg(feature = "fjall")]
-fn fjall_condition_mismatch_applies_nothing_and_consumes_no_fault() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = bitcoin_rs_storage::FjallStore::open(dir.path()).expect("open");
-    assert_mismatch_applies_nothing_and_consumes_no_fault(&store);
-}
-
-#[test]
-#[cfg(feature = "redb")]
-fn redb_condition_mismatch_applies_nothing_and_consumes_no_fault() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = bitcoin_rs_storage::RedbStore::open(dir.path()).expect("open");
-    assert_mismatch_applies_nothing_and_consumes_no_fault(&store);
-}
-
-#[test]
-#[cfg(feature = "rocksdb")]
 fn rocksdb_condition_mismatch_applies_nothing_and_consumes_no_fault() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = bitcoin_rs_storage::RocksDbStore::open(dir.path()).expect("open");
@@ -470,7 +358,6 @@ fn assert_mismatch_applies_nothing_and_consumes_no_fault<S: KvStore>(store: &S) 
 }
 
 #[test]
-#[cfg(feature = "rocksdb")]
 fn rocksdb_fail_apply_errors_on_plain_write() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = bitcoin_rs_storage::RocksDbStore::open(dir.path()).expect("open");
@@ -482,10 +369,9 @@ fn rocksdb_fail_apply_errors_on_plain_write() {
 }
 
 #[test]
-#[cfg(feature = "fjall")]
-fn fjall_snapshot_is_coherent_across_batch_commit() {
+fn rocksdb_snapshot_is_coherent_across_batch_commit() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = bitcoin_rs_storage::FjallStore::open(dir.path()).expect("open");
+    let store = bitcoin_rs_storage::RocksDbStore::open(dir.path()).expect("open");
     store
         .write_durable(multi_family_batch(&store, b"before"))
         .expect("seed");
@@ -698,6 +584,76 @@ impl KvStore for OneFamilyStore {
 
     fn arm_persist_fault(&self, _fault: PersistFault) {
         self.rows.lock().defect_armed = true;
+    }
+
+    fn multi_get(
+        &self,
+        cf: ColumnFamily,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<bytes::Bytes>>, StorageError> {
+        let guard = self.rows.lock();
+        let f_idx = family_index(cf);
+        Ok(keys
+            .iter()
+            .map(|k| {
+                guard
+                    .rows
+                    .get(&(f_idx, k.to_vec()))
+                    .map(|v| bytes::Bytes::copy_from_slice(v))
+            })
+            .collect())
+    }
+
+    fn ingest_sorted(
+        &self,
+        cf: ColumnFamily,
+        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        _scratch: &std::path::Path,
+    ) -> Result<u64, StorageError> {
+        let mut count = 0u64;
+        let mut prev_key: Option<Vec<u8>> = None;
+        let mut to_insert = Vec::new();
+        for (k, v) in rows {
+            if let Some(prev) = &prev_key {
+                if k.as_slice() <= prev.as_slice() {
+                    return Err(StorageError::InvalidOperation(
+                        "keys not strictly ascending",
+                    ));
+                }
+            }
+            prev_key = Some(k.clone());
+            to_insert.push((k, v));
+            count += 1;
+        }
+        let mut guard = self.rows.lock();
+        let f_idx = family_index(cf);
+        for (k, v) in to_insert {
+            guard.rows.insert((f_idx, k), v);
+        }
+        Ok(count)
+    }
+
+    fn delete_range(&self, cf: ColumnFamily, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
+        if start >= end {
+            return Ok(());
+        }
+        let mut guard = self.rows.lock();
+        let f_idx = family_index(cf);
+        guard.rows.retain(|(row_cf, key), _| {
+            if *row_cf != f_idx {
+                return true;
+            }
+            key.as_slice() < start || key.as_slice() >= end
+        });
+        Ok(())
+    }
+
+    fn checkpoint(&self, dir: &std::path::Path) -> Result<(), StorageError> {
+        std::fs::create_dir_all(dir).map_err(StorageError::Io)
+    }
+
+    fn engine_cache_bytes(&self) -> u64 {
+        0
     }
 }
 

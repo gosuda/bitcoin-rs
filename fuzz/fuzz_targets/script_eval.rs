@@ -2,8 +2,8 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence};
-use bitcoin_rs_script::{Interpreter, VerifyFlags};
+use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence};
+use bitcoin_rs_consensus::script::{Interpreter, VerifyFlags};
 
 const FLAGS: [VerifyFlags; 6] = [
     VerifyFlags::NONE,
@@ -53,15 +53,15 @@ fuzz_target!(|data: &[u8]| {
         let Some(tx_bytes) = take(&mut rest, tx_len) else {
             return;
         };
-        let Ok(tx) = bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Tx>(tx_bytes)
+        let Ok(tx) = bitcoin_rs_consensus::primitives::deserialize::<bitcoin_rs_consensus::primitives::Tx>(tx_bytes)
         else {
             return;
         };
-        let consensus = bitcoin_rs_primitives::consensus_bytes(&tx);
-        let re_decoded = bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Tx>(&consensus)
+        let consensus = bitcoin_rs_consensus::primitives::consensus_bytes(&tx);
+        let re_decoded = bitcoin_rs_consensus::primitives::deserialize::<bitcoin_rs_consensus::primitives::Tx>(&consensus)
             .expect("script_eval tx round-trip decode");
         assert_eq!(re_decoded, tx, "script_eval tx round-trip equality");
-        let re_consensus = bitcoin_rs_primitives::consensus_bytes(&re_decoded);
+        let re_consensus = bitcoin_rs_consensus::primitives::consensus_bytes(&re_decoded);
         assert_eq!(re_consensus, consensus, "canonical tx bytes idempotent");
         let Some(index) = take_u16(&mut rest) else {
             return;
@@ -84,7 +84,7 @@ fuzz_target!(|data: &[u8]| {
             let Some(value) = take(&mut rest, 8) else {
                 return;
             };
-            prevouts.push(bitcoin_rs_primitives::TxOut {
+            prevouts.push(bitcoin_rs_consensus::primitives::TxOut {
                 value: Amount::from_sat(u64::from_le_bytes(value.try_into().unwrap_or([0; 8]))),
                 script_pubkey: script.to_vec().into(),
             });
@@ -164,40 +164,40 @@ fuzz_target!(|data: &[u8]| {
 
     let script_sig = script_sig.to_vec();
     let script_pubkey = script_pubkey.to_vec();
-    let prevout = bitcoin_rs_primitives::TxOut {
+    let prevout = bitcoin_rs_consensus::primitives::TxOut {
         value: Amount::from_sat(amount),
         script_pubkey: script_pubkey.clone().into(),
     };
-    let credit = bitcoin_rs_primitives::Tx {
+    let credit = bitcoin_rs_consensus::primitives::Tx {
         version: 1,
-        inputs: vec![bitcoin_rs_primitives::TxIn {
-            previous_output: bitcoin_rs_primitives::OutPoint::null(),
+        inputs: vec![bitcoin_rs_consensus::primitives::TxIn {
+            previous_output: bitcoin_rs_consensus::primitives::OutPoint::null(),
             script_sig: vec![0x00, 0x00].into(),
             sequence: Sequence::MAX,
-            witness: bitcoin_rs_primitives::Witness::new(),
+            witness: bitcoin_rs_consensus::primitives::Witness::new(),
         }],
-        outputs: vec![bitcoin_rs_primitives::TxOut {
+        outputs: vec![bitcoin_rs_consensus::primitives::TxOut {
             value: Amount::from_sat(amount),
             script_pubkey: script_pubkey.clone().into(),
         }],
         lock_time: LockTime::ZERO,
     };
-    let tx = bitcoin_rs_primitives::Tx {
+    let tx = bitcoin_rs_consensus::primitives::Tx {
         version: 1,
-        inputs: vec![bitcoin_rs_primitives::TxIn {
-            previous_output: bitcoin_rs_primitives::OutPoint::new(credit.txid(), 0),
+        inputs: vec![bitcoin_rs_consensus::primitives::TxIn {
+            previous_output: bitcoin_rs_consensus::primitives::OutPoint::new(credit.txid(), 0),
             script_sig: script_sig.clone().into(),
             sequence: Sequence::MAX,
             witness: witness.clone().into(),
         }],
-        outputs: vec![bitcoin_rs_primitives::TxOut {
+        outputs: vec![bitcoin_rs_consensus::primitives::TxOut {
             value: Amount::from_sat(amount),
             script_pubkey: Script::new(),
         }],
         lock_time: LockTime::ZERO,
     };
-    let consensus = bitcoin_rs_primitives::consensus_bytes(&tx);
-    let re_decoded = bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Tx>(&consensus)
+    let consensus = bitcoin_rs_consensus::primitives::consensus_bytes(&tx);
+    let re_decoded = bitcoin_rs_consensus::primitives::deserialize::<bitcoin_rs_consensus::primitives::Tx>(&consensus)
         .expect("synthetic tx deserialize");
     assert_eq!(re_decoded, tx, "synthetic tx round-trip equality");
 
@@ -205,7 +205,7 @@ fuzz_target!(|data: &[u8]| {
     let r1 = interpreter.execute_with_prevouts(
         &script_pubkey,
         &script_sig,
-        &bitcoin_rs_primitives::Witness::from_stack(witness.clone()),
+        &bitcoin_rs_consensus::primitives::Witness::from_stack(witness.clone()),
         flags,
         std::slice::from_ref(&prevout),
         &tx,
@@ -214,7 +214,7 @@ fuzz_target!(|data: &[u8]| {
     let r2 = interpreter.execute_with_prevouts(
         &script_pubkey,
         &script_sig,
-        &bitcoin_rs_primitives::Witness::from_stack(witness),
+        &bitcoin_rs_consensus::primitives::Witness::from_stack(witness),
         flags,
         std::slice::from_ref(&prevout),
         &tx,

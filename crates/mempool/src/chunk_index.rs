@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt;
 
-use bitcoin_rs_primitives::Txid;
+use bitcoin_rs_consensus::primitives::Txid;
 use hashbrown::HashSet;
 use smallvec::SmallVec;
 

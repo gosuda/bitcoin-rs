@@ -17,14 +17,14 @@ libbitcoinkernel oracle tests prove consensus-script parity. This page owns live
 
 - **Owner**: `scripts/run-p2p-core-interop.sh`.
 - After bitcoin-rs catches up to Core on regtest, `getblockcount`, `getbestblockhash`, and `getblockchaininfo.{chain,blocks}` agree.
-- Evidence schema `bitcoin-rs-core-differential-v4` is verified by `crates/p2p/tests/core_interop_live.rs`.
+- Evidence schema `bitcoin-rs-core-differential-v4` is verified by `crates/wire/tests/core_interop_live.rs`.
 - This test complements `kernel_block_parity` / `kernel_vector_parity`.
 - Those tests check the C++ engine in-process.
 - This test checks a running Core node.
 
 ### `CORE-03`: BIP152 compact-block relay against live Core
 
-- **Owner**: `scripts/run-p2p-core-interop.sh` phases A–C plus the raw BIP152 probe; verified by `assert_bip152_relay` in `crates/p2p/tests/core_interop_live.rs`.
+- **Owner**: `scripts/run-p2p-core-interop.sh` phases A–C plus the raw BIP152 probe; verified by `assert_bip152_relay` in `crates/wire/tests/core_interop_live.rs`.
 - Phase A mines coinbase-only blocks through `generateblock` templates.
 - Every near-tip compact fetch reconstructs fully with no `getblocktxn`.
 - Phases B and C mine blocks over seeded mempool transactions (seeded before bitcoin-rs connects, so the node never learns them).
@@ -37,7 +37,7 @@ libbitcoinkernel oracle tests prove consensus-script parity. This page owns live
 
 ### `CORE-05`: Proactive block announcements across a live reorg
 
-- **Owner**: `scripts/p2p_block_announcement_probe.py`, invoked by `scripts/run-p2p-core-interop.sh`; verified by `assert_block_announcements` in `crates/p2p/tests/core_interop_live.rs`.
+- **Owner**: `scripts/p2p_block_announcement_probe.py`, invoked by `scripts/run-p2p-core-interop.sh`; verified by `assert_block_announcements` in `crates/wire/tests/core_interop_live.rs`.
 - Equivalent scripted peers connect to pinned Core 31.1 and bitcoin-rs.
 - One peer requests no announcement extension.
 - One peer negotiates BIP130 `sendheaders`.
@@ -55,7 +55,7 @@ libbitcoinkernel oracle tests prove consensus-script parity. This page owns live
 
 ### `CORE-06`: BIP324 v2 transport against live Core
 
-- **Owner**: `scripts/run-p2p-core-interop.sh`, with Core started as `-v2transport=1`; verified by `assert_transports` in `crates/p2p/tests/core_interop_live.rs`.
+- **Owner**: `scripts/run-p2p-core-interop.sh`, with Core started as `-v2transport=1`; verified by `assert_transports` in `crates/wire/tests/core_interop_live.rs`.
 - The main bitcoin-rs node keeps `--v2transport=false`, so CORE-02, CORE-03 and its connection to Core stay v1 evidence.
 - Its leg MUST report `v1` with empty session ids on both ends.
 - A fresh bitcoin-rs node with `--v2transport=true` dials Core.

@@ -54,11 +54,6 @@ CommitBatch ==
   /\ rowsCommitted' = rowsCommitted + 1
   /\ phase' = IF watermark + 1 = AppliedHeight THEN 0 ELSE 1
 
-CaughtUp ==
-  /\ phase = 0
-  /\ watermark = AppliedHeight
-  /\ UNCHANGED << watermark, rowsCommitted, phase >>
-
 Stutter ==
   /\ UNCHANGED vars
 
@@ -66,7 +61,6 @@ Next ==
   \/ Wake
   \/ Prepare
   \/ CommitBatch
-  \/ CaughtUp
   \/ Stutter
 
 TypeOK ==

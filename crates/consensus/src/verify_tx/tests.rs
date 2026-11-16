@@ -1,13 +1,13 @@
-use bitcoin::hashes::Hash as _;
-use bitcoin_rs_primitives::{
+use crate::primitives::{
     Amount, Block, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Txid, Witness, Wtxid, consensus_bytes, deserialize,
 };
 #[cfg(not(feature = "kernel"))]
-use bitcoin_rs_primitives::{Sighash, SighashCache};
-use bitcoin_rs_script::opcode::{OP_EQUAL, OP_HASH160};
-use bitcoin_rs_script::push_data;
-use bitcoin_rs_script::{VerifyFlags, push_int};
+use crate::primitives::{Sighash, SighashCache};
+use crate::script::opcode::{OP_EQUAL, OP_HASH160};
+use crate::script::push_data;
+use crate::script::{VerifyFlags, push_int};
+use bitcoin::hashes::Hash as _;
 
 use super::{ScriptStageTimings, is_final_tx, verify_coinbase_script_sig_size, verify_transaction};
 use crate::ValidationEngine;
@@ -197,17 +197,17 @@ fn verify_transaction_routes_taproot_spends_to_interpreter() {
 #[test]
 #[cfg(not(feature = "kernel"))]
 fn verify_transaction_accepts_valid_multi_input_taproot_keypath() {
-    use secp256k1::{Keypair, Message, Scalar, Secp256k1, SecretKey, XOnlyPublicKey};
+    use secp256k1::{Keypair, Scalar, SecretKey, XOnlyPublicKey};
     use sha2::{Digest, Sha256};
 
-    let secp = Secp256k1::new();
     let seeds = [1u8, 2u8];
     let mut keypairs = Vec::new();
     let mut prevouts = Vec::new();
     let mut outpoints = Vec::new();
     for (index, seed) in seeds.into_iter().enumerate() {
-        let secret = SecretKey::from_slice(&[seed; 32]).unwrap_or_else(|_| panic!("secret key"));
-        let keypair = Keypair::from_secret_key(&secp, &secret);
+        let secret =
+            SecretKey::from_secret_bytes([seed; 32]).unwrap_or_else(|_| panic!("secret key"));
+        let keypair = Keypair::from_secret_key(&secret);
         let (xonly, _) = XOnlyPublicKey::from_keypair(&keypair);
         let tag = {
             let mut h = Sha256::new();
@@ -217,12 +217,12 @@ fn verify_transaction_accepts_valid_multi_input_taproot_keypath() {
         let mut tweak_hash = Sha256::new();
         tweak_hash.update(tag);
         tweak_hash.update(tag);
-        tweak_hash.update(xonly.serialize());
+        tweak_hash.update(xonly.to_byte_array());
         tweak_hash.update([0u8; 32]);
         let tweak_arr: [u8; 32] = tweak_hash.finalize().into();
         let tweak = Scalar::from_be_bytes(tweak_arr).unwrap_or_else(|_| panic!("tweak scalar"));
         let tweaked_keypair = keypair
-            .add_xonly_tweak(&secp, &tweak)
+            .add_xonly_tweak(&tweak)
             .unwrap_or_else(|e| panic!("tweak: {e}"));
         let (output_key, _) = XOnlyPublicKey::from_keypair(&tweaked_keypair);
         let outpoint = OutPoint {
@@ -233,7 +233,7 @@ fn verify_transaction_accepts_valid_multi_input_taproot_keypath() {
         let mut script_pubkey = Vec::with_capacity(34);
         script_pubkey.push(0x51);
         script_pubkey.push(0x20);
-        script_pubkey.extend_from_slice(&output_key.serialize());
+        script_pubkey.extend_from_slice(&output_key.to_byte_array());
         prevouts.push(TxOut {
             value: Amount::from_sat(50_000),
             script_pubkey: script_pubkey.into(),
@@ -264,9 +264,8 @@ fn verify_transaction_accepts_valid_multi_input_taproot_keypath() {
         let sighash = cache
             .taproot_signature_hash(input_idx, &prevouts, None, None, Sighash::Default)
             .unwrap_or_else(|_| panic!("taproot sighash"));
-        let message = Message::from_digest(sighash.to_le_bytes());
-        let signature = secp.sign_schnorr(&message, keypair);
-        tx.inputs[input_idx].witness = vec![signature.serialize().to_vec()].into();
+        let signature = secp256k1::schnorr::sign(sighash.as_byte_array(), keypair);
+        tx.inputs[input_idx].witness = vec![signature.to_byte_array().to_vec()].into();
     }
 
     let mut utxos = hashbrown::HashMap::new();
@@ -569,6 +568,7 @@ fn op_equal_txout(value: u64) -> TxOut {
     }
 }
 
+// SCR-06
 #[test]
 fn script_cache_hit_skips_scripts_for_exact_flags_only() -> Result<(), TestError> {
     use crate::script_cache::{ScriptExecutionCache, WindowCacheTakes};
@@ -675,6 +675,7 @@ fn witnessed_mismatch_input(outpoint: OutPoint) -> TxIn {
     }
 }
 
+// SCR-06
 #[test]
 fn script_cache_hit_uses_derived_witness_ids_for_witness_bearing_bodies() -> Result<(), TestError> {
     use crate::script_cache::{ScriptExecutionCache, WindowCacheTakes};
@@ -704,6 +705,83 @@ fn script_cache_hit_uses_derived_witness_ids_for_witness_bearing_bodies() -> Res
     let hit =
         super::prepare_block_script_checks(&mut view, 0, 0, flags, &parsed, Some(&mut takes))?;
     assert!(super::verify_prepared_units(core::slice::from_ref(&hit)).is_ok());
+    Ok(())
+}
+
+// BLK-04
+#[test]
+fn block_script_checks_borrow_the_image_without_a_second_object_graph() -> Result<(), TestError> {
+    use crate::block_view::{BlockFacts, BlockView};
+    use crate::kernel::BlockScriptSource;
+    use crate::primitives::block::{
+        BlockImage, block_image_materialize_call_count, transaction_view_materialize_call_count,
+        unwatch_materializations, watch_materializations,
+    };
+
+    let witness_script = vec![crate::script::opcode::OP_PUSHNUM_1];
+    let witness_program = {
+        use bitcoin::hashes::sha256;
+        let mut program = vec![0x00, 0x20];
+        program.extend_from_slice(sha256::Hash::hash(&witness_script).as_byte_array());
+        program
+    };
+    let prevout = TxOut {
+        value: Amount::from_sat(50),
+        script_pubkey: Script::from_bytes(witness_program),
+    };
+    let coinbase = coinbase_transaction_with_script_sig_len(2);
+    let spend = Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: outpoint(9),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_stack(vec![witness_script]),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(50),
+            script_pubkey: Script::from_bytes(vec![crate::script::opcode::OP_PUSHNUM_1]),
+        }],
+    };
+    let block = Block {
+        header: Header {
+            version: 1,
+            bits: CompactTarget::from_consensus(0x2000_ffff),
+            ..Header::default()
+        },
+        txs: vec![coinbase.clone(), spend.clone()],
+    };
+    let image = BlockImage::from_local(block);
+    let expected_txids = [coinbase.txid(), spend.txid()];
+    let mut view = BlockView::from_image(&image, BlockFacts::from_image(&image));
+    assert_eq!(view.facts().txids(), &expected_txids[..]);
+    view.set_resolved(vec![Vec::new(), vec![Some(prevout)]]);
+
+    watch_materializations(&image);
+    let checks = super::prepare_block_script_checks(
+        &mut view,
+        0,
+        0,
+        VerifyFlags::MANDATORY,
+        &BlockScriptSource::Native,
+        None,
+    )?;
+    assert!(
+        super::verify_prepared_units(core::slice::from_ref(&checks)).is_ok(),
+        "the fixture spend must verify through views over the image"
+    );
+    let image_copies = block_image_materialize_call_count(&image);
+    let view_copies = transaction_view_materialize_call_count(&image);
+    unwatch_materializations(&image);
+    assert_eq!(
+        image_copies, 0,
+        "validation must not build a second owned transaction object graph"
+    );
+    assert_eq!(
+        view_copies, 0,
+        "validation must read through transaction views over the image"
+    );
     Ok(())
 }
 

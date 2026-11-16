@@ -7,4 +7,7 @@ package leanProofs
 lean_lib Proofs where
   globs := #[.one `Proofs, .submodules `Primitives, .submodules `Utxo,
     .submodules `Mempool, .submodules `ChainAdmission, .submodules `PeerLeases,
-    .submodules `ProjectionMining, .submodules `P2p, .submodules `Storage]
+    .submodules `ProjectionMining, .submodules `P2p, .submodules `Storage,
+    .submodules `IndexOpen, .submodules `ProjectionIndex,
+    .submodules `ServingView, .submodules `SnapshotBootstrap,
+    .submodules `NodeBudget, .submodules `MempoolSettlement]

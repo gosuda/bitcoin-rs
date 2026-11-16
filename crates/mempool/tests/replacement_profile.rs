@@ -1,11 +1,11 @@
 use super::TestError;
 use std::sync::Arc;
 
+use bitcoin_rs_consensus::primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolError, MempoolLimits, RbfError, ReplacementCandidate,
-};
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 
 fn coin(tag: u32) -> OutPoint {

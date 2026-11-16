@@ -37,7 +37,7 @@
 - [Block connect and reorg](how/block-connect-and-reorg.md)
 - [Header sync and block download](how/header-sync-and-block-download.md)
 - [Chain state and storage](how/state-and-storage.md)
-- [Durability and the journal](how/durability-and-journal.md)
+- [Atomic durability](how/durability-and-commit.md)
 - [Checkpoints and recovery](how/checkpoints-and-recovery.md)
 - [Snapshots and assumeutxo](how/snapshots-and-assumeutxo.md)
 - [Pruning](how/pruning.md)
@@ -56,7 +56,6 @@
 - [Compatibility with Bitcoin Core](trust/core-compatibility.md)
 - [BIP support](trust/bip-support.md)
 - [Verification: tests, fuzzing, proofs](trust/verification.md)
-- [Benchmarks](trust/benchmarks.md)
 
 # Contribute
 

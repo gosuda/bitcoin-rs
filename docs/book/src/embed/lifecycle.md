@@ -82,9 +82,9 @@ The lock file opens without following symlinks, and a non-regular `.lock` is ref
 
 ## Failure settlement
 
-A fatal storage or apply failure stops the node closed instead of leaving it partially usable. `ChainTransition` checks every apply result, and a fatal classification calls `Chainstate::fail_closed_for_recovery` (`crates/chainstate/src/lib.rs:780`). That call closes admission permanently and requests chainstate shutdown. Because the node latch is a child of the chainstate latch, the whole node stops.
+A fatal storage or apply failure stops the node closed instead of leaving it partially usable. `ChainTransition` checks every apply result, and a fatal classification calls `Chainstate::fail_closed_for_recovery` in [`crates/execution/src/lib.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/lib.rs). That call closes admission permanently and requests chainstate shutdown. Because the node latch is a child of the chainstate latch, the whole node stops.
 
-Fatal cases are a failed UTXO commit, a durable-head commit or lineage failure, block-body or undo persistence failure, recovery publication failure, and a journal stop that is not backpressure. Retryable failures return to the caller and leave the node running.
+Fatal cases include a failed coin commit, a durable-head commit or lineage failure, block-body or undo persistence failure, and recovery publication failure. This list is illustrative, not exhaustive; the `Fatal` classification in `crates/execution/src/window.rs` defines the full set. Retryable failures return to the caller and leave the node running.
 
 Startup failures follow a different rule. `start_node` rolls back through `TeardownMode::StartupAbort`, which never publishes a clean checkpoint, so the next open runs recovery rather than trusting a half-started node.
 
@@ -93,7 +93,7 @@ An assumeutxo snapshot whose background validation fails is also settled closed:
 The daemon log for a clean regtest start and `SIGTERM` shows both ends of the lifecycle:
 
 ```text
-{"timestamp":"2026-11-01T16:44:24.414833Z","level":"INFO","fields":{"message":"chainstate restore selected","restore_source":"cold","reason":"no_complete_checkpoint"},"target":"bitcoin_rs_chainstate::recovery"}
+{"timestamp":"2026-11-01T16:44:24.414833Z","level":"INFO","fields":{"message":"chainstate restore selected","restore_source":"cold","reason":"no_complete_checkpoint"},"target":"bitcoin_rs_execution::recovery"}
 {"timestamp":"2026-11-01T16:44:24.418584Z","level":"INFO","fields":{"message":"rpc listener bound","addr":"127.0.0.1:44089","surface":"Shared"},"target":"bitcoin_rs_node::lifecycle"}
 {"timestamp":"2026-11-01T16:44:25.821454Z","level":"INFO","fields":{"message":"published clean chainstate checkpoint","generation":1},"target":"bitcoin_rs_node::lifecycle"}
 {"timestamp":"2026-11-01T16:44:25.822383Z","level":"INFO","fields":{"message":"bitcoin-rs node exited cleanly"},"target":"bitcoin_rs_node::lifecycle"}

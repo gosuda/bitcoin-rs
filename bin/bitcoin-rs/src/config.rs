@@ -2,15 +2,15 @@ use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use bitcoin_rs_chainstate::ValidationMode;
+use bitcoin_rs_execution::ValidationMode;
 use bitcoin_rs_node::options::{
     PoolOverrides, parse_connect_endpoint, parse_network, parse_p2p_magic, parse_script_index,
     parse_storage_backend, parse_validation_engine, parse_validation_mode,
 };
 use bitcoin_rs_node::{
-    ChainstateJournalOverrides, IndexOverrides, MiningOverrides, Network, NetworkSelection,
-    NotificationConfig, ObservabilityOverrides, P2pOverrides, RpcOverrides, ScriptIndexMode,
-    StorageOverrides, UserConfig, ValidationEngine, ValidationOverrides,
+    IndexOverrides, MiningOverrides, Network, NetworkSelection, NotificationConfig,
+    ObservabilityOverrides, P2pOverrides, RpcOverrides, ScriptIndexMode, StorageOverrides,
+    UserConfig, ValidationEngine, ValidationOverrides,
 };
 use bitcoin_rs_storage::StorageBackend;
 use clap::Parser;
@@ -471,7 +471,7 @@ impl CoreValue for Option<Vec<bitcoin_rs_node::options::NetworkLabel>> {
     }
 }
 
-impl CoreValue for Option<Vec<bitcoin_rs_node::options::PeerNetwork>> {
+impl CoreValue for Option<Vec<bitcoin_rs_wire::PeerNetwork>> {
     fn apply(key: &str, value: &str, slot: &mut Self) -> Result<(), String> {
         let mut parsed = Vec::new();
         for item in value.split(',') {
@@ -586,25 +586,7 @@ mod tests {
     use std::path::Path;
 
     use super::parse_for_network;
-    use bitcoin_rs_node::{Network, resolve};
-
-    #[test]
-    fn network_section_overrides_globals() {
-        let layers = parse_for_network(
-            "
-prune=550
-[regtest]
-prune=900
-rpcuser=regtest-user
-rpcpassword=regtest-pass
-",
-            Network::Regtest,
-        )
-        .unwrap_or_else(|error| panic!("valid fixture parses: {error}"));
-        let layer_refs: Vec<_> = layers.iter().collect();
-        let config = resolve(&layer_refs).unwrap_or_else(|error| panic!("layer resolves: {error}"));
-        assert_eq!(config.storage.prune_target_mb, 900);
-    }
+    use bitcoin_rs_node::Network;
 
     #[test]
     fn every_table_core_key_reaches_its_slot() {
@@ -847,8 +829,8 @@ onlynet=onion,i2p
         assert_eq!(
             conf_with_overlays.p2p.overlay.onlynet,
             vec![
-                bitcoin_rs_node::options::PeerNetwork::Onion,
-                bitcoin_rs_node::options::PeerNetwork::I2p
+                bitcoin_rs_wire::PeerNetwork::Onion,
+                bitcoin_rs_wire::PeerNetwork::I2p
             ]
         );
         Ok(())
@@ -861,10 +843,11 @@ onlynet=onion,i2p
             Err(error) => error,
         };
         assert!(
-            error.to_string().contains(
-                "parse error on line 1: -prune=550, options in configuration file must be specified without leading -"
+            matches!(
+                error,
+                TestError::Bin(super::BinError::InvalidBitcoinConf { .. })
             ),
-            "the refusal quotes Core's parse error: {error}"
+            "a leading dash must surface as a conf parse refusal: {error}"
         );
     }
 

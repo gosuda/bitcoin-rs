@@ -7,15 +7,15 @@ use bitcoin_rs_consensus::ValidationEngine;
 use std::sync::mpsc;
 use std::thread;
 
+use bitcoin_rs_consensus::primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
+use bitcoin_rs_consensus::script::opcode;
 use bitcoin_rs_mempool::standardness::{AcceptanceRejectReason, PackageTxContext};
 use bitcoin_rs_mempool::{
     AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, Mempool, MempoolEntry,
     MempoolGateway, MempoolLimits, arm_admission_park, reset_admission_park,
 };
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
-};
-use bitcoin_rs_script::opcode;
 
 const P2PKH_SCRIPT: &[u8] = &[
     opcode::OP_DUP,
@@ -102,7 +102,7 @@ fn admission_request(
         prevouts,
         prevout_meta: hashbrown::HashMap::new(),
         csv_active: false,
-        next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+        next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
         locktime_cutoff: 0,
         max_feerate_sat_per_kvb: None,
         time: 1,
@@ -212,7 +212,7 @@ fn p2sh_sigop_cost_exceeds_standard_limit() {
     let witness_script = vec![opcode::OP_CHECKMULTISIG; 900];
     let tx = tx_one_input(
         prev,
-        bitcoin_rs_script::push_data(&p2wsh_script_pubkey(&[0x42; 32])),
+        bitcoin_rs_consensus::script::push_data(&p2wsh_script_pubkey(&[0x42; 32])),
         vec![witness_script],
         99_000,
         P2PKH_SCRIPT.to_vec(),
@@ -328,9 +328,9 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), TestErr
         inputs: vec![
             TxIn {
                 previous_output: OutPoint::new(parent_txid, 0),
-                script_sig: Script::from_bytes(bitcoin_rs_script::push_data(&p2wsh_script_pubkey(
-                    &[0x42; 32],
-                ))),
+                script_sig: Script::from_bytes(bitcoin_rs_consensus::script::push_data(
+                    &p2wsh_script_pubkey(&[0x42; 32]),
+                )),
                 sequence: Sequence::MAX,
                 witness: Witness::from_stack(vec![witness_script]),
             },

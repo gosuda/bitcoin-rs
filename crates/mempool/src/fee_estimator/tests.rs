@@ -1,5 +1,5 @@
 use super::{history_codec::HISTORY_MAGIC, *};
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_consensus::primitives::Hash256;
 
 fn test_txid(n: u8) -> Txid {
     let mut bytes = [0u8; 32];

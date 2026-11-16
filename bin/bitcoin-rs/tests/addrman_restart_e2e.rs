@@ -24,7 +24,7 @@ fn dns_disabled_restart_reconnects_to_a_gossiped_peer() -> Result<(), Error> {
 fn configured_asmap_survives_dns_disabled_restart() -> Result<(), Error> {
     let directory = tempfile::tempdir()?;
     let map = directory.path().join("asmap.raw");
-    let bytes = include_bytes!("../../../crates/p2p/tests/data/asmap-linked-ipv4-core-v31.1.raw");
+    let bytes = include_bytes!("../../../crates/wire/tests/data/asmap-linked-ipv4-core-v31.1.raw");
     std::fs::write(&map, bytes)?;
     let args = ["--asmap", map.to_str().expect("temporary path")];
     let options = SpawnOptions {

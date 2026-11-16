@@ -11,7 +11,7 @@ use bitcoin::{
     Amount, Block, BlockHash, CompactTarget, Network, OutPoint, ScriptBuf, Sequence, Target,
     Transaction, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_primitives::hex::{hex_decode, hex_encode};
+use bitcoin_rs_consensus::primitives::hex::{hex_decode, hex_encode};
 
 use crate::error::Error;
 

@@ -1,6 +1,6 @@
 # Reference set contract
 
-This page provides a readable projection of the `[reference]` record in `crates/rpc/core-compat.toml`.
+This page provides a readable projection of the `[reference]` record in `crates/serving/core-compat.toml`.
 It projects the typed validation in `e2e/src/reference_set.rs`.
 `ReferenceSet` is the parsed identity record used by test and formal gates.
 It is not a separate registry or new public type.
@@ -30,7 +30,7 @@ A version label alone is never custody: a reference MUST carry source and binary
   - `version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"`
 - Extra `[[reference.release.platforms]]` rows of the same shape (`arm64-apple-darwin`, `win64`) run the same release on other hosts.
 - Captures keep their own `core_source_commit`, `core_binary_sha256`, version, regtest inputs, and allowed differences.
-- `crates/rpc/tests/support/fixture.rs` compares these fields.
+- `crates/serving/tests/support/fixture.rs` compares these fields.
 - Changing the reference stales old captures.
 - The gate fails and never relabels.
 - The harness hashes the live executable.
@@ -62,14 +62,15 @@ A version label alone is never custody: a reference MUST carry source and binary
 
 ### `REF-04`: Corpus identities
 
-- Product corpora are defined in [`campaign-corpora.md`](campaign-corpora.md).
+- Product corpora are defined by this clause.
 - Manifest rows under `[[reference.corpora]]` pin them by `id`, `stop_height`, and `stop_hash`.
 - `C150` covers mainnet blocks `0 .. 150,000` (stop hash `0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b`, `muhash 383a0b41ac28ddf6ac91723b41527fa64c0b54451cee5f2c4b3823ef92117116`, first certified Core 31.1 `gettxoutsetinfo` at height 150,000).
 - `Cmodern` covers mainnet blocks `0 .. 709,635` (stop hash `00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f`, `txouts` 75,903,651, `total_amount_sat` 1,887,251,879,232,217, `muhash 71f94b3136225ba9f77ae89b68fdace431470af64bd29dd055e173830f837e5a`, first certified Core 31.1 `gettxoutsetinfo` response at 709,635).
 - A cell MUST NOT close on a guessed or recalled UTXO total.
 - `manifest_sha256` is optional until the archive exists (C150 exported 2026-09-07, Cmodern 2026-09-09).
 - `corpus_custody()` reports a missing manifest digest as `Blocked { missing: "manifest_sha256" }`, never an invented digest.
-- Each archive uses the Core-framed format with an export-time manifest digest.
+- Each archive uses the Core-framed format with an export-time manifest digest: `manifest_sha256` is the field the exporter embeds inside the manifest, not the SHA-256 of the manifest file.
+- The repository no longer carries a corpus exporter; archives are staged externally and verified against the pinned digests.
 - A length-prefixed diagnostic file is not a product corpus.
 
 ### `REF-06`: Formal tool identity
@@ -78,13 +79,13 @@ A version label alone is never custody: a reference MUST carry source and binary
 - `name = "apalache-mc"` at `version = "0.62.4"`.
 - `archive_sha256 3b6b7ebf24e778535bf47e0cb3f0799c9ab9048df41119c7d3091c6ca1760bc1`.
 - `jar_sha256 e5223915507b65cc5f1638bd037ede60f8a4fc1644aff46355779f9b05df9262`.
-- Observed Java runtime `26.0.2.1`.
+- Observed Java runtime `25.0.5`.
 
 ### `REF-07`: Pinned mainnet stop and custody rule
 
 - The default unpruned full-tip storage campaign uses a pinned mainnet stop `(height, block_hash)` recorded by the run.
 - It permits no floating stop.
-- The benchmark campaign owns any 1 TB verdict, which applies only to that pinned default lane.
+- No 1 TB storage verdict is recorded; any future verdict would apply only to this pinned default lane.
 - The offline snapshot in [FP-04](storage-footprint.md#fp-04-evidence-limits) does not decide it.
 - Missing identities, malformed commits or digests, unbound custody tuples, and confused product identities fail with typed `ReferenceError`.
 - The fixture gate rejects stale capture provenance.

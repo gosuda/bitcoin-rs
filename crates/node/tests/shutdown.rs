@@ -1,5 +1,3 @@
-#![cfg(any(feature = "fjall", feature = "redb"))]
-
 use crate::support::block_on;
 use bitcoin_rs_node::test_support::TestError;
 use bitcoin_rs_node::{Auth, Network, NodeConfig, RuntimeInputs, run};
@@ -44,14 +42,7 @@ fn loopback(port: u16) -> SocketAddr {
 }
 
 fn test_storage_backend() -> bitcoin_rs_storage::StorageBackend {
-    #[cfg(feature = "fjall")]
-    {
-        bitcoin_rs_storage::StorageBackend::Fjall
-    }
-    #[cfg(not(feature = "fjall"))]
-    {
-        bitcoin_rs_storage::StorageBackend::Redb
-    }
+    bitcoin_rs_storage::StorageBackend::RocksDb
 }
 
 #[test]

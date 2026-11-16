@@ -9,8 +9,8 @@ use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin::merkle_tree::calculate_root;
-use bitcoin_rs_p2p::compact_blocks::{CompactBlockHints, Outcome, Reconstruction};
-use bitcoin_rs_primitives::{Tx, Txid, Wtxid, deserialize};
+use bitcoin_rs_wire::compact_blocks::{CompactBlockHints, Outcome, Reconstruction};
+use bitcoin_rs_consensus::primitives::{BlockImage, Tx, Txid, Wtxid, deserialize};
 use libfuzzer_sys::arbitrary::Unstructured;
 use libfuzzer_sys::fuzz_target;
 
@@ -86,12 +86,12 @@ fn sixty_four_byte_tx() -> bitcoin::Transaction {
     }
 }
 
-fn assert_block_matches(block: &bitcoin_rs_primitives::Block, expected: &bitcoin::Block) {
+fn assert_block_matches(block: &BlockImage, expected: &bitcoin::Block) {
     assert_eq!(
-        block.header.compute_hash().as_bytes(),
+        block.header().compute_hash().as_bytes(),
         expected.header.block_hash().to_byte_array().as_slice()
     );
-    let txids: Vec<[u8; 32]> = block.txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
+    let txids: Vec<[u8; 32]> = (0..block.tx_count()).map(|i| *block.identity(i).txid().as_bytes()).collect();
     let expected_txids: Vec<[u8; 32]> = expected
         .txdata
         .iter()

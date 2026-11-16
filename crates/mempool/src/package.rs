@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{OutPoint, Tx, Txid};
+use bitcoin_rs_consensus::primitives::{OutPoint, Tx, Txid};
 use hashbrown::{HashMap, HashSet};
 
 use crate::{

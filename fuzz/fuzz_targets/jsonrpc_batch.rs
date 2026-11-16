@@ -89,7 +89,7 @@ fn verify_single_response(request: &Value, body: Option<&Value>) {
     );
 }
 
-fn verify_deep_nesting(handler: &bitcoin_rs_rpc::Handler) {
+fn verify_deep_nesting(handler: &bitcoin_rs_serving::Handler) {
     let mut deep_array = Vec::with_capacity(20_000);
     for _ in 0..10_000 {
         deep_array.push(b'[');
@@ -97,7 +97,7 @@ fn verify_deep_nesting(handler: &bitcoin_rs_rpc::Handler) {
     for _ in 0..10_000 {
         deep_array.push(b']');
     }
-    let deep_resp = bitcoin_rs_rpc::handle_json(handler, &deep_array);
+    let deep_resp = bitcoin_rs_serving::handle_json(handler, &deep_array);
     assert!(
         deep_resp.body.is_some(),
         "depth 10000 array must return error response without panic"
@@ -111,7 +111,7 @@ fn verify_deep_nesting(handler: &bitcoin_rs_rpc::Handler) {
     for _ in 0..10_000 {
         deep_obj.push(b'}');
     }
-    let deep_obj_resp = bitcoin_rs_rpc::handle_json(handler, &deep_obj);
+    let deep_obj_resp = bitcoin_rs_serving::handle_json(handler, &deep_obj);
     assert!(
         deep_obj_resp.body.is_some(),
         "depth 10000 object must return error response without panic"
@@ -119,10 +119,10 @@ fn verify_deep_nesting(handler: &bitcoin_rs_rpc::Handler) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let context = Arc::new(bitcoin_rs_rpc::context::Context::new());
-    let handler = bitcoin_rs_rpc::Handler::new(context);
+    let context = Arc::new(bitcoin_rs_serving::context::Context::new());
+    let handler = bitcoin_rs_serving::Handler::new(context);
 
-    let response = bitcoin_rs_rpc::handle_json(&handler, data);
+    let response = bitcoin_rs_serving::handle_json(&handler, data);
 
     let Ok(json_str) = core::str::from_utf8(data) else {
         return;

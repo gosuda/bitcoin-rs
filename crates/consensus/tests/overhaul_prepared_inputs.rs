@@ -1,12 +1,12 @@
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 use bitcoin::hashes::Hash as _;
-use bitcoin_rs_consensus::{ConsensusError, UtxoView, ValidationEngine, verify_transaction};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
     consensus_bytes,
 };
-use bitcoin_rs_script::VerifyFlags;
+use bitcoin_rs_consensus::script::VerifyFlags;
+use bitcoin_rs_consensus::{ConsensusError, UtxoView, ValidationEngine, verify_transaction};
 
 struct Coins(hashbrown::HashMap<OutPoint, TxOut>);
 
@@ -83,14 +83,11 @@ fn missing_or_duplicate_prevouts_fail_before_scripts() {
 
 #[test]
 fn transaction_identities_match_reference_oracle() {
-    let fixture = format!(
-        "{}/../primitives/tests/testdata/481824.bin",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let fixture = format!("{}/tests/testdata/481824.bin", env!("CARGO_MANIFEST_DIR"));
     let segwit = std::fs::read(&fixture).unwrap_or_else(|error| panic!("read {fixture}: {error}"));
     for bytes in [consensus_bytes(&Network::Mainnet.genesis_block()), segwit] {
-        let parsed =
-            bitcoin_rs_primitives::layout::ParsedBlock::parse_exact(&bytes).expect("parse");
+        let parsed = bitcoin_rs_consensus::primitives::layout::ParsedBlock::parse_exact(&bytes)
+            .expect("parse");
         let oracle: bitcoin::Block =
             bitcoin::consensus::deserialize(&bytes).expect("oracle decode");
         let materialized: Block = parsed.materialize();

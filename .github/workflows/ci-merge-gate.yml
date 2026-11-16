@@ -36,9 +36,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
-  # Same production feature set as ci-main's full-node lane: all three
-  # storage backends plus the bitcoinkernel script-verification engine.
-  FULL_NODE_FEATURES: "rocksdb,fjall,redb,kernel"
+  # Production feature set for full-node verification.
+  FULL_NODE_FEATURES: "kernel"
 
 jobs:
   # Fastest signal for the #1276-class break: consensus is where the
@@ -48,7 +47,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # The kernel engine is built from C++; install its prerequisites even
@@ -60,11 +59,6 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Kernel-gated consensus Clippy
         run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets --features kernel -- -D warnings
-      # Script's `kernel` feature only forwards to consensus's, so the
-      # consensus pass above does not compile script's own kernel-gated
-      # targets (`core_vectors`, `segwit_v0_sighash_edges`).
-      - name: Kernel-gated script targets Clippy
-        run: cargo clippy --locked -p bitcoin-rs-script --all-targets --features kernel -- -D warnings
       # Focused kernel oracle parity tests at the merge-gate boundary (issue #1511).
       # The library and shared-sighash suite also exercise owned block-check
       # preparation; the oracle helpers below use the borrowed transaction API.
@@ -77,7 +71,7 @@ jobs:
             kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: --nocapture
       - name: Kernel script core-vectors oracle test
         run: |
-          cargo test --locked -p bitcoin-rs-script --features kernel \
+          cargo test --locked -p bitcoin-rs-consensus --features kernel \
             --test suite core_vectors:: -- --nocapture
 
   # Match ci-main's production binary lint graph exactly. A cargo check here
@@ -87,7 +81,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # rocksdb's bindgen needs libclang; the kernel needs the C++ toolchain.

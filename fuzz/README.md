@@ -42,7 +42,7 @@ cargo +nightly fuzz run p2p_message
 | `header_sync_sequence`      | Header batches, alternative-branch reorgs, and tip selection by work    |
 | `chainstate_reorg_model`    | Connect, disconnect, flush, and reopen against an in-memory model       |
 
-The snapshot target also embeds the [independent Core regtest-200 fixture](../crates/utxo/tests/fixtures/core-v2/README.md). The fixture keeps its 51-byte pinned header. It yields at most 256 input triples as little-endian body-offset/XOR-byte mutations. Empty and no-op inputs exercise the complete positive fixture and reach coin decoding with no foreign-format seed. The fixture is compiled in. That arm needs no companion-corpus import.
+The snapshot target also embeds the [independent Core regtest-200 fixture](../crates/storage/tests/fixtures/core-v2/README.md). The fixture keeps its 51-byte pinned header. It yields at most 256 input triples as little-endian body-offset/XOR-byte mutations. Empty and no-op inputs exercise the complete positive fixture and reach coin decoding with no foreign-format seed. The fixture is compiled in. That arm needs no companion-corpus import.
 
 ```sh
 cargo +nightly fuzz run p2p_message -- -max_total_time=60

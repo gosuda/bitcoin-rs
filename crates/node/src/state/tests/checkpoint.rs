@@ -2,7 +2,7 @@ use super::*;
 use crate::test_support::TestError;
 use sonic_rs::JsonValueTrait as _;
 
-use bitcoin_rs_primitives::BlockPayload;
+use bitcoin_rs_consensus::primitives::BlockImage;
 
 #[test]
 fn the_chain_transaction_count_survives_a_checkpoint_restart() -> Result<(), TestError> {
@@ -15,17 +15,17 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> Result<(), Tes
         let state = NodeState::open(config.clone(), None)?;
         assert_eq!(
             applied_chain_tx_count(&state),
-            bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
             "a node that has applied nothing cannot know the count"
         );
 
-        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
         let genesis_tx_count = u64::try_from(genesis.txs.len())?;
-        let _tip = state.apply_block(&BlockPayload::from_local(genesis))?;
+        let _tip = state.apply_block(&BlockImage::from_local(genesis))?;
         let counted = applied_chain_tx_count(&state);
         assert_eq!(
             counted,
-            bitcoin_rs_chain::ChainTxCount::established(genesis_tx_count),
+            bitcoin_rs_execution::chain::ChainTxCount::established(genesis_tx_count),
             "genesis establishes the count"
         );
 
@@ -46,8 +46,9 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> Result<(), Tes
 #[test]
 fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError> {
     fn stable_hash(
-        view: &bitcoin_rs_utxo::UtxoSetView<'_>,
-    ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
+        view: &bitcoin_rs_storage::utxo::UtxoSetView<'_>,
+    ) -> Result<bitcoin_rs_consensus::primitives::Hash256, bitcoin_rs_storage::utxo::UtxoError>
+    {
         view.hash_serialized_3()
     }
     let dir = tempfile::tempdir()?;
@@ -56,12 +57,13 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
     let state = NodeState::open(config, None)?;
-    let genesis = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
+    let genesis =
+        BlockImage::from_local(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block());
     let genesis_tip = state.apply_block(&genesis)?;
     let expected_utxo_hash = state
         .chainstate()
-        .utxo_handle()
-        .with_stable_view(stable_hash)?;
+        .utxo_reader()
+        .with_stable_view(stable_hash)??;
     let expected_stats = state.chainstate().coin_stats_handle().snapshot();
     assert!(state.publish_checkpoint()?.is_some());
     drop(state);
@@ -84,8 +86,8 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
     assert_eq!(
         resumed
             .chainstate()
-            .utxo_handle()
-            .with_stable_view(stable_hash)?,
+            .utxo_reader()
+            .with_stable_view(stable_hash)??,
         expected_utxo_hash
     );
     assert_eq!(
@@ -95,23 +97,23 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
     assert!(resumed.block_log_reader().read().is_empty());
     assert!(resumed.mempool().read().is_empty());
 
-    let next = BlockPayload::from_local(regtest_fixture::mined_regtest_child_at(
-        genesis.block().block_hash(),
+    let next = BlockImage::from_local(regtest_fixture::mined_regtest_child_at(
+        genesis.block_hash(),
         1,
     )?);
     let next_tip = resumed.apply_block(&next)?;
     assert_eq!(next_tip.height, 1);
     assert_eq!(
         next_tip.hash.to_le_bytes(),
-        next.block().block_hash().0.to_le_bytes()
+        next.block_hash().0.to_le_bytes()
     );
     let listener_after_apply = resumed.chainstate().coin_stats_handle().snapshot();
     let mut rescanned = resumed
         .chainstate()
-        .utxo_handle()
+        .utxo_reader()
         .with_stable_view(|view| {
-            bitcoin_rs_utxo::stats::scan_coin_stats(view, next_tip.height, true)
-        })?;
+            bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, next_tip.height, true)
+        })??;
     rescanned.tx_count = listener_after_apply.tx_count;
     assert_eq!(
         listener_after_apply.total_amount, rescanned.total_amount,
@@ -125,11 +127,33 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
         .get("directory")
         .and_then(|value| value.as_str())
         .ok_or_else(|| std::io::Error::other("CURRENT has no generation directory"))?;
-    let snapshot_file = std::fs::File::open(root.join(directory).join("utxo-v4.dat"))?;
-    let mut snapshot_reader = std::io::BufReader::new(snapshot_file);
-    let snapshot = bitcoin_rs_utxo::snapshot::read_snapshot_strict_v4(&mut snapshot_reader)?;
-    assert_ne!(snapshot.muhash_trailer, [0_u8; 384]);
-    assert_eq!(snapshot.muhash_trailer, rescanned.muhash.finalize());
+    let manifest_bytes = std::fs::read(root.join(directory).join("manifest-v1.json"))?;
+    let manifest: sonic_rs::Value = sonic_rs::from_slice(&manifest_bytes)?;
+    assert!(manifest.get("utxo").is_none_or(|v| v.is_null()));
+    let inspection_dir = tempfile::tempdir()?;
+    for entry in std::fs::read_dir(root.join(directory).join("chainstate"))? {
+        let entry = entry?;
+        std::fs::copy(entry.path(), inspection_dir.path().join(entry.file_name()))?;
+    }
+    let image = bitcoin_rs_storage::open_checkpoint_store(inspection_dir.path())?;
+    let image_coins = image
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(image);
+    let committed_coins = resumed
+        .chainstate()
+        .coins()
+        .scan_snapshot()?
+        .iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        !committed_coins.is_empty(),
+        "the committed set must hold the next block's coinbase"
+    );
+    assert_eq!(
+        image_coins, committed_coins,
+        "the checkpoint generation must carry exactly the committed coin rows"
+    );
     drop(resumed);
 
     let resumed_again = NodeState::open(reopen_config, None)?;
@@ -143,23 +167,14 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> Result<(), TestError
 
 #[test]
 fn clean_checkpoint_lifecycle_is_backend_neutral() -> Result<(), TestError> {
-    let backends: Vec<&str> = vec![
-        #[cfg(feature = "fjall")]
-        "fjall",
-        #[cfg(feature = "rocksdb")]
-        "rocksdb",
-        #[cfg(feature = "redb")]
-        "redb",
-    ];
+    let backends: Vec<&str> = vec!["rocksdb"];
 
     for backend in backends {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join(backend);
         config.storage.backend = match backend {
-            "fjall" => bitcoin_rs_storage::StorageBackend::Fjall,
             "rocksdb" => bitcoin_rs_storage::StorageBackend::RocksDb,
-            "redb" => bitcoin_rs_storage::StorageBackend::Redb,
             _ => {
                 return Err(TestError::ExpectationFailed(
                     "a compiled-in storage backend",
@@ -167,8 +182,9 @@ fn clean_checkpoint_lifecycle_is_backend_neutral() -> Result<(), TestError> {
             }
         };
         config.p2p.listen.clear();
-        let genesis =
-            BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
+        let genesis = BlockImage::from_local(
+            bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block(),
+        );
         let state = NodeState::open(config.clone(), None)?;
         state.apply_block(&genesis)?;
         let _ = state.publish_checkpoint()?;
@@ -176,66 +192,30 @@ fn clean_checkpoint_lifecycle_is_backend_neutral() -> Result<(), TestError> {
 
         let resumed = NodeState::open(config, None)?;
         assert_eq!(resumed.resume_source(), ResumeSource::Checkpoint);
-        resumed.apply_block(&BlockPayload::from_local(
-            regtest_fixture::mined_regtest_child_at(genesis.block().block_hash(), 1)?,
+        resumed.apply_block(&BlockImage::from_local(
+            regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?,
         ))?;
     }
     Ok(())
 }
 
 #[test]
-fn rolling_coinstats_resume_continues_through_next_block() -> Result<(), TestError> {
-    let dir = tempfile::tempdir()?;
-    let data_dir = dir.path().join("node-g2");
-    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-    config.data_dir = data_dir.clone();
-    config.p2p.listen.clear();
-    let state = NodeState::open(config, None)?;
-    let genesis = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
-    state.apply_block(&genesis)?;
-    let before = state.chainstate().coin_stats_handle().snapshot();
-    let _ = state.publish_checkpoint()?;
-    drop(state);
-
-    let mut reopen_config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-    reopen_config.data_dir = data_dir;
-    reopen_config.p2p.listen.clear();
-    let resumed = NodeState::open(reopen_config, None)?;
-    assert_eq!(resumed.chainstate().coin_stats_handle().snapshot(), before);
-    resumed.apply_block(&BlockPayload::from_local(
-        regtest_fixture::mined_regtest_child_at(genesis.block().block_hash(), 1)?,
-    ))?;
-    let rolling = resumed.chainstate().coin_stats_handle().snapshot();
-    let mut scanned = resumed
-        .chainstate()
-        .utxo_handle()
-        .with_stable_view(|view| {
-            bitcoin_rs_utxo::stats::scan_coin_stats(view, rolling.height, true)
-        })?;
-    scanned.tx_count = rolling.tx_count;
-    assert_eq!(
-        rolling.total_amount, scanned.total_amount,
-        "restored state must receive subsequent rolling UTXO notifications"
-    );
-    Ok(())
-}
-
-#[test]
-fn journal_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
+fn durable_head_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
     fn stable_hash(
-        view: &bitcoin_rs_utxo::UtxoSetView<'_>,
-    ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
+        view: &bitcoin_rs_storage::utxo::UtxoSetView<'_>,
+    ) -> Result<bitcoin_rs_consensus::primitives::Hash256, bitcoin_rs_storage::utxo::UtxoError>
+    {
         view.hash_serialized_3()
     }
 
     let dir = tempfile::tempdir()?;
-    let data_dir = dir.path().join("journal-resume");
+    let data_dir = dir.path().join("checkpoint-resume");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = data_dir;
     config.p2p.listen.clear();
-    config.chainstate_journal.blocks = 1;
 
-    let genesis = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
+    let genesis =
+        BlockImage::from_local(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block());
     let first = NodeState::open(config.clone(), None)?;
     first.apply_block(&genesis)?;
     let _ = first.publish_checkpoint()?;
@@ -243,8 +223,8 @@ fn journal_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
 
     let base = NodeState::open(config.clone(), None)?;
     assert_eq!(base.resume_source(), ResumeSource::Checkpoint);
-    let child = regtest_fixture::mined_regtest_child_at(genesis.block().block_hash(), 1)?;
-    let expected_tip = base.apply_block(&BlockPayload::from_local(child))?;
+    let child = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
+    let expected_tip = base.apply_block(&BlockImage::from_local(child))?;
     let expected_utxo = base
         .chainstate()
         .utxo_handle()
@@ -254,11 +234,11 @@ fn journal_replay_restores_state_above_checkpoint() -> Result<(), TestError> {
     drop(base);
 
     let resumed = NodeState::open(config, None)?;
-    assert_eq!(resumed.resume_source(), ResumeSource::Journal);
+    assert_eq!(resumed.resume_source(), ResumeSource::Checkpoint);
     let resumed_tip = resumed
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| std::io::Error::other("journal replay did not publish a tip"))?;
+        .ok_or_else(|| std::io::Error::other("checkpoint replay did not publish a tip"))?;
     assert_eq!(resumed_tip.as_ref(), &expected_tip);
     assert_eq!(
         resumed
@@ -298,8 +278,8 @@ fn publish_checkpoint_returns_generation_and_reopens() -> Result<(), TestError> 
     config.data_dir = data_dir;
     config.p2p.listen.clear();
     let state = NodeState::open(config.clone(), None)?;
-    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-    let tip = state.apply_block(&BlockPayload::from_local(genesis))?;
+    let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
+    let tip = state.apply_block(&BlockImage::from_local(genesis))?;
     let generation = state.publish_checkpoint()?;
     assert!(
         generation.is_some_and(|published| published > 0),

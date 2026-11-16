@@ -9,3 +9,12 @@ import PeerLeases.Safety
 import ProjectionMining.Safety
 import P2p.BlockMemory
 import Storage.Lease
+import Storage.Schema
+import Storage.SchemaEpoch4
+import IndexOpen.Safety
+import ProjectionIndex.HandoffSafety
+import ProjectionIndex.GenerationsSafety
+import ServingView.Safety
+import SnapshotBootstrap.Safety
+import NodeBudget.Safety
+import MempoolSettlement.Safety

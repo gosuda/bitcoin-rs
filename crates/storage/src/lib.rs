@@ -13,13 +13,25 @@ pub use block_file::{
 };
 
 pub use cache_budget::{
-    CacheBudgetShare, clamp_dbcache_bytes, split_cache_budget_with_txindex,
-    split_cache_budget_without_txindex,
+    CacheBudgetShare, ChainstateCacheBudget, clamp_dbcache_bytes, split_cache_budget_with_txindex,
+    split_cache_budget_without_txindex, split_chainstate_cache_budget,
 };
 
 pub use column_families::ColumnFamily;
 
+pub mod committed_facts;
+pub use coins::{COIN_KEY_LEN, CoinCache, CoinKey, CoinStatsFeed, CoinStore, WindowDelta};
+#[cfg(any(test, feature = "test-seam"))]
+pub use commit::CommitFault;
+pub use commit::{AcceptedPrefix, CommitAuthority, CommitError, DurableReceipt};
+pub use committed_facts::{
+    CommittedBlock, CommittedFacts, CreatedOutput, FactsScript, SpentPrevout, TxFacts,
+};
+
+pub use bytes::Bytes;
 pub use error::{BoundedReadError, StorageError};
+pub use memory_kv::MemoryKvStore;
+pub use snapshot_activation::{SNAPSHOT_ACTIVATION_KEY, SnapshotActivationMarker};
 
 #[cfg(any(test, feature = "test-seam"))]
 pub use trait_::PersistFault;
@@ -48,23 +60,22 @@ pub use durable_head::{
     KvDurableHeadStore, SCRIPT_ATTESTATION_KEY, ScriptAttestation,
 };
 
-#[cfg(feature = "fjall")]
-pub use fjall_impl::{FJALL_DEFAULT_CACHE_BYTES, FjallStore};
-
-#[cfg(feature = "redb")]
-pub use redb_impl::{
-    REDB_DEFAULT_CACHE_BYTES, REDB_TXINDEX_DEFAULT_CACHE_BYTES, RedbStore,
-    open_redb_tx_index_store, open_redb_tx_index_store_with_cache,
-};
-
-#[cfg(feature = "rocksdb")]
 pub use rocksdb_impl::{ROCKSDB_DEFAULT_CACHE_BYTES, RocksDbStore};
+#[cfg(feature = "surrealkv")]
+pub use surrealkv_impl::{SURREALKV_DEFAULT_CACHE_BYTES, SurrealKvStore};
+
+#[cfg(feature = "mdbx")]
+pub use mdbx_impl::{MAX_KEY_SIZE, MAX_VAL_SIZE, MdbxStore};
+
+pub mod engine_detect;
+pub use checkpoint::open_checkpoint_store;
+pub use engine_detect::detect_engine;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StorageBackend {
     RocksDb,
-    Fjall,
-    Redb,
+    SurrealKv,
+    Mdbx,
 }
 
 impl StorageBackend {
@@ -72,17 +83,17 @@ impl StorageBackend {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RocksDb => "rocksdb",
-            Self::Fjall => "fjall",
-            Self::Redb => "redb",
+            Self::SurrealKv => "surrealkv",
+            Self::Mdbx => "mdbx",
         }
     }
 
     #[must_use]
     pub const fn is_compiled_in(self) -> bool {
         match self {
-            Self::RocksDb => cfg!(feature = "rocksdb"),
-            Self::Fjall => cfg!(feature = "fjall"),
-            Self::Redb => cfg!(feature = "redb"),
+            Self::RocksDb => true,
+            Self::SurrealKv => cfg!(feature = "surrealkv"),
+            Self::Mdbx => cfg!(feature = "mdbx"),
         }
     }
 }
@@ -93,8 +104,8 @@ impl FromStr for StorageBackend {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
             "rocksdb" => Ok(Self::RocksDb),
-            "fjall" => Ok(Self::Fjall),
-            "redb" => Ok(Self::Redb),
+            "surrealkv" => Ok(Self::SurrealKv),
+            "mdbx" => Ok(Self::Mdbx),
             _ => Err(format!("unsupported storage backend {value}")),
         }
     }
@@ -110,23 +121,31 @@ pub mod assumeutxo;
 mod batch;
 pub mod block_body;
 mod block_file;
+pub mod budget;
 pub mod cache_budget;
+pub mod coins;
 mod column_families;
+pub mod commit;
 pub mod durable_head;
 mod error;
+pub mod memory_kv;
 pub mod pruning;
 pub mod recovery_evidence;
+pub mod snapshot_activation;
 mod trait_;
 pub mod undo;
 
-#[cfg(feature = "fjall")]
-mod fjall_impl;
-#[cfg(feature = "redb")]
-mod redb_impl;
-#[cfg(feature = "rocksdb")]
+#[cfg(feature = "mdbx")]
+mod mdbx_impl;
 mod rocksdb_impl;
+#[cfg(feature = "surrealkv")]
+mod surrealkv_impl;
 
-pub mod chainstate_journal;
 pub mod checkpoint;
+#[cfg(any(test, verification, kani))]
+pub mod schema_model;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod utxo;
+#[cfg(any(test, feature = "test-seam"))]
+pub mod write_fault;
