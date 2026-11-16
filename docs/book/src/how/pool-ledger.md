@@ -237,7 +237,7 @@ Tests that pin the financial behavior, all in `crates/node/pool_ledger_tests.rs`
 | a reorged payout reverts then reconfirms | `a_reorged_out_confirmation_reverts_the_payout_and_a_new_block_reconfirms_it` |
 | fail is conclusive only for all txs | `a_batch_fails_only_when_every_signed_transaction_is_conclusively_double_spent` |
 | bounded pages advance by cursor | `bounded_pages_advance_via_cursor_without_rescanning_head` |
-| SV1 retirement and stale/duplicate codes | `pool_sv1::applied_block_retires_job_and_second_submit_is_stale` in `crates/serving/tests.rs` |
+| SV1 retirement and stale/duplicate codes | `mining_pool_sv1::applied_block_retires_job_and_second_submit_is_stale` in `crates/serving/tests.rs` |
 | job book stale and duplicate identity | `accepted_block_retirement_makes_second_same_job_nonce_stale` in `crates/serving/tests.rs` |
 
 ## What is not established

@@ -74,7 +74,7 @@ The `Supported` status is gated by `reference.differential_harness` in `crates/s
 
 ## Error codes and HTTP status
 
-`RpcError` (`crates/serving/src/error.rs:4`) maps to JSON-RPC codes in `code()` (`error.rs:61-91`): parse `-32700`, invalid request `-32600`, method not found `-32601`, invalid params `-32602`, internal `-32603`, then Core's application codes `-1`, `-3`, `-5`, `-8`, `-9`, `-10`, `-22`, `-25`, `-26`. HTTP status depends on the dialect (`error_status_for_code`, `server.rs`): the legacy dialect answers `-32600` with 400, `-32601` with 404, and everything else with 500; the v2 dialect answers dispatch errors with 200 and reserves 400 for envelope refusals. Tests pin each row of that table (`server/tests.rs`).
+`RpcError` (`crates/serving/src/error.rs:4`) maps to JSON-RPC codes in `code()` (`error.rs:61-91`): parse `-32700`, invalid request `-32600`, method not found `-32601`, invalid params `-32602`, internal `-32603`, then Core's application codes `-1`, `-3`, `-5`, `-8`, `-9`, `-10`, `-22`, `-25`, `-26`. HTTP status depends on the dialect (`error_status_for_code`, `server.rs`): the legacy dialect answers `-32600` with 400, `-32601` with 404, and everything else with 500; the v2 dialect answers dispatch errors with 200 and reserves 400 for envelope refusals. Tests pin each row of that table (`crates/serving/src/server.rs`).
 
 ## Connection tracking and the shutdown drain
 
@@ -84,7 +84,7 @@ The accept loop tracks every live connection in `ConnectionTracker` (`server.rs`
 rpc connections exceeded the drain deadline drained=N pending=M
 ```
 
-and joins whatever finished. The warning exists for handler threads that ignore both wakes; in the trace below an idle keep-alive connection drained immediately and the deadline was never reached. Idle-accept behavior, including prompt cancellation with a connected idle socket, is pinned by `serve_accept_loop_cancels_promptly_on_idle_socket` (`server/tests.rs`).
+and joins whatever finished. The warning exists for handler threads that ignore both wakes; in the trace below an idle keep-alive connection drained immediately and the deadline was never reached. Idle-accept behavior, including prompt cancellation with a connected idle socket, is pinned by `serve_accept_loop_cancels_promptly_on_idle_socket` (`crates/serving/src/server.rs`).
 
 ## Worked trace
 

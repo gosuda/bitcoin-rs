@@ -8,7 +8,7 @@ The binary parses the CLI, resolves config, opens the data directory under a loc
 
 1. `config.validate()` again at the node boundary (`lifecycle.rs`).
 2. Register consensus trace probes and cap the global rayon pool at 4 threads (`cap_global_thread_pool`, `GLOBAL_RAYON_THREADS = 4`, in `lifecycle.rs`).
-3. `NodeState::open` (`crates/node/src/lib.rs`), the storage and chainstate open described next.
+3. `NodeState::open` (`crates/node/src/state/open.rs`), the storage and chainstate open described next.
 4. Start index workers, then log `bitcoin-rs node booting` with the full config (`lifecycle.rs`).
 5. Init metrics (`init_metrics_services`, `lifecycle.rs`) when `--metrics-bind` is set, plus the readiness sampler.
 6. Install the signal handler (`ShutdownHandler::install`, `lifecycle.rs`) that triggers both the state shutdown latch and the chainstate shutdown request.

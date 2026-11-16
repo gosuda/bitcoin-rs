@@ -55,7 +55,7 @@ complete checkpoint in CURRENT?    -> checkpoint
 otherwise                          -> cold  (reason=no_complete_checkpoint)
 ```
 
-The cold paths log `restore_source="cold"` with the corresponding `reason` shown above (`recovery.rs`). Checkpoint startup logs `restored chainstate checkpoint` with `height` and `hash` (`crates/node/src/lib.rs`). These are not a universal `restore_source` log for all three sources.
+The cold paths log `restore_source="cold"` with the corresponding `reason` shown above (`recovery.rs`). Checkpoint startup logs `restored chainstate checkpoint` with `height` and `hash` (`crates/node/src/state/open.rs`). These are not a universal `restore_source` log for all three sources.
 
 `ResumeSource` (`recovery.rs:14`) is `Snapshot`, `Cold`, or `Checkpoint`. The non-cold cases:
 

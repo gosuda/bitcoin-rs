@@ -166,11 +166,11 @@ Readiness is event-driven. A new block or pool snapshot calls `chain_changed(par
 
 ## Peer ingress
 
-`crates/node/src/lib.rs` is the only bridge from P2P bodies to the gateway (`crates/node/src/lib.rs`).
+`crates/node/src/tx_ingress.rs` is the only bridge from P2P bodies to the gateway (`crates/node/src/tx_ingress.rs:88`).
 
 - A single transaction calls `submit_transaction` with `AdmissionOrigin::Peer`. A `Committed` result is announced to the relay queue with its mutation sequence, and mining generation advances. `AlreadyConfirmed` forgets the peer's known-transaction entry. A `Held` result requests missing parents, or asks for an ancestor package when the peer advertised package relay.
 - A package calls `submit_peer_package`. Accepted members are announced once each; the subject determines whether the package counts as useful traffic.
-- `process_retries` runs orphan maintenance and retries before reading the next body (`tx_ingress.rs:185`). The loop polls every 100 ms (`TX_INGRESS_POLL`) when there is no work.
+- `process_retries` runs orphan maintenance and retries before reading the next body (`crates/node/src/tx_ingress.rs:194`). The loop polls every 100 ms (`TX_INGRESS_POLL`) when there is no work.
 
 A failed admission does not answer success to the peer. `POL-05` owns the acknowledgement boundary for the pool; for relay, the absence of an announce is the refusal.
 

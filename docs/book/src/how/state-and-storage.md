@@ -112,7 +112,7 @@ INFO bitcoin_rs_node::lifecycle published clean chainstate checkpoint generation
 | --- | --- | --- |
 | A matching head needs no replay | `matching_durable_head_requires_no_replay` | [`crates/execution/src/durable.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable.rs) |
 | Replayed body matches the head identity | `committed_gap_body_must_hash_to_the_head_identity` | [`crates/execution/src/durable.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/durable.rs) |
-| Pruning keeps retained reorg history | `prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs` | [`crates/node/src/lib.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/lib.rs) |
-| A second open is refused while the first lives | `second_open_while_first_lives_refuses_and_reopen_succeeds_after_drop` | [`crates/node/src/lib.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/lib.rs) |
+| Pruning keeps retained reorg history | `prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs` | [`crates/node/src/state.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state.rs) |
+| A second open is refused while the first lives | `second_open_while_first_lives_refuses_and_reopen_succeeds_after_drop` | [`crates/node/src/state.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state.rs) |
 
 The [node lifecycle](../embed/lifecycle.md) chapter covers the data-directory lock and shutdown checkpoint. The [indexes](index.md) chapter covers the rows the worker adds on top of this state.

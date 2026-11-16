@@ -109,6 +109,6 @@ The worker's catch-up and row writes do not log at `info` in this build, so the 
 | Full history above a positive floor is unproven | `historical_full_history_positive_floor_is_unproven` | [`crates/projection/src/runtime.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/runtime.rs) |
 | A coverage floor is stamped and cleared on reset | `anchor_watermark_stamps_a_coverage_floor_that_reset_clears` | [`crates/projection/src/index.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/index.rs) |
 | Cursor paging neither skips nor repeats | `cursor_page_continues_without_skipping_or_repeating` | [`crates/projection/src/runtime/query/scripts.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/runtime/query/scripts.rs) |
-| Starting workers twice is idempotent | `start_index_workers_twice_is_idempotent` | [`crates/node/src/lib.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/lib.rs) |
+| Starting workers twice is idempotent | `start_index_workers_twice_is_idempotent` | [`crates/node/src/state.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state.rs) |
 
 The [state and storage](state-and-storage.md) chapter covers the durable records the worker reads, and the [architecture](architecture.md) chapter covers the wake call site.

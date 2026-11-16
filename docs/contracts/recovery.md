@@ -21,7 +21,7 @@ Startup ignores an unreferenced generation.
 
 Owners:
 - Authoritative durable root and ordered commit protocol (`crates/execution/src/connect.rs`, `disconnect.rs`, `durable.rs`).
-- Recovery and schema admission (`crates/execution/src/recovery.rs`, with process-composition tests in `crates/node/src/lib.rs`).
+- Recovery and schema admission (`crates/execution/src/recovery.rs`, with process-composition tests in `crates/node/src/state.rs` (`mod tests`)).
 - Persistent coin transition boundary (`crates/storage/src/commit.rs`, `crates/storage/src/coins.rs`; durable form in `crates/storage/src/durable_head.rs`).
 - Crash and lost-write fault tests (`crates/node/crash_recovery_tests.rs`).
 - Reorg and disconnect (`crates/execution/src/reorg.rs`, `disconnect.rs`).
@@ -132,7 +132,7 @@ struct DurableHead {
 - Cleanup failures are warnings, not recovery failures.
 - Ordinary checkpoints and unknown files are preserved.
 - Proof: `crates/execution/src/assumeutxo.rs` covers commitment verification, isolated replay, terminal-write failures, and role guards.
-- Proof: `assumeutxo_recovery_tests.rs` covers real-storage restart, process-kill boundaries, and lost failure receipts.
+- Proof: `crates/execution/src/assumeutxo.rs` (`tests::recovery`) covers real-storage restart, process-kill boundaries, and lost failure receipts.
 - The tests also cover root-preserving archive replay, checkpoint pin binding, pruning, and below-base reorg restart.
 
 ## Clauses
@@ -196,7 +196,7 @@ Commit details:
 - The hook fires in `PublishMode::Now` only for a direct child of the published tip.
 - The hook fires in `PublishMode::Grouped` only for the newest block of the staged prefix immediately before group sync.
 - A failing window hands off only the last successful block.
-- The hook is gated on the IBD latch in `crates/node/src/lib.rs`.
+- The hook is gated on the IBD latch in `crates/node/src/state/open.rs`.
 - The hook never fires in `PublishMode::Replay`.
 - The hook enqueues without waiting.
 - Commit order remains strict: block sync in step 3, atomic batch in step 4, cache install in step 5, publication in step 6, follower dispatch in step 8.
@@ -235,7 +235,7 @@ Replay validation rules:
 - A `Full` start over such a head rebuilds cold.
 - A completed rebuild attests `Full`.
 - The tests verify valid-spend receipt reuse and corrupt-undo refusal.
-- Proof: `durable/tests.rs` (committed-gap receipt reuse, future-clock recheck exclusion, fail-closed replay).
+- Proof: `crates/execution/src/durable.rs` (committed-gap receipt reuse, future-clock recheck exclusion, fail-closed replay).
 ### `RCV-03`: Prior-or-whole-proposed and orphan tails
 
 - The storage engine resolves an outstanding atomic batch to the prior root or to the wholly proposed root.
@@ -370,7 +370,7 @@ The crash and error points produce exactly these results:
 - It is evidence publication, not chainstate authority.
 - It publishes a recovery fact only after the restored authoritative position is known.
 - Neither the warning store nor the marker MAY move chainstate.
-- The node crate keeps `RecoveryReporter` (`crates/node/src/lib.rs`) as the composition adapter.
+- The node crate keeps `RecoveryReporter` (`crates/node/src/state/storage.rs`) as the composition adapter.
 - That adapter implements `IndexAheadSink` and `RollbackWarningSource` alongside the storage capabilities it adapts.
 - For checkpoint fallback and index-watermark-ahead evidence, the publisher first renders/logs the warning.
 - The publisher updates the process-visible warning snapshot, then attempts the atomic durable marker write.

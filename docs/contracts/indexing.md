@@ -18,7 +18,7 @@ Owners:
 - Status mapping by `DerivedIndexLifecycle` onto wire types in `crates/projection/src/capabilities.rs` (no parallel status enum).
 - Portable bundles in `crates/projection/src/portable.rs` and `portable/` modules run by the worker in `runtime/startup.rs`.
 - Node owns only the one-shot request:
-  - option parsing in `crates/node/src/options.rs`, validation in `crates/node/src/config.rs`, directive in `crates/node/src/lib.rs`.
+  - option parsing in `crates/node/src/options.rs`, validation in `crates/node/src/config.rs`, directive in `crates/node/src/state.rs`.
 
 ## Clauses
 
