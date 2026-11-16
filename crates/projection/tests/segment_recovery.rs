@@ -1,8 +1,7 @@
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::segment::{
-    IndexGeneration, NoSealedTxOrdinals, RetireFault, SealFault, TailWriterState,
-    append_tail_block, arm_retire_fault, arm_seal_fault, meta_gen_key, publish_sealed,
-    recover_segments, seal_tail_generation,
+    IndexGeneration, RetireFault, SealFault, TailWriterState, append_tail_block, arm_retire_fault,
+    arm_seal_fault, meta_gen_key, publish_sealed, recover_segments, seal_tail_generation,
 };
 use bitcoin_rs_projection::{IndexCapabilities, IndexCapability};
 use bitcoin_rs_storage::budget::UnboundedBudget;
@@ -101,7 +100,7 @@ fn tail_only_store(blocks: &[CommittedBlock]) -> Result<(TempDir, RocksDbStore),
     let mut state = TailWriterState::new();
     for block in blocks {
         let mut batch = store.new_batch();
-        append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals)?;
+        append_tail_block(&mut batch, block, &mut state)?;
         store.write_durable(batch)?;
     }
     Ok((dir, store))
@@ -251,7 +250,7 @@ fn writer_open_completes_an_interrupted_seal() -> Result<(), TestError> {
     let mut state = TailWriterState::new();
     for block in &blocks {
         let mut batch = store.new_batch();
-        append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals)?;
+        append_tail_block(&mut batch, block, &mut state)?;
         store.write_durable(batch)?;
     }
     let mut marker_batch = store.new_batch();
@@ -496,5 +495,138 @@ fn retire_fault_after_tombstone_recovers_by_completion() -> Result<(), TestError
         )?
         .rows;
     assert!(tombstones.is_empty(), "tombstone must clear after recovery");
+    Ok(())
+}
+
+// IDX-06, IDX-12
+#[test]
+fn positive_floor_spend_survives_seal_reopen_and_disappears_on_rollback() -> Result<(), TestError> {
+    use bitcoin_rs_consensus::primitives::encode::double_sha256;
+    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
+    use bitcoin_rs_projection::{
+        ConsumerCursorUpdate, IndexReader, IndexWatermark, IndexWriter, PreparedBatch,
+        PreparedBatchLimits, TxPositionValue,
+    };
+    use bitcoin_rs_storage::PrefixScanLimit;
+
+    let mut blocks = one_spend_generation();
+    let block = &mut blocks[0];
+    block.height = 2;
+    block.parent_hash = [0x81; 32];
+    block.txs.remove(0);
+    let tx = &mut block.txs[0];
+    let input = &tx.inputs[0];
+    let outpoint = OutPoint {
+        txid: Txid::from(Hash256::from_le_bytes(&input.txid)),
+        vout: input.vout,
+    };
+    assert!(input.height < block.height);
+    let mut transaction = 1_i32.to_le_bytes().to_vec();
+    transaction.push(1);
+    transaction.extend_from_slice(&input.txid);
+    transaction.extend_from_slice(&input.vout.to_le_bytes());
+    transaction.push(0);
+    transaction.extend_from_slice(&u32::MAX.to_le_bytes());
+    transaction.push(1);
+    transaction.extend_from_slice(&tx.outputs[0].value.to_le_bytes());
+    transaction.push(1);
+    transaction.push(0x51);
+    transaction.extend_from_slice(&0_u32.to_le_bytes());
+    tx.outputs[0].script = FactsScript::copy_from_slice(&[0x51]);
+    tx.txid = double_sha256(&transaction).to_le_bytes();
+    tx.offset = 81;
+    tx.len = u32::try_from(transaction.len())?;
+    block.header[4..36].copy_from_slice(&block.parent_hash);
+    block.hash = double_sha256(&block.header).to_le_bytes();
+    let mut body = block.header.to_vec();
+    body.push(1);
+    body.extend_from_slice(&transaction);
+
+    let dir = tempdir()?;
+    let scratch = tempdir()?;
+    let caps = IndexCapabilities::HISTORICAL;
+    {
+        let store = Arc::new(RocksDbStore::open(dir.path())?);
+        let writer = parking_lot::RwLock::new(IndexWriter::open(Arc::clone(&store), 1)?);
+        bitcoin_rs_projection::TxIndexWriter::anchor_watermark(
+            &writer,
+            caps,
+            IndexWatermark {
+                height: block.height - 1,
+                hash: block.parent_hash,
+            },
+            block.height,
+        )?;
+        let mut writer = writer.into_inner();
+        let prepared = writer.prepare_block_from_facts(caps, block.clone())?;
+        let mut batch = PreparedBatch::new(PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+        batch
+            .try_push(prepared)
+            .map_err(|_| "prepared block must fit")?;
+        writer.commit_forward(batch)?;
+        seal_tail_generation(store.as_ref(), 1, 2, caps, scratch.path())?;
+    }
+    let store = Arc::new(RocksDbStore::open(dir.path())?);
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let limit = PrefixScanLimit {
+        max_rows: 16,
+        max_bytes: 1 << 20,
+    };
+    {
+        let view = writer.snapshot()?;
+        assert!(
+            view.transaction_rows(&outpoint.txid, limit)?
+                .rows
+                .is_empty()
+        );
+        let unrelated = OutPoint {
+            vout: 1,
+            ..outpoint
+        };
+        assert!(view.spending_rows(&unrelated, limit)?.rows.is_empty());
+        let answer = view.spending_rows(&outpoint, limit)?;
+        assert!(answer.complete);
+        assert_eq!(
+            answer.rows.len(),
+            1,
+            "seal and reopen must retain the below-floor spend"
+        );
+        assert_eq!(answer.rows[0].row.height(), block.height);
+        let positions = TxPositionValue::decode(&answer.rows[0].value)
+            .ok_or("spender positions must decode")?;
+        assert_eq!(
+            positions
+                .iter()
+                .map(|p| (p.offset(), p.byte_len()))
+                .collect::<Vec<_>>(),
+            vec![(block.txs[0].offset, block.txs[0].len)]
+        );
+    }
+    let fence = writer.fenced_watermarks()?.0;
+    writer.commit_rollback_one_for_with_cursor(
+        fence,
+        caps,
+        Some(IndexWatermark {
+            height: 1,
+            hash: block.parent_hash,
+        }),
+        &body,
+        ConsumerCursorUpdate::Keep,
+    )?;
+    let view = writer.snapshot()?;
+    let answer = view.spending_rows(&outpoint, limit)?;
+    assert!(answer.complete);
+    assert!(
+        answer.rows.is_empty(),
+        "rollback must remove the disconnected spender"
+    );
+    assert!(
+        view.transaction_rows(&outpoint.txid, limit)?
+            .rows
+            .is_empty()
+    );
     Ok(())
 }

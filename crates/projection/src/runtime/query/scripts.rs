@@ -132,6 +132,21 @@ impl DerivedIndexQueryEngine {
         outpoint: &OutPoint,
     ) -> Result<Option<SpendingRecord>, TxQueryError> {
         let rows = Self::scan_spending_rows(snapshot, budget, outpoint)?;
+        if rows.is_empty() {
+            return Self::scoped_absence(prefix, "script history");
+        }
+        let funding =
+            self.locate_funding_transaction_for(snapshot, prefix, budget, &outpoint.txid)?;
+        let funding_height = if let Some((height, transaction)) = funding {
+            let vout = usize::try_from(outpoint.vout)
+                .map_err(|_| TxQueryError::Storage("outpoint vout overflow".into()))?;
+            if transaction.outputs.get(vout).is_none() {
+                return Self::scoped_absence(prefix, "script history");
+            }
+            Some(height)
+        } else {
+            None
+        };
         let mut last_height = None;
         let mut below_floor = false;
         for row in rows {
@@ -140,14 +155,26 @@ impl DerivedIndexQueryEngine {
                 continue;
             }
             last_height = Some(height);
+            if funding_height.is_some_and(|funding_height| height < funding_height) {
+                continue;
+            }
             if !prefix.covers(height) {
                 if height < prefix.floor {
                     below_floor = true;
                 }
                 continue;
             }
+            let positions = Self::validated_positions(&row.value)?;
             let hash = self.resolve_hash_at_height(height, prefix)?;
-            if let Some(positions) = Self::validated_positions(&row.value)? {
+            if funding_height == Some(height) {
+                if let Some(record) =
+                    self.spender_after_funding_in_block(budget, height, hash, outpoint)?
+                {
+                    return Ok(Some(record));
+                }
+                continue;
+            }
+            if let Some(positions) = positions {
                 for &position in positions {
                     let Some(transaction) =
                         self.resolve_positioned_transaction(budget, height, hash, position)?
@@ -174,6 +201,29 @@ impl DerivedIndexQueryEngine {
             ));
         }
         Self::scoped_absence(prefix, "script history")
+    }
+
+    fn spender_after_funding_in_block(
+        &self,
+        budget: &mut QueryBudget,
+        height: u32,
+        hash: super::Hash256,
+        outpoint: &OutPoint,
+    ) -> Result<Option<SpendingRecord>, TxQueryError> {
+        let block = self.resolve_block(budget, height, hash)?;
+        let funding_index = block
+            .txs
+            .iter()
+            .rposition(|transaction| transaction.txid() == outpoint.txid)
+            .ok_or_else(|| {
+                TxQueryError::Storage("funding transaction missing from canonical block".into())
+            })?;
+        for transaction in &block.txs[funding_index + 1..] {
+            if let Some(record) = Self::spending_input(transaction, height, outpoint)? {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
     }
 
     fn spending_input(
@@ -635,6 +685,14 @@ mod tests {
                 encoded_bytes: 0,
                 complete: true,
             })
+        }
+
+        fn funding_transaction_rows(
+            &self,
+            txid: &Txid,
+            limit: PrefixScanLimit,
+        ) -> Result<TxIndexScan, IndexError> {
+            self.transaction_rows(txid, limit)
         }
 
         fn funding_rows(

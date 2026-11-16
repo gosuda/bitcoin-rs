@@ -1,4 +1,6 @@
-use super::{SpillBudget, SpillSet, cursor_peak, merge, reset_cursor_peak};
+use super::{
+    MAX_MERGE_FAN_IN, RunFile, SpillBudget, SpillSet, cursor_peak, merge, reset_cursor_peak,
+};
 use std::io::Result as IoResult;
 
 fn retained_capacity(buffer: &Vec<(Vec<u8>, Vec<u8>)>) -> IoResult<u64> {
@@ -8,6 +10,21 @@ fn retained_capacity(buffer: &Vec<(Vec<u8>, Vec<u8>)>) -> IoResult<u64> {
             .map(|(key, value)| key.capacity() + value.capacity())
             .sum::<usize>();
     u64::try_from(retained).map_err(std::io::Error::other)
+}
+
+fn single_row_runs(
+    scratch: &std::path::Path,
+    rows: &[(Vec<u8>, Vec<u8>)],
+) -> IoResult<Vec<RunFile>> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, (key, value))| {
+            let path = scratch.join(format!("input-{index}.bin"));
+            let mut file = std::fs::File::create(&path)?;
+            super::write_row(&mut file, key, value)?;
+            Ok(RunFile { path, level: 0 })
+        })
+        .collect()
 }
 
 // SNP-05, PRJ-09
@@ -104,17 +121,13 @@ fn bounded_merge_matches_sorted_reference() -> IoResult<()> {
     reset_cursor_peak();
     const ROWS: u64 = 21;
     let scratch = tempfile::tempdir()?;
-    let budget = SpillBudget::new(0);
-    let set = SpillSet::new(&budget, scratch.path().to_path_buf());
-    let mut sorter = set.sorter("fanin");
     let mut pushed: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for order in 0..ROWS {
         let key = ((order * 5) % ROWS).to_be_bytes().to_vec();
         let value = (((order * 5) % ROWS) ^ 0x9e37).to_be_bytes().to_vec();
-        sorter.push(key.clone(), value.clone())?;
         pushed.push((key, value));
     }
-    let runs = sorter.finish()?;
+    let runs = single_row_runs(scratch.path(), &pushed)?;
     assert!(
         runs.len() > 16,
         "the test needs more runs than the fan-in bound"
@@ -153,17 +166,13 @@ fn dropped_spill_set_removes_run_files() -> IoResult<()> {
 fn three_level_merge_keeps_only_final_intermediates() -> IoResult<()> {
     const ROWS: u64 = 300;
     let scratch = tempfile::tempdir()?;
-    let budget = SpillBudget::new(0);
-    let set = SpillSet::new(&budget, scratch.path().to_path_buf());
-    let mut sorter = set.sorter("levels");
     let mut pushed: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for order in 0..ROWS {
         let key = ((order * 5) % ROWS).to_be_bytes().to_vec();
         let value = (((order * 5) % ROWS) ^ 0x9e37).to_be_bytes().to_vec();
-        sorter.push(key.clone(), value.clone())?;
         pushed.push((key, value));
     }
-    let runs = sorter.finish()?;
+    let runs = single_row_runs(scratch.path(), &pushed)?;
     assert!(
         runs.len() > 256,
         "the test needs more runs than two fan-in levels hold"
@@ -206,13 +215,10 @@ fn three_level_merge_keeps_only_final_intermediates() -> IoResult<()> {
 fn failed_chunk_removes_earlier_intermediates() -> IoResult<()> {
     const ROWS: u64 = 20;
     let scratch = tempfile::tempdir()?;
-    let budget = SpillBudget::new(0);
-    let set = SpillSet::new(&budget, scratch.path().to_path_buf());
-    let mut sorter = set.sorter("fault");
-    for order in 0..ROWS {
-        sorter.push(order.to_be_bytes().to_vec(), vec![0u8; 8])?;
-    }
-    let runs = sorter.finish()?;
+    let pushed = (0..ROWS)
+        .map(|order| (order.to_be_bytes().to_vec(), vec![0u8; 8]))
+        .collect::<Vec<_>>();
+    let runs = single_row_runs(scratch.path(), &pushed)?;
     assert!(
         runs.len() > 16,
         "the test needs more runs than one chunk holds"
@@ -262,5 +268,65 @@ fn oversized_row_header_is_refused() -> IoResult<()> {
         ));
     };
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    Ok(())
+}
+
+#[test]
+fn online_compaction_bounds_live_runs_and_preserves_equal_key_order() -> IoResult<()> {
+    const ROWS: u64 = 4097;
+    reset_cursor_peak();
+    let scratch = tempfile::tempdir()?;
+    let budget = SpillBudget::new(0);
+    let set = SpillSet::new(&budget, scratch.path().to_path_buf());
+    let mut sorter = set.sorter("online");
+    let levels =
+        usize::try_from(u64::BITS / MAX_MERGE_FAN_IN.ilog2()).map_err(std::io::Error::other)?;
+    let live_run_bound = (MAX_MERGE_FAN_IN - 1) * levels;
+    for sequence in 0..ROWS {
+        sorter.push(
+            (sequence % 7).to_be_bytes().to_vec(),
+            sequence.to_be_bytes().to_vec(),
+        )?;
+        let live_files = std::fs::read_dir(scratch.path())?.collect::<IoResult<Vec<_>>>()?;
+        assert!(
+            live_files.len() <= live_run_bound,
+            "online run ownership exceeded its integer-domain metadata bound"
+        );
+    }
+    assert!(cursor_peak() > 0, "ingestion must actually compact runs");
+    assert!(cursor_peak() <= MAX_MERGE_FAN_IN);
+    let runs = sorter.finish()?;
+    let mut rows = merge(&runs)?;
+    for key in 0..7_u64 {
+        for sequence in (key..ROWS).step_by(7) {
+            assert_eq!(
+                rows.next().transpose()?,
+                Some((key.to_be_bytes().to_vec(), sequence.to_be_bytes().to_vec())),
+                "equal keys retain original run order and every value"
+            );
+        }
+    }
+    assert!(rows.next().is_none());
+    assert!(cursor_peak() <= MAX_MERGE_FAN_IN);
+    Ok(())
+}
+
+#[test]
+fn failed_online_compaction_cleans_partial_output_and_owned_inputs() -> IoResult<()> {
+    let scratch = tempfile::tempdir()?;
+    let budget = SpillBudget::new(0);
+    let set = SpillSet::new(&budget, scratch.path().to_path_buf());
+    let mut sorter = set.sorter("online-fault");
+    for sequence in 0..MAX_MERGE_FAN_IN {
+        sorter.push(sequence.to_be_bytes().to_vec(), vec![1])?;
+    }
+    let first = std::fs::read_dir(scratch.path())?
+        .next()
+        .ok_or_else(|| std::io::Error::other("spill input missing"))??;
+    std::fs::remove_file(first.path())?;
+    assert!(sorter.push(vec![255], vec![2]).is_err());
+    drop(set);
+    assert_eq!(budget.current_bytes(), 0);
+    assert!(std::fs::read_dir(scratch.path())?.next().is_none());
     Ok(())
 }

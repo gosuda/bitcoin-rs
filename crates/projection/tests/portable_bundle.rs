@@ -579,14 +579,30 @@ impl Node {
             open_store: Arc::new(move |dir| {
                 let inner = RocksDbStore::open_with_cache(dir, STORE_CACHE_BYTES)
                     .map_err(bitcoin_rs_projection::runtime::DerivedIndexWorkerError::Storage)?;
+                let scratch = dir.join("seal-scratch");
+                fs::create_dir_all(&scratch).map_err(|error| {
+                    bitcoin_rs_projection::runtime::DerivedIndexWorkerError::Storage(
+                        StorageError::Io(error),
+                    )
+                })?;
                 if crash {
                     let store = Arc::new(CrashAfterBulkImport {
                         inner,
                         crashed: AtomicBool::new(false),
                     });
-                    open_derived_index_store_on_worker(store, DEFAULT_BATCH_LIMITS, epoch)
+                    bitcoin_rs_projection::runtime::open_derived_index_store_with_scratch(
+                        store,
+                        DEFAULT_BATCH_LIMITS,
+                        epoch,
+                        scratch,
+                    )
                 } else {
-                    open_derived_index_store_on_worker(Arc::new(inner), DEFAULT_BATCH_LIMITS, epoch)
+                    bitcoin_rs_projection::runtime::open_derived_index_store_with_scratch(
+                        Arc::new(inner),
+                        DEFAULT_BATCH_LIMITS,
+                        epoch,
+                        scratch,
+                    )
                 }
             }),
             bundle: start.bundle,
@@ -918,6 +934,171 @@ fn export_then_restore_serves_the_same_queries_as_backfill() {
         fs::read(again.join(MANIFEST)).expect("re-exported manifest"),
         fs::read(bundle.join(MANIFEST)).expect("original manifest"),
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_reads_bundle_from_nonwritable_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct BundlePermissions {
+        path: PathBuf,
+        original: fs::Permissions,
+    }
+    impl Drop for BundlePermissions {
+        fn drop(&mut self) {
+            fs::set_permissions(&self.path, self.original.clone())
+                .expect("restore bundle directory permissions");
+        }
+    }
+    let fixture = ChainFixture::new(1, 1);
+    let root = tempfile::tempdir().expect("read-only bundle fixture");
+    let source = root.path().join("source");
+    let receiver = root.path().join("receiver");
+    let bundle = root.path().join("bundle");
+    backfilled_source(&fixture, &source);
+    exported_bundle(&fixture, &source, &bundle);
+    let expected_files = read_dir_files(&bundle);
+    let permissions = BundlePermissions {
+        path: bundle.clone(),
+        original: fs::metadata(&bundle)
+            .expect("bundle directory metadata")
+            .permissions(),
+    };
+    fs::set_permissions(&bundle, fs::Permissions::from_mode(0o555))
+        .expect("make bundle directory nonwritable");
+    let restored = Node::start(
+        &fixture,
+        &receiver,
+        Start {
+            bundle: restore(&bundle),
+            ..Start::default()
+        },
+    );
+    restored.wait_reconciling();
+    assert!(
+        restored.synced_at(fixture.tip.height),
+        "read-only bundle restore readiness"
+    );
+    for (txid, height) in &fixture.txids {
+        let (tx, identity) = restored
+            .adapter
+            .transaction_block(txid)
+            .expect("read-only bundle query")
+            .expect("canonical transaction");
+        assert_eq!(tx.txid(), *txid);
+        assert_eq!(
+            identity,
+            bitcoin_rs_projection::TransactionBlock {
+                height: *height,
+                hash: fixture.block_hashes[usize::try_from(*height).expect("height fits usize")],
+            }
+        );
+    }
+    restored.stop();
+    let state = durable(&receiver);
+    assert_eq!(state.floor, Some(0));
+    assert_eq!(state.watermark, Some(fixture.tip_watermark()));
+    assert_eq!(read_dir_files(&bundle), expected_files);
+    drop(permissions);
+}
+
+#[test]
+fn restore_accepts_aggregate_positions_across_canonical_heights() {
+    for (blocks, extra, expected_counts) in [
+        (2, 3, vec![1_usize, 4, 4]),
+        (4, 1, vec![1_usize, 2, 2, 2, 2]),
+    ] {
+        let fixture = ChainFixture::new(blocks, extra);
+        let mut expected_rows = Vec::new();
+        let mut expected_transactions = Vec::new();
+        let mut counts = Vec::new();
+        for height in 0..=blocks {
+            let hash =
+                fixture.block_hashes[usize::try_from(height).expect("fixture height fits usize")];
+            let body = &fixture.bodies[&(height, hash.to_le_bytes())];
+            let block: bitcoin::Block =
+                bitcoin::consensus::deserialize(body).expect("independent block decode");
+            assert_eq!(block.block_hash().to_byte_array(), hash.to_le_bytes());
+            let mut offset = 80
+                + serialize(&bitcoin::VarInt(
+                    u64::try_from(block.txdata.len()).expect("transaction count fits u64"),
+                ))
+                .len();
+            counts.push(block.txdata.len());
+            for tx in &block.txdata {
+                let bytes = serialize(tx);
+                let end = offset + bytes.len();
+                assert_eq!(&body[offset..end], bytes.as_slice());
+                let txid_bytes = tx.compute_txid().to_byte_array();
+                let txid = Txid::from(Hash256::from_le_bytes(&txid_bytes));
+                expected_rows.push((
+                    txid_bytes,
+                    height,
+                    hash.to_le_bytes(),
+                    u32::try_from(offset).expect("canonical offset fits u32"),
+                    u32::try_from(bytes.len()).expect("transaction length fits u32"),
+                ));
+                expected_transactions.push((txid, height, hash, bytes));
+                offset = end;
+            }
+            assert_eq!(
+                offset,
+                body.len(),
+                "canonical transactions consume the body"
+            );
+        }
+        assert_eq!(counts, expected_counts);
+        assert_eq!(counts.iter().sum::<usize>(), 9);
+        assert!(counts.iter().all(|&count| count <= 4));
+        expected_rows.sort_unstable();
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("source");
+        let receiver = root.path().join("receiver");
+        let bundle = root.path().join("bundle");
+        backfilled_source(&fixture, &source);
+        exported_bundle(&fixture, &source, &bundle);
+        let restored = Node::start(
+            &fixture,
+            &receiver,
+            Start {
+                bundle: restore(&bundle),
+                ..Start::default()
+            },
+        );
+        restored.wait_reconciling();
+        let info = restored
+            .adapter
+            .index_info()
+            .expect("restored capability status");
+        assert!(
+            info.synced,
+            "restore did not establish synced capability: {info:?}"
+        );
+        assert_eq!(info.best_block_height, fixture.tip.height);
+        assert_eq!(info.coverage_height, fixture.tip.height);
+        for (txid, height, hash, bytes) in expected_transactions {
+            let (tx, identity) = restored
+                .adapter
+                .transaction_block(&txid)
+                .expect("restored transaction lookup")
+                .expect("canonical transaction is served");
+            assert_eq!(tx.txid(), txid);
+            assert_eq!(
+                bitcoin_rs_consensus::primitives::consensus_bytes(&tx),
+                bytes
+            );
+            assert_eq!(
+                identity,
+                bitcoin_rs_projection::TransactionBlock { height, hash }
+            );
+        }
+        restored.stop();
+        let state = durable(&receiver);
+        assert_eq!(state.tx_confirmed, expected_rows);
+        assert_eq!(state.floor, Some(0));
+        assert_eq!(state.watermark, Some(fixture.tip_watermark()));
+    }
 }
 
 #[test]

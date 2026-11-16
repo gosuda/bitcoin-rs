@@ -51,7 +51,7 @@ struct SorterState {
     buffer: Vec<(Vec<u8>, Vec<u8>)>,
     buffered: u64,
     runs: Vec<RunFile>,
-    next_run: u32,
+    next_run: u64,
 }
 
 pub struct SpillSorter<'a> {
@@ -62,6 +62,7 @@ pub struct SpillSorter<'a> {
 #[derive(Clone, Debug)]
 pub struct RunFile {
     path: PathBuf,
+    level: u32,
 }
 
 impl RunFile {
@@ -155,7 +156,12 @@ impl<'a> SpillSet<'a> {
             let path = self
                 .dir
                 .join(format!("{}-{:06}.bin", state.prefix, state.next_run));
-            state.next_run = state.next_run.saturating_add(1);
+            state.next_run = state.next_run.checked_add(1).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "spill run sequence overflow",
+                )
+            })?;
             path
         };
         let file = OpenOptions::new()
@@ -174,12 +180,56 @@ impl<'a> SpillSet<'a> {
             let _unused = std::fs::remove_file(&path);
         }
         result?;
-        let mut sorters = self.sorters.borrow_mut();
-        let state = &mut sorters[id];
-        state.runs.push(RunFile { path });
-        drop(std::mem::take(&mut state.buffer));
-        self.budget.sub(std::mem::take(&mut state.buffered));
-        Ok(())
+        {
+            let mut sorters = self.sorters.borrow_mut();
+            let state = &mut sorters[id];
+            state.runs.push(RunFile { path, level: 0 });
+            drop(std::mem::take(&mut state.buffer));
+            self.budget.sub(std::mem::take(&mut state.buffered));
+        }
+        self.compact(id)
+    }
+
+    fn compact(&self, id: usize) -> std::io::Result<()> {
+        loop {
+            let (chunk, level, path) = {
+                let sorters = self.sorters.borrow();
+                let state = &sorters[id];
+                let Some(last) = state.runs.last() else {
+                    return Ok(());
+                };
+                let count = state
+                    .runs
+                    .iter()
+                    .rev()
+                    .take_while(|run| run.level == last.level)
+                    .count();
+                if count < MAX_MERGE_FAN_IN {
+                    return Ok(());
+                }
+                let start = state.runs.len() - MAX_MERGE_FAN_IN;
+                let sequence = MERGE_TMP_ID.fetch_add(1, SeqCst);
+                (
+                    state.runs[start..].to_vec(),
+                    last.level + 1,
+                    self.dir
+                        .join(format!("{}-compact-{sequence:016x}.bin", state.prefix)),
+                )
+            };
+            let output = OwnedIntermediates {
+                paths: vec![path.clone()],
+            };
+            merge_chunk(&chunk, &path)?;
+            for run in &chunk {
+                std::fs::remove_file(&run.path)?;
+            }
+            let mut sorters = self.sorters.borrow_mut();
+            let state = &mut sorters[id];
+            let start = state.runs.len() - MAX_MERGE_FAN_IN;
+            state.runs.truncate(start);
+            state.runs.push(RunFile { path, level });
+            let _ = output.disarm();
+        }
     }
 
     fn finish(&self, id: usize) -> std::io::Result<Vec<RunFile>> {
@@ -434,7 +484,10 @@ pub fn merge(runs: &[RunFile]) -> std::io::Result<Merge> {
                 }
             }
             owned.paths.push(out.clone());
-            next.push(RunFile { path: out });
+            next.push(RunFile {
+                path: out,
+                level: 0,
+            });
         }
         current = next;
     }

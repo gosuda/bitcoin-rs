@@ -454,7 +454,7 @@ fn restore_batch(ops: Vec<BatchOp>) -> BufferedWriteBatch {
     batch
 }
 
-// IDX-09
+// IDX-09, IDX-12
 #[test]
 fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), TestError> {
     for height in [0_u32, 170, 481_824] {
@@ -476,17 +476,17 @@ fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), TestError> 
             "height {height} keeps at least one row per funding script"
         );
         assert_eq!(
-            totals.funding, facts.funding_outputs,
-            "height {height} writes one funding occurrence per output"
+            totals.funding, facts.funding_occurrences,
+            "height {height} exposes one funding occurrence per distinct script and transaction"
         );
         assert_eq!(
-            totals.spending, facts.spending_inputs,
-            "height {height} writes one spending occurrence per non-coinbase input"
+            totals.spending, facts.spending_occurrences,
+            "height {height} exposes one spending occurrence per distinct spent script and transaction"
         );
         assert_eq!(
             spent_row_count(&indexer, &block)?,
-            facts.in_block_spends,
-            "height {height} spender rows name only in-block creations"
+            facts.spending_inputs,
+            "height {height} writes one spender row per non-coinbase input regardless of funding coverage"
         );
     }
     Ok(())
@@ -546,38 +546,49 @@ fn funding_row_count<S: KvStore>(
 }
 
 struct GoldenFacts {
-    funding_outputs: usize,
+    funding_occurrences: usize,
     funding_scripts: std::collections::BTreeSet<Vec<u8>>,
     spending_inputs: usize,
-    in_block_spends: usize,
+    spending_occurrences: usize,
 }
 
 fn golden_facts(block: &Block) -> GoldenFacts {
+    let mut funding = std::collections::BTreeSet::new();
+    let mut spending = std::collections::BTreeSet::new();
+    let mut created: std::collections::BTreeMap<([u8; 32], u32), &[u8]> =
+        std::collections::BTreeMap::new();
     let mut facts = GoldenFacts {
-        funding_outputs: 0,
+        funding_occurrences: 0,
         funding_scripts: std::collections::BTreeSet::new(),
         spending_inputs: 0,
-        in_block_spends: 0,
+        spending_occurrences: 0,
     };
-    let mut earlier_txids: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
     for tx in &block.txs {
+        let txid = *tx.txid().as_bytes();
         if !tx.is_coinbase() {
             facts.spending_inputs += tx.inputs.len();
-            facts.in_block_spends += tx
-                .inputs
-                .iter()
-                .filter(|input| earlier_txids.contains(input.previous_output.txid.as_bytes()))
-                .count();
+            for input in &tx.inputs {
+                let outpoint = &input.previous_output;
+                let script = created
+                    .get(&(*outpoint.txid.as_bytes(), outpoint.vout))
+                    .copied()
+                    .unwrap_or(FIXTURE_SPENT_SCRIPT.as_slice());
+                if script.first() != Some(&0x6a) {
+                    spending.insert((script.to_vec(), txid));
+                }
+            }
         }
-        for output in &tx.outputs {
+        for (vout, output) in (0_u32..).zip(&tx.outputs) {
             let script = output.script_pubkey.as_bytes();
-            if !script.is_empty() && script[0] != 0x6a {
-                facts.funding_outputs += 1;
+            created.insert((txid, vout), script);
+            if script.first() != Some(&0x6a) {
+                funding.insert((script.to_vec(), txid));
                 facts.funding_scripts.insert(script.to_vec());
             }
         }
-        earlier_txids.insert(*tx.txid().as_bytes());
     }
+    facts.funding_occurrences = funding.len();
+    facts.spending_occurrences = spending.len();
     facts
 }
 

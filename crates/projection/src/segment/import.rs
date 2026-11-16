@@ -321,9 +321,9 @@ pub(crate) fn script_history_segment(
         );
     }
 
-    let (tx_rows, creations) = transaction_rows(&transactions.identities, &ordinals, block_hashes)?;
+    let tx_rows = transaction_rows(&transactions.identities, &ordinals, block_hashes)?;
     let postings = posting_rows(&funded, &ordinals).map_err(|_| too_many())?;
-    let spend_dir = spend_rows(&spends, &creations, &ordinals)?;
+    let spend_dir = spend_rows(&spends, &ordinals)?;
 
     Ok(ImportedSegment {
         coverage,
@@ -360,17 +360,13 @@ fn collect_funded(
 }
 
 #[cfg(test)]
-type Creations = BTreeMap<[u8; 32], Vec<u32>>;
-
-#[cfg(test)]
 fn transaction_rows(
     identities: &BTreeMap<Identity, Option<[u8; 32]>>,
     ordinals: &BTreeMap<Identity, u32>,
     block_hashes: &[[u8; 32]],
-) -> Result<(Rows, Creations), ScriptHistoryImportError> {
+) -> Result<Rows, ScriptHistoryImportError> {
     let zero = [0_u8; 32];
     let mut rows = Vec::with_capacity(identities.len().saturating_mul(2));
-    let mut creations: Creations = BTreeMap::new();
     for (identity, txid) in identities {
         let (height, offset, len) = *identity;
         let ordinal = ordinals[identity];
@@ -385,20 +381,12 @@ fn transaction_rows(
             .ok()
             .and_then(|index| block_hashes.get(index))
             .ok_or(ScriptHistoryImportError::MissingHeader { height })?;
-        creations.entry(*txid).or_default().push(ordinal);
         rows.push((
             encode_tx_dir_key(0, txid, height).to_vec(),
             encode_tx_dir_value(block_hash, ordinal, offset, len).to_vec(),
         ));
     }
-    Ok((rows, creations))
-}
-
-#[cfg(test)]
-fn latest_creation_before(creations: &Creations, txid: &[u8; 32], spending: u32) -> Option<u32> {
-    let ordinals = creations.get(txid)?;
-    let earlier = ordinals.partition_point(|&creation| creation < spending);
-    earlier.checked_sub(1).map(|index| ordinals[index])
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -448,17 +436,13 @@ fn posting_rows(
 #[cfg(test)]
 fn spend_rows(
     spends: &[Spend],
-    creations: &Creations,
     ordinals: &BTreeMap<Identity, u32>,
 ) -> Result<Rows, ScriptHistoryImportError> {
     let mut rows = Vec::with_capacity(spends.len());
     for spend in spends {
         let spending = ordinals[&spend.spender];
-        let Some(creation) = latest_creation_before(creations, &spend.txid, spending) else {
-            continue;
-        };
         rows.push((
-            encode_spend_dir_key(0, creation, spend.vout).to_vec(),
+            encode_spend_dir_key(0, &spend.txid, spend.vout, spend.height).to_vec(),
             encode_spend_dir_value(spending).to_vec(),
         ));
     }

@@ -5,9 +5,7 @@ mod read;
 pub mod spill;
 pub mod tail;
 pub(crate) use read::{RecordPage, SegmentSnapshot};
-pub use tail::{
-    CreationOrdinals, NoSealedTxOrdinals, SealedTxOrdinals, TailWriterState, append_tail_block,
-};
+pub use tail::{TailWriterState, append_tail_block};
 #[cfg(test)]
 mod tests;
 

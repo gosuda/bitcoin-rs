@@ -585,14 +585,11 @@ fn restart_clears_a_staged_segment_and_keeps_the_published_one()
     Ok(())
 }
 
-// PRJ-06
+// PRJ-06, IDX-12
 #[test]
-fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation()
+fn a_spend_of_an_output_sealed_under_the_other_capability_preserves_its_identity()
 -> Result<(), crate::portable::TestError> {
-    use crate::segment::format::{
-        TX_KIND_TXID, decode_tx_dir_key, decode_tx_dir_value, encode_spend_dir_key,
-        tx_dir_kind_prefix,
-    };
+    use crate::segment::format::{decode_spend_dir_key, decode_spend_dir_value};
     use bitcoin_rs_storage::committed_facts::{
         CommittedBlock, CreatedOutput, SpentPrevout, TxFacts,
     };
@@ -638,6 +635,7 @@ fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation(
         }],
     };
 
+    let spending_ordinal = u32::try_from(created.txs.len())?;
     let mut state = crate::segment::TailWriterState::new();
     let mut batch = store.new_batch();
     batch.put(
@@ -645,12 +643,7 @@ fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation(
         crate::types::INDEX_FORMAT_VERSION_KEY,
         &crate::types::INDEX_FORMAT_VERSION_VALUE,
     );
-    crate::segment::append_tail_block(
-        &mut batch,
-        &created,
-        &mut state,
-        &crate::segment::NoSealedTxOrdinals,
-    )?;
+    crate::segment::append_tail_block(&mut batch, &created, &mut state)?;
     store.write_durable(batch)?;
     crate::segment::seal_tail_generation(
         store.as_ref(),
@@ -671,27 +664,50 @@ fn a_spend_of_an_output_sealed_under_the_other_capability_resolves_its_creation(
     store.write_durable(batch)?;
 
     let snapshot = store.snapshot()?;
-    let mut creation = None;
-    let txid_rows = tx_dir_kind_prefix(1, TX_KIND_TXID);
-    for row in snapshot.iter_prefix(ColumnFamily::TxDir, &txid_rows)? {
-        let (key, value) = row?;
-        let (_, txid, _) = decode_tx_dir_key(&key).ok_or("tx directory key")?;
-        if txid == [0xA1; 32] {
-            let (_, ordinal, _, _) = decode_tx_dir_value(&value).ok_or("tx directory value")?;
-            creation = Some(ordinal);
-        }
-    }
-    let creation = creation.ok_or("the sealed generation names the creating transaction")?;
-    assert_eq!(creation, 0, "the first sealed transaction has ordinal zero");
     let spends: Vec<_> = snapshot
         .iter_prefix(ColumnFamily::SpendDir, &0_u64.to_be_bytes())?
         .collect::<Result<_, _>>()?;
-    let expected_key = encode_spend_dir_key(0, 0, 0);
     assert_eq!(
         spends.len(),
         1,
         "the cross-capability spend writes one spend row"
     );
-    assert_eq!(spends[0].0, expected_key.to_vec());
+    assert_eq!(
+        decode_spend_dir_key(&spends[0].0),
+        Some((0, [0xA1; 32], 0, 2))
+    );
+    assert_eq!(
+        decode_spend_dir_value(&spends[0].1),
+        Some(spending_ordinal),
+        "the spender follows every transaction in the sealed creation block"
+    );
     Ok(())
+}
+
+#[test]
+fn spend_event_codec_preserves_full_identity_and_rejects_noncanonical_lengths() {
+    use crate::segment::format::{
+        decode_spend_dir_key, decode_spend_dir_value, encode_spend_dir_key, encode_spend_dir_value,
+        spend_dir_outpoint_prefix,
+    };
+
+    let key = encode_spend_dir_key(7, &[0xA5; 32], u32::MAX, 42);
+    assert_eq!(
+        decode_spend_dir_key(&key),
+        Some((7, [0xA5; 32], u32::MAX, 42))
+    );
+    assert_eq!(
+        &key[..44],
+        &spend_dir_outpoint_prefix(7, &[0xA5; 32], u32::MAX)
+    );
+    assert_ne!(key, encode_spend_dir_key(7, &[0xA5; 32], u32::MAX, 43));
+    assert_eq!(decode_spend_dir_key(&key[..47]), None);
+    let mut extended = key.to_vec();
+    extended.push(0);
+    assert_eq!(decode_spend_dir_key(&extended), None);
+
+    let value = encode_spend_dir_value(u32::MAX);
+    assert_eq!(decode_spend_dir_value(&value), Some(u32::MAX));
+    assert_eq!(decode_spend_dir_value(&value[..3]), None);
+    assert_eq!(decode_spend_dir_value(&[0; 5]), None);
 }

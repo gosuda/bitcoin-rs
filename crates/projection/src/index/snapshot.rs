@@ -64,6 +64,13 @@ pub trait TxIndexSnapshot: Send + Sync {
         txid: &Txid,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError>;
+    /// Creation candidates from the ScriptHistory publication, independently of TxLookup.
+    /// Absence does not disprove a funding transaction below that publication's floor.
+    fn funding_transaction_rows(
+        &self,
+        txid: &Txid,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError>;
     fn funding_rows(
         &self,
         scripthash: ScriptHash,

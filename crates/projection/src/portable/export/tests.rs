@@ -310,6 +310,14 @@ impl TxIndexSnapshot for PagedFake {
         Err(Self::lookup_error())
     }
 
+    fn funding_transaction_rows(
+        &self,
+        _txid: &Txid,
+        _limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        Err(Self::lookup_error())
+    }
+
     fn funding_rows(
         &self,
         _scripthash: ScriptHash,

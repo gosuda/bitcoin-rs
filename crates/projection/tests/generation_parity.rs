@@ -1,8 +1,8 @@
 use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
 use bitcoin_rs_projection::segment::bulk_builder::{BulkSegmentBuilder, StreamingSegmentBuilder};
 use bitcoin_rs_projection::segment::{
-    Coverage, NoSealedTxOrdinals, TailWriterState, append_tail_block, meta_gen_key,
-    seal_tail_generation, sealed_generations,
+    Coverage, TailWriterState, append_tail_block, meta_gen_key, seal_tail_generation,
+    sealed_generations,
 };
 use bitcoin_rs_projection::{
     IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter,
@@ -267,7 +267,7 @@ fn append_tail_blocks<S: KvStore>(store: &S, blocks: &[CommittedBlock]) -> Resul
     let mut tail_state = TailWriterState::new();
     for block in blocks {
         let mut batch = store.new_batch();
-        append_tail_block(&mut batch, block, &mut tail_state, &NoSealedTxOrdinals)?;
+        append_tail_block(&mut batch, block, &mut tail_state)?;
         store.write_durable(batch)?;
     }
     Ok(())
@@ -383,17 +383,10 @@ fn same_tx_fund_and_spend_keeps_both_posting_occurrences() -> Result<(), TestErr
     }];
 
     for pair in tail_seal_and_bulk_family_digests(&blocks, 1)? {
+        assert!(pair.tail_rows > 0, "{:?} has no sealed rows", pair.family);
         if pair.family == ColumnFamily::SpendDir {
-            assert_eq!(
-                pair.tail_rows, 0,
-                "input CC names no in-generation creation"
-            );
-            assert_eq!(
-                pair.bulk_rows, 0,
-                "input CC names no in-generation creation"
-            );
-        } else {
-            assert!(pair.tail_rows > 0, "{:?} has no sealed rows", pair.family);
+            assert_eq!(pair.tail_rows, 1);
+            assert_eq!(pair.bulk_rows, 1);
         }
         assert_eq!(
             pair.tail, pair.bulk,
@@ -428,34 +421,17 @@ fn same_tx_fund_and_spend_keeps_both_posting_occurrences() -> Result<(), TestErr
     );
     {
         use bitcoin_rs_projection::segment::format::{
-            decode_tx_dir_key, decode_tx_dir_value, encode_spend_dir_key, encode_tx_dir_key,
+            decode_spend_dir_key, decode_spend_dir_value,
         };
-        let funded_key = encode_tx_dir_key(1, &[0xD2; 32], 1);
-        let funded_value = snapshot
-            .get(ColumnFamily::TxDir, &funded_key)?
-            .ok_or("funded D2 has a TxDir row at height 1")?;
-        let (_, creation, _, _) =
-            decode_tx_dir_value(&funded_value).ok_or("decode funded TxDir value")?;
-        for item in snapshot.iter_prefix(ColumnFamily::TxDir, &1u64.to_be_bytes())? {
-            let (key, _) = item?;
-            if let Some((_, txid, _)) = decode_tx_dir_key(&key) {
-                assert_ne!(
-                    txid, [0xCC; 32],
-                    "spent CC has no TxDir creation in generation 1"
-                );
-            }
-        }
-        let spend_key = encode_spend_dir_key(1, creation, 0);
-        assert!(
-            snapshot.get(ColumnFamily::SpendDir, &spend_key)?.is_none(),
-            "funded D2 vout 0 has no spender in generation 1"
+        let spends = snapshot
+            .iter_prefix(ColumnFamily::SpendDir, &1u64.to_be_bytes())?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(spends.len(), 1);
+        assert_eq!(
+            decode_spend_dir_key(&spends[0].0),
+            Some((1, [0xCC; 32], 0, 1))
         );
-        let mut spend_rows = 0u64;
-        for item in snapshot.iter_prefix(ColumnFamily::SpendDir, &1u64.to_be_bytes())? {
-            let _ = item?;
-            spend_rows = spend_rows.saturating_add(1);
-        }
-        assert_eq!(spend_rows, 0, "input CC names no in-generation creation");
+        assert_eq!(decode_spend_dir_value(&spends[0].1), Some(0));
     }
     Ok(())
 }

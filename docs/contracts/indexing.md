@@ -77,7 +77,7 @@ Owners:
   - `crates/projection/src/runtime/query_tests.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
   - `crates/serving/tests/handler_smoke.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
 - `crates/wire/src/listener/writer_shutdown_tests.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
-- `ScriptLive` is self-contained under format 9 (PRJ-11).
+- `ScriptLive` is self-contained under format 10 (PRJ-11).
 - Its 43-byte key is `script-hash-prefix || full-outpoint`.
 - Its value stores `script_hash` followed by the compact varint coin payload `varint(compress_amount(value)) || varint((height << 1) | coinbase)` with Core's `CompressAmount` and minimal varints; decoding refuses truncated input, malformed varints, amount overflow, height overflow, and trailing bytes.
 - Readers exact-check the full script hash directly from the stored coin without requiring a live UTXO read or chain-transition lock.
@@ -89,10 +89,11 @@ Owners:
   - `txid`
   - 6-byte transaction position
   - a flag byte
-- Funding and spending references from one transaction to one script merge into one occurrence with both flags.
+- Stored `ScriptPost` items keep each funding and spending event, including events with the same transaction ordinal. The history reader merges these items into one public occurrence per script and transaction with both flags.
 - The spent script comes from authoritative UTXO or undo state.
 - A missing spent script fails preparation with `MissingSpentCoin` instead of writing a partial history.
-- `ColumnFamily::Spending` keeps outpoint-keyed rows for `spender` queries only.
+- `ColumnFamily::Spending` keeps outpoint-keyed spend events for `spender` queries only. Each format 10 key is `generation_BE8 || funding_txid_32 || vout_BE4 || spending_height_BE4`; its value is `spending_ordinal_BE4`.
+- Each spend event MUST be stored independently of the funding transaction's creation height or retained coverage. The spender transaction directory resolves only the spending occurrence; funding discovery is not required.
 - Each occurrence names the script and the block position.
 - A history page is one bounded seek over one script prefix.
 - Exact script-hash comparison filters prefix collisions without loading a block.
@@ -181,11 +182,13 @@ Owners:
 - The `data_dir/txindex` namespace maintains durable format versions and capability watermarks (`IndexWatermarks`, `ConsumerCursor`).
 - A stored schema or format version foreign to this build MUST reset and rebuild the store per `docs/policies/db-migration.md`.
 - The store MUST never perform an in-place migration.
-- `IndexWriter::open` (`crates/projection/src/index/write.rs`) accepts format 9 (`INDEX_FORMAT_VERSION_VALUE`) as the current durability marker only.
-- This format provides newest-first history-occurrence rows with inverted heights, 43-byte live rows, and 6-byte positions.
+- `IndexWriter::open` (`crates/projection/src/index/write.rs`) accepts format 10 (`INDEX_FORMAT_VERSION_VALUE`) as the current durability marker only.
+- This format provides newest-first history-occurrence rows with inverted heights, 43-byte live rows, 6-byte positions, and outpoint spend events keyed by generation, funding outpoint, and spending height with a spending ordinal value.
 - The row format is owned by this clause; any format change requires a new durability marker.
 - Every older marker returns `IndexError::UnsupportedTxIndexFormatVersion`.
 - In that case, `open_writer` in `crates/projection/src/runtime/startup.rs` full-resets the derived store for rebuild without an in-place upgrade path.
+- Format 9 spend rows omitted events when funding creation was outside retained coverage. An owner-local rebuild from retained canonical blocks and undo is required to recover those events; row conversion cannot recover missing events.
+- This cutover changes only the index durability marker, not `CURRENT_SCHEMA`. There is one current reader and writer, with no dual reader or in-place conversion.
 - Selective reset under `IDX-04` covers corrupt watermarks, not versions.
 - Reset recovery accepts only current 17-byte claims and 9-byte Idle states.
 - Idle versions MUST remain monotonic generations to prevent ABA races.
@@ -579,14 +582,14 @@ That document gives consumer usage and defers to this clause for every consisten
   - Full `script_history_at_prefix` answers stay unproven on a positive floor and return `Unavailable(HistoryUnproven { floor })`.
   - Standalone `spender_at_prefix` takes the exact `OutPoint`.
   - Its spender rows are keyed directly by outpoint prefix and height and verified per candidate.
-  - It needs no funding discovery and may return a scoped `Ok(None)` above a positive floor after verifying matching spender rows in range and none below it.
-  - That `None` means no verified spend in `[floor, anchor]`, not that the coin is unspent and not that the outpoint exists.
+  - When a covered funding occurrence is present, the latest canonical occurrence of its exact txid bounds the current outpoint lifetime. Earlier-lifetime spends are excluded; later transactions in the funding block remain eligible. These candidates belong to `ScriptHistory` and do not require `TxLookup`.
+  - Missing covered funding leaves the lower bound unknown and MUST NOT suppress a verified covered spend or require a below-floor funding body. A scoped `Ok(None)` means no verified spend in the covered current lifetime when its creation is known, or in `[floor, anchor]` otherwise; it does not prove that the outpoint exists.
 - Unchanged and not added:
   - Strict `ScriptLive` reads, current Core RPC handlers, compact-filter serving, and existing exact-tip methods keep their behavior.
   - Index reads stay synchronous and bounded.
   - Esplora consumes `confirmed_history_page` pages for `/txs/chain`.
   - The index owns no HTTP route.
-  - Nothing here adds a runtime, framework, persistent query state, durable format, full-scan compatibility path, or arbitrary historical anchor.
+  - The prefix query interface adds no independent durable format; it uses the format 10 outpoint spend-event representation in `IDX-02` and the rebuild policy in `IDX-05`. It adds no runtime, framework, persistent query state, full-scan compatibility path, or arbitrary historical anchor.
 - Error shape:
   | Case | Result |
   |---|---|

@@ -311,8 +311,7 @@ fn tx_dir_gated_by_capabilities() -> Result<(), BulkBuilderError> {
 
 // PRJ-07
 #[test]
-fn duplicate_txid_spends_resolve_to_the_creation_before_each_spend() -> Result<(), BulkBuilderError>
-{
+fn duplicate_txid_spends_preserve_outpoint_and_spending_height() -> Result<(), BulkBuilderError> {
     let dup = [0xaa; 32];
     let script = |byte: u8| FactsScript::copy_from_slice(&[byte]);
     let output = |byte: u8| CreatedOutput {
@@ -381,11 +380,15 @@ fn duplicate_txid_spends_resolve_to_the_creation_before_each_spend() -> Result<(
     );
 
     let rows = &generation.spend_dir;
-    assert_eq!(rows.len(), 2, "each spend names its own preceding creation");
+    assert_eq!(
+        rows.len(),
+        2,
+        "each spending height retains the exact outpoint"
+    );
     assert_eq!(
         crate::segment::format::decode_spend_dir_key(&rows[0].0),
-        Some((1, 0, 0)),
-        "the spend at ordinal 1 resolves to the first creation"
+        Some((1, dup, 0, 2)),
+        "the first spend retains its funding txid and spending height"
     );
     assert_eq!(
         crate::segment::format::decode_spend_dir_value(&rows[0].1),
@@ -393,8 +396,8 @@ fn duplicate_txid_spends_resolve_to_the_creation_before_each_spend() -> Result<(
     );
     assert_eq!(
         crate::segment::format::decode_spend_dir_key(&rows[1].0),
-        Some((1, 2, 0)),
-        "the spend at ordinal 3 resolves to the recreation, not the first creation"
+        Some((1, dup, 0, 4)),
+        "the later spend retains the same outpoint at a different height"
     );
     assert_eq!(
         crate::segment::format::decode_spend_dir_value(&rows[1].1),
@@ -620,6 +623,73 @@ fn bounded_fan_in_matches_sorted_reference() -> Result<(), StreamError> {
     assert!(
         cursor_peak() <= MAX_MERGE_FAN_IN,
         "merge held more open runs than the fan-in bound"
+    );
+    Ok(())
+}
+
+// PRJ-08, PRJ-09
+#[test]
+fn script_reduction_preserves_posting_events_and_statistics() -> Result<(), BulkBuilderError> {
+    let mut blocks = synthetic_blocks(1);
+    let script = blocks[0].txs[0].outputs[0].script.clone();
+    blocks[0].txs[0].outputs.push(CreatedOutput {
+        vout: 1,
+        value: 7,
+        script: script.clone(),
+    });
+    for value in [11, 13] {
+        blocks[0].txs[0].inputs.push(SpentPrevout {
+            txid: [0xab; 32],
+            vout: u32::try_from(value).unwrap(),
+            value,
+            script: script.clone(),
+            height: 0,
+            coinbase: false,
+        });
+    }
+    let scratch = tempfile::tempdir()?;
+    let rows = BulkSegmentBuilder::new(
+        Arc::new(UnboundedBudget),
+        None,
+        scratch.path().to_path_buf(),
+    )
+    .without_filter()
+    .build_generation_rows(7, &blocks)?;
+    assert_eq!(rows.script_dict.len(), 1);
+    assert_eq!(
+        decode_script_dict_key(&rows.script_dict[0].0),
+        Some((7, Sha256::digest(&script).into()))
+    );
+    assert_eq!(decode_script_dict_value(&rows.script_dict[0].1), Some(0));
+    assert_eq!(rows.script_stats.len(), 1);
+    assert_eq!(
+        decode_script_stats_key(&rows.script_stats[0].0),
+        Some((7, 0))
+    );
+    assert_eq!(
+        decode_script_stats_value(&rows.script_stats[0].1),
+        Some(ScriptStats {
+            funded_count: 4,
+            spent_count: 2,
+            funded_sats: 15_007,
+            spent_sats: 24,
+        })
+    );
+    assert_eq!(rows.script_post.len(), 1);
+    assert_eq!(
+        decode_script_post_chunk_key(&rows.script_post[0].0),
+        Some((7, 0, 0))
+    );
+    assert_eq!(
+        decode_chunk_postings(0, &rows.script_post[0].1),
+        Some(vec![
+            (0, POSTING_FLAG_SPENDING),
+            (0, POSTING_FLAG_SPENDING),
+            (0, POSTING_FLAG_FUNDING),
+            (0, POSTING_FLAG_FUNDING),
+            (1, POSTING_FLAG_FUNDING),
+            (2, POSTING_FLAG_FUNDING),
+        ])
     );
     Ok(())
 }
