@@ -473,14 +473,7 @@ impl DerivedIndexQueryEngine {
                         .cmp(&left.position.offset())
                         .then_with(|| right.txid.cmp(&left.txid))
                 });
-                occurrences.dedup_by(|later, kept| {
-                    if later.txid == kept.txid {
-                        kept.flags |= later.flags;
-                        true
-                    } else {
-                        false
-                    }
-                });
+                occurrences.dedup_by(|left, right| left.txid == right.txid);
                 for occurrence in occurrences {
                     if let Some(cursor) = occurrence_cursor
                         && height == cursor.height
