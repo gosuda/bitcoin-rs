@@ -83,7 +83,9 @@ checkpoint refused while disconnect of block {hash} at height {height} is in fli
 
 The refusal leaves the marker armed and `CURRENT` unchanged. It creates no generation directory. The test `tests::checkpoint_debt_tests::checkpoint_refuses_inflight_disconnect_and_preserves_state` (checked source citation: `crates/execution/src/lib.rs::checkpoint_refuses_inflight_disconnect_and_preserves_state`) arms a disconnect marker, calls `publish_checkpoint`, and asserts the error plus byte-identical `CURRENT` and directory listing.
 
-Normal successful disconnects disarm their marker immediately in `crates/execution/src/disconnect.rs`. For a persisted `DisconnectPhase::RolledBack` marker left by a crash, `CheckpointPublisher::settle_disconnect_debt` in `crates/execution/src/checkpoint/publisher.rs` requests ordinary checkpoint publication. A successful publication clears the marker through `undo_store.disarm_disconnect()`.
+Normal successful disconnects disarm their marker immediately in `crates/execution/src/disconnect.rs`. During live reorg settlement and periodic maintenance, `CheckpointPublisher::settle_disconnect_debt` in `crates/execution/src/checkpoint/publisher.rs` handles a remaining `DisconnectPhase::RolledBack` marker by requesting ordinary checkpoint publication. It skips `InFlight` markers. A successful ordinary publication clears the marker through `undo_store.disarm_disconnect()`.
+
+At startup, `recover_disconnect_marker` in `crates/execution/src/durable.rs` reconciles the restored state with the durable head, including any required rewind or replay. If it found a marker, it then calls `Chainstate::publish_recovery_checkpoint`. That publishes with `DisconnectRetirement::Recovered`; successful recovery publication retires the marker through `undo_store.retire_disconnect_marker()`. This path covers both `InFlight` and `RolledBack` markers surviving a crash.
 
 ## Header checkpoint file
 
