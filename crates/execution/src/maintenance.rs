@@ -60,7 +60,10 @@ fn maintenance_step(publisher: &CheckpointPublisher, elapsed: Duration) -> bool 
         return false;
     }
     match publisher.settle_disconnect_debt() {
-        Ok(true) => return true,
+        Ok(true) => {
+            log::info!("maintenance settled completed disconnect debt with a checkpoint");
+            return true;
+        }
         Ok(false) => {}
         Err(CheckpointError::DisconnectInFlight { hash, height }) => {
             tracing::debug!(%hash, height, "maintenance publication deferred: disconnect in flight");
