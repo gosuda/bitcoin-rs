@@ -2201,7 +2201,11 @@ mod tests {
             dir.path().join("index"),
         )?);
         let reader = crate::Indexer::new(Arc::clone(&store));
-        let writer = parking_lot::RwLock::new(crate::IndexWriter::open(store, 1)?);
+        let scratch = dir.path().join("seal-scratch");
+        assert!(!scratch.exists());
+        let writer = parking_lot::RwLock::new(
+            crate::IndexWriter::open(store, 1)?.with_seal_scratch(scratch),
+        );
         #[derive(Clone, Copy)]
         enum Case {
             Complete,
@@ -2306,7 +2310,10 @@ mod tests {
             let result =
                 validate_artifact_with_budget(&host, &path, &manifest, Some(&chain), &budget);
             match case {
-                Case::Complete => assert!(matches!(result, Ok((_, LocatorOutcome::Verified)))),
+                Case::Complete => {
+                    let (_, outcome) = result?;
+                    assert!(matches!(outcome, LocatorOutcome::Verified));
+                }
                 Case::MissingFinal => assert!(matches!(
                     result,
                     Err(IndexBundleError::Incomplete {
