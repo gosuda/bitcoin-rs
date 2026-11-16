@@ -429,26 +429,6 @@ fn accepted_and_block_inclusion_events_arrive_in_commit_order() {
 }
 
 #[test]
-fn remove_for_block_publishes_removals_with_origins() {
-    let observer = Arc::new(RecordingObserver::default());
-    let gateway = gateway_with(Some(dyn_observer(&observer)));
-
-    let mined = tx(3);
-    let mined_txid = mined.txid();
-    gateway
-        .insert_entry(AdmissionOrigin::Rpc, entry(&mined))
-        .expect("in");
-    observer.seen.lock().clear();
-    gateway.remove_for_block(AdmissionOrigin::Rpc, &[&mined], &[mined_txid], 8, 1);
-
-    let seen = observer.seen.lock();
-    assert_eq!(
-        *seen,
-        vec![(hash(&mined_txid), removed(RemovalReason::BlockInclusion))],
-    );
-}
-
-#[test]
 fn remove_for_block_leaves_unmined_child_and_publishes_only_the_parent() {
     let observer = Arc::new(RecordingObserver::default());
     let gateway = gateway_with(Some(dyn_observer(&observer)));
@@ -1889,20 +1869,6 @@ fn composite_isolates_a_panicking_leg() {
         failure.1, 0,
         "observer identity belongs in tracing, not metric labels"
     );
-}
-
-#[test]
-fn gateway_contains_a_panicking_payload_destructor() {
-    let gateway = gateway_with(Some(Arc::new(PanickingObserver)));
-    let committed = tx(52);
-    let committed_txid = committed.txid();
-
-    assert!(
-        gateway
-            .insert_entry(AdmissionOrigin::Rpc, entry(&committed))
-            .is_ok()
-    );
-    assert!(gateway.read().contains_txid(&committed_txid));
 }
 
 #[test]

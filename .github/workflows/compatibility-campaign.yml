@@ -95,7 +95,7 @@ jobs:
 
   # Compile-only MSRV gate: the policy promise is that workspace crates build
   # on the declared MSRV. A second compile graph, so it runs on schedule;
-  # tests, benches, and kernel/C++ production behavior remain in ci-main.
+  # tests and kernel/C++ production behavior remain in ci-main.
   msrv:
     runs-on: ubuntu-latest
     steps:

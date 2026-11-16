@@ -6,7 +6,7 @@
 
 - The production default is `native` (`validation.engine = "native"`).
 - [Getting started](../getting-started.md#validation-engine) owns the option spelling and resolution order.
-- A different production default requires product-cell promotion evidence under [HPA-13](hot-path-attribution.md#hpa-13-promotion-and-regression-thresholds).
+- A different production default requires measured product-cell promotion evidence (`docs/contracts/test-evidence.md` owns the evidence rules).
 - A compiled `kernel` capability, a microbenchmark, or a historical verdict does not change the default.
 
 ### `VAL-02`: The native interpreter is the complete portable engine

@@ -89,11 +89,27 @@ impl Reconstruction {
             return Outcome::Fallback(hash);
         }
 
+        let pending_bytes = self.retained_bytes();
+        let slot_bytes = total.saturating_mul(core::mem::size_of::<Option<Tx>>());
+        let short_id_bytes = 6_usize.saturating_mul(compact.short_ids.len());
+        if self.pending.len() >= MAX_PENDING_RECONSTRUCTIONS
+            || pending_bytes
+                .saturating_add(slot_bytes)
+                .saturating_add(short_id_bytes)
+                > MAX_PENDING_RETAINED_BYTES
+        {
+            return Outcome::Fallback(hash);
+        }
+
         let Some(mut filled) = place_prefills(compact, total) else {
             return Outcome::Fallback(hash);
         };
-        let mut retained_bytes = 6_usize
-            .saturating_mul(compact.short_ids.len())
+        let mut retained_bytes = short_id_bytes
+            .saturating_add(
+                filled
+                    .capacity()
+                    .saturating_mul(core::mem::size_of::<Option<Tx>>()),
+            )
             .saturating_add(
                 filled
                     .iter()
@@ -102,9 +118,7 @@ impl Reconstruction {
                     .sum::<usize>(),
             );
 
-        if self.pending.len() >= MAX_PENDING_RECONSTRUCTIONS
-            || self.retained_bytes().saturating_add(retained_bytes) > MAX_PENDING_RETAINED_BYTES
-        {
+        if pending_bytes.saturating_add(retained_bytes) > MAX_PENDING_RETAINED_BYTES {
             return Outcome::Fallback(hash);
         }
 
@@ -122,32 +136,42 @@ impl Reconstruction {
             Err(()) => return Outcome::Fallback(hash),
         }
 
-        if self.pending.len() >= MAX_PENDING_RECONSTRUCTIONS
-            || self.retained_bytes().saturating_add(retained_bytes) > MAX_PENDING_RETAINED_BYTES
-        {
+        if pending_bytes.saturating_add(retained_bytes) > MAX_PENDING_RETAINED_BYTES {
             return Outcome::Fallback(hash);
         }
-        let missing: Vec<u64> = filled
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| slot.is_none())
-            .map(|(index, _)| u64::try_from(index).unwrap_or(u64::MAX))
-            .collect();
-        if missing.is_empty() {
+        let missing_count = filled.iter().filter(|slot| slot.is_none()).count();
+        if missing_count == 0 {
             return match complete_block(header, filled) {
                 Ok(block) => Outcome::Complete(block),
                 Err(()) => Outcome::Fallback(hash),
             };
         }
-        if missing.len() > MAX_REQUESTED_MISSING {
+        if missing_count > MAX_REQUESTED_MISSING {
             return Outcome::Fallback(hash);
         }
+        let mut missing = Vec::with_capacity(missing_count);
+        missing.extend(
+            filled
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| slot.is_none())
+                .map(|(index, _)| u64::try_from(index).unwrap_or(u64::MAX)),
+        );
+        retained_bytes = retained_bytes.saturating_add(
+            missing
+                .capacity()
+                .saturating_mul(core::mem::size_of::<u64>()),
+        );
+        if pending_bytes.saturating_add(retained_bytes) > MAX_PENDING_RETAINED_BYTES {
+            return Outcome::Fallback(hash);
+        }
+        let indexes = missing.clone();
         self.pending.insert(
             hash,
             Pending {
                 header,
                 filled,
-                missing: missing.clone(),
+                missing,
                 retained_bytes,
                 deadline: now + PENDING_DEADLINE,
             },
@@ -155,7 +179,7 @@ impl Reconstruction {
         Outcome::RequestMissing(GetBlockTxn {
             txs_request: BlockTransactionsRequest {
                 block_hash: wire_block_hash(hash),
-                indexes: missing,
+                indexes,
             },
         })
     }

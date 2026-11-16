@@ -39,16 +39,9 @@ secp256k1.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-criterion.workspace = true
 tempfile.workspace = true
-# The benchmark uses the same allocator as the production binary. Inherits
-# `default-features = false`, matching `bin/bitcoin-rs`.
-mimalloc.workspace = true
 bitcoin.workspace = true
 
-[[bench]]
-name = "utxo_commit"
-harness = false
 
 [[test]]
 name = "suite"

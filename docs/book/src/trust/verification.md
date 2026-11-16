@@ -129,4 +129,4 @@ There is no formal proof of the whole node. There is no recorded external JSON-R
 
 Use those limits when you describe a result. "Tested" names the layer and the scope. "Verified" without a scope names nothing.
 
-Next: [Contracts and evidence](../contribute/contracts.md) explains how a test earns a clause tag. [Benchmarks](benchmarks.md) explains why no performance number in this book is a result.
+Next: [Contracts and evidence](../contribute/contracts.md) explains how a test earns a clause tag.

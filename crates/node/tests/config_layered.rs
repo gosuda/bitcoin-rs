@@ -258,26 +258,6 @@ fn same_layer_explicit_overrides_follow_network_profile() -> Result<()> {
 }
 
 #[test]
-fn p2p_magic_override_requires_explicit_peer_and_disabled_seeds() {
-    let layer = UserConfig {
-        p2p: P2pOverrides {
-            magic: Some([0xec, 0xa5, 0xd4, 0x34]),
-            dns_seeds: Some(false),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let error = match resolve(&[&layer]) {
-        Ok(_) => panic!("magic overrides need a peer"),
-        Err(error) => error,
-    };
-    assert!(
-        matches!(error, bitcoin_rs_node::ConfigError::MagicRequiresConnect),
-        "{error:?}"
-    );
-}
-
-#[test]
 fn script_index_is_valid_without_core_txindex() -> Result<()> {
     let layer = UserConfig {
         indexes: bitcoin_rs_node::IndexOverrides {

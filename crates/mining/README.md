@@ -160,8 +160,6 @@ with at most one active preparation and one pending newest staged job:
   the state lock before installing, avoiding lock coupling with the chain tree
   and invalidating automatically when the tip moves.
 
-`cargo bench -p bitcoin-rs-mining --bench candidate` times `assemble_candidate`
-against live fixture pools. It is a measurement seam, not a budget.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

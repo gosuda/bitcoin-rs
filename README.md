@@ -10,7 +10,7 @@
 [Documentation](docs/README.md) ·
 [Compatibility matrix](docs/api/ecosystem-compat.toml) ·
 [Contributing](CONTRIBUTING.md) ·
-[Benchmarks and limitations](docs/benchmarks/end-to-end-sync.md)
+[Limitations](#compatibility-and-limitations)
 
 The [mdBook handbook](docs/book/src/SUMMARY.md) is the chapter-by-chapter guide to running, embedding, and verifying the node; build it with `mdbook build docs/book`.
 

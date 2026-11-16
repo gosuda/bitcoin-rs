@@ -33,7 +33,6 @@ tempfile.workspace = true
 
 [dev-dependencies]
 bitcoin.workspace = true
-criterion.workspace = true
 proptest.workspace = true
 # Own integration tests are a separate crate: the lib compiles there without
 # `cfg(test)`, so the cross-crate admission park seam must arrive through the
@@ -41,9 +40,6 @@ proptest.workspace = true
 # opt in.
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 
-[[bench]]
-name = "insert_fill"
-harness = false
 
 [[test]]
 name = "suite"

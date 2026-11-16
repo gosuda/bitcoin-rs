@@ -32,7 +32,7 @@ Choose the lane for its purpose. The default binary is kernel-free.
 
 The default feature set in `bin/bitcoin-rs/Cargo.toml` is `fjall`, `redb`, and `zmq`. `rocksdb` is a separate non-default feature.
 
-Keep the kernel lane in its own `CARGO_TARGET_DIR` when you need to prove that a kernel-free binary contains no kernel support. The [benchmark page for the native default](https://github.com/gosuda/bitcoin-rs/blob/main/docs/benchmarks/native-validation-default.md) records the closure lane that checks this.
+Keep the kernel lane in its own `CARGO_TARGET_DIR` when you need to prove that a kernel-free binary contains no kernel support; building with `--features kernel` in the shared target directory would leave kernel-linked artifacts beside the default build.
 
 For a faster compile during development, the workspace defines a `quickstart` profile. It inherits the release profile with link-time optimization off and 16 codegen units:
 

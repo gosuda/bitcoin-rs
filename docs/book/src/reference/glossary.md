@@ -46,8 +46,6 @@ The project's shared vocabulary is [`CONCEPTS.md`](https://github.com/gosuda/bit
 
 **Peer socket.** A connected P2P TCP stream after accept or dial. `CountingStream` owns its posture: it disables Nagle once, then wraps the stream so handshake, reads, and writes all count into one `PeerCounters`.
 
-**Product performance cell.** One coordinate of the frozen 36-cell denominator: one domain (`offline`, `p2p`, or `muhash`), one corpus, one native architecture, and one backend. Allocator variants, scalar or AVX2 builds, and microbenchmarks are diagnostics, never cells.
-
 **Provably unspendable output.** An output whose `scriptPubKey` starts with `OP_RETURN` or exceeds `MAX_SCRIPT_SIZE`. The UTXO set never admits it, and the snapshot codec records that admission rule under the tag `bitcoin-rs-utxo-spendable-v1`.
 
 **REST gateway.** The optional, unauthenticated Core-compatible HTTP surface served on the existing JSON-RPC listener. It is enabled with `rest=1`, and JSON-RPC requests on the same listener keep their configured authentication.

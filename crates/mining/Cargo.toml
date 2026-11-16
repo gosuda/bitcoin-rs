@@ -51,7 +51,6 @@ sonic-rs.workspace = true
 proptest.workspace = true
 proptest-state-machine.workspace = true
 bitcoin.workspace = true
-criterion.workspace = true
 # Own integration tests compile the mempool lib without cfg(test): the gated
 # gateway replacement seam must arrive through the test-seam feature, the same
 # way bitcoin-rs-p2p and bitcoin-rs-rpc opt in.
@@ -63,9 +62,6 @@ tempfile.workspace = true
 secp256k1 = { version = "=0.28.2", default-features = false, features = ["std", "rand-std"] }
 rand = { version = "0.8.8", default-features = false, features = ["std", "std_rng"] }
 
-[[bench]]
-name = "candidate"
-harness = false
 
 [[test]]
 name = "suite"

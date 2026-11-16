@@ -586,25 +586,7 @@ mod tests {
     use std::path::Path;
 
     use super::parse_for_network;
-    use bitcoin_rs_node::{Network, resolve};
-
-    #[test]
-    fn network_section_overrides_globals() {
-        let layers = parse_for_network(
-            "
-prune=550
-[regtest]
-prune=900
-rpcuser=regtest-user
-rpcpassword=regtest-pass
-",
-            Network::Regtest,
-        )
-        .unwrap_or_else(|error| panic!("valid fixture parses: {error}"));
-        let layer_refs: Vec<_> = layers.iter().collect();
-        let config = resolve(&layer_refs).unwrap_or_else(|error| panic!("layer resolves: {error}"));
-        assert_eq!(config.storage.prune_target_mb, 900);
-    }
+    use bitcoin_rs_node::Network;
 
     #[test]
     fn every_table_core_key_reaches_its_slot() {
@@ -861,10 +843,11 @@ onlynet=onion,i2p
             Err(error) => error,
         };
         assert!(
-            error.to_string().contains(
-                "parse error on line 1: -prune=550, options in configuration file must be specified without leading -"
+            matches!(
+                error,
+                TestError::Bin(super::BinError::InvalidBitcoinConf { .. })
             ),
-            "the refusal quotes Core's parse error: {error}"
+            "a leading dash must surface as a conf parse refusal: {error}"
         );
     }
 

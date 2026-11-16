@@ -470,6 +470,8 @@ fn colliding_hint_requests_only_its_slot() {
     assert_eq!(
         reconstruction.retained_bytes(),
         2 * 6
+            + 3 * core::mem::size_of::<Option<Tx>>()
+            + core::mem::size_of::<u64>()
             + [&native.txs[0], &native.txs[2]]
                 .into_iter()
                 .map(|tx| core::mem::size_of::<Tx>() + tx.retained_heap_bytes())
@@ -1314,4 +1316,137 @@ fn prefilled_witness_heap_counts_against_the_pending_retention_cap() {
         ),
         "decoded witness heap must be charged, not only the serialized length"
     );
+}
+
+#[test]
+fn slot_metadata_over_budget_falls_back_before_hint_scan() {
+    let (_, mut cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2)], 2, 0x81);
+    let slots = MAX_BLOCK_TX_COUNT;
+    let slot_count =
+        u64::try_from(slots).unwrap_or_else(|error| panic!("slot count fits: {error}"));
+    cmpct.compact_block.short_ids = (1..slot_count)
+        .map(|index| {
+            let bytes = index.to_le_bytes();
+            ShortId::from(
+                <[u8; 6]>::try_from(&bytes[..6])
+                    .unwrap_or_else(|error| panic!("short ID has six bytes: {error}")),
+            )
+        })
+        .collect();
+    let hints = CountingHints {
+        inner: SetHints { txs: Vec::new() },
+        scans: AtomicUsize::new(0),
+    };
+    let mut reconstruction = Reconstruction::new();
+    let mut prefill = test_tx(3);
+    prefill.outputs[0].script_pubkey = vec![3; MAX_PENDING_RETAINED_BYTES / 2].into();
+    let (_, pending) = sample_cmpct(vec![prefill, test_tx(4)], 2, 0x82);
+    assert!(matches!(
+        reconstruction.receive_cmpctblock(&pending, 2, &hints, now()),
+        Outcome::RequestMissing(_)
+    ));
+    let retained_before = reconstruction.retained_bytes();
+    assert!(
+        retained_before + slots * core::mem::size_of::<Option<Tx>>() > MAX_PENDING_RETAINED_BYTES
+    );
+    assert!(matches!(
+        reconstruction.receive_cmpctblock(&cmpct, 2, &hints, now()),
+        Outcome::Fallback(_)
+    ));
+    assert_eq!(hints.scans.load(Ordering::Relaxed), 1);
+    assert_eq!(reconstruction.retained_bytes(), retained_before);
+}
+
+#[test]
+fn metadata_inclusive_budget_is_reusable_after_pending_release() {
+    let hints = SetHints { txs: Vec::new() };
+    for release in 0..3 {
+        let mut reconstruction = Reconstruction::new();
+        let received_at = now();
+        let mut blocks = Vec::new();
+        for seed in 1..=3 {
+            let mut txs: Vec<Tx> = (0..=128).map(test_tx).collect();
+            txs[0].lock_time = LockTime::from_consensus(seed);
+            let overhead = 129 * core::mem::size_of::<Option<Tx>>()
+                + 128 * core::mem::size_of::<u64>()
+                + 128 * 6
+                + core::mem::size_of::<Tx>()
+                + txs[0].retained_heap_bytes()
+                - txs[0].outputs[0].script_pubkey.len();
+            txs[0].outputs[0].script_pubkey =
+                vec![1; MAX_PENDING_RETAINED_BYTES / 2 - overhead].into();
+            blocks.push(sample_cmpct(txs, 2, u64::from(seed)));
+        }
+        for (index, (_, cmpct)) in blocks[..2].iter().enumerate() {
+            if index == 1 {
+                let mut oversized = blocks[1].0.txs.clone();
+                let script_len = oversized[0].outputs[0].script_pubkey.len();
+                oversized[0].outputs[0].script_pubkey = vec![1; script_len + 1].into();
+                let (_, over_budget) = sample_cmpct(oversized, 2, 0x83);
+                assert!(matches!(
+                    reconstruction.receive_cmpctblock(&over_budget, 2, &hints, received_at),
+                    Outcome::Fallback(_)
+                ));
+                assert_eq!(
+                    reconstruction.retained_bytes(),
+                    MAX_PENDING_RETAINED_BYTES / 2
+                );
+            }
+            assert!(matches!(
+                reconstruction.receive_cmpctblock(cmpct, 2, &hints, received_at),
+                Outcome::RequestMissing(_)
+            ));
+            assert_eq!(
+                reconstruction.retained_bytes(),
+                (index + 1) * (MAX_PENDING_RETAINED_BYTES / 2)
+            );
+        }
+        assert!(matches!(
+            reconstruction.receive_cmpctblock(&blocks[2].1, 2, &hints, received_at),
+            Outcome::Fallback(_)
+        ));
+        assert_eq!(reconstruction.pending_len(), 2);
+        let retry_at = if release == 2 {
+            let expired_at = received_at + PENDING_DEADLINE;
+            reconstruction.prune(expired_at);
+            assert_eq!(reconstruction.retained_bytes(), 0);
+            expired_at
+        } else {
+            let native = &blocks[0].0;
+            let transactions = if release == 0 {
+                native.txs[1..].iter().map(registry_tx).collect()
+            } else {
+                Vec::new()
+            };
+            let result = reconstruction.receive_blocktxn(
+                &BlockTxn {
+                    transactions: BlockTransactions {
+                        block_hash: wire_block_hash(native.block_hash()),
+                        transactions,
+                    },
+                },
+                received_at,
+            );
+            if release == 0 {
+                let Outcome::Complete(block) = result else {
+                    panic!("expected complete block, got {result:?}");
+                };
+                assert_eq!(block.txs, native.txs);
+            } else {
+                assert!(matches!(result, Outcome::Fallback(_)));
+            }
+            assert_eq!(
+                reconstruction.retained_bytes(),
+                MAX_PENDING_RETAINED_BYTES / 2
+            );
+            received_at
+        };
+        let mut retry = blocks[2].1.clone();
+        retry.compact_block.header.nonce += 1;
+        assert!(matches!(
+            reconstruction.receive_cmpctblock(&retry, 2, &hints, retry_at),
+            Outcome::RequestMissing(_)
+        ));
+        assert!(reconstruction.retained_bytes() <= MAX_PENDING_RETAINED_BYTES);
+    }
 }

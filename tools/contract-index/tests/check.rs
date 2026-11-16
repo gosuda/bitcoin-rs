@@ -186,21 +186,3 @@ fn check_fails_on_a_missing_code_path() {
         stderr(&output)
     );
 }
-
-#[test]
-fn dated_records_cite_the_tree_at_their_measurement_date() {
-    let directory = fixture();
-    let generate = run(directory.path(), false);
-    assert!(generate.status.success(), "{}", stderr(&generate));
-    write(
-        directory.path(),
-        "docs/benchmarks/data/measurement-2026-01-01.md",
-        "# Measurement\n\n`crates/demo/src/retired.rs` was deleted after this run.\n",
-    );
-    let output = run(directory.path(), true);
-    assert!(
-        output.status.success(),
-        "a dated record may cite a path retired after its run, got:\n{}",
-        stderr(&output)
-    );
-}

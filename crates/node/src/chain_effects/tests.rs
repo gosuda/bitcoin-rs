@@ -382,10 +382,12 @@ fn snapshot_retries_each_resident_orphan_once_after_settlement() -> Result<(), T
     assert!(matches!(retained.result, Ok(SubmitOutcome::Held { .. })));
     assert!(gateway.read().contains_txid(&available.txid()));
     assert_eq!(gateway.orphan_count(), 1);
+    assert!(gateway.have_tx(Hash256::from(missing.wtxid()), true));
     assert_eq!(
-        gateway.get_tx_by_wtxid(missing.wtxid()).as_ref(),
-        Some(missing.as_ref())
+        gateway.held_orphan(missing.wtxid()),
+        Some((*missing).clone())
     );
+    assert_eq!(gateway.get_tx_by_wtxid(missing.wtxid()), None);
     assert_eq!(gateway.read().sequence_number(), 1);
     assert_eq!(gateway.retry_orphans(&chain, now), []);
     Ok(())
@@ -464,10 +466,9 @@ fn assert_admission_followers_after_chain_change(connect: bool) -> Result<(), Te
     )];
     assert!(gateway.stable_generation().is_none());
     assert_eq!(gateway.retry_orphans(&chain, now), []);
-    assert_eq!(
-        gateway.get_tx_by_wtxid(child.wtxid()).as_ref(),
-        Some(child.as_ref())
-    );
+    assert!(gateway.have_tx(Hash256::from(child.wtxid()), true));
+    assert_eq!(gateway.held_orphan(child.wtxid()), Some((*child).clone()));
+    assert_eq!(gateway.get_tx_by_wtxid(child.wtxid()), None);
     assert_eq!(gateway.orphan_count(), 1);
     assert_eq!(gateway.read().sequence_number(), 0);
 

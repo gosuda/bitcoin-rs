@@ -108,13 +108,12 @@ rustix.workspace = true
 bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
 tempfile.workspace = true
-# Own integration tests and benchmarks are separate crates, so they opt into
-# the same explicit seam used by the subsystem crates below.
+# Own integration tests are separate crates, so they opt into the same
+# explicit seam used by the subsystem crates below.
 bitcoin-rs-node = { workspace = true, default-features = false, features = ["test-seam"] }
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }
-criterion.workspace = true
 sonic-rs.workspace = true
 toml.workspace = true
 rustix.workspace = true
@@ -129,17 +128,6 @@ common_messages_sv2.workspace = true
 mining_sv2.workspace = true
 noise_sv2.workspace = true
 
-[[bench]]
-name = "sync_pipeline"
-harness = false
-
-[[bench]]
-name = "chainstate_journal"
-harness = false
-
-[[bench]]
-name = "evidence"
-harness = true
 
 [[test]]
 name = "suite"

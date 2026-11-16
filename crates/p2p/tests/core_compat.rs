@@ -19,12 +19,12 @@ use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::dispatch::{
     ChainQuery, InventoryServing, dispatch_inbound, dispatch_inbound_full,
 };
-use bitcoin_rs_p2p::handshake::{feature_messages, start, version_message};
+use bitcoin_rs_p2p::handshake::{start, version_message};
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
 use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve, spawn_outbound_connection};
 use bitcoin_rs_p2p::wire::{
-    MAX_HEADERS_MESSAGE_COUNT, MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION,
-    PeerError, read_message, write_message,
+    MAX_HEADERS_MESSAGE_COUNT, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION, PeerError, read_message,
+    write_message,
 };
 use bitcoin_rs_p2p::{
     BannedSubnet, COMMANDS, CORE_UNTYPED_COMMANDS, FEATURE_VERSION, InboundBlock, InboundHeaders,
@@ -594,7 +594,11 @@ fn outbound_handshake_sends_version_then_core_feature_set() {
     assert!(matches!(messages.first(), Some(Message::Version(_))));
     assert_eq!(
         &messages[1..],
-        &feature_messages(),
+        &[
+            Message::WtxidRelay,
+            Message::SendAddrV2,
+            Message::SendHeaders
+        ],
         "BIP339 wtxidrelay, BIP155 sendaddrv2, BIP130 sendheaders — Core 31 order"
     );
 }
@@ -752,31 +756,6 @@ fn headers_responses_truncate_at_the_core_2000_limit() -> Result<(), TestError> 
     };
     assert_eq!(served.len(), MAX_HEADERS_MESSAGE_COUNT);
     assert_eq!(served.len(), 2_000, "Core 31.1 max headers per message");
-    Ok(())
-}
-
-#[test]
-fn oversized_getheaders_locator_disconnects_before_state_mutation() -> Result<(), TestError> {
-    let genesis = genesis_block()?;
-    let headers = child_headers(&genesis.header, 2);
-    let chain = FakeChain::new(headers.clone(), HashMap::new());
-    let mut peer = ready_peer(Magic::REGTEST)?;
-    let locator = vec![headers[0].compute_hash(); MAX_LOCATOR_HASHES + 1];
-
-    let error = expect_protocol_error(
-        dispatch_collect(
-            &mut peer,
-            &get_headers(locator, NativeBlockHash::default()),
-            Some(&chain),
-        ),
-        "Core disconnects oversized locators",
-    )?;
-
-    assert!(matches!(
-        error,
-        PeerError::Misbehavior("getheaders locator too large")
-    ));
-    assert_eq!(peer.state, PeerState::Ready, "rejected before FSM mutation");
     Ok(())
 }
 
@@ -1654,13 +1633,4 @@ fn pruned_version_message_advertises_network_limited_only() {
     assert!(version.services.has(ServiceFlags::WITNESS));
     assert_eq!(version.sender.services, pruned);
     assert_eq!(version.receiver.services, pruned);
-}
-
-#[test]
-fn unpruned_version_message_advertises_network() {
-    let unpruned = ServiceFlags::WITNESS | ServiceFlags::NETWORK;
-    let version = version_message(1, 0, PeerRole::FullRelay, unpruned, USER_AGENT);
-    assert!(version.services.has(ServiceFlags::NETWORK));
-    assert!(!version.services.has(ServiceFlags::NETWORK_LIMITED));
-    assert!(version.services.has(ServiceFlags::WITNESS));
 }

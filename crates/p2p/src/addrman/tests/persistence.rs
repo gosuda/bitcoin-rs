@@ -352,3 +352,57 @@ fn anchor_handling_bounds_expiration_and_recovery() {
     book.return_restart_anchors(EPOCH + 3);
     assert_eq!(book.state.lock().stored.anchors.len(), 2);
 }
+
+fn old_v1_shape() -> sonic_rs::Value {
+    sonic_rs::json!({"version":1,"magic":[1,1,1,1],"secret":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"records":[{
+        "addr":"8.8.8.8:8333","services":9,"source_group":(1_u64<<48)|0x0101,"source_ip":"1.1.1.1",
+        "last_seen":EPOCH,"last_attempt":EPOCH-1,"last_success":0,"failures":3,"tried":false
+    }]})
+}
+
+fn old_v8_shape() -> sonic_rs::Value {
+    sonic_rs::json!({"version":8,"magic":[1,1,1,1],"secret":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"records":[{
+        "addr":"8.8.8.8:8333","services":9,"source":{"ip":"1.1.1.1"},
+        "last_seen":EPOCH,"last_success":EPOCH,"failures":0,"tried":true,"new_buckets":[]
+    }],"asmap_id":null,"anchors":[]})
+}
+
+// RCV-11
+#[test]
+fn synthetic_old_shapes_are_preserved_without_decoding() {
+    for (version, shape) in [(1, old_v1_shape()), (8, old_v8_shape())] {
+        for scoped in [false, true] {
+            let dir = tempfile::tempdir().expect("directory");
+            let base = dir.path().join("peers.dat");
+            let path = network_path(&base, [1; 4]);
+            let source = if scoped { &path } else { &base };
+            let bytes = fixture_bytes(&shape);
+            fs::write(source, &bytes).expect("old snapshot");
+            let fresh = AddressBook::open(Some(base.clone()), [1; 4], false, None);
+            assert!(fresh.state.lock().writable, "version {version}");
+            assert_eq!(fresh.len(), 0, "no historical records are imported");
+            assert_eq!(fs::read(source).expect("source before save"), bytes);
+            let backup = rejected_backup(source, &bytes);
+            assert_eq!(fs::read(&backup).expect("durable preservation"), bytes);
+            fresh.learn_dns("seed", &[target()], EPOCH);
+            fresh.save();
+            assert_eq!(fs::read(&backup).expect("preserved after save"), bytes);
+            if scoped {
+                assert_ne!(fs::read(&path).expect("fresh publication"), bytes);
+            } else {
+                assert_eq!(fs::read(&base).expect("base retained"), bytes);
+                let published = fs::read(&path).expect("fresh scoped publication");
+                assert_ne!(published, bytes);
+                let book: sonic_rs::Value =
+                    sonic_rs::from_slice(&published[..published.len() - 32])
+                        .expect("canonical JSON");
+                assert_eq!(book["format"], "bitcoin-rs-addrman");
+                assert_eq!(book["version"], 1);
+            }
+            let restored = AddressBook::open(Some(base), [1; 4], false, None);
+            assert!(restored.state.lock().writable);
+            assert_eq!(restored.len(), 1);
+            assert_indexes(&restored.state.lock());
+        }
+    }
+}

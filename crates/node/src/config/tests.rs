@@ -134,9 +134,12 @@ fn pool_layers_preserve_explicit_fields_and_override_policy() -> Result<(), Test
     assert!(pool.sv2_bind.is_none());
     assert_eq!(pool.fee_bps, 125);
     assert_eq!(pool.share_difficulty, "2.5");
+    let mut share_target_bytes = [0_u8; 32];
+    share_target_bytes[26] = 0x66;
+    share_target_bytes[27] = 0x66;
     assert_eq!(
         pool.share_target,
-        bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal("2.5")?
+        bitcoin_rs_mining::pool::ShareTarget::from_le_bytes(share_target_bytes)?
     );
     assert_eq!(pool.ledger_config().window_work, 1000);
     assert_eq!(pool.ledger_config().pool_fee_bps, 125);

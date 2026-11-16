@@ -18,8 +18,6 @@ This guide covers the development workflow, coding standards, and verification c
   selection is the runtime `validation.engine` setting. The exact defaults are
   owned by the
   [validation-default contract](docs/contracts/validation-default.md).
-- The PR comparator tests use Python 3.13. Fuzzing and dependency/feature
-  matrix checks also need the tools described in the main workflow below.
 
 From the repository root, install and select stable:
 
@@ -80,8 +78,7 @@ pinned Core fixture:
 Formal evidence has its own lane: provision with
 `bash scripts/provision-ci-reference-fixtures.sh formal`, then run
 `python3 scripts/check_models.py`. A `--check-only` invocation checks custody,
-not model properties. Benchmark evidence checks run with
-`cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --bench evidence`.
+not model properties.
 
 The [pre-commit configuration](.pre-commit-config.yaml) runs the same script,
 so local hooks are the kernel-free PR gate, not the C++ full-node lane.
@@ -114,7 +111,7 @@ current base before `main` moves forward.
 [`.github/workflows/main.yml`](.github/workflows/main.yml) runs kernel-enabled
 tests and the main-only verification lanes. It triggers on pushes to `main` and
 on manual dispatch. The lanes are bench smoke, native-script evidence, the
-comparator corpus, the kernel oracle, and Core differential. Bench smoke
+kernel oracle, and Core differential. Bench smoke
 includes the witness-activation kernel regression and the SegWit-v0 kernel
 oracle.
 Pull-request-triggered checks are defined in
@@ -151,26 +148,11 @@ cargo test -p bitcoin-rs-consensus --features kernel \
 The tests in all three parity modules are not ignored. Passing `--ignored`
 would skip them rather than run the oracle checks.
 
-### Benchmark compilation check
+### Kernel-enabled checks
 
-The main workflow compiles the retained crate-level benchmarks without kernel,
-under the `quickstart` profile:
-
-```sh
-cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle --profile quickstart
-cargo bench -p bitcoin-rs-mining --no-run --no-default-features --bench candidate --profile quickstart
-cargo bench -p bitcoin-rs-utxo --no-run \
-  --no-default-features --features fjall --bench utxo_commit --profile quickstart
-cargo bench -p bitcoin-rs-node --no-run \
-  --no-default-features --features fjall --bench sync_pipeline --profile quickstart
-cargo bench -p bitcoin-rs-node --no-run \
-  --no-default-features --features fjall --bench chainstate_journal --profile quickstart
-```
-
-The same `bench-smoke` job also compiles the kernel-enabled binary-package
-benches (`--features rocksdb,fjall,redb,kernel`). It runs the witness-activation
-kernel regression. It also checks the SegWit-v0 kernel oracle with retained
-diagnostics.
+The `bench-smoke` job in `main.yml` installs the native prerequisites and runs
+the witness-activation kernel regression plus the SegWit-v0 kernel oracle with
+retained diagnostics.
 
 ### Fuzzing
 

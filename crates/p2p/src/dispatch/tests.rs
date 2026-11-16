@@ -1398,10 +1398,8 @@ fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
     assert_eq!(gateway.get_tx_by_wtxid(tx.wtxid()), Some(tx));
 }
 
-#[test]
-fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
+fn gateway_holding_witness_tx(orphan: bool) -> (bitcoin_rs_mempool::MempoolGateway, Arc<Tx>) {
     use bitcoin_rs_primitives::Script;
-    use std::sync::Arc;
 
     use bitcoin_rs_mempool::{
         AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolEntry,
@@ -1423,57 +1421,59 @@ fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
         }
     }
 
-    for orphan in [false, true] {
-        let gateway = MempoolGateway::new(
-            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            None,
-            ValidationEngine::Native,
-            None,
+    let gateway = MempoolGateway::new(
+        Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+        None,
+        ValidationEngine::Native,
+        None,
+    );
+    let mut tx = dummy_tx(0x51);
+    tx.inputs[0].script_sig.clear();
+    tx.inputs[0].witness = Witness::from_stack(vec![vec![0x51]]);
+    tx.outputs[0].script_pubkey = Script::from_bytes(vec![0x6a, 4, 1, 2, 3, 4]);
+    let tx = Arc::new(tx);
+    if orphan {
+        let source = PeerToken {
+            endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+                std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            )),
+            addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+                [127, 0, 0, 1],
+                8333,
+            ))),
+            connection_id: 1,
+        };
+        assert!(matches!(
+            gateway.submit_transaction(
+                Arc::clone(&tx),
+                AdmissionOrigin::Peer(source),
+                None,
+                0,
+                &MissingCoins,
+            ),
+            Ok(SubmitOutcome::Held { .. })
+        ));
+        assert_eq!(gateway.orphan_count(), 1);
+    } else {
+        assert!(
+            gateway
+                .insert_entry(
+                    AdmissionOrigin::Rpc,
+                    MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0),
+                )
+                .is_ok()
         );
-        let mut tx = dummy_tx(0x51);
-        tx.inputs[0].script_sig.clear();
-        tx.inputs[0].witness = Witness::from_stack(vec![vec![0x51]]);
-        tx.outputs[0].script_pubkey = Script::from_bytes(vec![0x6a, 4, 1, 2, 3, 4]);
-        let tx = Arc::new(tx);
+    }
+    (gateway, tx)
+}
+
+#[test]
+fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
+    for orphan in [false, true] {
+        let (gateway, tx) = gateway_holding_witness_tx(orphan);
         let txid = bitcoin::Txid::from_byte_array(*tx.txid().as_bytes());
         let wtxid = bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes());
         assert_ne!(txid.as_byte_array(), wtxid.as_byte_array());
-        if orphan {
-            let source = PeerToken {
-                endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
-                    std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
-                )),
-                addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
-                    [127, 0, 0, 1],
-                    8333,
-                ))),
-                connection_id: 1,
-            };
-            assert!(matches!(
-                gateway.submit_transaction(
-                    Arc::clone(&tx),
-                    AdmissionOrigin::Peer(source),
-                    None,
-                    0,
-                    &MissingCoins,
-                ),
-                Ok(SubmitOutcome::Held { .. })
-            ));
-            assert_eq!(gateway.orphan_count(), 1);
-            assert_eq!(
-                gateway.get_tx_by_wtxid(tx.wtxid()).as_ref(),
-                Some(tx.as_ref())
-            );
-        } else {
-            assert!(
-                gateway
-                    .insert_entry(
-                        AdmissionOrigin::Rpc,
-                        MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0),
-                    )
-                    .is_ok()
-            );
-        }
         for (remote_requested, item) in [
             (false, Inventory::WTx(wtxid)),
             (true, Inventory::Transaction(txid)),
@@ -1510,6 +1510,26 @@ fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
                 ),
                 vec![Message::GetData(expected)]
             );
+        }
+    }
+}
+
+// P2P-01
+#[test]
+fn getdata_serves_mempool_bodies_but_never_held_orphans() {
+    for orphan in [false, true] {
+        let (gateway, tx) = gateway_holding_witness_tx(orphan);
+        let item = Inventory::WTx(bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes()));
+        let responses = dispatch_collect_full(
+            &mut ready_peer(),
+            &Message::GetData(vec![item]),
+            None,
+            Some(&gateway),
+        );
+        if orphan {
+            assert_eq!(responses, vec![Message::NotFound(vec![item])]);
+        } else {
+            assert_eq!(responses, vec![Message::Tx((*tx).clone())]);
         }
     }
 }

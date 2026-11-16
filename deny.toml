@@ -44,15 +44,13 @@ deny = [
     # serializes with sonic-rs. The `wrappers` list holds every third-party
     # crate that keeps a direct serde_json dependency we cannot remove:
     # corepc-types models Bitcoin Core v31 RPC results, tracing-subscriber
-    # formats the node's JSON logs, criterion with tinytemplate back the
-    # benches, and usdt-impl with dof carry the optional USDT probe path. Any
+    # formats the node's JSON logs, and usdt-impl with dof carry the optional
+    # USDT probe path. Any
     # other direct dependent, including a workspace crate, fails this check, so
     # a reintroduction needs an explicit decision here.
     { crate = "serde_json", wrappers = [
         "corepc-types",
         "tracing-subscriber",
-        "criterion",
-        "tinytemplate",
         "usdt-impl",
         "dof",
     ], reason = "first-party JSON goes through sonic-rs; only the listed third-party wrappers may depend on serde_json", use-instead = "sonic-rs" },

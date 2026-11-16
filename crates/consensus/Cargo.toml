@@ -38,19 +38,11 @@ usdt = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
-criterion.workspace = true
 secp256k1.workspace = true
 bitcoin.workspace = true
 sonic-rs.workspace = true
 serde.workspace = true
 
-[[bench]]
-name = "merkle"
-harness = false
-
-[[bench]]
-name = "block_facts"
-harness = false
 
 [[test]]
 name = "suite"

@@ -56,7 +56,6 @@
 - [Compatibility with Bitcoin Core](trust/core-compatibility.md)
 - [BIP support](trust/bip-support.md)
 - [Verification: tests, fuzzing, proofs](trust/verification.md)
-- [Benchmarks](trust/benchmarks.md)
 
 # Contribute
 
