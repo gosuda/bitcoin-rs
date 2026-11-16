@@ -13,7 +13,8 @@ pool	bitcoin-rs	native	--no-default-features --features pool
 pool-sv2	bitcoin-rs	native	--no-default-features --features pool-sv2
 portable-kernel	bitcoin-rs	native	--no-default-features --features zmq,kernel
 full-node	bitcoin-rs	native	--no-default-features --features kernel
-consensus-native	bitcoin-rs-consensus	pure	--no-default-features --all-targets
+consensus-native	bitcoin-rs-consensus	pure	--no-default-features --lib
+consensus-native-tests	bitcoin-rs-consensus	native	--no-default-features --all-targets
 consensus-kernel	bitcoin-rs-consensus	native	--features kernel --all-targets
 storage-default	bitcoin-rs-storage	native	--no-default-features --all-targets
 storage-surrealkv	bitcoin-rs-storage	native	--features surrealkv --all-targets
@@ -26,4 +27,5 @@ node-zmq	bitcoin-rs-node	native	--no-default-features --features zmq --all-targe
 node-default	bitcoin-rs-node	native	--all-targets
 node-surrealkv	bitcoin-rs-node	native	--no-default-features --features surrealkv --all-targets
 node-mdbx	bitcoin-rs-node	native	--no-default-features --features mdbx --all-targets
-consensus-usdt	bitcoin-rs-consensus	pure	--features usdt --all-targets
+consensus-usdt	bitcoin-rs-consensus	pure	--features usdt --lib
+consensus-usdt-tests	bitcoin-rs-consensus	native	--features usdt --all-targets
