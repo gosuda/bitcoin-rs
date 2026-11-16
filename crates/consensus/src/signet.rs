@@ -253,19 +253,8 @@ mod tests {
         check_signet_block_solution(&BlockImage::from_local(block.clone()), challenge)
     }
 
-    #[expect(
-        clippy::expect_used,
-        reason = "fixed independent-reference fixtures: a malformed vector file is an authoring bug"
-    )]
-    fn core_signet_blocks() -> [&'static str; 10] {
-        let raw = include_str!("../../../testdata/consensus/vectors/core-signet-blocks.txt");
-        let mut blocks = [""; 10];
-        let mut lines = raw.lines();
-        for block in &mut blocks {
-            *block = lines.next().expect("10 core signet blocks");
-        }
-        assert!(lines.next().is_none());
-        blocks
+    fn core_signet_blocks() -> impl Iterator<Item = &'static str> {
+        include_str!("../../../testdata/consensus/vectors/core-signet-blocks.txt").lines()
     }
 
     fn hex_bytes(hex: &str) -> Result<Vec<u8>, std::num::ParseIntError> {

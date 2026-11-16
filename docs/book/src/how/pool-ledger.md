@@ -138,7 +138,7 @@ The audit table is a hash chain. `append_audit` hashes `"btcrs.pool.audit.v1" ||
 | restart | balances, audit, and sequence continue byte for byte | `state_survives_a_restart_byte_for_byte` |
 | tampering | audit chain detects it | `the_audit_chain_is_deterministic_and_detects_tampering` |
 
-All four live in `crates/node/pool_ledger_tests.rs`, which is with one `mod rocksdb`; the current suite runs it against RocksDB (`crates/node/pool_ledger_tests.rs`).
+All four live in `crates/node/pool_ledger_tests.rs`, compiled behind a single `mod rocksdb`; the current suite runs it against RocksDB (`crates/node/pool_ledger_tests.rs`).
 
 ## Retirement after an applied block
 
