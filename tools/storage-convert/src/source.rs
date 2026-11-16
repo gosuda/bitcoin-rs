@@ -282,7 +282,6 @@ impl SourceNamespace {
                     if supported_txindex_tables.contains(&name) {
                         has_specialized = true;
                     } else if name == "coin_records" {
-                        has_generic = true;
                         let table = read_txn
                             .open_table(TableDefinition::<&[u8], &[u8]>::new("coin_records"))
                             .map_err(|e| ConvertError::EngineOpen(EngineOpenError::RedbTable(e)))?;
