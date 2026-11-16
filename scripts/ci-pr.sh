@@ -91,8 +91,10 @@ test_crates_silent_payments() {
 }
 
 test_crates_storage() {
+  profile "test: bitcoin-rs-storage-convert" \
+    cargo_test -p bitcoin-rs-storage-convert
   profile "test: bitcoin-rs-storage-convert (surrealkv, mdbx)" \
-    cargo_test -p bitcoin-rs-storage-convert --features surrealkv,mdbx
+    cargo_test -p bitcoin-rs-storage-convert --features surrealkv,mdbx --test suite engine_copy::
   profile "test: bitcoin-rs-storage (surrealkv, mdbx)" \
     cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx
 }
