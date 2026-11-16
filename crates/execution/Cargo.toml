@@ -64,4 +64,4 @@ proptest-state-machine.workspace = true
 
 [[test]]
 name = "suite"
-path = "tests/suite.rs"
+path = "tests.rs"

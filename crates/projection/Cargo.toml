@@ -58,13 +58,13 @@ tempfile.workspace = true
 
 [[test]]
 name = "suite"
-path = "tests/suite.rs"
+path = "tests.rs"
 
 [[test]]
 name = "parse_once"
-path = "tests/parse_once.rs"
+path = "parse_once_tests.rs"
 
 [[test]]
 name = "bulk_script_allocation"
-path = "tests/bulk_script_allocation.rs"
+path = "bulk_script_allocation_tests.rs"
 harness = false

@@ -240,7 +240,12 @@ impl<'a> OccurrenceStream<'a> {
         let script_id = format::decode_script_dict_value(&value)
             .ok_or_else(|| malformed("script_dict value"))?;
         let bound = match scope {
-            Scope::Sealed { .. } => snapshot.last_ordinal_at_or_below(scope, start)?,
+            Scope::Sealed { .. } => {
+                let Some(bound) = snapshot.last_ordinal_at_or_below(scope, start)? else {
+                    return Ok(None);
+                };
+                Some(bound)
+            }
             Scope::Tail { .. } => None,
         };
         Ok(Some(Self {
@@ -1425,10 +1430,12 @@ mod tests {
     const PAGE_READ_SLACK: usize = 1;
     type Row = (Vec<u8>, Vec<u8>);
     type FixtureRows = (BTreeMap<usize, BTreeMap<Vec<u8>, Vec<u8>>>, Vec<Row>);
+    type CapturedReads = Arc<std::sync::Mutex<Vec<(usize, Vec<u8>)>>>;
 
     struct CountingSnapshot {
         rows: BTreeMap<usize, BTreeMap<Vec<u8>, Vec<u8>>>,
         scans: Arc<AtomicUsize>,
+        reads: CapturedReads,
     }
 
     impl KvSnapshot for CountingSnapshot {
@@ -1463,6 +1470,10 @@ mod tests {
             limit: PrefixScanLimit,
         ) -> Result<PrefixScan, StorageError> {
             self.scans.fetch_add(1, Ordering::Relaxed);
+            self.reads
+                .lock()
+                .expect("read log")
+                .push((cf.index(), prefix.to_vec()));
             let mut rows = Vec::new();
             for (key, value) in self
                 .rows
@@ -1628,6 +1639,7 @@ mod tests {
             kv: Box::new(CountingSnapshot {
                 rows,
                 scans: Arc::new(AtomicUsize::new(0)),
+                reads: Arc::default(),
             }),
             published,
         };
@@ -1703,6 +1715,7 @@ mod tests {
                 kv: Box::new(CountingSnapshot {
                     rows,
                     scans: Arc::clone(&scans),
+                    reads: Arc::default(),
                 }),
                 published,
             };
@@ -1813,6 +1826,7 @@ mod tests {
             kv: Box::new(CountingSnapshot {
                 rows,
                 scans: Arc::new(AtomicUsize::new(0)),
+                reads: Arc::default(),
             }),
             published,
         };
@@ -1947,6 +1961,7 @@ mod tests {
             kv: Box::new(CountingSnapshot {
                 rows,
                 scans: Arc::clone(&scans),
+                reads: Arc::default(),
             }),
             published,
         };
@@ -2009,6 +2024,133 @@ mod tests {
         assert!(
             scans.load(Ordering::Relaxed) - walk_before <= 4 * pages,
             "the full walk must stay linear in pages, not quadratic in history"
+        );
+    }
+
+    // PRJ-07
+    #[test]
+    fn funding_record_page_skips_sealed_generations_newer_than_the_cursor() {
+        let script = ScriptHash::from_byte_array([0x09u8; 32]);
+        let mut script_dict = BTreeMap::new();
+        script_dict.insert(
+            format::encode_script_dict_key(1, &script.to_byte_array()).to_vec(),
+            format::encode_script_dict_value(5).to_vec(),
+        );
+        script_dict.insert(
+            format::encode_script_dict_key(2, &script.to_byte_array()).to_vec(),
+            format::encode_script_dict_value(9).to_vec(),
+        );
+        let mut tx_dir = BTreeMap::new();
+        let mut script_post = BTreeMap::new();
+        for (segment, script_id, base_height) in [(1_u64, 5_u32, 1_u32), (2_u64, 9_u32, 11_u32)] {
+            let mut items = Vec::new();
+            let mut previous = 0_u32;
+            for ordinal in 0_u32..4 {
+                let height = base_height + ordinal;
+                let transaction =
+                    txid(u32::try_from(segment).expect("segment id fits u32") * 100 + ordinal);
+                tx_dir.insert(
+                    format::encode_tx_ordinal_key(segment, ordinal).to_vec(),
+                    format::encode_tx_ordinal_value(&transaction, height, ordinal, 90).to_vec(),
+                );
+                items.push(format::PostingItem {
+                    delta_ordinal: ordinal - previous,
+                    flags: ScriptHistoryOccurrence::FUNDING,
+                });
+                previous = ordinal;
+            }
+            for (key, value) in format::chunk_postings(segment, script_id, items) {
+                script_post.insert(key, value);
+            }
+        }
+        let mut rows = BTreeMap::new();
+        rows.insert(ColumnFamily::ScriptDict.index(), script_dict);
+        rows.insert(ColumnFamily::TxDir.index(), tx_dir);
+        rows.insert(ColumnFamily::ScriptPost.index(), script_post);
+        let scans = Arc::new(AtomicUsize::new(0));
+        let reads: CapturedReads = Arc::default();
+        let mut published: [Option<Vec<Scope>>; 4] = std::array::from_fn(|_| None);
+        published[IndexCapability::ScriptHistory.index()] = Some(vec![
+            Scope::Sealed {
+                segment_id: 1,
+                coverage: Coverage {
+                    first_height: 0,
+                    last_height: u32::MAX,
+                    last_hash: [0; 32],
+                },
+            },
+            Scope::Sealed {
+                segment_id: 2,
+                coverage: Coverage {
+                    first_height: 0,
+                    last_height: u32::MAX,
+                    last_hash: [0; 32],
+                },
+            },
+        ]);
+        let snapshot = SegmentSnapshot {
+            kv: Box::new(CountingSnapshot {
+                rows,
+                scans: Arc::clone(&scans),
+                reads: Arc::clone(&reads),
+            }),
+            published,
+        };
+        let first = snapshot
+            .funding_record_page(
+                None,
+                PrefixScanLimit {
+                    max_rows: 5,
+                    max_bytes: usize::MAX,
+                },
+            )
+            .expect("first funding page");
+        assert_eq!(
+            first.rows.len(),
+            5,
+            "the first page covers the newer generation"
+        );
+        let after = first.rows.last().expect("a full first page").0.clone();
+        reads.lock().expect("read log").clear();
+        let second = snapshot
+            .funding_record_page(
+                Some(&after),
+                PrefixScanLimit {
+                    max_rows: 64,
+                    max_bytes: usize::MAX,
+                },
+            )
+            .expect("second funding page");
+        assert!(second.complete, "the remaining history fits in one page");
+        let heights: Vec<u32> = second
+            .rows
+            .iter()
+            .map(|(key, _)| {
+                crate::types::decode_history_height(key[8..].try_into().expect("height"))
+            })
+            .collect();
+        assert_eq!(
+            heights,
+            vec![3, 2, 1],
+            "older pages keep reading the sealed history"
+        );
+        let newer = Scope::Sealed {
+            segment_id: 2,
+            coverage: Coverage {
+                first_height: 0,
+                last_height: u32::MAX,
+                last_hash: [0; 32],
+            },
+        }
+        .prefix();
+        assert!(
+            !reads
+                .lock()
+                .expect("read log")
+                .iter()
+                .any(|(cf, prefix)| *cf == ColumnFamily::ScriptPost.index()
+                    && prefix.starts_with(&newer)),
+            "the newer sealed generation must not be rescanned below the cursor"
         );
     }
 }

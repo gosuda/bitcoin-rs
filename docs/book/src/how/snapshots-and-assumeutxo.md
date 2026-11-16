@@ -53,7 +53,7 @@ The durable head row carries one `ScriptAttestation` byte (`crates/storage/src/d
 The byte matters at startup. `require_full_script_attestation` (`crates/execution/src/recovery.rs:97`) loads it when the operator asks for full validation:
 
 - attestation is `Full`: continue normally.
-- attestation is below `Full` and the head names a still-`Validating` assumeutxo state: refuse with `full validation cannot revalidate an assumeutxo datadir that is still validating its historical suffix; restart with --validation-mode assume-valid or resync`. Rebuilding scripts under an unsettled snapshot would race the background validation; pinned by `crates/execution/src/durable/tests/revalidation.rs:629`.
+- attestation is below `Full` and the head names a still-`Validating` assumeutxo state: refuse with `full validation cannot revalidate an assumeutxo datadir that is still validating its historical suffix; restart with --validation-mode assume-valid or resync`. Rebuilding scripts under an unsettled snapshot would race the background validation; pinned by `crates/execution/src/durable.rs`.
 - attestation is below `Full` otherwise: write the full-revalidation marker and cold-rebuild the chain with full validation (see [Checkpoints and recovery](checkpoints-and-recovery.md)).
 
 Under assume-valid mode the node keeps running and only logs `the stored assume-valid chain is not fully script-validated; blocks the fast path skipped stay unverified`.
@@ -95,7 +95,7 @@ Loading it fails because the freshly mined base is not a compiled pin:
  2de233db...721773 is not pinned for Regtest"}}
 ```
 
-That refusal is the pin check doing its job: regtest pins describe one deterministic chain (heights 110 and 200), not whatever a local miner produced. The dump side is unrestricted: `dumptxoutset` writes whatever the applied tip holds, to an fsynced temporary sibling that is renamed into place without replacement; any existing destination (including named pipes) is refused atomically so an export never overwrites existing data. The successful full read of a genuine Core-produced regtest-200 snapshot, including the commitment and a 200-coin CoinStats reconstruction, is covered by `crates/storage/src/utxo/core_snapshot/tests.rs::genuine_core_dump_matches_compiled_anchor_and_full_state` (fixture `crates/storage/tests/fixtures/core-v2/core200.dat`, 14,439 bytes). That test ran at HEAD for this chapter.
+That refusal is the pin check doing its job: regtest pins describe one deterministic chain (heights 110 and 200), not whatever a local miner produced. The dump side is unrestricted: `dumptxoutset` writes whatever the applied tip holds, to an fsynced temporary sibling that is renamed into place without replacement; any existing destination (including named pipes) is refused atomically so an export never overwrites existing data. The successful full read of a genuine Core-produced regtest-200 snapshot, including the commitment and a 200-coin CoinStats reconstruction, is covered by `crates/storage/src/utxo/core_snapshot.rs::genuine_core_dump_matches_compiled_anchor_and_full_state` (fixture `testdata/storage/fixtures/core-v2/core200.dat`, 14,439 bytes). That test ran at HEAD for this chapter.
 
 ## Failure modes
 
@@ -116,8 +116,8 @@ That refusal is the pin check doing its job: regtest pins describe one determini
 ## Where the invariants are proven
 
 - `ARCH-07b` owns the roles and the single-active-authority invariant; the pin, commitment, and attestation rules above implement it.
-- Snapshot reader: `crates/storage/src/utxo/core_snapshot/tests.rs`, including `forged_collision_families_never_enter_the_utxo_hash_table` (a collision family staged in the stream cannot enter the UTXO hash table), `all_limits_are_enforced_including_aggregate_scripts_and_header_bytes`, and `structure_and_record_semantics_fail_closed`.
-- Activation and attestation: `crates/execution/src/assumeutxo/tests.rs` (unsettled-tip refusal pinned at line 740) and `crates/execution/src/durable/tests/revalidation.rs:629`.
+- Snapshot reader: `crates/storage/src/utxo/core_snapshot.rs`, including `forged_collision_families_never_enter_the_utxo_hash_table` (a collision family staged in the stream cannot enter the UTXO hash table), `all_limits_are_enforced_including_aggregate_scripts_and_header_bytes`, and `structure_and_record_semantics_fail_closed`.
+- Activation and attestation: `crates/execution/src/assumeutxo.rs` (unsettled-tip refusal pinned by `snapshot_refuses_work_comparison_when_durable_and_applied_tips_differ`) and `crates/execution/src/durable.rs`.
 - Contract and proof counts live in [`docs/contracts/evidence-index.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/evidence-index.md).
 
 Differences from Bitcoin Core worth knowing: Core 31.1 accepts a snapshot whose per-txid coin groups contain repeated txids in ways this reader rejects as `TransactionOrder`, and Core derives the chain tip from the stream while bitcoin-rs derives it from the pinned anchor; recorded side by side in `docs/contracts/architecture.md` (API-33 evidence). Core also lets the background validation window reassign freely, while bitcoin-rs refuses disconnects below the snapshot base outright.

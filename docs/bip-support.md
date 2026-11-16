@@ -26,8 +26,8 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | 66 | [Strict DER](../crates/consensus/src/verify_block.rs) | ✅ | - | Core activation heights |
 | 68/112/113 | [Relative locks / MTP](../crates/consensus/src/bip68.rs) | ✅ | - | [Block connection](../crates/execution/src/connect.rs); BIP9 activation |
 | 94 | [Timewarp protection](../crates/execution/src/chain/header_sync.rs) | ✅ | - | Testnet4 BIP94 candidate-timestamp floor at retarget boundaries |
-| 141 | [Segwit validation](../crates/consensus/tests/witness_commitment_rules.rs) | ✅ | - | Commitments, weight, [sigops](../crates/consensus/tests/witness_sigop_activation.rs) |
-| 143 | [Segwit v0 sighash](../crates/consensus/tests/shared_sighash.rs) | ✅ | - | [Reference vectors](../crates/consensus/tests/primitives_bip_vectors.rs) |
+| 141 | [Segwit validation](../crates/consensus/tests.rs) | ✅ | - | Commitments, weight, sigops (`witness_sigop_activation::valid_witness_scripts_enforce_the_inclusive_sigop_limit`) |
+| 143 | [Segwit v0 sighash](../crates/consensus/tests.rs) | ✅ | - | Reference vectors (`vectors::sighash_vectors_match_bitcoin_cache`) |
 | 147 | [NULLDUMMY](../crates/consensus/src/script/eval.rs) | ✅ | - | Enforced with WITNESS flag |
 | 320 | [General-purpose version bits](../crates/execution/src/chain/deployment.rs) | ❌ | - | Candidates use versionbits; no general-purpose policy |
 | 325 | [Signet block solution](../crates/consensus/src/signet.rs) | ◐ | - | Default challenge only; custom challenges unsupported |
@@ -48,7 +48,7 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 | 155 | [Address v2](../crates/wire/src/wire.rs) | ◐ | - | Negotiation, IP receive path, and `addrv2` getaddr replies (IPv4/IPv6 rows only) |
 | 157/158 | [Compact filters](../crates/projection/src/index/filters.rs) | ✅ | ✓ | Optional blockfilterindex; basic active-chain filters; [Kyoto regtest scope](api/ecosystem-compat.toml) |
 | 159 | [Limited-network service](../crates/node/src/state/open.rs) | ✅ | - | Pruned nodes advertise NETWORK_LIMITED + WITNESS |
-| 324 | [v2 transport](../crates/wire/src/transport.rs) | ✅ | ✓ | On by default (`--v2transport=false` opts out); [Core 31.1 interop in both directions](api/ecosystem-compat.toml) under [CORE-06](contracts/core-differential.md); [vectors](../crates/wire/tests/data/bip324/) and [negotiation tests](../crates/wire/src/listener/v2_transport_tests.rs) |
+| 324 | [v2 transport](../crates/wire/src/transport.rs) | ✅ | ✓ | On by default (`--v2transport=false` opts out); [Core 31.1 interop in both directions](api/ecosystem-compat.toml) under [CORE-06](contracts/core-differential.md); [vectors](../testdata/wire/data/bip324) and [negotiation tests](../crates/wire/src/listener.rs) |
 | 330 | [Erlay](https://github.com/gosuda/bitcoin-rs/issues/1501) | ❌ | - | Explicitly deferred backlog (#1501 tracks the deferral, so the policy keeps it `Unsupported` rather than `Planned`); sendtxrcncl ignored |
 | 339 | [Wtxid relay](../crates/wire/src/peer.rs) | ✅ | - | Negotiation, announcements and getdata |
 | 434 | [Feature negotiation](../crates/wire/src/feature.rs) | 🧪 | - | Draft-pinned `feature` codec and pre-`verack` negotiation at protocol 70017; no feature is announced; local proof pending; Core 31.1 does not support BIP434 ([policy §7](policies/p2p-compatibility.md#7-deviation-ledger)) |
@@ -58,9 +58,9 @@ Linked capability names lead to code or tests; notes link scope and evidence own
 
 | BIP | Capability | Support | External evidence | Notes |
 | :-- | :-- | :--: | :--: | :-- |
-| 22 | [GetBlockTemplate](../crates/serving/tests/mining_template_shape.rs) | ✅ | - | Template contract; [mining evidence](api/ecosystem-compat.toml) in-tree only |
+| 22 | [GetBlockTemplate](../crates/serving/tests.rs) | ✅ | - | Template contract; [mining evidence](api/ecosystem-compat.toml) in-tree only |
 | 23 | [GBT extensions](../crates/node/src/mining/coordinator.rs) | ◐ | - | Proposal mode, long-poll and version bits; no submitold/workid |
-| 141 | [Template witness commitment](../crates/serving/tests/mining_coinbase_template.rs) | ✅ | - | Coinbase commitment and rules |
+| 141 | [Template witness commitment](../crates/serving/tests.rs) | ✅ | - | Coinbase commitment and rules |
 
 ## Wallet, index, and application
 

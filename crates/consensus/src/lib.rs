@@ -21,7 +21,27 @@ mod sha256d64;
 pub mod signet;
 mod sigops;
 #[cfg(test)]
-pub(crate) mod test_error;
+pub(crate) mod test_error {
+    #[derive(Debug, thiserror::Error)]
+    pub(crate) enum TestError {
+        #[error("consensus error: {0}")]
+        Consensus(#[from] crate::ConsensusError),
+        #[error("decode error: {0}")]
+        Decode(#[from] crate::primitives::DecodeError),
+        #[error("try-from-int error: {0}")]
+        TryFromInt(#[from] core::num::TryFromIntError),
+        #[error("parse-int error: {0}")]
+        ParseInt(#[from] std::num::ParseIntError),
+        #[error("missing expected value: {0}")]
+        Missing(&'static str),
+    }
+
+    impl From<&'static str> for TestError {
+        fn from(msg: &'static str) -> Self {
+            Self::Missing(msg)
+        }
+    }
+}
 pub mod trace;
 pub mod verify_block;
 pub mod verify_tx;
