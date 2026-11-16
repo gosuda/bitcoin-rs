@@ -180,17 +180,6 @@ impl BlockStager {
             return StagedBlock::DroppedForRetry { hash };
         }
 
-        let mut credit = credit;
-        if let Some(credit) = credit.as_mut()
-            && let Err(error) = credit.retain(retained)
-        {
-            tracing::debug!(
-                %error,
-                %hash,
-                retained,
-                "retained block exceeds its ingress reservation"
-            );
-        }
         entry.insert(ReceivedBlock {
             payload,
             received_at: now,
