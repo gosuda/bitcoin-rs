@@ -181,8 +181,32 @@ pub(crate) fn run(
         IndexBundleDirective::Manifest(directives) => {
             let mut last = None;
             for directive in directives {
-                if let Some(outcome) = run(host, directive)? {
-                    last = Some(outcome);
+                let capability = match directive {
+                    IndexBundleDirective::AttachManifestArtifact(_) => {
+                        Some(IndexCapability::TxLookup)
+                    }
+                    IndexBundleDirective::AttachManifestScriptHistory(_) => {
+                        Some(IndexCapability::ScriptHistory)
+                    }
+                    IndexBundleDirective::AttachManifestCompactFilters(_) => {
+                        Some(IndexCapability::CompactFilters)
+                    }
+                    _ => None,
+                };
+                match run(host, directive) {
+                    Ok(Some(outcome)) => last = Some(outcome),
+                    Ok(None) => {}
+                    Err(IndexBundleError::Index(
+                        error @ IndexError::WatermarkMismatch {
+                            expected: None,
+                            actual: Some(_),
+                        },
+                    )) if capability.is_some() => {
+                        log::error!(
+                            "portable index attach refused a populated capability; sibling artifacts continue: error={error}, capability={capability:?}"
+                        );
+                    }
+                    Err(error) => return Err(error),
                 }
             }
             Ok(last)

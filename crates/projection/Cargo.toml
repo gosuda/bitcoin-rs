@@ -41,6 +41,7 @@ zerocopy.workspace = true
 serde.workspace = true
 sonic-rs.workspace = true
 metrics.workspace = true
+log.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true

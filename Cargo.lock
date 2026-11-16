@@ -509,6 +509,7 @@ dependencies = [
  "compact_str",
  "crossbeam-channel",
  "hashbrown 0.17.1",
+ "log",
  "metrics",
  "parking_lot 0.13.0",
  "proptest",
