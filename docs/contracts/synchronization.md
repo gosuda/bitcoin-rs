@@ -162,7 +162,7 @@ Distinguish, and never conflate:
 - This is not promised with unavailable block history (a `MissingBody` needs the fetch path, `crates/node/src/p2p/sync/historical.rs`), unusable peers, or terminal fail-closed conditions.
 - Progress is observable through `getchainstates`, `getindexinfo`, and `getblockchaininfo`.
 - No new global sync manager, mirrored cursor, persistent verdict, or extra state machine is implied.
-- Cross-crate composition proof: `crates/node/tests.rs::sync_smoke::tick_recovers_rejected_frontier_without_publishing_unapplied_blocks` feeds admitted headers and a malformed frontier body through the real delivery channels.
+- Cross-crate composition proof: `crates/node/tests.rs::tick_recovers_rejected_frontier_without_publishing_unapplied_blocks` feeds admitted headers and a malformed frontier body through the real delivery channels.
 - It asserts applied progress, the in-memory `ChainEventPublisher::snapshot()`, UTXO/CoinStats, and the RPC block log.
 - It asserts that both admitted tree nodes keep `NodeStatus != Invalid`.
 - It then asserts that resending only the correct parent applies its already-staged successor.
