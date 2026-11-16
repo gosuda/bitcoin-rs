@@ -1129,7 +1129,12 @@ mod tests {
                     matches!(&refused, Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::Other),
                     "{refused:?}",
                 );
-                assert!(!refused.as_ref().err().is_some_and(PeerError::is_misbehavior));
+                assert!(
+                    !refused
+                        .as_ref()
+                        .err()
+                        .is_some_and(PeerError::is_misbehavior)
+                );
                 Ok(())
             })?;
             assert_eq!(*memory.used.lock(), 0);

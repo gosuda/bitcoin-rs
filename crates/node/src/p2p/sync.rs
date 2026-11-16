@@ -5187,10 +5187,9 @@ mod tests {
                     .or_fail("shared backing credit"),
             }))
             .or_fail("charged successor");
-            let requested = u64::try_from(
-                successor.bytes().len() + successor.retained_heap_bytes(),
-            )
-            .or_fail("retained byte count");
+            let requested =
+                u64::try_from(successor.bytes().len() + successor.retained_heap_bytes())
+                    .or_fail("retained byte count");
             let successor_hash = Hash256::from(successor.block_hash());
             sync.scheduler.lock().stager.insert_with_credit(
                 successor_hash,
@@ -5220,8 +5219,7 @@ mod tests {
                         .or_fail("historical credit"),
                 ),
             );
-            let expected_charge =
-                u64::try_from(backing_charge + CREDIT).or_fail("combined credit");
+            let expected_charge = u64::try_from(backing_charge + CREDIT).or_fail("combined credit");
             assert_eq!(
                 budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages),
                 expected_charge,
