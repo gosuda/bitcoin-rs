@@ -182,33 +182,6 @@ impl DerivedIndexQueryEngine {
         Self::scoped_absence(prefix, "transaction index")
     }
 
-    pub(super) fn locate_funding_transaction_for(
-        &self,
-        snapshot: &dyn TxIndexSnapshot,
-        prefix: &ReadPrefix,
-        budget: &mut QueryBudget,
-        txid: &Txid,
-    ) -> Result<Option<(u32, Tx)>, TxQueryError> {
-        let limit = budget.next_scan_limit()?;
-        let scan = snapshot
-            .funding_transaction_rows(txid, limit)
-            .map_err(|error| TxQueryError::Storage(error.to_string().into()))?;
-        let mut rows = budget.accept_scan(scan)?;
-        rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.row.height()));
-        for row in rows {
-            let height = row.row.height();
-            if !prefix.covers(height) {
-                continue;
-            }
-            if let Some(transaction) =
-                self.resolve_transaction_occurrence(prefix, budget, txid, &row)?
-            {
-                return Ok(Some((height, transaction)));
-            }
-        }
-        Ok(None)
-    }
-
     fn resolve_transaction_occurrence(
         &self,
         prefix: &ReadPrefix,

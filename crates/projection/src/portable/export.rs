@@ -1165,7 +1165,7 @@ mod tests {
             &self,
             _txid: &Txid,
             _limit: PrefixScanLimit,
-        ) -> Result<TxIndexScan, IndexError> {
+        ) -> Result<crate::FundingTransactionScan, IndexError> {
             Err(Self::lookup_error())
         }
 

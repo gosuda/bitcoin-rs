@@ -589,6 +589,7 @@ That document gives consumer usage and defers to this clause for every consisten
   - Standalone `spender_at_prefix` takes the exact `OutPoint`.
   - Its spender rows are keyed directly by outpoint prefix and height and verified per candidate.
   - When a covered funding occurrence is present, the latest canonical occurrence of its exact txid bounds the current outpoint lifetime. Earlier-lifetime spends are excluded; later transactions in the funding block remain eligible. These candidates belong to `ScriptHistory` and do not require `TxLookup`.
+  - Funding selection MUST compare the full transaction id and recorded block hash from the transaction directory against `chain(anchor)`. It MUST NOT require the funding body. The metadata scan charges every examined row and encoded byte to the query budget, including rows outside the published scope.
   - Missing covered funding leaves the lower bound unknown and MUST NOT suppress a verified covered spend or require a below-floor funding body. A scoped `Ok(None)` means no verified spend in the covered current lifetime when its creation is known, or in `[floor, anchor]` otherwise; it does not prove that the outpoint exists.
 - Unchanged and not added:
   - Strict `ScriptLive` reads, current Core RPC handlers, compact-filter serving, and existing exact-tip methods keep their behavior.

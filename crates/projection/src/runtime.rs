@@ -1030,10 +1030,15 @@ mod query_tests {
 
         fn funding_transaction_rows(
             &self,
-            txid: &Txid,
+            _txid: &Txid,
             _limit: PrefixScanLimit,
-        ) -> Result<TxIndexScan, IndexError> {
-            self.typed_scan(ColumnFamily::TxConfirmed, &TxidRow::scan_prefix(txid))
+        ) -> Result<crate::FundingTransactionScan, IndexError> {
+            Ok(crate::FundingTransactionScan {
+                rows: Vec::new(),
+                examined_rows: 0,
+                encoded_bytes: 0,
+                complete: true,
+            })
         }
 
         fn funding_rows(
@@ -2718,10 +2723,15 @@ mod query_tests {
 
         fn funding_transaction_rows(
             &self,
-            txid: &Txid,
+            _txid: &Txid,
             _limit: PrefixScanLimit,
-        ) -> Result<TxIndexScan, IndexError> {
-            self.typed_scan(ColumnFamily::TxConfirmed, &TxidRow::scan_prefix(txid))
+        ) -> Result<crate::FundingTransactionScan, IndexError> {
+            Ok(crate::FundingTransactionScan {
+                rows: Vec::new(),
+                examined_rows: 0,
+                encoded_bytes: 0,
+                complete: true,
+            })
         }
 
         fn funding_rows(
@@ -3898,18 +3908,35 @@ mod query_tests {
     #[test]
     fn spender_at_prefix_distinguishes_recreated_outpoints_at_each_canonical_prefix()
     -> Result<(), crate::portable::TestError> {
-        assert_recreated_outpoint_spenders_at_canonical_prefixes(IndexCapabilities::HISTORICAL)
+        assert_recreated_outpoint_spenders_at_canonical_prefixes(
+            IndexCapabilities::HISTORICAL,
+            false,
+        )
     }
 
     // IDX-12
     #[test]
     fn spender_at_prefix_distinguishes_recreated_outpoints_with_script_history_only()
     -> Result<(), crate::portable::TestError> {
-        assert_recreated_outpoint_spenders_at_canonical_prefixes(IndexCapabilities::SCRIPT_HISTORY)
+        assert_recreated_outpoint_spenders_at_canonical_prefixes(
+            IndexCapabilities::SCRIPT_HISTORY,
+            false,
+        )
+    }
+
+    // IDX-02, IDX-12
+    #[test]
+    fn spender_at_prefix_distinguishes_recreated_outpoints_with_pruned_creation_bodies()
+    -> Result<(), crate::portable::TestError> {
+        assert_recreated_outpoint_spenders_at_canonical_prefixes(
+            IndexCapabilities::SCRIPT_HISTORY,
+            true,
+        )
     }
 
     fn assert_recreated_outpoint_spenders_at_canonical_prefixes(
         capabilities: IndexCapabilities,
+        prune_creations: bool,
     ) -> Result<(), crate::portable::TestError> {
         struct FundingOccurrence<'a> {
             transaction: &'a Tx,
@@ -4018,7 +4045,9 @@ mod query_tests {
                 return Err("one canonical block is admitted per batch".into());
             }
             writer.commit_forward(batch)?;
-            bodies.push((height, block.block_hash(), body_bytes));
+            if !prune_creations || height != 4 {
+                bodies.push((height, block.block_hash(), body_bytes));
+            }
             let tip_id = tree
                 .write()
                 .insert_header(block.header, NodeStatus::HeaderValid)?;

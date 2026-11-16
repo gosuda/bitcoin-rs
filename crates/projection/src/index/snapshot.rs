@@ -3,7 +3,7 @@ use super::{
     write::IndexWriter,
 };
 use crate::types::{HashPrefixRow, ScriptHash};
-use bitcoin_rs_consensus::primitives::{OutPoint, Txid};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
 use bitcoin_rs_storage::{KvStore, PrefixScanLimit};
 
 #[derive(Debug)]
@@ -15,6 +15,21 @@ pub struct TxIndexScanRow {
 #[derive(Debug)]
 pub struct TxIndexScan {
     pub rows: Vec<TxIndexScanRow>,
+    pub encoded_bytes: usize,
+    pub complete: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FundingTransaction {
+    pub txid: Txid,
+    pub block_hash: Hash256,
+    pub height: u32,
+}
+
+#[derive(Debug)]
+pub struct FundingTransactionScan {
+    pub rows: Vec<FundingTransaction>,
+    pub examined_rows: usize,
     pub encoded_bytes: usize,
     pub complete: bool,
 }
@@ -70,7 +85,7 @@ pub trait TxIndexSnapshot: Send + Sync {
         &self,
         txid: &Txid,
         limit: PrefixScanLimit,
-    ) -> Result<TxIndexScan, IndexError>;
+    ) -> Result<FundingTransactionScan, IndexError>;
     fn funding_rows(
         &self,
         scripthash: ScriptHash,

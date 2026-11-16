@@ -432,6 +432,8 @@ pub(crate) enum TestError {
     #[error(transparent)]
     Chain(#[from] bitcoin_rs_execution::chain::ChainError),
     #[error(transparent)]
+    RegtestFixture(#[from] bitcoin_rs_execution::chain::regtest_fixture::RegtestFixtureError),
+    #[error(transparent)]
     Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
     Sonic(#[from] sonic_rs::Error),
