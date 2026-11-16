@@ -1,7 +1,9 @@
 use super::*;
 use crate::{AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolLimits, PrevoutMeta};
 use bitcoin_rs_consensus::ValidationEngine;
-use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut, Witness};
+use bitcoin_rs_consensus::primitives::{
+    Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut, Witness,
+};
 use parking_lot::{Mutex, RwLock};
 use std::time::Duration;
 

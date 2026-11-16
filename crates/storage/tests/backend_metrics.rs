@@ -1,5 +1,3 @@
-#![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
-
 use hashbrown::HashMap;
 use std::sync::Arc;
 
@@ -157,108 +155,6 @@ fn assert_gauge_eq(recorder: &LabeledRecorder, key: &str, expected: u64) {
 }
 
 #[test]
-#[cfg(feature = "fjall")]
-fn fjall_counts_each_durability_path_once() -> TestResult {
-    let recorder = LabeledRecorder::default();
-    let dir = tempfile::tempdir()?;
-    let store = bitcoin_rs_storage::FjallStore::open_with_cache(dir.path(), txindex_share())?;
-    metrics::with_local_recorder(&recorder, || {
-        let Ok(()) = put_one_row(&store) else {
-            panic!("fjall default write failed")
-        };
-        let mut batch = store.new_batch();
-        batch.put(ColumnFamily::BlockBodies, b"metrics-key", b"value");
-        let Ok(()) = store.write_durable(batch) else {
-            panic!("fjall durable write failed")
-        };
-    });
-    assert_eq!(recorder.counter(&writes_total("fjall", "default")), 1);
-    assert_eq!(recorder.counter(&writes_total("fjall", "durable")), 1);
-    assert_eq!(
-        recorder.writes_total("fjall"),
-        2,
-        "two logical writes must produce exactly two events"
-    );
-    Ok(())
-}
-
-#[test]
-#[cfg(feature = "fjall")]
-fn fjall_configures_the_budgeted_share_verbatim() -> TestResult {
-    let recorder = LabeledRecorder::default();
-    let dir = tempfile::tempdir()?;
-    let share = txindex_share();
-    metrics::with_local_recorder(&recorder, || {
-        let Ok(_store) = bitcoin_rs_storage::FjallStore::open_with_cache(dir.path(), share) else {
-            panic!("fjall open with budgeted share failed")
-        };
-    });
-    assert_gauge_eq(&recorder, &cache_capacity("fjall"), share);
-    Ok(())
-}
-
-#[test]
-#[cfg(feature = "redb")]
-fn redb_counts_each_durability_path_once() -> TestResult {
-    let recorder = LabeledRecorder::default();
-    let dir = tempfile::tempdir()?;
-    let store = bitcoin_rs_storage::RedbStore::open_with_cache(dir.path(), txindex_share())?;
-    metrics::with_local_recorder(&recorder, || {
-        let mut deferred = store.new_batch();
-        deferred.put(ColumnFamily::BlockBodies, b"deferred-key", b"value");
-        let Ok(()) = store.write_deferred(deferred) else {
-            panic!("redb deferred write failed")
-        };
-        let mut durable = store.new_batch();
-        durable.put(ColumnFamily::BlockBodies, b"durable-key", b"value");
-        let Ok(()) = store.write_durable(durable) else {
-            panic!("redb durable write failed")
-        };
-    });
-    assert_eq!(recorder.counter(&writes_total("redb", "deferred")), 1);
-    assert_eq!(recorder.counter(&writes_total("redb", "durable")), 1);
-    assert_eq!(
-        recorder.writes_total("redb"),
-        2,
-        "two logical writes must produce exactly two events"
-    );
-    Ok(())
-}
-
-#[test]
-#[cfg(feature = "redb")]
-fn redb_configures_the_budgeted_share_verbatim() -> TestResult {
-    let recorder = LabeledRecorder::default();
-    let dir = tempfile::tempdir()?;
-    let share = txindex_share();
-    metrics::with_local_recorder(&recorder, || {
-        let Ok(_store) = bitcoin_rs_storage::RedbStore::open_with_cache(dir.path(), share) else {
-            panic!("redb open with budgeted share failed")
-        };
-    });
-    assert_gauge_eq(&recorder, &cache_capacity("redb"), share);
-    Ok(())
-}
-
-#[test]
-#[cfg(feature = "redb")]
-fn redb_txindex_wrapper_configures_the_budgeted_share_verbatim() -> TestResult {
-    let recorder = LabeledRecorder::default();
-    let dir = tempfile::tempdir()?;
-    let share = txindex_share();
-    metrics::with_local_recorder(&recorder, || {
-        let Ok(_store) =
-            bitcoin_rs_storage::open_redb_tx_index_store_with_cache(dir.path(), share, None)
-        else {
-            panic!("redb txindex open with budgeted share failed")
-        };
-    });
-    assert_gauge_eq(&recorder, &cache_capacity("redb-txindex"), share);
-    Ok(())
-}
-
-#[test]
-#[cfg(feature = "rocksdb")]
 fn rocksdb_deferred_and_durable_writes_count_once() -> TestResult {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
@@ -290,7 +186,6 @@ fn rocksdb_deferred_and_durable_writes_count_once() -> TestResult {
 }
 
 #[test]
-#[cfg(feature = "rocksdb")]
 fn rocksdb_configures_the_budgeted_share_verbatim() -> TestResult {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;

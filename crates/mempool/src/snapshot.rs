@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     ConsensusEncode, Hash256, Network, Tx, Txid, consensus_bytes, deserialize,
 };
 use hashbrown::HashMap;

@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use proptest::prelude::*;

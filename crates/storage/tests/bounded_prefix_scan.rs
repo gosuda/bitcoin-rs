@@ -1,5 +1,3 @@
-#![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
-
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScan, PrefixScanLimit, StorageError};
 
 use crate::support::TestResult;
@@ -349,29 +347,10 @@ fn run_bounded_scan_suite<S: KvStore>(store: &S) -> Result<(), StorageError> {
 }
 
 // ARCH-02
-#[cfg(feature = "fjall")]
-#[test]
-fn fjall_bounded_prefix_scan() -> TestResult<()> {
-    let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::FjallStore::open(temp.path())?;
-    run_bounded_scan_suite(&store)?;
-    Ok(())
-}
-
-#[cfg(feature = "rocksdb")]
 #[test]
 fn rocksdb_bounded_prefix_scan() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let store = bitcoin_rs_storage::RocksDbStore::open(temp.path())?;
-    run_bounded_scan_suite(&store)?;
-    Ok(())
-}
-
-#[cfg(feature = "redb")]
-#[test]
-fn redb_bounded_prefix_scan() -> TestResult<()> {
-    let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::RedbStore::open(temp.path())?;
     run_bounded_scan_suite(&store)?;
     Ok(())
 }

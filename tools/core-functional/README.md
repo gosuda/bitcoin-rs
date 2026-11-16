@@ -381,7 +381,9 @@ landed in the working tree (uncommitted at run time):
   `off` (bare global directive, no per-crate floors); in the landed tree the
   node keeps Core's bare-`off` semantics reverted and the wrapper's
   `printtoconsole=0` translation composes
-  `--log-level=off,fjall=off,rocksdb=off` (`a0e99247`).
+  `--log-level=off,rocksdb=off` (the node caps bare levels at
+  `rocksdb=warn` since the RocksDB-only engine cutover; run 4 recorded the
+  same closure at `a0e99247`, when the directive also named `fjall`).
 
 - bitcoin-rs commit: `a32b3856e` (run 4 measured the byte-identical
   working tree one commit later than `1f51eb4ab` plus these fixes; the
@@ -655,9 +657,10 @@ raw unshimmed reproductions under `results/raw-evidence*/`.
   node log level `off` (bare global `EnvFilter` directive) plus the
   wrapper's `printtoconsole=0` translation changed from `--log-level=warn`
   to `--log-level=off`. In the landed tree the node-side bare `off` was
-  reverted to Core's semantics (`off` means `off,fjall=warn,rocksdb=warn`
-  again) and the closure moved entirely into the wrapper, which now
-  composes `--log-level=off,fjall=off,rocksdb=off` (`a0e99247`) - the same
+  reverted to Core's semantics (bare levels keep a `rocksdb=warn` cap; at
+  the recorded commit `a0e99247` the cap also named `fjall`) and the
+  closure moved entirely into the wrapper, which now
+  composes `--log-level=off,rocksdb=off` - the same
   fully-silent console the tests assert. Direct probe
   (`results/run4/gap-probes.md`): a node at `off` writes 0 stderr bytes
   across a dial the node warns about, where `warn` writes 489. Run 4
@@ -833,7 +836,7 @@ per-test `tmp/` datadirs retained for debugging.
 | path | role |
 |------|------|
 | `fetch-core-tests.sh` | `git archive`s `test/functional`, `contrib/linearize`, `share/rpcauth` from a verified tag in a local Core checkout, writes a `PROVENANCE` stamp, symlinks `<dest>/bin/bitcoind` -> `bin/bitcoind-wrapper`. Refuses to run if the tag does not resolve. |
-| `bin/bitcoind-wrapper` | Python adapter exec'd by the framework. Translates Core-style argv to bitcoin-rs flags, derives a supported-only `bitcoin-rs-derived.conf` from the framework's `bitcoin.conf`, and creates the RPC cookie file where the framework reads it (`<datadir>/<chain>/.cookie`), pointing the node at it via `--rpc-cookie`. The node's own data directory is `<datadir>/bitcoin-rs-data` (bitcoin-rs refuses a fresh datadir holding foreign entries, and the framework always pre-populates `<datadir>/` with `bitcoin.conf` and `stderr/`/`stdout/`; keeping the node dir at the datadir top level means the framework's cache copytree carries the premined chain in the node's own storage format). Also creates the Core-facing layout `<datadir>/<chain>/{,wallets}` (mode 0700) that Core bitcoind always creates, the framework's cache teardown `rmdir`s, and `feature_posix_fs_permissions.py` asserts. With no chain marker anywhere the wrapper defaults to mainnet (Core's default), so the cookie lands at `<datadir>/.cookie` where the framework's `get_auth_cookie(datadir, "")` reads it. `printtoconsole=0` (the framework's setting) translates to the fully-silent composed directive `--log-level=off,fjall=off,rocksdb=off` (run 4 measured the earlier bare `--log-level=off`; the closest equivalent of Core's "console stays quiet" behavior that tests assert at teardown). Unmappable flags/conf keys are dropped and appended as JSON lines to `<datadir>/wrapper-dropped-flags.log`. Silent on stdout/stderr in success paths. Reads `BITCOIN_RS_BIN` (required) and `BITCOIN_RS_EXTRA_ARGS` (optional, appended verbatim). |
+| `bin/bitcoind-wrapper` | Python adapter exec'd by the framework. Translates Core-style argv to bitcoin-rs flags, derives a supported-only `bitcoin-rs-derived.conf` from the framework's `bitcoin.conf`, and creates the RPC cookie file where the framework reads it (`<datadir>/<chain>/.cookie`), pointing the node at it via `--rpc-cookie`. The node's own data directory is `<datadir>/bitcoin-rs-data` (bitcoin-rs refuses a fresh datadir holding foreign entries, and the framework always pre-populates `<datadir>/` with `bitcoin.conf` and `stderr/`/`stdout/`; keeping the node dir at the datadir top level means the framework's cache copytree carries the premined chain in the node's own storage format). Also creates the Core-facing layout `<datadir>/<chain>/{,wallets}` (mode 0700) that Core bitcoind always creates, the framework's cache teardown `rmdir`s, and `feature_posix_fs_permissions.py` asserts. With no chain marker anywhere the wrapper defaults to mainnet (Core's default), so the cookie lands at `<datadir>/.cookie` where the framework's `get_auth_cookie(datadir, "")` reads it. `printtoconsole=0` (the framework's setting) translates to the fully-silent composed directive `--log-level=off,rocksdb=off` (run 4 measured the earlier bare `--log-level=off`; the closest equivalent of Core's "console stays quiet" behavior that tests assert at teardown). Unmappable flags/conf keys are dropped and appended as JSON lines to `<datadir>/wrapper-dropped-flags.log`. Silent on stdout/stderr in success paths. Reads `BITCOIN_RS_BIN` (required) and `BITCOIN_RS_EXTRA_ARGS` (optional, appended verbatim). |
 | `config.ini` | Template framework config; `run.sh` renders `@CORE_TESTS_DIR@` into the results dir. `ENABLE_BITCOIND=true`, every other component `false` so wallet/cli/zmq-dependent tests take the framework's own skip paths. |
 | `shim/sitecustomize.py` | PYTHONPATH startup hook; every patch is an explicitly recorded bitcoin-rs deviation (see the file header); patches (2) and (3) carry a disable env var while patch (1) is unconditional. Three patches remain active: (1) monkeypatches `test_framework.wallet.MiniWallet.generate` to mine via the implemented `generatetoaddress` RPC instead of the unimplemented `generatetodescriptor` (ADDRESS_OP_TRUE mode only; other modes keep upstream behavior and fail loudly); (2) no-ops the one framework-plumbing RPC the node still lacks, `setmocktime` (no candidate test calls it itself; NG-3); (3) strips exactly the `stop(wait=0)` teardown form (Core's hidden wait argument; the node's stop takes none - non-zero waits still fail honestly; NG-4). Two run-1 patches were deleted once the node closed their gaps and run 2 + direct probes verified the closures: the client-side params-rewrite for `"params":{}` and `generatetoaddress` named-object forms (NG-1, closed by `862068637`) and the `syncwithvalidationinterfacequeue` no-op (NG-2, same commit). No Core code is copied; the patches preserve upstream post-conditions where they apply. |
 | `run.sh` + `tools/core-functional/bin/runner.py` | Runner: per-test `python3 <test>.py --configfile <rendered config.ini> --tmpdir <results>/tmp/<test> --cachedir <results>/cache` with the shim on `PYTHONPATH`, cwd `= <dest>/test/functional`. Before the parallel pool starts, runs the extracted tree's `create_cache.py` once, serially, against the shared cachedir (Core's own `test_runner.py` pattern) so parallel jobs never race to build the cache; the framework skips mining when the cache node dir already exists, so pre-seeded caches are reused. Each test runs as its own process group; a timeout kills the whole group so node processes a timed-out test spawned cannot linger and hold ports. Classifies 0=PASS, 77=SKIP, else=FAIL (timeout tracked separately). Fails fast (exit 2, before running anything) when `BITCOIN_RS_BIN` is unset/missing. Records per-test exit code, duration, framework-log tail, and captured stdout/stderr tails in `report.json` (a relative `--results-dir` is resolved, since tests run with a different cwd). |
@@ -872,7 +875,7 @@ Mapped Core flag -> bitcoin-rs flag (both `-flag=v` and `-flag` forms):
 | `-onlynet=list` | `--onlynet=list` (validated) |
 | `-dbcache=N` / `-prune=N` | `--dbcache-mb=N` / `--prune-target-mb=N` |
 | `-txindex=B` / `-blockfilterindex=B` / `-rest=B` / `-persistmempool=B` | same-meaning bitcoin-rs flags |
-| `-printtoconsole=0` (conf/argv) | `--log-level=off,fjall=off,rocksdb=off` (Core keeps the console silent; the node's bare `off` keeps the `fjall=warn,rocksdb=warn` floors, so full silence composes the directive per target — tests assert an empty stderr at stop) |
+| `-printtoconsole=0` (conf/argv) | `--log-level=off,rocksdb=off` (Core keeps the console silent; the node's bare `off` keeps the `rocksdb=warn` floor, so full silence composes the directive per target — tests assert an empty stderr at stop) |
 | `-proxyrandomize=B` / `-i2pacceptincoming=B` | `--proxy-randomize-credentials=B` / `--i2p-accept=B` |
 | `-h` / `-version` | `--help` / `--version` (`--version` prints the node's own one-line version notice and exits 0 - NG-15 fixed after the 2026-10-30 measured run, where the binary rejected the flag with clap exit 2) |
 
@@ -882,7 +885,7 @@ v2transport, onlynet, proxy, onion, i2psam, torcontrol, proxyrandomize,
 i2pacceptincoming, uacomment, listen`. `rpcuser`/`rpcpassword`/`rpccookiefile`
 become the cookie file the adapter writes (see below), and
 `printtoconsole=0` becomes the fully-silent composed directive
-(`--log-level=off,fjall=off,rocksdb=off`; see the table). `-uacomment=X`
+(`--log-level=off,rocksdb=off`; see the table). `-uacomment=X`
 (argv) translates to a repeatable `--uacomment=X` flag and a conf `uacomment=`
 line is carried verbatim (both accumulate; a conf line whose option was
 already set on the CLI is suppressed, per the CLI-outranks-conf rule). Everything else - including the

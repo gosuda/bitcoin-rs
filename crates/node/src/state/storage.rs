@@ -1,36 +1,40 @@
 use crate::NodeConfig;
-use bitcoin_rs_chain::BlockBodySource;
-use bitcoin_rs_primitives::BlockBodyMetadata;
-use bitcoin_rs_rpc::context::{PruneResult, PruneService, PruneServiceError, PruneStatus};
+use bitcoin_rs_consensus::primitives::BlockBodyMetadata;
+use bitcoin_rs_serving::context::{PruneResult, PruneService, PruneServiceError, PruneStatus};
 use bitcoin_rs_storage::DurableHeadStore as _;
 use bitcoin_rs_storage::FlatFileBlockStore;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::StoreGuard;
+use bitcoin_rs_storage::block_body::BlockBodySource;
 use bitcoin_rs_storage::pruning::PruneError;
 use bitcoin_rs_storage::recovery_evidence::RecoveryEvidencePublisher;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
 
 use super::open::NodeOpenError;
 
 pub(super) struct NodeStorage {
     backend: StorageBackend,
-    undo_store: Arc<dyn bitcoin_rs_chainstate::UndoStore>,
+    undo_store: Arc<dyn bitcoin_rs_execution::UndoStore>,
     durable_head: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     prune_height: Option<u32>,
+    engine_cache_probe: Arc<dyn Fn() -> u64 + Send + Sync>,
     pub(super) deferred: Arc<dyn DeferredChainstateServices>,
+    pub(super) coins: Arc<bitcoin_rs_storage::CoinStore>,
+    pub(super) commit_authority: Arc<bitcoin_rs_storage::CommitAuthority>,
 }
 
 struct ChainstateComposer<'a> {
     backend: StorageBackend,
     data_dir: &'a std::path::Path,
     guard: &'a StoreGuard,
+    cache_allocation: bitcoin_rs_storage::ChainstateCacheBudget,
+    budget: Arc<crate::budget::NodeBudget>,
 }
 
 impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
@@ -42,11 +46,26 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
         store: Arc<S>,
     ) -> core::result::Result<Self::Output, bitcoin_rs_storage::StorageError>
     where
-        S: KvStore,
+        S: KvStore + 'static,
     {
         let durable_head = Arc::new(bitcoin_rs_storage::KvDurableHeadStore::new(Arc::clone(
             &store,
         )));
+        let dyn_store: Arc<dyn bitcoin_rs_storage::KvStore> = store.clone();
+        let coin_charge = bitcoin_rs_storage::budget::ChargeHandle::new(
+            self.budget.clone(),
+            bitcoin_rs_storage::budget::BudgetOwner::CoinCache,
+        );
+        let coins = Arc::new(bitcoin_rs_storage::CoinStore::open_with_charge(
+            Arc::clone(&dyn_store),
+            self.cache_allocation.coin_bytes,
+            Some(coin_charge),
+        ));
+        let engine_weak = Arc::downgrade(&dyn_store);
+        let commit_authority = Arc::new(bitcoin_rs_storage::CommitAuthority::new(
+            dyn_store,
+            Arc::clone(&coins),
+        ));
         let committed = durable_head.load()?.and_then(|head| head.body_extent);
         let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::seeded(
             bitcoin_rs_storage::pruning::ExecutedFrontier::reconstruct(&*store)?,
@@ -61,12 +80,17 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
             }
             .guarded_by(Arc::clone(self.guard)),
         );
+        let engine_cache_probe: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(move || {
+            engine_weak
+                .upgrade()
+                .map_or(0, |store| store.engine_cache_bytes())
+        });
         let deferred: Arc<dyn DeferredChainstateServices> = Arc::new(ChainstateStoreServices {
             store: Arc::clone(&store),
         });
         let storage = NodeStorage {
             backend: self.backend,
-            undo_store: Arc::new(bitcoin_rs_chainstate::KvUndoStore::new(Arc::clone(&store))),
+            undo_store: Arc::new(bitcoin_rs_execution::KvUndoStore::new(Arc::clone(&store))),
             durable_head,
             block_body_store: Arc::new(bitcoin_rs_storage::block_body::IndexedBlockBodyStore::new(
                 Arc::clone(&store),
@@ -74,7 +98,10 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
             )),
             retention,
             prune_height,
+            engine_cache_probe,
             deferred,
+            coins,
+            commit_authority,
         };
         Ok((storage, block_files))
     }
@@ -83,8 +110,9 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
 impl NodeStorage {
     pub(super) fn open(
         config: &NodeConfig,
-        chainstate_cache_bytes: u64,
+        cache_allocation: bitcoin_rs_storage::ChainstateCacheBudget,
         guard: &StoreGuard,
+        budget: Arc<crate::budget::NodeBudget>,
     ) -> Result<(Self, Arc<FlatFileBlockStore>), NodeOpenError> {
         let chainstate_dir = config.data_dir.join("chainstate");
         std::fs::create_dir_all(&chainstate_dir).map_err(|source| {
@@ -99,12 +127,14 @@ impl NodeStorage {
             "chainstate",
             backend,
             &chainstate_dir,
-            Some(chainstate_cache_bytes),
+            Some(cache_allocation.engine_bytes),
             guard,
             ChainstateComposer {
                 backend,
                 data_dir: &config.data_dir,
                 guard,
+                cache_allocation,
+                budget,
             },
         )?;
         Ok(opened)
@@ -118,18 +148,30 @@ impl NodeStorage {
         self.prune_height
     }
 
+    pub(super) fn engine_cache_probe(&self) -> Arc<dyn Fn() -> u64 + Send + Sync> {
+        Arc::clone(&self.engine_cache_probe)
+    }
+
     pub(super) fn block_body_store(
         &self,
     ) -> Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore> {
         Arc::clone(&self.block_body_store)
     }
 
-    pub(super) fn undo_store(&self) -> Arc<dyn bitcoin_rs_chainstate::UndoStore> {
+    pub(super) fn undo_store(&self) -> Arc<dyn bitcoin_rs_execution::UndoStore> {
         Arc::clone(&self.undo_store)
     }
 
     pub(super) fn durable_head(&self) -> Arc<dyn bitcoin_rs_storage::DurableHeadStore> {
         Arc::clone(&self.durable_head)
+    }
+
+    pub(super) fn coins(&self) -> Arc<bitcoin_rs_storage::CoinStore> {
+        Arc::clone(&self.coins)
+    }
+
+    pub(super) fn commit_authority(&self) -> Arc<bitcoin_rs_storage::CommitAuthority> {
+        Arc::clone(&self.commit_authority)
     }
 
     pub(super) fn retention(&self) -> Arc<bitcoin_rs_storage::RetentionRegistry> {
@@ -144,7 +186,7 @@ impl NodeStorage {
         bitcoin_rs_storage::pruning::HistoryAccess::new(
             Arc::clone(&self.retention),
             bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(
-                bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
+                bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
             ),
         )
     }
@@ -154,15 +196,10 @@ pub(super) trait DeferredChainstateServices: Send + Sync {
     fn prune_service(
         &self,
         block_files: Arc<FlatFileBlockStore>,
-        authority: bitcoin_rs_chainstate::PruneAuthority,
+        authority: bitcoin_rs_execution::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> Result<Arc<dyn PruneService>, NodeOpenError>;
-    fn journal_writer(
-        &self,
-        dir: cap_std::fs::Dir,
-        bootstrap: bitcoin_rs_chainstate::JournalBootstrap,
-    ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter, NodeOpenError>;
 }
 
 struct ChainstateStoreServices<S> {
@@ -173,7 +210,7 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
     fn prune_service(
         &self,
         block_files: Arc<FlatFileBlockStore>,
-        authority: bitcoin_rs_chainstate::PruneAuthority,
+        authority: bitcoin_rs_execution::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> Result<Arc<dyn PruneService>, NodeOpenError> {
@@ -185,44 +222,6 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
             retention,
         )?))
     }
-
-    fn journal_writer(
-        &self,
-        dir: cap_std::fs::Dir,
-        bootstrap: bitcoin_rs_chainstate::JournalBootstrap,
-    ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter, NodeOpenError> {
-        build_journal_writer(dir, Arc::clone(&self.store), &bootstrap)
-    }
-}
-
-fn build_journal_writer<S: KvStore + 'static>(
-    dir: cap_std::fs::Dir,
-    store: Arc<S>,
-    bootstrap: &bitcoin_rs_chainstate::JournalBootstrap,
-) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter, NodeOpenError> {
-    let mut writer = if bootstrap.open_existing {
-        bitcoin_rs_storage::chainstate_journal::JournalWriter::open(dir, store)?
-    } else {
-        bitcoin_rs_storage::chainstate_journal::JournalWriter::initialize(
-            dir,
-            store,
-            bootstrap.base_generation,
-            (0, 0),
-            bootstrap.height,
-            bootstrap.block_hash,
-            bootstrap.prev_hash,
-            bootstrap.chain_tx_count,
-        )?
-    };
-    writer.configure(bitcoin_rs_storage::chainstate_journal::JournalPolicy {
-        batch_blocks: bootstrap.config.blocks,
-        batch_seconds: Duration::from_secs(bootstrap.config.seconds),
-        rotate_mib: bootstrap.config.rotate_mib,
-        max_journal_mib: bootstrap.config.max_journal_mib,
-        max_lag_blocks: bootstrap.config.max_lag_blocks,
-        max_lag_seconds: Duration::from_secs(bootstrap.config.max_lag_seconds),
-    })?;
-    Ok(bitcoin_rs_storage::chainstate_journal::shared_journal_writer(writer))
 }
 
 pub(super) struct StoredBlockBodySource {
@@ -239,15 +238,15 @@ impl BlockBodySource for StoredBlockBodySource {
     fn block_body(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::BlockHash,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_chain::BlockBodyReadError> {
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
+    ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError> {
         self.store
             .load_block_body_for_verification(height, hash.0)
             .map_err(|error| match error {
                 StorageError::CorruptBlockFrame(_) => {
-                    bitcoin_rs_chain::BlockBodyReadError::Corrupt(error.to_string())
+                    bitcoin_rs_storage::block_body::BlockBodyReadError::Corrupt(error.to_string())
                 }
-                _ => bitcoin_rs_chain::BlockBodyReadError::Read(error.to_string()),
+                _ => bitcoin_rs_storage::block_body::BlockBodyReadError::Read(error.to_string()),
             })
     }
 
@@ -258,7 +257,7 @@ impl BlockBodySource for StoredBlockBodySource {
     fn block_body_range(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::BlockHash,
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
         offset: u32,
         len: u32,
     ) -> Option<Vec<u8>> {
@@ -283,7 +282,7 @@ impl BlockBodySource for StoredBlockBodySource {
     fn block_body_metadata(
         &self,
         height: u32,
-        hash: bitcoin_rs_primitives::BlockHash,
+        hash: bitcoin_rs_consensus::primitives::BlockHash,
     ) -> Option<BlockBodyMetadata> {
         self.store
             .block_body_metadata(height, hash.0)
@@ -295,7 +294,7 @@ impl BlockBodySource for StoredBlockBodySource {
 pub(super) struct NodePruneService<S: KvStore> {
     store: Arc<S>,
     block_files: Arc<FlatFileBlockStore>,
-    authority: bitcoin_rs_chainstate::PruneAuthority,
+    authority: bitcoin_rs_execution::PruneAuthority,
     pruneheight: Mutex<Option<u32>>,
     durable_tip_height: Arc<AtomicU32>,
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
@@ -305,7 +304,7 @@ impl<S: KvStore> NodePruneService<S> {
     pub(super) fn new(
         store: Arc<S>,
         block_files: Arc<FlatFileBlockStore>,
-        authority: bitcoin_rs_chainstate::PruneAuthority,
+        authority: bitcoin_rs_execution::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> Result<Self, NodeOpenError> {
@@ -376,7 +375,7 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
 
 pub(crate) struct RecoveryReporter(pub(crate) RecoveryEvidencePublisher);
 
-impl bitcoin_rs_index::runtime::IndexAheadSink for RecoveryReporter {
+impl bitcoin_rs_projection::runtime::IndexAheadSink for RecoveryReporter {
     fn report_index_ahead(
         &self,
         capability: &str,
@@ -386,7 +385,7 @@ impl bitcoin_rs_index::runtime::IndexAheadSink for RecoveryReporter {
         index_hash_be: &str,
         depth: u32,
         unix_secs: u64,
-    ) -> Result<(), bitcoin_rs_index::runtime::IndexAheadError> {
+    ) -> Result<(), bitcoin_rs_projection::runtime::IndexAheadError> {
         self.0
             .publish_index_ahead(
                 capability,
@@ -401,7 +400,7 @@ impl bitcoin_rs_index::runtime::IndexAheadSink for RecoveryReporter {
     }
 }
 
-impl bitcoin_rs_index::RollbackWarningSource for RecoveryReporter {
+impl bitcoin_rs_projection::RollbackWarningSource for RecoveryReporter {
     fn rollback_warnings(&self) -> Vec<String> {
         self.0.warnings()
     }
@@ -410,7 +409,7 @@ impl bitcoin_rs_index::RollbackWarningSource for RecoveryReporter {
 #[cfg(test)]
 mod body_read_tests {
     use super::*;
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Hash256;
     use bitcoin_rs_storage::block_body::BlockBodyStore;
 
     struct UnreadableStore;
@@ -433,7 +432,7 @@ mod body_read_tests {
     fn stored_body_read_preserves_failure_instead_of_reporting_absence() {
         let source = StoredBlockBodySource::new(Arc::new(UnreadableStore));
         match source.block_body(1, Hash256::default().into()) {
-            Err(bitcoin_rs_chain::BlockBodyReadError::Read(error)) => {
+            Err(bitcoin_rs_storage::block_body::BlockBodyReadError::Read(error)) => {
                 assert!(error.contains("injected body read failure"));
             }
             _ => panic!("I/O failure proves neither corruption, absence nor a successful read"),

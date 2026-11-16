@@ -3,20 +3,21 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin::hex::FromHex;
-use bitcoin_rs_chain::{BlockTree, TipSnapshot, regtest_fixture};
-use bitcoin_rs_chainstate::Chainstate;
-use bitcoin_rs_node::Network;
-use bitcoin_rs_node::test_support::TestError;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, deserialize,
 };
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_execution::Chainstate;
+use bitcoin_rs_execution::chain::{BlockTree, TipSnapshot, regtest_fixture};
+use bitcoin_rs_node::Network;
+use bitcoin_rs_node::test_support::TestError;
+use bitcoin_rs_storage::utxo::UtxoSet;
+use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::unbounded;
 use parking_lot::RwLock;
 
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 
+// SYNC-02
 #[test]
 fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestError> {
     let genesis = regtest_genesis_block()?;
@@ -26,38 +27,45 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestErr
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
     let chain_tip = block_tree.write().tip_handle();
     let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
-    let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
-    let (inbound_headers_tx, inbound_headers_rx) = unbounded::<bitcoin_rs_p2p::InboundHeaders>();
-    let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let peer_table = Arc::new(bitcoin_rs_wire::PeerTable::new());
+    let (inbound_headers_tx, inbound_headers_rx) = unbounded::<bitcoin_rs_wire::InboundHeaders>();
+    let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_wire::InboundBlock>();
     let (handles, coin_stats) = apply_handles_with_coin_stats(
         Network::Regtest,
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
     );
+    let handles = Arc::new(handles);
     let ibd = handles.ibd_latch();
-    let sync = bitcoin_rs_node::sync::block_sync(
-        Arc::new(handles),
-        bitcoin_rs_node::ChainFollowers::noop(),
-        Arc::clone(&peer_table),
+    let sync = bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
+        handles: Arc::clone(&handles),
+        followers: bitcoin_rs_node::ChainFollowers::noop(),
+        peer_table,
         inbound_headers_rx,
         inbound_blocks_rx,
-        Arc::clone(&ibd),
-        None,
-    );
+        ibd,
+        assumeutxo: None,
+        budget: Arc::new(
+            bitcoin_rs_node::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(16),
+                1,
+            ),
+        ),
+    });
 
     inbound_headers_tx
-        .send(bitcoin_rs_p2p::InboundHeaders {
+        .send(bitcoin_rs_wire::InboundHeaders {
             headers: vec![genesis.header, block_one.header, block_two.header],
             source: None,
             wire_response: true,
         })
         .map_err(|_| TestError::message("send headers failed"))?;
     inbound_blocks_tx
-        .send(bitcoin_rs_p2p::InboundBlock::from_local(block_two.clone()))
+        .send(bitcoin_rs_wire::InboundBlock::from_local(block_two.clone()))
         .map_err(|_| TestError::message("send block failed"))?;
     inbound_blocks_tx
-        .send(bitcoin_rs_p2p::InboundBlock::from_local(block_one.clone()))
+        .send(bitcoin_rs_wire::InboundBlock::from_local(block_one.clone()))
         .map_err(|_| TestError::message("send block failed"))?;
 
     sync.tick();
@@ -67,10 +75,8 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestErr
         .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
     assert_eq!(applied.height, 2);
     assert_eq!(applied.hash, block_two.block_hash().0);
-    assert_eq!(
-        coin_stats.snapshot(),
-        expected_coin_stats(&[&genesis, &block_one, &block_two])?
-    );
+    let expected_stats = expected_coin_stats(&[&genesis, &block_one, &block_two])?;
+    assert_engine_coin_stats(&handles, &coin_stats.snapshot(), &expected_stats)?;
     assert_eq!(block_tree.read().len(), 3);
     Ok(())
 }
@@ -90,7 +96,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
     let applied_tip = Arc::new(ArcSwapOption::empty());
     let (inbound_headers_tx, inbound_headers_rx) = unbounded();
     let (inbound_blocks_tx, inbound_blocks_rx) = unbounded();
-    let (handles, coin_stats, utxo) = apply_handles_with_coin_stats_and_utxo(
+    let (handles, coin_stats, _utxo) = apply_handles_with_coin_stats_and_utxo(
         Network::Regtest,
         chain_tip,
         applied_tip,
@@ -99,15 +105,21 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
     let handles = Arc::new(handles);
     let followers = bitcoin_rs_node::ChainFollowers::noop();
     let block_log = followers.block_log_reader();
-    let sync = bitcoin_rs_node::sync::block_sync(
-        Arc::clone(&handles),
+    let sync = bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
+        handles: Arc::clone(&handles),
         followers,
-        Arc::new(bitcoin_rs_p2p::PeerTable::new()),
+        peer_table: Arc::new(bitcoin_rs_wire::PeerTable::new()),
         inbound_headers_rx,
         inbound_blocks_rx,
-        handles.ibd_latch(),
-        None,
-    );
+        ibd: handles.ibd_latch(),
+        assumeutxo: None,
+        budget: Arc::new(
+            bitcoin_rs_node::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(16),
+                1,
+            ),
+        ),
+    });
     sync.tick();
     let before = handles.chain_snapshot();
     assert_eq!(
@@ -117,7 +129,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
     let genesis_stats = expected_coin_stats(&[&genesis])?;
 
     inbound_headers_tx
-        .send(bitcoin_rs_p2p::InboundHeaders {
+        .send(bitcoin_rs_wire::InboundHeaders {
             headers: vec![block_one.header, block_two.header],
             source: None,
             wire_response: true,
@@ -126,7 +138,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
     for bodies in [vec![], vec![malformed, block_two.clone()]] {
         for block in bodies {
             inbound_blocks_tx
-                .send(bitcoin_rs_p2p::InboundBlock::from_local(block))
+                .send(bitcoin_rs_wire::InboundBlock::from_local(block))
                 .map_err(|_| TestError::message("send block failed"))?;
         }
         sync.tick();
@@ -139,8 +151,18 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
             .ok_or_else(|| TestError::message("missing applied tip"))?;
         assert_eq!((applied.height, applied.hash), (0, genesis.block_hash().0));
         assert_eq!(handles.chain_snapshot(), before);
-        assert_eq!(coin_stats.snapshot(), genesis_stats);
-        assert!(utxo.is_empty(), "unapplied bodies must not create coins");
+        assert_engine_coin_stats(&handles, &coin_stats.snapshot(), &genesis_stats)?;
+        assert!(
+            handles
+                .utxo_reader()
+                .get(&OutPoint::new(block_one.txs[0].txid(), 0))?
+                .is_none()
+                && handles
+                    .utxo_reader()
+                    .get(&OutPoint::new(block_two.txs[0].txid(), 0))?
+                    .is_none(),
+            "unapplied bodies must not create coins",
+        );
         let log = block_log.read();
         assert_eq!(log.len(), 1, "unapplied blocks must not reach the RPC log");
         assert_eq!(log[0].hash, genesis.block_hash());
@@ -150,12 +172,15 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
             let id = tree
                 .lookup(block.block_hash().0)
                 .ok_or_else(|| TestError::message("missing admitted header"))?;
-            assert_ne!(tree.node(id)?.status, bitcoin_rs_chain::NodeStatus::Invalid);
+            assert_ne!(
+                tree.node(id)?.status,
+                bitcoin_rs_execution::chain::NodeStatus::Invalid
+            );
         }
     }
 
     inbound_blocks_tx
-        .send(bitcoin_rs_p2p::InboundBlock::from_local(block_one.clone()))
+        .send(bitcoin_rs_wire::InboundBlock::from_local(block_one.clone()))
         .map_err(|_| TestError::message("send block failed"))?;
     for _ in 0..16 {
         sync.tick();
@@ -181,15 +206,16 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Resu
     );
     assert_eq!(after.epoch, before.epoch);
     assert_eq!(after.sequence, before.sequence + 2);
-    assert_eq!(
-        coin_stats.snapshot(),
-        expected_coin_stats(&[&genesis, &block_one, &block_two])?
-    );
-    assert_eq!(utxo.len(), 2);
-    for block in [&block_one, &block_two] {
+    let expected_stats = expected_coin_stats(&[&genesis, &block_one, &block_two])?;
+    assert_engine_coin_stats(&handles, &coin_stats.snapshot(), &expected_stats)?;
+    for (height, block) in [&block_one, &block_two].iter().enumerate() {
         assert_eq!(
-            utxo.get(&OutPoint::new(block.txs[0].txid(), 0)),
-            Some(block.txs[0].outputs[0].clone())
+            handles
+                .utxo_reader()
+                .get(&OutPoint::new(block.txs[0].txid(), 0))?,
+            Some(block.txs[0].outputs[0].clone()),
+            "coinbase output at height {} must be live in the engine coin store",
+            height + 1,
         );
     }
     let log = block_log.read();
@@ -213,28 +239,35 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats() -> Result<()
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
     let chain_tip = block_tree.write().tip_handle();
     let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
-    let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
-    let (inbound_headers_tx, inbound_headers_rx) = unbounded::<bitcoin_rs_p2p::InboundHeaders>();
-    let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
-    let (handles, coin_stats, utxo) = apply_handles_with_coin_stats_and_utxo(
+    let peer_table = Arc::new(bitcoin_rs_wire::PeerTable::new());
+    let (inbound_headers_tx, inbound_headers_rx) = unbounded::<bitcoin_rs_wire::InboundHeaders>();
+    let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_wire::InboundBlock>();
+    let (handles, coin_stats, _utxo) = apply_handles_with_coin_stats_and_utxo(
         Network::Regtest,
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
     );
+    let handles = Arc::new(handles);
     let ibd = handles.ibd_latch();
-    let sync = bitcoin_rs_node::sync::block_sync(
-        Arc::new(handles),
-        bitcoin_rs_node::ChainFollowers::noop(),
-        Arc::clone(&peer_table),
+    let sync = bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
+        handles: Arc::clone(&handles),
+        followers: bitcoin_rs_node::ChainFollowers::noop(),
+        peer_table,
         inbound_headers_rx,
         inbound_blocks_rx,
-        Arc::clone(&ibd),
-        None,
-    );
+        ibd,
+        assumeutxo: None,
+        budget: Arc::new(
+            bitcoin_rs_node::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(16),
+                1,
+            ),
+        ),
+    });
 
     inbound_headers_tx
-        .send(bitcoin_rs_p2p::InboundHeaders {
+        .send(bitcoin_rs_wire::InboundHeaders {
             headers: fixture.blocks.iter().map(|block| block.header).collect(),
             source: None,
             wire_response: true,
@@ -242,7 +275,7 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats() -> Result<()
         .map_err(|_| TestError::message("send headers failed"))?;
     for block in fixture.blocks.iter().skip(1) {
         inbound_blocks_tx
-            .send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
+            .send(bitcoin_rs_wire::InboundBlock::from_local(block.clone()))
             .map_err(|_| TestError::message("send block failed"))?;
     }
 
@@ -262,20 +295,30 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats() -> Result<()
             .0
     );
     assert!(
-        utxo.get(&fixture.mature_coinbase_outpoint).is_none(),
+        handles
+            .utxo_reader()
+            .get(&fixture.mature_coinbase_outpoint)?
+            .is_none(),
         "mature coinbase prevout must be removed by the height-101 spend",
     );
     assert!(
-        utxo.get(&fixture.funding_outpoint).is_none(),
+        handles
+            .utxo_reader()
+            .get(&fixture.funding_outpoint)?
+            .is_none(),
         "funding prevout must be removed by the height-102 spend",
     );
     assert!(
-        utxo.get(&fixture.spend_outpoint).is_some(),
+        handles
+            .utxo_reader()
+            .get(&fixture.spend_outpoint)?
+            .is_some(),
         "height-102 spend output must remain live",
     );
 
     let block_refs: Vec<&Block> = fixture.blocks.iter().collect();
-    assert_eq!(coin_stats.snapshot(), expected_coin_stats(&block_refs)?);
+    let expected_stats = expected_coin_stats(&block_refs)?;
+    assert_engine_coin_stats(&handles, &coin_stats.snapshot(), &expected_stats)?;
     Ok(())
 }
 
@@ -369,6 +412,51 @@ fn expected_coin_stats(blocks: &[&Block]) -> Result<CoinStats, TestError> {
     Ok(stats)
 }
 
+/// Asserts coin statistics from the engine coin store, the coin authority
+/// under the storage engine, against an independently computed expectation.
+/// MuHash accumulators compare through `finalize_hash`, the canonical
+/// coinstats identity: `scan_coin_stats` and incremental insert/remove
+/// bookkeeping carry removals in different internal accumulator fields, so
+/// raw-struct equality is not the identity.
+fn assert_engine_coin_stats(
+    handles: &Chainstate,
+    listener: &CoinStats,
+    expected: &CoinStats,
+) -> Result<(), TestError> {
+    let reader = handles.utxo_reader();
+    let snapshot = reader.scan_coin_snapshot()?;
+    let coins = UtxoSet::new();
+    for row in snapshot.iter_prefix(bitcoin_rs_storage::ColumnFamily::Coins, &[])? {
+        let (_key, value) = row?;
+        coins.insert_parsed_record(
+            bitcoin_rs_storage::utxo::UtxoRecord::from_encoded(value.into_boxed_slice())
+                .map_err(TestError::Utxo)?,
+        );
+    }
+    let scanned = coins.with_stable_view(|view| {
+        bitcoin_rs_storage::utxo::stats::scan_coin_stats(view, expected.height, true)
+    })?;
+    assert_eq!(
+        handles
+            .applied_tip_snapshot()
+            .ok_or_else(|| TestError::message("missing applied tip"))?
+            .chain_tx_count
+            .to_wire(),
+        expected.tx_count,
+    );
+    assert_eq!(scanned.height, expected.height);
+    assert_eq!(scanned.total_amount, expected.total_amount);
+    assert_eq!(scanned.bogo_size, expected.bogo_size);
+    assert_eq!(scanned.utxo_count, expected.utxo_count);
+    assert_eq!(listener.tx_count, expected.tx_count);
+    assert_eq!(
+        scanned.muhash.finalize_hash(),
+        expected.muhash.finalize_hash(),
+        "engine coin set must match the independently computed set",
+    );
+    Ok(())
+}
+
 fn apply_handles_with_coin_stats(
     network: Network,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -390,7 +478,7 @@ fn apply_handles_with_coin_stats_and_utxo(
     let mut utxo = UtxoSet::new();
     utxo.track_coin_stats((*coin_stats).clone());
     let utxo = Arc::new(utxo);
-    let chain_events = bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0);
+    let chain_events = bitcoin_rs_execution::events::ChainEventPublisher::detached(0);
     let handles = Chainstate::new(
         network,
         chain_tip,

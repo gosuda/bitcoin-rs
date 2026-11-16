@@ -1,5 +1,5 @@
 #[cfg(feature = "kernel")]
-use bitcoin_rs_primitives::OutPoint;
+use bitcoin_rs_consensus::primitives::OutPoint;
 
 #[expect(dead_code, reason = "used when feature kernel is enabled")]
 #[derive(Debug, thiserror::Error)]
@@ -13,11 +13,11 @@ pub(crate) enum TestError {
     #[error("hex slice decode error: {0}")]
     HexSlice(#[from] bitcoin::hex::HexToBytesError),
     #[error("consensus decode error: {0}")]
-    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error("consensus error: {0}")]
     Consensus(#[from] bitcoin_rs_consensus::ConsensusError),
     #[error("script flags error: {0}")]
-    ScriptFlags(#[from] bitcoin_rs_script::ScriptError),
+    ScriptFlags(#[from] bitcoin_rs_consensus::script::ScriptError),
     #[cfg(feature = "kernel")]
     #[error("kernel error: {0}")]
     Kernel(#[from] bitcoinkernel::KernelError),
@@ -28,7 +28,7 @@ pub(crate) enum TestError {
     #[error("tx hex does not decode for {path}: {source}")]
     TxHex {
         path: String,
-        source: bitcoin_rs_primitives::DecodeError,
+        source: bitcoin_rs_consensus::primitives::DecodeError,
     },
     #[error("txid mismatch for {path}: manifest says {expected} but hashes to {actual}")]
     TxidMismatch {
@@ -55,7 +55,7 @@ pub(crate) enum TestError {
     #[error("vector row {row}: tx does not decode: {source}")]
     RowDecode {
         row: usize,
-        source: bitcoin_rs_primitives::DecodeError,
+        source: bitcoin_rs_consensus::primitives::DecodeError,
     },
     #[cfg(feature = "kernel")]
     #[error("vector row {row}: missing prevout for input {outpoint:?}")]
@@ -71,7 +71,7 @@ pub(crate) enum TestError {
     Interpreter {
         input: usize,
         #[source]
-        source: bitcoin_rs_script::ScriptError,
+        source: bitcoin_rs_consensus::script::ScriptError,
     },
     #[cfg(feature = "kernel")]
     #[error("interpreter rejected input {input}")]

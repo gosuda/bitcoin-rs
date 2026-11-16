@@ -2,7 +2,7 @@
 # Install the pinned Bitcoin Core 31.1 bitcoind used by the live differential.
 #
 # Downloads the official tarball for this platform from bitcoincore.org,
-# checks it against the SHA-256 pinned in crates/rpc/core-compat.toml, and
+# checks it against the SHA-256 pinned in crates/serving/core-compat.toml, and
 # extracts bitcoind. Prints the bitcoind path on stdout (log lines go to
 # stderr).
 #
@@ -85,7 +85,7 @@ cached_matches_pin() {
   version="$("${BITCOIND}" -version 2>/dev/null)" || return 1
   version="${version%%$'\n'*}"
   # Component-exact match against the canonical pin, mirroring
-  # crates/p2p/tests/core_interop_live.rs version_is_pinned_line: the pinned
+  # crates/wire/tests/core_interop_live.rs version_is_pinned_line: the pinned
   # "31.1" accepts 31.1(.N) but not 31.10(.N), 31.2(.N), or 30.1(.N).
   [[ "${version}" =~ ([0-9]+(\.[0-9]+)*) ]] || return 1
   local -a parsed=()

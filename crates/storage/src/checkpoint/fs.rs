@@ -10,7 +10,7 @@ use cap_std::fs::{Dir, File, OpenOptions};
 pub const CURRENT_SCHEMA_FILE: &str = "CURRENT_SCHEMA";
 pub const DATA_DIR_LOCK_FILE: &str = ".lock";
 const CURRENT_SCHEMA_TEMP_FILE: &str = ".CURRENT_SCHEMA.tmp";
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 pub fn open_data_dir(path: &Path) -> io::Result<Dir> {
     Dir::open_ambient_dir(path, ambient_authority())
@@ -58,7 +58,7 @@ pub fn ensure_current_schema(data: &Dir) -> io::Result<()> {
     }
 }
 
-fn validate_current_schema(bytes: &[u8]) -> io::Result<()> {
+fn validate_current_schema(bytes: &[u8]) -> Result<(), io::Error> {
     if bytes == current_schema_bytes().as_slice() {
         return Ok(());
     }
@@ -77,7 +77,7 @@ fn incompatible_schema(reason: impl Into<String>) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "{}; remove or replace the datadir and restart to perform a full resync",
+            "{}; convert it with bitcoin-rs-storage-convert --from <old> --to <new>, or resync into a new datadir",
             reason.into()
         ),
     )
@@ -310,17 +310,40 @@ fn check_confined_endpoint(name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Name of the nested engine-image directory a staged checkpoint generation
+/// writes under itself (`CheckpointStage::checkpoint_store`).
+pub(crate) const STAGED_STORE_DIR: &str = "chainstate";
+
+fn remove_engine_dir_content(dir: &Dir) -> io::Result<()> {
+    for entry in dir.entries()? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            let child = dir.open_dir_nofollow(&file_name)?;
+            remove_engine_dir_content(&child)?;
+            dir.remove_dir(&file_name)?;
+        } else {
+            dir.remove_file(&file_name)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn remove_known_dir(root: &CheckpointRoot, name: &str) -> io::Result<()> {
     let dir = root.open_dir(name)?;
     for entry in dir.entries()? {
         let entry = entry?;
         let file_name = entry.file_name();
-        let Some(file_name) = file_name.to_str() else {
-            continue;
-        };
-        let file_type = entry.file_type()?;
-        if file_type.is_file() {
-            dir.remove_file(file_name)?;
+        if entry.file_type()?.is_dir() {
+            if file_name != std::ffi::OsStr::new(STAGED_STORE_DIR) {
+                continue;
+            }
+            let child = dir.open_dir_nofollow(&file_name)?;
+            remove_engine_dir_content(&child)?;
+            dir.remove_dir(&file_name)?;
+        } else {
+            dir.remove_file(&file_name)?;
         }
     }
     drop(dir);

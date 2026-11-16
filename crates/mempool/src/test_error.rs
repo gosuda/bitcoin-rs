@@ -15,7 +15,7 @@ pub(crate) enum TestError {
     #[error("chain change error: {0}")]
     ChainChange(#[from] crate::ChainChangeError),
     #[error("hash error: {0}")]
-    Hash(#[from] bitcoin_rs_primitives::HashError),
+    Hash(#[from] bitcoin_rs_consensus::primitives::HashError),
     #[error("try-from-int error: {0}")]
     TryFromInt(#[from] core::num::TryFromIntError),
     #[error("consensus decode error: {0}")]

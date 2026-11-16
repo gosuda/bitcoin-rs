@@ -6,11 +6,10 @@ fn test_hash(byte: u8) -> Hash256 {
     Hash256::from_le_bytes(&[byte; 32])
 }
 
-#[cfg(feature = "redb")]
 #[test]
 fn a_deferred_undo_record_is_readable_before_any_flush() -> TestResult {
     let dir = tempfile::tempdir()?;
-    let store = Arc::new(crate::RedbStore::open(dir.path())?);
+    let store = Arc::new(crate::RocksDbStore::open(dir.path())?);
     let undo_store = KvUndoStore::new(Arc::clone(&store));
     let hash = Hash256::from_le_bytes(&[0x4d; 32]);
 
@@ -28,18 +27,17 @@ fn a_deferred_undo_record_is_readable_before_any_flush() -> TestResult {
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
 #[test]
 fn an_armed_disconnect_marker_survives_closing_and_reopening_the_store() -> TestResult {
     let dir = tempfile::tempdir()?;
     let block_hash = Hash256::from_le_bytes(&[0xa7; 32]);
 
     {
-        let store = Arc::new(crate::FjallStore::open(dir.path())?);
+        let store = Arc::new(crate::RocksDbStore::open(dir.path())?);
         KvUndoStore::new(store).arm_disconnect(140_003, block_hash)?;
     }
 
-    let reopened = Arc::new(crate::FjallStore::open(dir.path())?);
+    let reopened = Arc::new(crate::RocksDbStore::open(dir.path())?);
     let marker = KvUndoStore::new(Arc::clone(&reopened))
         .load_disconnect_marker()?
         .ok_or(TestError::Missing(
@@ -67,7 +65,7 @@ fn an_armed_disconnect_marker_survives_closing_and_reopening_the_store() -> Test
     KvUndoStore::new(Arc::clone(&reopened)).complete_disconnect(140_003, block_hash)?;
     KvUndoStore::new(Arc::clone(&reopened)).disarm_disconnect()?;
     drop(reopened);
-    let after = Arc::new(crate::FjallStore::open(dir.path())?);
+    let after = Arc::new(crate::RocksDbStore::open(dir.path())?);
     assert_eq!(
         KvUndoStore::new(after).load_disconnect_marker()?,
         None,
@@ -217,11 +215,10 @@ proptest! {
 }
 
 // RCV-15
-#[cfg(feature = "fjall")]
 #[test]
 fn a_corrupt_marker_row_fails_closed_and_stays_on_disk() -> TestResult {
     let dir = tempfile::tempdir()?;
-    let store = Arc::new(crate::FjallStore::open(dir.path())?);
+    let store = Arc::new(crate::RocksDbStore::open(dir.path())?);
     store.put(ColumnFamily::UtxoMeta, DISCONNECT_MARKER_KEY, b"short")?;
 
     let outcome = KvUndoStore::new(Arc::clone(&store)).load_disconnect_marker();
@@ -336,11 +333,10 @@ fn a_repeated_rollback_completion_for_the_same_block_succeeds() -> Result<(), St
 }
 
 // RCV-15
-#[cfg(feature = "fjall")]
 #[test]
 fn disarming_an_absent_marker_is_a_no_op() -> TestResult {
     let dir = tempfile::tempdir()?;
-    let undo = KvUndoStore::new(Arc::new(crate::FjallStore::open(dir.path())?));
+    let undo = KvUndoStore::new(Arc::new(crate::RocksDbStore::open(dir.path())?));
 
     undo.disarm_disconnect()?;
 
@@ -353,11 +349,10 @@ fn disarming_an_absent_marker_is_a_no_op() -> TestResult {
 }
 
 // EVT-05
-#[cfg(feature = "fjall")]
 #[test]
 fn a_backend_marker_cannot_be_completed_for_another_block() -> TestResult {
     let dir = tempfile::tempdir()?;
-    let undo = KvUndoStore::new(Arc::new(crate::FjallStore::open(dir.path())?));
+    let undo = KvUndoStore::new(Arc::new(crate::RocksDbStore::open(dir.path())?));
     undo.arm_disconnect(700, test_hash(0x70))?;
 
     let outcome = undo.complete_disconnect(701, test_hash(0x71));
@@ -378,15 +373,13 @@ fn a_backend_marker_cannot_be_completed_for_another_block() -> TestResult {
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
 struct ArmOnMarkerRead {
-    inner: Arc<crate::FjallStore>,
+    inner: Arc<crate::RocksDbStore>,
     next: parking_lot::Mutex<Option<(u32, Hash256)>>,
 }
 
-#[cfg(feature = "fjall")]
 impl ArmOnMarkerRead {
-    fn new(inner: Arc<crate::FjallStore>) -> Self {
+    fn new(inner: Arc<crate::RocksDbStore>) -> Self {
         Self {
             inner,
             next: parking_lot::Mutex::new(None),
@@ -398,7 +391,6 @@ impl ArmOnMarkerRead {
     }
 }
 
-#[cfg(feature = "fjall")]
 impl KvStore for ArmOnMarkerRead {
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let observed = self.inner.get(cf, key)?;
@@ -481,14 +473,42 @@ impl KvStore for ArmOnMarkerRead {
     fn arm_persist_fault(&self, fault: crate::PersistFault) {
         self.inner.arm_persist_fault(fault);
     }
+
+    fn multi_get(
+        &self,
+        cf: ColumnFamily,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<bytes::Bytes>>, StorageError> {
+        self.inner.multi_get(cf, keys)
+    }
+
+    fn ingest_sorted(
+        &self,
+        cf: ColumnFamily,
+        rows: &mut dyn Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        scratch: &std::path::Path,
+    ) -> Result<u64, StorageError> {
+        self.inner.ingest_sorted(cf, rows, scratch)
+    }
+
+    fn delete_range(&self, cf: ColumnFamily, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete_range(cf, start, end)
+    }
+
+    fn checkpoint(&self, dir: &std::path::Path) -> Result<(), StorageError> {
+        self.inner.checkpoint(dir)
+    }
+
+    fn engine_cache_bytes(&self) -> u64 {
+        self.inner.engine_cache_bytes()
+    }
 }
 
 // EVT-05
-#[cfg(feature = "fjall")]
 #[test]
 fn a_disconnect_armed_while_the_marker_is_disarmed_survives() -> TestResult {
     let dir = tempfile::tempdir()?;
-    let inner = Arc::new(crate::FjallStore::open(dir.path())?);
+    let inner = Arc::new(crate::RocksDbStore::open(dir.path())?);
     let gated = Arc::new(ArmOnMarkerRead::new(Arc::clone(&inner)));
     let undo = KvUndoStore::new(Arc::clone(&gated));
     undo.arm_disconnect(90, test_hash(0x90))?;
@@ -535,7 +555,6 @@ fn disconnect_marker_decode_rejects_oversized_slices() {
     }
 }
 
-#[cfg(feature = "fjall")]
 #[test]
 fn corrupt_marker_rows_fail_closed_across_all_store_operations() -> TestResult {
     let malformed_phase = {
@@ -554,7 +573,7 @@ fn corrupt_marker_rows_fail_closed_across_all_store_operations() -> TestResult {
 
     for &payload in bad_payloads {
         let dir = tempfile::tempdir()?;
-        let store = Arc::new(crate::FjallStore::open(dir.path())?);
+        let store = Arc::new(crate::RocksDbStore::open(dir.path())?);
         store.put(ColumnFamily::UtxoMeta, DISCONNECT_MARKER_KEY, payload)?;
         let undo = KvUndoStore::new(Arc::clone(&store));
 

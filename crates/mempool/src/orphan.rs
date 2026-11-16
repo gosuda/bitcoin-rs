@@ -1,6 +1,6 @@
 use crate::mutation::PeerToken;
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use bitcoin_rs_primitives::{Hash256, Tx, Txid, Wtxid};
+use bitcoin_rs_consensus::primitives::{Hash256, Tx, Txid, Wtxid};
 use hashbrown::{HashMap, HashSet};
 
 const DEFAULT_ORPHAN_QUOTA: usize = 100;

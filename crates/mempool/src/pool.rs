@@ -2,10 +2,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::{Bound, RangeInclusive};
 
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
 
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
 use hashbrown::{HashMap, HashSet};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
@@ -79,6 +79,8 @@ pub enum MempoolError {
     Policy(#[from] PolicyError),
     #[error("mempool full")]
     Full,
+    #[error("mempool delivery queue is full")]
+    DeliveryQueueFull,
     #[error("mempool spending index is inconsistent")]
     InconsistentSpendingIndex,
 }
@@ -120,9 +122,11 @@ pub struct Mempool {
     fee_delta_sequence: u64,
     estimator: FeeEstimator,
     mempool_sequence: u64,
+    snapshot_cache: parking_lot::Mutex<Option<Arc<MempoolMiningSnapshot>>>,
     pub(crate) accepted_capture: Option<Vec<(Txid, Arc<Tx>)>>,
     rolling_min_fee: parking_lot::Mutex<crate::rolling_min_fee::RollingMinFee>,
     rolling_epoch: u64,
+    settled_at_commit: u64,
 }
 
 #[derive(Debug, Default)]
@@ -469,11 +473,13 @@ impl Mempool {
             fee_delta_sequence: 0,
             estimator: FeeEstimator::new(),
             mempool_sequence: 0,
+            snapshot_cache: parking_lot::Mutex::new(None),
             accepted_capture: None,
             rolling_min_fee: parking_lot::Mutex::new(
                 crate::rolling_min_fee::RollingMinFee::default(),
             ),
             rolling_epoch: 0,
+            settled_at_commit: 0,
         }
     }
 
@@ -519,6 +525,20 @@ impl Mempool {
     #[must_use]
     pub const fn fee_delta_sequence_number(&self) -> u64 {
         self.fee_delta_sequence
+    }
+
+    #[must_use]
+    pub const fn settled_at_commit(&self) -> u64 {
+        self.settled_at_commit
+    }
+
+    #[must_use]
+    pub const fn settled_generation(&self) -> (u64, u64, u64) {
+        (
+            self.settled_at_commit,
+            self.mempool_sequence,
+            self.fee_delta_sequence,
+        )
     }
 
     #[must_use]
@@ -984,12 +1004,16 @@ impl Mempool {
         self.entry(self.entry_id_by_txid(txid)?)
     }
 
-    pub(crate) fn set_unbroadcast(&mut self, wtxid: bitcoin_rs_primitives::Wtxid, pending: bool) {
+    pub(crate) fn set_unbroadcast(
+        &mut self,
+        wtxid: bitcoin_rs_consensus::primitives::Wtxid,
+        pending: bool,
+    ) {
         self.broadcast_transition(wtxid, |entry| entry.broadcast_pending = pending);
     }
 
     /// Records a serve attempt's mark, taken before its bytes are sent.
-    pub(crate) fn mark_broadcast(&mut self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    pub(crate) fn mark_broadcast(&mut self, wtxid: bitcoin_rs_consensus::primitives::Wtxid) {
         self.broadcast_transition(wtxid, |entry| {
             entry.broadcast_marks = entry.broadcast_marks.saturating_add(1);
         });
@@ -998,7 +1022,7 @@ impl Mempool {
     /// A marked serve attempt committed: initial broadcast completed. A
     /// commit without a live mark belongs to a replaced entry and is
     /// ignored.
-    pub(crate) fn commit_broadcast(&mut self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    pub(crate) fn commit_broadcast(&mut self, wtxid: bitcoin_rs_consensus::primitives::Wtxid) {
         self.broadcast_transition(wtxid, |entry| {
             if entry.broadcast_marks > 0 {
                 entry.broadcast_marks -= 1;
@@ -1011,7 +1035,7 @@ impl Mempool {
     /// is still pending and no send ever committed or remains in flight, so
     /// an earlier failure cannot overwrite a peer's successful send or
     /// revive a replaced entry.
-    pub(crate) fn restore_broadcast(&mut self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    pub(crate) fn restore_broadcast(&mut self, wtxid: bitcoin_rs_consensus::primitives::Wtxid) {
         self.broadcast_transition(wtxid, |entry| {
             entry.broadcast_marks = entry.broadcast_marks.saturating_sub(1);
         });
@@ -1022,7 +1046,7 @@ impl Mempool {
     /// evicted or replaced — is left alone.
     fn broadcast_transition(
         &mut self,
-        wtxid: bitcoin_rs_primitives::Wtxid,
+        wtxid: bitcoin_rs_consensus::primitives::Wtxid,
         transition: impl FnOnce(&mut MempoolEntry),
     ) {
         let Some(&id) = self.derived.by_wtxid.get(&wtxid) else {
@@ -1036,7 +1060,7 @@ impl Mempool {
 
     /// Recomputes `entry.unbroadcast` from pending intent, in-flight marks,
     /// and the done latch, keeping the derived index in step.
-    fn sync_unbroadcast(&mut self, id: EntryId, wtxid: bitcoin_rs_primitives::Wtxid) {
+    fn sync_unbroadcast(&mut self, id: EntryId, wtxid: bitcoin_rs_consensus::primitives::Wtxid) {
         let Some(unbroadcast) = self.entry_mut(id).map(|entry| {
             entry.unbroadcast =
                 entry.broadcast_pending && !entry.broadcast_done && entry.broadcast_marks == 0;
@@ -1182,7 +1206,20 @@ impl Mempool {
     }
 
     #[must_use]
-    pub fn mining_snapshot(&self) -> MempoolMiningSnapshot {
+    pub fn mining_snapshot(&self) -> Arc<MempoolMiningSnapshot> {
+        let sequence = self.sequence_number();
+        let fee_delta_sequence = self.fee_delta_sequence;
+        if let Some(cached) = self.snapshot_cache.lock().as_ref() {
+            if cached.sequence == sequence && cached.fee_delta_sequence == fee_delta_sequence {
+                return Arc::clone(cached);
+            }
+        }
+        let snapshot = Arc::new(self.rebuild_mining_snapshot());
+        *self.snapshot_cache.lock() = Some(Arc::clone(&snapshot));
+        snapshot
+    }
+
+    fn rebuild_mining_snapshot(&self) -> MempoolMiningSnapshot {
         let order: Vec<EntryId> = self
             .derived
             .chunks
@@ -1467,48 +1504,43 @@ impl Mempool {
         self.remove_entry_and_descendants_into(id, reason, changes);
     }
 
-    #[must_use]
-    pub fn plan_block_removals(&self, block: &Block) -> BlockRemovalPlan {
-        let txids = block.txids();
-        let txs: Vec<&Tx> = block.txs.iter().collect();
-        self.plan_block_removals_from_txs(&txs, &txids)
-    }
-
-    fn plan_block_removals_from_txs(
+    pub fn plan_block_removals(
         &self,
-        block_txs: &[&Tx],
-        block_txids: &[Txid],
+        facts: &crate::settlement::TransitionFacts,
     ) -> BlockRemovalPlan {
-        assert_eq!(
-            block_txs.len(),
-            block_txids.len(),
-            "block transactions and validated txids must stay aligned"
-        );
         let mut planned: HashSet<EntryId> = HashSet::new();
         let mut removals: Vec<(EntryId, RemovalReason)> = Vec::new();
-        for (tx, txid) in block_txs.iter().zip(block_txids) {
+        let mut subtree = Vec::new();
+        for (txid, spent) in facts.confirmed.iter().zip(&facts.spent) {
             if let Some(id) = self.entry_id_by_txid(txid) {
                 if planned.insert(id) {
                     removals.push((id, RemovalReason::BlockInclusion));
                 }
             }
-            for root in self.conflicts_for(tx) {
-                if planned.contains(&root) {
-                    continue;
-                }
-                let mut subtree = Vec::new();
-                self.collect_unplanned_descendants(root, &planned, &mut subtree);
-                subtree.sort_unstable();
-                for id in subtree {
-                    if planned.insert(id) {
-                        removals.push((id, RemovalReason::Conflict));
+            for previous_output in spent {
+                for (_, id) in self
+                    .derived
+                    .spending
+                    .range(outpoint_range(*previous_output))
+                {
+                    let root = *id;
+                    if planned.contains(&root) {
+                        continue;
+                    }
+                    subtree.clear();
+                    self.collect_unplanned_descendants(root, &planned, &mut subtree);
+                    subtree.sort_unstable();
+                    for id in subtree.drain(..) {
+                        if planned.insert(id) {
+                            removals.push((id, RemovalReason::Conflict));
+                        }
                     }
                 }
             }
         }
         let mut seen_txids: HashSet<Txid> = HashSet::new();
         let mut fee_deltas_cleared = 0_u64;
-        for txid in block_txids {
+        for txid in &facts.confirmed {
             if seen_txids.insert(*txid) && self.fee_deltas.contains_key(txid) {
                 fee_deltas_cleared += 1;
             }
@@ -1646,28 +1678,33 @@ impl Mempool {
 
     pub fn remove_for_block(
         &mut self,
-        block_txs: &[&Tx],
-        block_txids: &[Txid],
+        facts: &crate::settlement::TransitionFacts,
         height: u32,
         now: u64,
     ) -> MutationResult {
-        assert_eq!(
-            block_txs.len(),
-            block_txids.len(),
-            "block transactions and validated txids must stay aligned"
-        );
-        self.estimator.block_connected(block_txids, height);
+        self.estimator.block_connected(&facts.confirmed, height);
 
-        let plan = self.plan_block_removals_from_txs(block_txs, block_txids);
+        let plan = self.plan_block_removals(facts);
         let mut changes = Vec::with_capacity(plan.removals.len());
         self.remove_entries_with_reasons(&plan.removals, &mut changes);
-        for txid in block_txids {
+        for txid in &facts.confirmed {
             if self.fee_deltas.remove(txid).is_some() {
                 self.fee_delta_sequence = MutationSequence::advance(self.fee_delta_sequence);
             }
         }
         self.rolling_min_fee.lock().note_block(now);
         self.finish_mutation(changes)
+    }
+
+    pub fn settle_for_block(
+        &mut self,
+        facts: &crate::settlement::TransitionFacts,
+        commit_id: u64,
+        height: u32,
+        now: u64,
+    ) -> MutationResult {
+        self.settled_at_commit = commit_id;
+        self.remove_for_block(facts, height, now)
     }
 
     #[must_use]
@@ -1733,6 +1770,11 @@ impl Mempool {
             }
         }
         self.finish_mutation(changes)
+    }
+
+    pub fn settle_for_reorg(&mut self, txids: &[Txid], commit_id: u64) -> MutationResult {
+        self.settled_at_commit = commit_id;
+        self.remove_for_reorg(txids)
     }
 
     #[cfg(any(test, feature = "test-seam"))]
@@ -2397,7 +2439,9 @@ fn outpoint_range(outpoint: OutPoint) -> RangeInclusive<(SpendingKey, EntryId)> 
 
 #[cfg(test)]
 fn txid_of(bytes: [u8; 32]) -> Txid {
-    Txid::from(bitcoin_rs_primitives::Hash256::from_le_bytes(&bytes))
+    Txid::from(bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(
+        &bytes,
+    ))
 }
 #[cfg(test)]
 mod package_tests {
@@ -2551,7 +2595,7 @@ mod spend_index_tests;
 mod dynamic_memory_usage_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut};
+    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Tx, TxIn, TxOut};
 
     use super::*;
 
@@ -2655,7 +2699,7 @@ mod dynamic_memory_usage_tests {
 mod entry_overhead_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_primitives::Tx;
+    use bitcoin_rs_consensus::primitives::Tx;
 
     use super::*;
 

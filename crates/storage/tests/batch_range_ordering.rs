@@ -1,5 +1,3 @@
-#![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
-
 use std::path::Path;
 
 use bitcoin_rs_storage::{
@@ -177,37 +175,11 @@ fn range_fault_laws<S: KvStore>(open: impl Fn(&Path) -> Result<S, StorageError>)
     Ok(())
 }
 
-#[cfg(feature = "fjall")]
-#[test]
-fn fjall_range_ordering_and_reopen() -> TestResult {
-    range_ordering_laws(|path| bitcoin_rs_storage::FjallStore::open(path))
-}
-
-#[cfg(feature = "redb")]
-#[test]
-fn redb_range_ordering_and_reopen() -> TestResult {
-    range_ordering_laws(|path| bitcoin_rs_storage::RedbStore::open(path))
-}
-
-#[cfg(feature = "rocksdb")]
 #[test]
 fn rocksdb_range_ordering_and_reopen() -> TestResult {
     range_ordering_laws(|path| bitcoin_rs_storage::RocksDbStore::open(path))
 }
 
-#[cfg(feature = "fjall")]
-#[test]
-fn fjall_range_faults_preserve_atomicity_and_error_receipts() -> TestResult {
-    range_fault_laws(|path| bitcoin_rs_storage::FjallStore::open(path))
-}
-
-#[cfg(feature = "redb")]
-#[test]
-fn redb_range_faults_preserve_atomicity_and_error_receipts() -> TestResult {
-    range_fault_laws(|path| bitcoin_rs_storage::RedbStore::open(path))
-}
-
-#[cfg(feature = "rocksdb")]
 #[test]
 fn rocksdb_range_faults_preserve_atomicity_and_error_receipts() -> TestResult {
     range_fault_laws(|path| bitcoin_rs_storage::RocksDbStore::open(path))

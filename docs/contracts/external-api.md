@@ -13,27 +13,27 @@ wallet interoperability remain unverified.
 
 ### `API-01`: Single manifest owner
 
-- `REGISTRY` in `crates/rpc/src/registry.rs` is the single source of truth for RPC, REST and ZMQ. Each row binds one dispatch arm to one compatibility claim.
-- `MANIFEST` in `crates/rpc/src/manifest.rs` projects those rows.
+- `REGISTRY` in `crates/serving/src/registry.rs` is the single source of truth for RPC, REST and ZMQ. Each row binds one dispatch arm to one compatibility claim.
+- `MANIFEST` in `crates/serving/src/manifest.rs` projects those rows.
 - A JSON-RPC method answers only when a non-`Unimplemented` row carries its name.
 - No second route inventory exists.
 - Each `Entry` carries `name`, `kind` (`Rpc`, `Rest`, `Zmq`), `status`, `feature`, `core_version`, `notes`, and `since`.
 - Each `Entry` also carries required capabilities, error behavior, consistency class, resource budget, and evidence scenario.
 - `Status` is `Supported`, `Deviation`, `Implemented (unverified)`, `Extension`, `Disabled`, or `Unimplemented`.
-- `[reference].differential_harness` in `crates/rpc/core-compat.toml` gates `Supported`.
+- `[reference].differential_harness` in `crates/serving/core-compat.toml` gates `Supported`.
 - Compatibility class, runtime readiness, and observed proof stay separate facts.
 - Unsupported Core surfaces stay `Unimplemented` and answer `RpcError::MethodNotFound` (`-32601`).
 - No wallet-only RPC is a disguised successful no-op.
 - The build generates `docs/rpc-reference.md` from the registry. Maintainers MUST NOT edit that file by hand.
-- `crates/rpc/tests/manifest_coverage.rs` enforces set equality between registry and live dispatch in both directions.
-- The test regenerates the reference (`REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test suite manifest_coverage::regenerate_reference -- --ignored`).
+- `crates/serving/tests/manifest_coverage.rs` enforces set equality between registry and live dispatch in both directions.
+- The test regenerates the reference (`REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-serving --test suite manifest_coverage::regenerate_reference -- --ignored`).
 
 ### `API-02`: JSON-RPC mechanics and the wallet-free surface
 
 - Parameter type and coercion rules follow the pinned Core 31.1 contract.
 - Named and positional forms, declared JSON-RPC 1 and 2 envelopes, notifications, authentication, and error ordering also follow that contract.
-- Object `params` bind per method: `bind_named_params` (`crates/rpc/src/handlers.rs`) is the counterpart of Core's `transformNamedArguments` with its per-command arg names (`src/rpc/server.cpp`), reordering a named object into the positional array the handler already parses (null-filled holes, the `args` positional prefix, Core's `-8` for duplicate/unknown names). An *empty* params object is accepted for every method exactly like `[]`/absent, unconditionally in the envelope (`server.rs::handle_single_json`, where Core likewise resolves `{}` to no arguments). Coverage of *non-empty* named objects is per-method and incremental: it exists only where parameter names are declared to the binder — every registry row that carries a parameter list (`getblocktweaks`, `getblockhash`, `getblockheader`, `getblock`, `gettxoutsetinfo`, `scantxoutset`, `gettxout`, `sendrawtransaction`, `testmempoolaccept`, `decoderawtransaction`, `compressrawtransaction`, `decompressrawtransaction`, `createrawtransaction`, `finalizepsbt`, `getrawmempool`, `getmempoolancestors`, `getmempooldescendants`, `estimatesmartfee`, `getdescriptorinfo`, `deriveaddresses`, `disconnectnode`, `setban`, `getnodeaddresses`, `generatetoaddress`, `generateblock`, `dumptxoutset`, `getblockfilter`, `getdeploymentinfo`, the `waitfor*` waits, `decodescript`, and `submitpackage`) plus handler-level declarations (`setnetworkactive`, `addnode`, `submitheader`, `loadtxoutset`, and the silent-payments extension). A method without a name map keeps rejecting named objects with its local `-32602` shape error — an honest partial deviation, not a silent reordering; callers use positional or named forms as Core documents.
-- The server validates the envelope before dispatch (`crates/rpc/src/server.rs::handle_single_json`, mirroring `src/rpc/request.cpp`).
+- Object `params` bind per method: `bind_named_params` (`crates/serving/src/handlers.rs`) is the counterpart of Core's `transformNamedArguments` with its per-command arg names (`src/rpc/server.cpp`), reordering a named object into the positional array the handler already parses (null-filled holes, the `args` positional prefix, Core's `-8` for duplicate/unknown names). An *empty* params object is accepted for every method exactly like `[]`/absent, unconditionally in the envelope (`server.rs::handle_single_json`, where Core likewise resolves `{}` to no arguments). Coverage of *non-empty* named objects is per-method and incremental: it exists only where parameter names are declared to the binder — every registry row that carries a parameter list (`getblocktweaks`, `getblockhash`, `getblockheader`, `getblock`, `gettxoutsetinfo`, `scantxoutset`, `gettxout`, `sendrawtransaction`, `testmempoolaccept`, `decoderawtransaction`, `compressrawtransaction`, `decompressrawtransaction`, `createrawtransaction`, `finalizepsbt`, `getrawmempool`, `getmempoolancestors`, `getmempooldescendants`, `estimatesmartfee`, `getdescriptorinfo`, `deriveaddresses`, `disconnectnode`, `setban`, `getnodeaddresses`, `generatetoaddress`, `generateblock`, `dumptxoutset`, `getblockfilter`, `getdeploymentinfo`, the `waitfor*` waits, `decodescript`, and `submitpackage`) plus handler-level declarations (`setnetworkactive`, `addnode`, `submitheader`, `loadtxoutset`, and the silent-payments extension). A method without a name map keeps rejecting named objects with its local `-32602` shape error — an honest partial deviation, not a silent reordering; callers use positional or named forms as Core documents.
+- The server validates the envelope before dispatch (`crates/serving/src/server.rs::handle_single_json`, mirroring `src/rpc/request.cpp`).
 - A non-null `jsonrpc` field MUST be a string `"1.0"` (accepted legacy) or `"2.0"`.
 - `params` MUST be an array, object, or `null`.
 - `method` MUST be present and MUST be a string.
@@ -52,7 +52,7 @@ wallet interoperability remain unverified.
 - An all-notification batch answers 204 with no body.
 - A batch drops a v2 notification member with a refused envelope, matching Core's `IsNotification` gate.
 - The same object sent alone reports its refusal.
-- Failures map through `RpcError` (`crates/rpc/src/error.rs`): `-32700`, `-32600`..=`-32603`, plus Core `-1`, `-3`, `-5`, `-8`, `-9`, `-10`, `-22`, `-25`, and `-26`.
+- Failures map through `RpcError` (`crates/serving/src/error.rs`): `-32700`, `-32600`..=`-32603`, plus Core `-1`, `-3`, `-5`, `-8`, `-9`, `-10`, `-22`, `-25`, and `-26`.
 - `createrawtransaction` consumes only `inputs`, `outputs`, `locktime`, and `replaceable`.
 - The version stays 2, and `replaceable` defaults to false.
 - A named `version` is unknown (`-8`).
@@ -98,7 +98,7 @@ wallet interoperability remain unverified.
 - Bare P2PK/multisig keeps Core syntactic key handling.
 - This is an input and work limit, not a response-size limit.
 - Pinned matrix: `overhaul_process_harness::script_decode_cases` (classes, encodings, wrappers, checksums, params, networks, shared projections).
-- `gettxoutproof` without `blockhash` finds the block from the UTXO set: it answers `has_live_outputs_for_txid` once per requested txid in ascending txid order (an absent txid costs one lookup), checks the request latch before each txid, and answers from the first txid that holds a live output (`MAX_OUTPUTS_PER_BLOCK` vouts per txid).
+- `gettxoutproof` without `blockhash` finds the block from the UTXO set. It reads and decodes at most one `CoinStore` record per requested txid in ascending txid order, checks the request latch before each txid, and answers from the first txid with a live output below `MAX_OUTPUTS_PER_BLOCK`. Within that record, it uses the lowest qualifying vout.
 - Missing block data answers Core `-1` (`Block not available (pruned data)` on a pruned node, `Block not available (not fully downloaded)` otherwise); a body that does not decode answers Core `-32603` (`Can't read block from disk`); an empty txid list answers Core `-8`, a duplicated txid answers Core `-8` naming the raw input, and a non-string `blockhash` answers a Core `-3` type error.
 - With no unspent coin, it consults the txindex about the first txid only.
 - With neither source, it answers Core `-5` (`Transaction not yet in block`) and reads no block body.
@@ -106,10 +106,11 @@ wallet interoperability remain unverified.
 - With `blockhash`, it reads only that block.
 - Both forms take the request latch and poll it. Neither holds a blocking-quota slot (`API-34`).
 - The registry declares `Interruptible`.
+- `gettxout` and `gettxoutproof` answer Core `-32603` when the coin store cannot read or decode a coin row. They never answer `null` for that coin and never fall back to the txindex.
 
 #### Retained block inputs
 
-- `getblock` verbosity 2/3, `getrawtransaction` verbosity 2 and `/rest/spenttxouts` share one read-only `utxo::contract::BlockUndoSource` implemented by the chainstate owner.
+- `getblock` verbosity 2/3, `getrawtransaction` verbosity 2 and `/rest/spenttxouts` share one read-only `BlockUndoSource` (defined in `crates/consensus/src/undo.rs`, re-exported by `bitcoin_rs_storage::utxo::contract`) and implemented by `bitcoin_rs_execution::Chainstate` in `crates/execution/src/block_spends.rs`.
 - RPC captures one `AppliedView` for confirmations/next-block linkage and passes its hash.
 - A moved applied hash, durable receipt (including archive-only commits), or expired retention lease refuses the response.
 - An in-flight prune reservation provisional error requires consumers to wait and retry instead of rebuilding.
@@ -117,7 +118,7 @@ wallet interoperability remain unverified.
 - Successful undo is complete and input-ordered.
 - Same-block inputs come from earlier transactions in the authenticated body.
 - External inputs come from native net undo.
-- BIP30 overwritten-output restores are not input rows.
+- BIP30 overwritten outputs are undo removes, not restores; disconnect drops them without recovering the replaced coin, as Bitcoin Core.
 - The implementation uses no present-day UTXO lookup and no invented coin.
 - The native version-1 undo format is unchanged.
 - A retained body with uncertified or pruned undo MAY omit fee and prevout fields in `getblock` and `getrawtransaction`.
@@ -163,7 +164,7 @@ wallet interoperability remain unverified.
 - It then searches the block for its row under the shared render permit.
 - No measurement claim is established here.
 - Storage boundaries provide bounded reads with safe unsupported defaults, never an unbounded fallback.
-- These include Fjall value checks, redb read guards, and RocksDB pinned values before the owned copy.
+- These include RocksDB pinned values and bounded read guards before the owned copy.
 - Backend pages, caches, and decompression remain outside the copy bound.
 - Block reads bound locator and frame length before allocation.
 - Custom stores MUST implement the bounded reads before serving this capability.
@@ -245,12 +246,12 @@ wallet interoperability remain unverified.
 - Malformed hashes return `-8`.
 - REST keeps its JSON-only format with 400 for malformed or unknown hashes.
 - Excess arguments keep the local JSON-RPC parameter-shape error, not Core help text.
-- Envelope proof: `crates/rpc/src/server.rs` envelope and batch tests plus `crates/rpc/tests/auth.rs` legacy-envelope pin.
+- Envelope proof: `crates/serving/src/server.rs` envelope and batch tests plus `crates/serving/tests/auth.rs` legacy-envelope pin.
 - Pinned Core sources: `src/rpc/request.cpp`, `src/httprpc.cpp` (rules read from pinned source, no Core binary run).
 
 ### `API-03`: REST dialect
 
-- REST keeps its own HTTP semantics in `crates/rpc/src/rest.rs` (status codes, content types, empty bodies, not-found).
+- REST keeps its own HTTP semantics in `crates/serving/src/rest.rs` (status codes, content types, empty bodies, not-found).
 - No generic JSON-RPC error handler spans the dialects.
 - Formats are `json` (`application/json`), `hex` (`text/plain`), and `bin` (`application/octet-stream`).
 - A disabled gateway or unknown path returns 404.
@@ -261,6 +262,7 @@ wallet interoperability remain unverified.
 - JSON bodies, mixed input sources, malformed or trailing data, and oversized requests fail with HTTP 400.
 - Empty serialized vectors are valid; URI requests still require outpoints.
 - Plain coin reads capture tip and coins under the stable chain read role.
+- A coin store read or decode error returns HTTP 500 for `/rest/getutxos`, never a bitmap miss.
 - Mixed reads retain one pool view and reject a changed or odd chain generation.
 - Rendering happens after guards are dropped.
 - Pool-created outputs use Core REST `MEMPOOL_HEIGHT` (2147483647).
@@ -271,7 +273,7 @@ wallet interoperability remain unverified.
 
 ### `API-04`: ZMQ notification contract
 
-- `crates/rpc/src/zmq.rs` owns declared Core topics `hashblock`, `hashtx`, `rawblock`, `rawtx`, and `sequence`.
+- `crates/serving/src/zmq.rs` owns declared Core topics `hashblock`, `hashtx`, `rawblock`, `rawtx`, and `sequence`.
 - It preserves Core byte order, sequence counters, and connect, disconnect, and mempool ordering.
 - The `sequence` body frame is reversed txid (32 bytes) + label byte (1) + little-endian sequence (8): 41 bytes total.
 - `BlockInclusion` emits no `R` frame; every other removal reason does.
@@ -283,7 +285,7 @@ wallet interoperability remain unverified.
 
 ### `API-05`: Solo-mining generate path
 
-- Owner: `MiningControl::generate` (`crates/mining/src/control.rs`) via `MiningCoordinator::generate` (`crates/node/src/mining.rs`), assembling each block through `MiningService::assemble_fresh`.
+- Owner: `MiningControl::generate` (`crates/serving/src/mining/control.rs`) via `MiningCoordinator::generate` (`crates/node/src/mining.rs`), assembling each block through `MiningService::assemble_fresh`.
 - Each block is a fresh candidate (no GBT cache).
 - `generateblock` validates the unsolved block first (`API-30`).
 - Both generate paths solve and then either submit through the chainstate owner or dry-validate through `Chainstate::validate_block` (`ARCH-07`).
@@ -306,7 +308,7 @@ wallet interoperability remain unverified.
 
 ### `API-06`: `getnetworkhashps` snapshot and invalid-height behavior
 
-- Owner: `network_hash_ps` in `crates/mining/src/network_hashps.rs`.
+- Owner: `network_hash_ps` in `crates/serving/src/mining/network_hashps.rs`.
 - The node coordinator supplies only the locked block tree and one applied-tip snapshot.
 - Height checks and the hash-rate walk use that snapshot plus locked tree, never a second tip load.
 - The window is Core's parent walk (`lookup` parent pointers from the resolved start, min/max header time, `chainwork` delta).
@@ -319,7 +321,7 @@ wallet interoperability remain unverified.
 
 ### `API-07`: RPC fixture reference provenance
 
-- Owner: the corpus loader in `crates/rpc/tests/support/fixture.rs` owns `core_version` and `core_binary_sha256` pins and their validation.
+- Owner: the corpus loader in `crates/serving/tests/support/fixture.rs` owns `core_version` and `core_binary_sha256` pins and their validation.
 - Every fixture records the version and exact binary digest of its capture.
 - Missing, empty, or mismatched values fail loading before replay.
 - The pins describe the released Core node used for recorded responses.
@@ -391,8 +393,8 @@ wallet interoperability remain unverified.
 
 ### `API-11`: BIP22/BIP23 template extras
 
-- Owner: `template_from_candidate` in `crates/mining/src/coordinator.rs` via `MiningService::get_block_template`.
-- JSON projection: `render_block_template` in `crates/rpc/src/handlers/mining.rs`.
+- Owner: `template_from_candidate` in `crates/node/src/mining/coordinator.rs` via `MiningService::get_block_template`.
+- JSON projection: `render_block_template` in `crates/serving/src/handlers/mining.rs`.
 - Capabilities are the producer's implemented set (`proposal`, `longpoll`).
 - Client-advertised names are not echoed back.
 - `submitold` and `workid` are unmodeled BIP23 extras and are never emitted.
@@ -416,9 +418,9 @@ wallet interoperability remain unverified.
 
 ### `API-12`: Mainnet template operational gates
 
-- Owner: `ensure_template_ready` in `crates/rpc/src/handlers/mining.rs`.
+- Owner: `ensure_template_ready` in `crates/serving/src/handlers/mining.rs`.
 - Template mode on mainnet requires at least one live peer in `PeerTable`.
-- Template mode on mainnet also requires leaving IBD (`!ctx.chain.ibd.is_active(now, network)`, latch in `crates/chain/src/ibd.rs`).
+- Template mode on mainnet also requires leaving IBD (`!ctx.chain.ibd.is_active(now, network)`, latch in `crates/execution/src/chain/ibd.rs`).
 - Failures return Core `-9` (`bitcoin-rs is not connected!`) and `-10` (`bitcoin-rs is in initial sync and waiting for blocks...`).
 - Proposal mode skips these gates.
 - Non-mainnet networks skip these gates (Core `IsTestChain()`).
@@ -427,7 +429,7 @@ wallet interoperability remain unverified.
 
 - Owner: `MiningCoordinator::submit_header` in `crates/node/src/mining.rs`.
 - RPC decodes hex and projects the result; it does not admit headers.
-- Reject projection is `header_reject_reason` in `crates/mining/src/bip22.rs`.
+- Reject projection is `header_reject_reason` in `crates/serving/src/mining/bip22.rs`.
 - Authoritative admission is `Chainstate::admit_headers`.
 - Decode failures (invalid hex, fewer than 80 bytes) return Core `-22` (`Block header decode failed`).
 - Extra bytes after an 80-byte header are ignored (Core `DecodeHexBlockHeader`).
@@ -444,7 +446,7 @@ wallet interoperability remain unverified.
 
 ### `API-14`: GBT client-rule negotiation
 
-- Owner: `ensure_client_rules_for_template` and `ensure_client_supports_mandatory_rules` in `crates/rpc/src/handlers/mining.rs`.
+- Owner: `ensure_client_rules_for_template` and `ensure_client_supports_mandatory_rules` in `crates/serving/src/handlers/mining.rs`.
 - Template mode requires the client to list `segwit`.
 - On signet, template mode also requires `signet`.
 - Failures return Core `-8` with Core exact messages (`getblocktemplate must be called with the segwit rule set ...`, `... signet rule set ...`).
@@ -454,9 +456,9 @@ wallet interoperability remain unverified.
 
 ### `API-15`: `submitblock` decode
 
-- Owner: `decode_submitted_block` in `crates/rpc/src/handlers/mining.rs`.
-- Admission stays on the single `MiningControl::submit_block(BlockPayload)`.
-- The decoder hex-decodes the input and runs one shared decode via `BlockPayload::from_prefix`.
+- Owner: `decode_submitted_block` in `crates/serving/src/handlers/mining.rs`.
+- Admission stays on the single `MiningControl::submit_block(BlockImage)`.
+- The decoder hex-decodes the input and runs one shared decode via `BlockImage::from_prefix`.
 - It retains only the consumed prefix and discards the remainder.
 - Invalid hex or an incomplete block returns Core `-22` (`Block decode failed`, Core `DecodeHexBlk`).
 - Extra bytes after a complete block are ignored.
@@ -466,7 +468,7 @@ wallet interoperability remain unverified.
 
 ### `API-16`: GBT proposal request parsing
 
-- Owner: `parse_block_template_request` in `crates/rpc/src/handlers/mining.rs`.
+- Owner: `parse_block_template_request` in `crates/serving/src/handlers/mining.rs`.
 - An unknown or non-string `mode` returns Core `-8` (`Invalid mode`).
 - Proposal does not require listing the `proposal` capability.
 - Missing `data` returns Core `-3` (`Missing data String key for proposal`) with no `invalid type:` prefix.
@@ -476,7 +478,7 @@ wallet interoperability remain unverified.
 
 ### `API-17`: `submitblock` uncommitted witness nonce
 
-- Owner: `update_uncommitted_block_structures` in `crates/mining/src/coinbase.rs`, called from `MiningCoordinator::submit_block` in `crates/node/src/mining.rs`.
+- Owner: `update_uncommitted_block_structures` in `crates/serving/src/mining/coinbase.rs`, called from `MiningCoordinator::submit_block` in `crates/node/src/mining.rs`.
 - The miner applies read-only fill-need signals on the borrowed payload and submits directly when no fill applies (no re-encode/clone).
 - Only a possible fill trial-clones and submits `from_local` of the filled clone.
 - The previous header must be known, and SegWit must be active for the height.
@@ -498,9 +500,9 @@ wallet interoperability remain unverified.
 
 ### `API-19`: BIP22 reject reasons
 
-- Owner: `bip22_reject_reason` in `crates/node/src/mining.rs` for `ApplyError` arms, delegating to `consensus_reject_reason` and `chain_reject_reason` in `crates/mining/src/bip22.rs`.
+- Owner: `bip22_reject_reason` in `crates/node/src/mining.rs` for `ApplyError` arms, delegating to `consensus_reject_reason` and `chain_reject_reason` in `crates/serving/src/mining/bip22.rs`.
 - Proposal and `submitblock` project apply and consensus failures as Core `GetRejectReason` strings (`bad-cb-missing`, `bad-txnmrklroot`, `bad-cb-amount`, `high-hash`, `time-too-old`, ...).
-- Operational refusals (`Shutdown`, journal backpressure) stay `inconclusive`.
+- Operational refusals (`Shutdown`, a closed-for-recovery chainstate) stay `inconclusive`.
 - The first failing check names the reason.
 - Context-free checks run in Core `CheckBlock` order: merkle root and mutation, size limits, coinbase placement, transaction checks, then legacy sigops.
 - Witness malleation and block weight run after them, in Core `ContextualCheckBlock` order.
@@ -512,7 +514,7 @@ wallet interoperability remain unverified.
 
 ### `API-20`: GBT `vbrequired` is always 0
 
-- Owner: `template_from_candidate` in `crates/mining/src/coordinator.rs` via `MiningService::get_block_template`.
+- Owner: `template_from_candidate` in `crates/node/src/mining/coordinator.rs` via `MiningService::get_block_template`.
 - Signalling deployments read from the applied tree through the node `ChainContextSource`.
 - Core v31 hardcodes `vbrequired` to 0.
 - Signalling deployments still appear in `vbavailable`.
@@ -531,14 +533,14 @@ wallet interoperability remain unverified.
 
 ### `API-22`: GBT `coinbaseaux.flags` is empty hex
 
-- Owner: `render_block_template` in `crates/rpc/src/handlers/mining.rs`.
+- Owner: `render_block_template` in `crates/serving/src/handlers/mining.rs`.
 - Core v31 emits `coinbaseaux: { "flags": HexStr(COINBASE_FLAGS) }`.
 - The flags bytes are empty, so the hex string is `""`.
 - An empty object is not the Core shape.
 
 ### `API-23`: `prioritisetransaction` dummy and `fee_delta`
 
-- Owner: `prioritisetransaction` in `crates/rpc/src/handlers/mining.rs`.
+- Owner: `prioritisetransaction` in `crates/serving/src/handlers/mining.rs`.
 - Core reads `fee_delta` from params[2].
 - The deprecated dummy (params[1]) MUST be omitted, null or numeric zero.
 - Any other value returns `-8` (`Priority is no longer supported, dummy argument to prioritisetransaction must be 0.`).
@@ -546,7 +548,7 @@ wallet interoperability remain unverified.
 
 ### `API-24`: `prioritisetransaction` refuses pooled dust
 
-- Owner: `prioritisetransaction` in `crates/rpc/src/handlers/mining.rs`.
+- Owner: `prioritisetransaction` in `crates/serving/src/handlers/mining.rs`.
 - Core v31 rejects a mempool transaction with dust outputs when `require_standard` is set.
 - That rejection returns `-8` (`Priority is not supported for transactions with dust outputs.`).
 - `require_standard` follows Core's `-acceptnonstdtxn` default (enforced everywhere except regtest).
@@ -556,14 +558,14 @@ wallet interoperability remain unverified.
 
 ### `API-25`: `getmininginfo` omits unset optional fields
 
-- Owner: `render_mining_info` in `crates/rpc/src/handlers/mining.rs`.
+- Owner: `render_mining_info` in `crates/serving/src/handlers/mining.rs`.
 - Core pushes `currentblockweight`, `currentblocktx`, and `signet_challenge` only when set.
 - Unset optional fields are omitted, not JSON `null`, via `typed_to_sonic_omitting_nulls`.
 
 ### `API-26`: `estimatesmartfee` parameters and Esplora fee estimates
 
-- Owners: `estimatesmartfee` in `crates/rpc/src/handlers/util.rs`.
-- Esplora owner: `/fee-estimates` in `crates/rpc/src/esplora/public.rs`.
+- Owners: `estimatesmartfee` in `crates/serving/src/handlers/util.rs`.
+- Esplora owner: `/fee-estimates` in `crates/serving/src/esplora/public.rs`.
 - `conf_target` MUST be in `1..=1008` (Core `MAX_CONFIRM_TARGET`), else `-8` (`Invalid conf_target, must be between 1 and 1008`).
 - `estimate_mode` is optional case-insensitive `UNSET`/`ECONOMICAL`/`CONSERVATIVE` (Core `FeeModeFromString`).
 - Unknown strings return `-8` (`Invalid estimate_mode parameter, ...`).
@@ -580,7 +582,7 @@ wallet interoperability remain unverified.
 
 ### `API-27`: `generateblock` txid and raw-tx parse errors
 
-- Owner: `parse_generateblock_transactions` in `crates/rpc/src/handlers/mining.rs`.
+- Owner: `parse_generateblock_transactions` in `crates/serving/src/handlers/mining.rs`.
 - A 64-character hex string is Core `Txid::FromHex`.
 - A txid missing from the mempool returns `-5` (`Transaction {str} not in mempool.`, caller's string).
 - Anything else is Core `DecodeHexTx`.
@@ -589,7 +591,7 @@ wallet interoperability remain unverified.
 
 ### `API-28`: `getprioritisedtransactions` `modified_fee` is satoshis
 
-- Owner: `getprioritisedtransactions` in `crates/rpc/src/handlers/mining.rs`.
+- Owner: `getprioritisedtransactions` in `crates/serving/src/handlers/mining.rs`.
 - Core mining RPCs use satoshis, not BTC.
 - `fee_delta` is an integer satoshi overlay.
 - `modified_fee` (actual fee plus delta, present only when `in_mempool`) is the same unit.
@@ -597,7 +599,7 @@ wallet interoperability remain unverified.
 
 ### `API-29`: generate invalid-output text
 
-- Owners: `generateblock_payout_script` in `crates/rpc/src/handlers/util.rs`; `generatetoaddress` in `crates/rpc/src/handlers/mining.rs`.
+- Owners: `generateblock_payout_script` in `crates/serving/src/handlers/util.rs`; `generatetoaddress` in `crates/serving/src/handlers/mining.rs`.
 - `generatetoaddress` refuses a non-address with `-5` (`Error: Invalid address`).
 - `generateblock` tries a descriptor first (`require_checksum = false`).
 - Ranged and multipath descriptors return `-8` (`API-31`).
@@ -614,10 +616,10 @@ wallet interoperability remain unverified.
 - An ordered candidate refused by the mining sigop preflight also returns this `-25` (`bad-blk-sigops`), not an operational `Failed`.
 - `generatetoaddress` (`Mempool`) matches Core `generateBlocks` and skips it.
 - The check calls `apply::validate_block` directly (`ApplyIntent::Propose` already skips hash-meets-target), not GBT `propose` (`API-18` vocabulary).
-- Shutdown and journal backpressure stay `Unavailable`, not `TestBlockValidity`.
+- Shutdown and a closed-for-recovery chainstate stay `Unavailable`, not `TestBlockValidity`.
 ### `API-31`: `generateblock` multipath, ranged, and Expand errors
 
-- Owner: `generateblock_payout_script` in `crates/rpc/src/handlers/util.rs`.
+- Owner: `generateblock_payout_script` in `crates/serving/src/handlers/util.rs`.
 - Core `getScriptFromDescriptor` throws before the address fallback.
 - More than one parsed descriptor returns `-8` (`Multipath descriptor not accepted`).
 - `IsRange()` returns `-8` (`Ranged descriptor not accepted. Maybe pass through deriveaddresses first?`).
@@ -652,13 +654,13 @@ wallet interoperability remain unverified.
 - `loadtxoutset(path)` synchronously reads an unmodified Core v2 `dumptxoutset` file.
 - Positional `[path]` and named `{ "path": path }` are accepted.
 - Relative paths resolve below the datadir.
-- Input MUST be a regular file outside the node's `assumeutxo` recovery namespace.
+- Input MUST be a regular file.
 - The shared UTXO codec applies finite resource limits.
 - It resolves height, commitment, and cumulative transaction count only from the compiled network anchor matching the header base hash.
 - The decoded state MUST reproduce `hash_serialized_3` (a parsed header is not authentication).
 - One file import per node may materialize at a time.
-- Portable RPC and native-v4 embedding share that permit and reject an existing activation before opening/decoding.
-- Archive publication and abandoned-reservation cleanup follow `ARCH-07b`.
+- Portable RPC import holds the one-file permit and rejects an existing activation before opening/decoding.
+- Activation publishes the snapshot-base checkpoint and removes no operator file.
 - Activation requires an empty mempool and retains operator fee prioritisation.
 - Orphan reconsideration policy, bounds, and settlement are owned by `MPL-04` in `mempool-mutations.md`.
 - Activation runs through `AssumeUtxoManager` with consumer reconciliation and a lifecycle-protected admission recheck.
@@ -669,7 +671,7 @@ wallet interoperability remain unverified.
 - The installation boundary also rejects repeated activation, missing headers, and an existing full-revalidation requirement.
 - It also rejects a base without strictly greater cumulative work than the settled tip.
 - Height alone does not rank branches; equal work is refused (no Core block-availability tie-breaker parity).
-- Native v4 checkpoints stay internal recovery artifacts and are not accepted.
+- Checkpoints stay internal recovery artifacts and are not accepted as import input.
 - Result: `coins_loaded` (unspent outputs, not txid records), `tip_hash`, `base_height`, and UTF-8 display of the absolute input `path`.
 - The path is rendered before activation; non-UTF-8 bytes are replaced only in this display.
 - Path and open failures return `-8`.
@@ -701,7 +703,7 @@ wallet interoperability remain unverified.
 - Missing, null, empty, or any other string returns `-8`.
 - An unknown named parameter (e.g. `rollback`) also returns `-8`.
 - Relative `path` resolves below the datadir and its final component MUST be UTF-8.
-- Nothing is ever replaced: any existing destination (including named pipes) or one under the recovery namespace is refused with `-8`.
+- Nothing is ever replaced: any existing destination (including named pipes) is refused with `-8`.
 - The export is one coherent view.
 - It takes chain-transition exclusion then the stable UTXO view.
 - It reads tip plus chain transaction count holding both, and holds both until the last coin is encoded.
@@ -727,9 +729,9 @@ wallet interoperability remain unverified.
 - Interrupted export or full blocking quota returns `-1`.
 - Error `-32603` covers no-rename platform, closed admission, missing applied tip, unestablished chain tx count, concurrent export, and encode/write/length/sync failure.
 - Export evidence needs the pinned Core 31.1 `bitcoind`.
-- Test `e2e/tests/assumeutxo.rs::bitcoin_rs_export_is_accepted_by_a_fresh_core_node` submits the 200 fixture blocks and compares against `crates/utxo/tests/fixtures/core-v2/core200.dat`.
+- Test `e2e/tests/assumeutxo.rs::bitcoin_rs_export_is_accepted_by_a_fresh_core_node` submits the 200 fixture blocks and compares against `crates/storage/tests/fixtures/core-v2/core200.dat`.
 - The test loads the export into a fresh Core node.
-- The test fails (does not skip) when the binary is missing or its digest differs per `crates/rpc/core-compat.toml` (`scripts/install-bitcoind.sh`).
+- The test fails (does not skip) when the binary is missing or its digest differs per `crates/serving/core-compat.toml` (`scripts/install-bitcoind.sh`).
 - This covers regtest height-200 only; there is no mainnet memory, throughput, or commit-blocking claim.
 
 ### `API-34`: Active-tip waits
@@ -819,7 +821,7 @@ wallet interoperability remain unverified.
 - A valid range on a non-wildcard descriptor is checked and ignored, including fixed multipath.
 - Private keys, private-requiring derivation, Taproot trees, and other descriptors are refused as explicit Core deviations.
 - Repeated alternatives within one multipath specifier are rejected with `-5` like Core (implementation-specific diagnostic).
-- One transient reservation belongs to the authoritative `UtxoSet`; a second start returns `-8`.
+- One transient reservation belongs to the resident `UtxoSet` scan image; a second start returns `-8`.
 - Status is null when idle, else approximate progress.
 - Abort requests cancellation and returns whether a reservation exists.
 - Abort yields `success: false` with actual visited `txouts` plus only fully projected unspents.
@@ -851,7 +853,7 @@ wallet interoperability remain unverified.
 
 ### `API-36`: `stop` lifecycle control
 
-- Owner: `stop` in `crates/rpc/src/handlers/util.rs`, triggering the node's single graceful-shutdown latch (`Chainstate::request_shutdown`, the same latch the SIGTERM/SIGINT handler trips). No second shutdown path exists.
+- Owner: `stop` in `crates/serving/src/handlers/util.rs`, triggering the node's single graceful-shutdown latch (`Chainstate::request_shutdown`, the same latch the SIGTERM/SIGINT handler trips). No second shutdown path exists.
 - The reply is this node's own status string (`bitcoin-rs stopping`); the latch is tripped before the reply is written, and teardown normally lets the reply finish before the process exits 0. The string deliberately differs from Core's (`Bitcoin Core stopping`, `src/rpc/server.cpp`): the functional framework discards the stop reply (`test_node.py` `stop` never reads it), so no test required Core-string equality, and this node does not imitate Core's identity elsewhere (`--version`). A context without attached node control (embedded/test use) answers `-32603`.
 - Declared deviation: Core's hidden numeric `wait` argument is not honored — any argument is refused with the local `-32602` shape error — and the node does not wait for other in-flight RPC connections to drain before exiting.
 - Proof: `handlers::util::stop` unit tests (status string, shutdown trigger, missing control, argument refusal) and `e2e/tests/lifecycle.rs::stop_rpc_answers_the_node_status_and_exits_zero` (real binary, node-shaped reply, exit code 0 within a bounded wait).

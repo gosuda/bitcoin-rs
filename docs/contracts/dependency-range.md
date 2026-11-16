@@ -24,25 +24,29 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The scheduled compatibility workflow uses a disposable runner.
 - These lanes are not pull-request merge gates.
 
-### `DEP-02`: One copy of each consensus-stack crate
+### `DEP-02`: One copy of each consensus-stack crate except listed exact-version splits
 - **Owner**: `deny.toml` `[bans]`.
 - **Scope**: the resolved graph of each DEP-01 lane.
 - Check both lanes under `deny.toml` `[graph]` with `all-features = true`, not each lane's own feature set.
 - Scope covers `bitcoin`, `bitcoin_hashes`, `secp256k1`, and `secp256k1-sys`.
-- Each of those crates MUST resolve to exactly one version per graph.
-- Exactly one pool-only exception is approved.
-- The pinned SRI release family is `noise_sv2 2.0.0`.
-- The `pool-sv2` feature in `crates/mining/Cargo.toml` reaches this family.
+- Each of those crates MUST resolve to exactly one version per graph, except the exact-version splits listed here.
+- The Bitcoin 0.32.102 reference dependency retains `bitcoin_hashes 0.14.101` alongside direct `bitcoin_hashes 1.2.0`.
+- The direct `secp256k1 0.33.1` line coexists with Bitcoin's exact `secp256k1 0.29.1` and `secp256k1-sys 0.10.1` reference line; versioned native links keep the two libraries distinct.
+- The pool-only exception below remains approved.
+- The pinned SRI release family is `noise_sv2 2.1.0`.
+- The `pool-sv2` feature in `crates/serving/Cargo.toml` reaches this family.
 - This family carries its own audited `secp256k1 0.28.2` and `secp256k1-sys 0.9.2` authority-key line.
 - This family also carries its own `bitcoin_hashes 0.13.1` transport line.
-- `deny.toml` `[bans].skip` pins those exact versions with the `noise_sv2 2.0.0` reason.
-- `multiple-versions = "deny"` fails any other second version.
-- No further skip is approved for these four names.
+- `deny.toml` `[bans].skip` pins those exact versions with the `noise_sv2 2.1.0` reason.
+- `multiple-versions = "deny"` fails any split not covered by the listed exact-version skips.
+- No further skip is approved for these four names beyond the listed exact-version splits.
 - The skip entries are audited splits.
 - Each entry leaves one unskipped anchor, so a new version of a skipped crate fails.
-- Package-id cardinality beyond one version per name is not checked mechanically.
+- Package-id cardinality beyond the listed exact-version splits is not checked mechanically.
 - Lockfile review pins that cardinality.
-- The Noise-family dependencies in `crates/mining/Cargo.toml` are optional normal dependencies.
+- For `base64`, only direct `0.23.1`, the Bitcoin dependency chain's `0.21.7`, and the metrics exporter's `0.22.1` may coexist.
+- These exact-version splits do not approve other `base64` versions.
+- The Noise-family dependencies in `crates/serving/Cargo.toml` are optional normal dependencies.
 - The `pool-sv2` feature enables these dependencies.
 - Cargo forbids `optional` dev-dependencies.
 - Cargo does not honor `cfg(feature)` in target dev tables.
@@ -89,14 +93,21 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The DEP-01 lanes run `check bans` only.
 
 ## Selected range prerequisites
-- `proptest` is bounded at `>=1.11, <1.12` in the root `Cargo.toml` `[workspace.dependencies]`.
-- Version `1.12` moves to the `rand_core 0.10` and `rand_xorshift 0.5` family.
-- The bound retains the selected `rand 0.9` family used elsewhere.
+- `bitcoin_hashes 1.2.0` requires `bitcoin-internals 0.6.0` directly and `bitcoin-internals 0.7.0` through `bitcoin-consensus-encoding 1.3`; only that exact-version split is approved, with `deny.toml` `[bans].skip` pinning `bitcoin-internals@0.6.0`.
+- `base64` is bounded to `>=0.23.1, <0.24` with defaults disabled and `std` (including `alloc`) enabled.
+- `simd-unsafe` remains disabled.
+- `secp256k1` is bounded to `>=0.33.1, <0.34` with `std`, `alloc`, `recovery`, `rand`, and `global-context` enabled. Bitcoin's exact `secp256k1 0.29.1` and `secp256k1-sys 0.10.1` reference line is an approved split, pinned in `deny.toml` `[bans].skip`; it approves no other version.
+- The metrics exporter's `base64 0.22.1` is an approved exact-version duplicate, not approval for other versions.
+- `proptest` is bounded at `>=1.12, <1.13` and `proptest-state-machine` is pinned at `=0.9.0` in the root `Cargo.toml` `[workspace.dependencies]`.
+- Version `1.12` moves to the `rand_core 0.10` and `rand_xorshift 0.5` family, so the lock carries `rand_core@0.10.1` beside `rand_core@0.9.5` from the selected `rand 0.9` family.
+- That `rand_core` pair is an approved exact-version split. It approves no other `rand` family change.
+- `parking_lot` is bounded at `>=0.13.0, <0.14`. Transitive crates on the `0.12` line (`rust-rocksdb`, `signet-libmdbx`, `surrealkv`, `quick_cache`, `affinitypool`) keep `parking_lot@0.12.5`, with its `parking_lot_core@0.9.12` and `lock_api@0.4.14`.
+- That `parking_lot`/`parking_lot_core`/`lock_api` pair with the `0.13`/`0.10`/`0.5` lines is an approved exact-version split. It approves no other `parking_lot` family change.
 - The `syn@3.0.9` exception in `deny.toml` `[bans]` is an exact-version pin for the proc-macro chain.
 - When the `syn 3.0.x` patch in the root or `fuzz` lock moves, update the exception to that exact version in the same change.
 - The entry describes this `syn` pin only.
 - It does not approve other splits.
-- The `secp256k1@0.28.2`, `secp256k1-sys@0.9.2`, and `bitcoin_hashes@0.13.1` exceptions in `deny.toml` `[bans]` are exact-version pins for the `noise_sv2 2.0.0` SV2 chain.
+- The `secp256k1@0.28.2`, `secp256k1-sys@0.9.2`, and `bitcoin_hashes@0.13.1` exceptions in `deny.toml` `[bans]` are exact-version pins for the `noise_sv2 2.1.0` SV2 chain.
 - This policy matches the `syn` pin above, including their RustCrypto transport companions.
 - When the pinned SRI release family moves, update those exceptions to the exact resolved versions in the same change.
 - The entries approve no other split.
@@ -116,11 +127,15 @@ Empty backend markers on non-storage crates are not combinations.
 - Owner: `scripts/feature-matrix.tsv`.
 - Scope: operator `bitcoin-rs` and `bitcoin-rs-node` backend and kernel flags plus reached storage and consensus crates.
 - Each row is one combination CI MUST `cargo check` independently.
-- `lane=pure` carries fjall, redb, zmq, and optional `silent-payments` with the native interpreter.
+- The `pure` lane covers engine-free crates such as `bitcoin-rs-consensus` (`--no-default-features`, and `--features usdt`).
+- These consensus rows check only the library target. Their test dependencies require the RocksDB native prerequisites.
+- Proof: `scripts/check-feature-matrix.sh pure` executes the `consensus-native` and `consensus-usdt` rows in `scripts/feature-matrix.tsv` with `--lib`; the `feature-combinations` pure job in `.github/workflows/compatibility-campaign.yml` skips `.github/actions/native-deps`.
+- The `native` lane checks all consensus targets for both combinations and runs the feature-off and feature-on `sdt_notes` tests.
+- Proof: `scripts/check-feature-matrix.sh native` executes the `consensus-native-tests` and `consensus-usdt-tests` rows after native prerequisites, and `.github/workflows/compatibility-campaign.yml` runs `crates/consensus/tests/sdt_notes.rs::embedded_sdt_notes_match_core_layout` for both feature-off and feature-on builds.
 - `lane=native` requires cmake, libboost (kernel), or C storage engines.
 - Kernel rows (`portable-kernel`, `full-node`, `consensus-kernel`) are capability builds with `kernel` compiled in.
 - Engine selection stays runtime via `validation.engine`.
-- The `bitcoin-rs-node` crate default (`fjall,zmq`) is a pure row.
+- The `bitcoin-rs-node` crate default (`zmq`) is a native row.
 - The checker selects the repository-root workspace from nested workspaces such as `fuzz/`.
 - Adding a Cargo feature is not enough.
 - Add a row here in the same commit, or do not add the feature.

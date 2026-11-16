@@ -118,72 +118,6 @@ fn state_writer_refuses_to_clobber() {
     write_state(&path, &state).expect("first write");
     assert!(write_state(&path, &state).is_err());
 }
-
-#[test]
-fn connect_batch_relieve_journal_retention_pressure() {
-    use bitcoin_rs_chain::regtest_fixture;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut config =
-        crate::NodeConfig::default_for_network(bitcoin_rs_primitives::Network::Regtest);
-    config.data_dir = dir.path().join("backpressure-node");
-    config.p2p.listen.clear();
-    config.chainstate_journal.max_journal_mib = 1;
-    config.chainstate_journal.rotate_mib = 1;
-
-    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-    let state = crate::state::NodeState::open(config.clone(), None).expect("open node");
-    let genesis_tip = state
-        .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
-            genesis.clone(),
-        ))
-        .expect("genesis");
-    state.publish_checkpoint().expect("baseline checkpoint");
-
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(
-            config
-                .data_dir
-                .join("chainstate-journal/segment-9999999999.log"),
-        )
-        .expect("pressure file")
-        .set_len(1024 * 1024)
-        .expect("pressure size");
-
-    let child =
-        regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1).expect("mine child");
-    assert!(
-        matches!(
-            state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
-                child.clone()
-            )),
-            Err(crate::ConnectMutationError::NotCommitted(
-                bitcoin_rs_chainstate::ApplyError::JournalBackpressure(_)
-            ))
-        ),
-        "the fixture must prove retention pressure refuses the child"
-    );
-
-    let mut batch = vec![bitcoin_rs_primitives::BlockPayload::from_local(child)];
-    connect_batch(&state, &mut batch).expect("relief retries the refused block");
-    assert!(
-        batch.is_empty(),
-        "the batch drains even through the relief path"
-    );
-    let tip = state
-        .chainstate()
-        .applied_tip_snapshot()
-        .expect("relief must commit the child");
-    assert_ne!(
-        tip.as_ref(),
-        &genesis_tip,
-        "the tip must advance past genesis"
-    );
-    assert_eq!(tip.height, 1, "the retried child commits at height 1");
-}
-
 fn corpus_manifest_bytes(network: &str, magic: &str) -> Vec<u8> {
     format!(
         concat!(
@@ -249,7 +183,7 @@ fn manifest_reader_rejects_unsupported_corpus_version() {
 
 #[test]
 fn manifest_network_matches_configured_identity() {
-    let regtest = bitcoin_rs_primitives::Network::Regtest.identity_name();
+    let regtest = bitcoin_rs_consensus::primitives::Network::Regtest.identity_name();
     assert_eq!(regtest, "regtest");
     let doc = Manifest {
         network: "regtest".to_owned(),
@@ -269,7 +203,7 @@ fn manifest_network_matches_configured_identity() {
 
 #[test]
 fn offline_import_pins_full_validation_mode() {
-    use bitcoin_rs_chainstate::ValidationMode;
+    use bitcoin_rs_execution::ValidationMode;
     for inherited in [ValidationMode::Full, ValidationMode::AssumeValid] {
         assert_eq!(
             resolve_offline_validation_mode(inherited),
@@ -283,7 +217,7 @@ fn binding_entry(height: u32, hash: &str) -> ManifestBlock {
 }
 
 fn header_hash_hex(header: &[u8; HEADER_LEN]) -> String {
-    bitcoin_rs_primitives::encode::double_sha256(header).to_string()
+    bitcoin_rs_consensus::primitives::encode::double_sha256(header).to_string()
 }
 
 #[test]
@@ -317,7 +251,7 @@ fn offline_import_refuses_stale_persisted_index_namespace() {
 }
 
 struct TwoBlockArchive {
-    blocks: Vec<bitcoin_rs_primitives::Block>,
+    blocks: Vec<bitcoin_rs_consensus::primitives::Block>,
     corpus: Vec<u8>,
     manifest: Vec<u8>,
     stop_hash: String,
@@ -325,16 +259,19 @@ struct TwoBlockArchive {
 
 fn two_block_archive() -> TwoBlockArchive {
     use sha2::Digest as _;
-    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-    let child = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)
-        .expect("mine child");
+    let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
+    let child = bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_child_at(
+        genesis.block_hash(),
+        1,
+    )
+    .expect("mine child");
     let blocks = vec![genesis, child];
-    let magic = bitcoin_rs_primitives::Network::Regtest.magic();
+    let magic = bitcoin_rs_consensus::primitives::Network::Regtest.magic();
     let mut corpus = Vec::new();
     let mut entries = Vec::new();
     let mut offset: u64 = 0;
     for (index, block) in blocks.iter().enumerate() {
-        let payload = bitcoin_rs_primitives::BlockPayload::from_local(block.clone());
+        let payload = bitcoin_rs_consensus::primitives::BlockImage::from_local(block.clone());
         let raw = payload.bytes();
         let mut framed = Vec::with_capacity(8 + raw.len());
         framed.extend_from_slice(&magic);
@@ -357,7 +294,7 @@ fn two_block_archive() -> TwoBlockArchive {
     hasher.update(&corpus);
     let manifest = format!(
         r#"{{"schema":"core-framed-archive-manifest-v1","network":"regtest","network_magic":"fabfb5da","start_height":0,"stop_height":1,"archive_sha256":"{digest}","archive_bytes":{bytes},"blocks":[{blocks}]}}"#,
-        digest = bitcoin_rs_primitives::hex::hex_encode(&hasher.finalize()),
+        digest = bitcoin_rs_consensus::primitives::hex::hex_encode(&hasher.finalize()),
         bytes = corpus.len(),
         blocks = entries.join(",")
     );
@@ -372,7 +309,7 @@ fn two_block_archive() -> TwoBlockArchive {
 
 fn offline_import_config(data_dir: &std::path::Path) -> crate::NodeConfig {
     let mut config =
-        crate::NodeConfig::default_for_network(bitcoin_rs_primitives::Network::Regtest);
+        crate::NodeConfig::default_for_network(bitcoin_rs_consensus::primitives::Network::Regtest);
     config.data_dir = data_dir.to_path_buf();
     config.p2p.listen.clear();
     config
@@ -453,7 +390,7 @@ fn offline_import_refuses_tip_without_provenance() {
         let live = crate::state::NodeState::open(offline_import_config(&data_dir), None)
             .expect("open node");
         for block in &archive.blocks {
-            live.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            live.apply_block(&bitcoin_rs_consensus::primitives::BlockImage::from_local(
                 block.clone(),
             ))
             .expect("connect");
@@ -495,5 +432,65 @@ fn manifest_read_refuses_oversized_input_without_buffering_it() {
     assert!(
         matches!(error, OfflineImportError::ManifestExceedsBound),
         "{error:?}"
+    );
+}
+
+#[test]
+fn offline_import_classifies_malformed_coin_row_as_stable_view_rebuild() {
+    let archive = two_block_archive();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_dir = dir.path().join("node");
+    let (corpus, manifest) = write_archive_fixture(dir.path(), &archive);
+    let state_path = dir.path().join("state.json");
+    let mut config = offline_import_config(&data_dir);
+    config.storage.backend = bitcoin_rs_storage::StorageBackend::RocksDb;
+
+    run_offline_import(config.clone(), &corpus, &manifest, &state_path)
+        .expect("initial offline import succeeds");
+    let state_before = std::fs::read(&state_path).expect("read certified state");
+    let provenance_before =
+        std::fs::read(provenance_path(&data_dir)).expect("read certification provenance");
+
+    {
+        use bitcoin_rs_storage::KvStore as _;
+
+        let store = bitcoin_rs_storage::RocksDbStore::open(data_dir.join("chainstate"))
+            .expect("open configured RocksDB chainstate");
+        let malformed_key = [0xa5_u8; 32];
+        store
+            .put(
+                bitcoin_rs_storage::ColumnFamily::Coins,
+                &malformed_key,
+                b"malformed",
+            )
+            .expect("insert malformed coin row");
+        store.flush().expect("flush malformed coin row");
+    }
+
+    let resume_state = dir.path().join("state-resume.json");
+    let error = run_offline_import(config, &corpus, &manifest, &resume_state)
+        .expect_err("malformed coin row must refuse certification");
+    match error {
+        OfflineImportError::StableViewRebuild { source } => {
+            assert!(
+                matches!(&source, bitcoin_rs_storage::utxo::UtxoError::CorruptRecord),
+                "stable-view failure must preserve the corrupt-record source, got {source:?}"
+            );
+        }
+        other => panic!("malformed coin row must fail during stable-view rebuild, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read(&state_path).expect("read certified state after refusal"),
+        state_before,
+        "certified state must remain unchanged on refusal"
+    );
+    assert_eq!(
+        std::fs::read(provenance_path(&data_dir)).expect("read provenance after refusal"),
+        provenance_before,
+        "certification provenance must remain unchanged on refusal"
+    );
+    assert!(
+        !resume_state.exists(),
+        "refusal must not write a replacement certified state"
     );
 }

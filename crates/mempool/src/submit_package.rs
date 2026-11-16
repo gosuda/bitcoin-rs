@@ -7,9 +7,10 @@ use crate::{
     AdmissionChain, AdmissionOrigin, LocalOrigin, MempoolGateway, MutationResult, PeerToken,
     SubmitError,
 };
+use alloc::borrow::Cow;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use bitcoin_rs_primitives::{Tx, Txid, Wtxid, unix_time_secs};
+use bitcoin_rs_consensus::primitives::{Tx, Txid, Wtxid, unix_time_secs};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackageTxResult {
@@ -72,8 +73,7 @@ fn ordered(mut txs: Vec<Tx>) -> Result<Vec<Tx>, SubmitError> {
     Ok(txs)
 }
 
-fn ancestors_in_topological_order(txs: &[Tx]) -> alloc::borrow::Cow<'_, [Tx]> {
-    use alloc::borrow::Cow;
+fn ancestors_in_topological_order(txs: &[Tx]) -> Cow<'_, [Tx]> {
     let Some((_, ancestors)) = txs.split_last() else {
         return Cow::Borrowed(txs);
     };
@@ -156,11 +156,12 @@ impl MempoolGateway {
             package_error: None,
             tx_results: Vec::with_capacity(txs.len()),
         };
-        let mut reconsider = Vec::new();
+        let mut reconsider: Vec<(usize, Arc<Tx>)> = Vec::new();
         let mut quit_early = false;
         for (index, tx) in txs.iter().enumerate() {
+            let single = Arc::new(tx.clone());
             let row = match self.submit_package_attempt(
-                core::slice::from_ref(tx),
+                core::slice::from_ref(&single),
                 AdmissionOrigin::from(LocalOrigin::Rpc),
                 max_rate,
                 |_| time,
@@ -182,7 +183,7 @@ impl MempoolGateway {
                             | AcceptanceRejectReason::MissingInputs
                     )
                 ) {
-                    reconsider.push(index);
+                    reconsider.push((index, single));
                 } else {
                     quit_early = true;
                 }
@@ -190,7 +191,7 @@ impl MempoolGateway {
             result.tx_results.push(row);
         }
         if !quit_early && reconsider.len() > 1 {
-            let pending: Vec<_> = reconsider.iter().map(|&index| txs[index].clone()).collect();
+            let pending: Vec<Arc<Tx>> = reconsider.iter().map(|(_, tx)| Arc::clone(tx)).collect();
             match self.submit_package_attempt(
                 &pending,
                 AdmissionOrigin::from(LocalOrigin::Rpc),
@@ -211,15 +212,15 @@ impl MempoolGateway {
                     }) {
                         result.package_error = Some(AcceptanceRejectReason::MissingEphemeralSpends);
                     }
-                    for (index, row) in reconsider.into_iter().zip(attempt.results) {
+                    for ((index, _), row) in reconsider.into_iter().zip(attempt.results) {
                         if row != PackageTxResult::Unvalidated {
                             result.tx_results[index] = row;
                         }
                     }
                 }
                 Err(error) => {
-                    for index in reconsider {
-                        result.tx_results[index] = PackageTxResult::Rejected(error);
+                    for (index, _) in &reconsider {
+                        result.tx_results[*index] = PackageTxResult::Rejected(error);
                     }
                 }
             }
@@ -252,7 +253,15 @@ impl MempoolGateway {
         chain: &dyn AdmissionChain,
     ) -> Result<MutationResult, SubmitError> {
         let txs = ordered(txs)?;
-        self.submit_package_with_times(&txs, origin, max_rate, |_| time, chain)
+        crate::package::check_structure(&txs)?;
+        let shared: Vec<Arc<Tx>> = txs.into_iter().map(Arc::new).collect();
+        self.submit_package_atomic(
+            &shared,
+            AdmissionOrigin::from(origin),
+            max_rate,
+            |_| time,
+            chain,
+        )
     }
 
     pub(crate) fn submit_package_with_times(
@@ -264,7 +273,14 @@ impl MempoolGateway {
         chain: &dyn AdmissionChain,
     ) -> Result<MutationResult, SubmitError> {
         crate::package::check_structure(txs)?;
-        self.submit_package_atomic(txs, AdmissionOrigin::from(origin), max_rate, time, chain)
+        let shared: Vec<Arc<Tx>> = txs.iter().map(|tx| Arc::new(tx.clone())).collect();
+        self.submit_package_atomic(
+            &shared,
+            AdmissionOrigin::from(origin),
+            max_rate,
+            time,
+            chain,
+        )
     }
 
     pub fn submit_peer_package(
@@ -277,7 +293,17 @@ impl MempoolGateway {
         let txs = ancestors_in_topological_order(txs);
         crate::package::check_structure(&txs)?;
         check_ancestor_shape(&txs)?;
-        self.submit_package_atomic(&txs, AdmissionOrigin::Peer(source), None, |_| time, chain)
+        let shared: Vec<Arc<Tx>> = match txs {
+            Cow::Owned(txs) => txs.into_iter().map(Arc::new).collect(),
+            Cow::Borrowed(txs) => txs.iter().map(|tx| Arc::new(tx.clone())).collect(),
+        };
+        self.submit_package_atomic(
+            &shared,
+            AdmissionOrigin::Peer(source),
+            None,
+            |_| time,
+            chain,
+        )
     }
 
     #[must_use]
@@ -297,7 +323,7 @@ impl MempoolGateway {
 
     fn submit_package_atomic(
         &self,
-        txs: &[Tx],
+        txs: &[Arc<Tx>],
         origin: AdmissionOrigin,
         max_rate: Option<u64>,
         time: impl Fn(&Tx) -> u64,
@@ -319,7 +345,7 @@ impl MempoolGateway {
 
     fn submit_package_attempt(
         &self,
-        txs: &[Tx],
+        txs: &[Arc<Tx>],
         origin: AdmissionOrigin,
         max_rate: Option<u64>,
         time: impl Fn(&Tx) -> u64,
@@ -332,10 +358,10 @@ impl MempoolGateway {
             };
             let (pending, sequence, stamp, inputs, mut results) = {
                 let pool = self.read();
-                let pending: Vec<_> = txs
+                let pending: Vec<Arc<Tx>> = txs
                     .iter()
                     .filter(|tx| !pool.contains_txid(&tx.txid()))
-                    .cloned()
+                    .map(Arc::clone)
                     .collect();
                 let sequence = pool.sequence_number();
                 if self
@@ -531,6 +557,7 @@ impl MempoolGateway {
                     })
                 },
                 |result| Some(result),
+                || crate::AdmitError::DeliveryQueueFull,
             );
             match result {
                 Ok(result) => {
@@ -554,6 +581,7 @@ impl MempoolGateway {
                 Err(error) => {
                     let error = match error {
                         crate::AdmitError::Policy(reason) => SubmitError::Policy(reason),
+                        crate::AdmitError::DeliveryQueueFull => SubmitError::RetryExhausted,
                         _ => SubmitError::Consensus,
                     };
                     if facts.package_error == Some(AcceptanceRejectReason::MinRelayFeeNotMet) {

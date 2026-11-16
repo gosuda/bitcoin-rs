@@ -3,12 +3,12 @@ use std::str::FromStr as _;
 use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
+use bitcoin_rs_consensus::primitives::Network;
 use bitcoin_rs_node::{
     NetworkSelection, NodeConfig, NotificationConfig, P2pOverrides, ScriptIndexMode, UserConfig,
     ValidationOverrides, ZmqEndpointConfig, resolve,
 };
-use bitcoin_rs_primitives::Network;
-use bitcoin_rs_rpc::zmq::ZmqTopic;
+use bitcoin_rs_serving::zmq::ZmqTopic;
 
 #[test]
 fn public_listener_is_opt_in_and_budgets_resolve_independently() -> Result<()> {
@@ -100,19 +100,19 @@ fn overlay_routing_is_opt_in_and_layered_without_implicit_fallback() -> Result<(
         config
             .p2p
             .overlay
-            .allows(bitcoin_rs_primitives::PeerNetwork::Onion)
+            .allows(bitcoin_rs_consensus::primitives::PeerNetwork::Onion)
     );
     assert!(
         config
             .p2p
             .overlay
-            .allows(bitcoin_rs_primitives::PeerNetwork::I2p)
+            .allows(bitcoin_rs_consensus::primitives::PeerNetwork::I2p)
     );
     assert!(
         !config
             .p2p
             .overlay
-            .allows(bitcoin_rs_primitives::PeerNetwork::Ipv4)
+            .allows(bitcoin_rs_consensus::primitives::PeerNetwork::Ipv4)
     );
     assert!(!config.p2p.overlay.randomize_credentials);
     assert_eq!(config.p2p.overlay.port, 18445);
@@ -135,7 +135,7 @@ fn blank_onlynet_environment_clears_an_inherited_network_list() -> Result<()> {
     environment.apply_env("BITCOIN_RS_ONLYNET", std::ffi::OsStr::new("  "))?;
     assert_eq!(
         resolve(&[&file, &environment])?.p2p.overlay.onlynet,
-        Vec::<bitcoin_rs_primitives::PeerNetwork>::new()
+        Vec::<bitcoin_rs_consensus::primitives::PeerNetwork>::new()
     );
     assert!(
         environment
@@ -290,7 +290,7 @@ fn scriptindex_utxo_mode_is_live_only() -> Result<()> {
             .indexes
             .script_index
             .enabled_capabilities(config.indexes.txindex),
-        bitcoin_rs_index::IndexCapabilities::SCRIPT_LIVE
+        bitcoin_rs_projection::IndexCapabilities::SCRIPT_LIVE
     );
     Ok(())
 }
@@ -491,91 +491,6 @@ fn assume_valid_height_defaults_to_mainnet_anchor() -> Result<()> {
 }
 
 #[test]
-fn chainstate_journal_defaults_resolve() -> Result<()> {
-    let config = resolve(&[])?;
-    let journal = config.chainstate_journal;
-    assert!(journal.enabled);
-    assert_eq!(journal.blocks, 500);
-    assert_eq!(journal.seconds, 5);
-    assert_eq!(journal.rotate_mib, 256);
-    assert_eq!(journal.max_journal_mib, 2048);
-    assert_eq!(journal.max_lag_blocks, 500);
-    assert_eq!(journal.max_lag_seconds, 30);
-    Ok(())
-}
-
-#[test]
-fn chainstate_journal_higher_layer_overrides_blocks() -> Result<()> {
-    let lower = UserConfig {
-        chainstate_journal: bitcoin_rs_node::ChainstateJournalOverrides {
-            enabled: Some(true),
-            blocks: Some(100),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let higher = UserConfig {
-        chainstate_journal: bitcoin_rs_node::ChainstateJournalOverrides {
-            blocks: Some(200),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let config = resolve(&[&lower, &higher])?;
-    assert!(config.chainstate_journal.enabled);
-    assert_eq!(config.chainstate_journal.blocks, 200);
-    assert_eq!(config.chainstate_journal.seconds, 5);
-    Ok(())
-}
-
-#[test]
-fn chainstate_journal_off_keeps_other_defaults() -> Result<()> {
-    let layer = UserConfig {
-        chainstate_journal: bitcoin_rs_node::ChainstateJournalOverrides {
-            enabled: Some(false),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let config = resolve(&[&layer])?;
-    assert!(!config.chainstate_journal.enabled);
-    assert_eq!(config.chainstate_journal.blocks, 500);
-    Ok(())
-}
-
-#[test]
-fn chainstate_journal_rejects_invalid_values() {
-    let zero_blocks = UserConfig {
-        chainstate_journal: bitcoin_rs_node::ChainstateJournalOverrides {
-            blocks: Some(0),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    assert!(resolve(&[&zero_blocks]).is_err());
-
-    let lag_below_batch = UserConfig {
-        chainstate_journal: bitcoin_rs_node::ChainstateJournalOverrides {
-            max_lag_blocks: Some(10),
-            blocks: Some(500),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    assert!(resolve(&[&lag_below_batch]).is_err());
-
-    let retention_below_rotation = UserConfig {
-        chainstate_journal: bitcoin_rs_node::ChainstateJournalOverrides {
-            rotate_mib: Some(512),
-            max_journal_mib: Some(256),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    assert!(resolve(&[&retention_below_rotation]).is_err());
-}
-
-#[test]
 fn mining_payout_address_decodes_after_all_layers() -> Result<()> {
     use bitcoin_rs_node::MiningOverrides;
 
@@ -620,7 +535,7 @@ fn operator_noban_defaults_empty_and_uses_the_subnet_owner() -> Result<()> {
         NodeConfig::default_for_network(Network::Regtest)
             .p2p
             .noban_subnets,
-        Vec::<bitcoin_rs_node::options::IpSubnet>::new()
+        Vec::<bitcoin_rs_wire::IpSubnet>::new()
     );
     let layer: UserConfig = toml::from_str(
         r#"network = "regtest"
@@ -643,7 +558,7 @@ p2p_noban = ["192.0.2.99/24", "::1"]
     environment.apply_env("BITCOIN_RS_P2P_NOBAN", std::ffi::OsStr::new(""))?;
     assert_eq!(
         resolve(&[&layer, &environment])?.p2p.noban_subnets,
-        Vec::<bitcoin_rs_node::options::IpSubnet>::new()
+        Vec::<bitcoin_rs_wire::IpSubnet>::new()
     );
     assert!(
         environment

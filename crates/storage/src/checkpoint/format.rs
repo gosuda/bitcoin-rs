@@ -1,5 +1,5 @@
 use super::CheckpointError;
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_consensus::primitives::Network;
 
 pub(crate) fn generation_name(generation: u64) -> String {
     format!("gen-{generation:020}")
@@ -44,8 +44,8 @@ pub fn decode_hex<const N: usize>(encoded: &str) -> Result<[u8; N], CheckpointEr
             N.saturating_mul(2)
         ))
     };
-    if !bitcoin_rs_primitives::hex::is_lowercase_hex(encoded) {
+    if !bitcoin_rs_consensus::primitives::hex::is_lowercase_hex(encoded) {
         return Err(invalid());
     }
-    bitcoin_rs_primitives::hex::hex_decode_array(encoded).map_err(|_| invalid())
+    bitcoin_rs_consensus::primitives::hex::hex_decode_array(encoded).map_err(|_| invalid())
 }

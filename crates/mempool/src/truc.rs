@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{Tx, Txid};
+use bitcoin_rs_consensus::primitives::{Tx, Txid};
 use hashbrown::HashSet;
 use thiserror::Error;
 

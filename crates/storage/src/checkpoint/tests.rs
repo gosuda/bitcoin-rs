@@ -2,8 +2,14 @@ use super::format::generation_name;
 use super::fs::CheckpointRoot;
 use super::load::read_current;
 use super::*;
-use bitcoin_rs_primitives::hex::hex_encode;
+use bitcoin_rs_consensus::primitives::hex::hex_encode;
 
+use super::{
+    CHECKPOINT_ROOT, COINSTATS_ARTIFACT_LEN, COINSTATS_CODEC, COINSTATS_FILE, COINSTATS_VERSION,
+    CURRENT_FILE, CheckpointError, CheckpointFailpoint, CheckpointManifestV1, CheckpointReference,
+    CheckpointRetention, CurrentV1, HEADER_CODEC, HEADERS_FILE, MANIFEST_FILE, MANIFEST_FORMAT,
+    MANIFEST_VERSION, UTXO_CODEC, UTXO_VERSION, UtxoArtifactV1, commit_publication, fs::read_file,
+};
 use crate::test_support::{TestError, TestResult};
 use cap_std::ambient_authority;
 use sha2::{Digest, Sha256};
@@ -51,7 +57,7 @@ fn publish_fixture_at(
         },
     )?;
     let ((), utxo_digest) = stage.write_artifact_with_failpoints(
-        UTXO_FILE,
+        "utxo-snapshot.dat",
         CheckpointFailpoint::UtxoWrite,
         CheckpointFailpoint::UtxoSync,
         |writer| {
@@ -69,8 +75,8 @@ fn publish_fixture_at(
         },
     )?;
     let identity = CheckpointIdentity {
-        network: bitcoin_rs_primitives::Network::Regtest,
-        genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+        network: bitcoin_rs_consensus::primitives::Network::Regtest,
+        genesis: bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash(),
     };
     let manifest = CheckpointManifestV1 {
         format: MANIFEST_FORMAT.to_owned(),
@@ -101,8 +107,8 @@ fn publish_fixture_at(
             best_chain_sha256: "00".repeat(32),
             applied_chain_sha256: "00".repeat(32),
         },
-        utxo: UtxoArtifactV1 {
-            file: UTXO_FILE.to_owned(),
+        utxo: Some(UtxoArtifactV1 {
+            file: "utxo-snapshot.dat".to_owned(),
             codec: UTXO_CODEC.to_owned(),
             version: UTXO_VERSION,
             bytes: utxo_digest.bytes,
@@ -110,7 +116,7 @@ fn publish_fixture_at(
             record_count: 0,
             output_count: 0,
             muhash_trailer_sha256: "00".repeat(32),
-        },
+        }),
         coinstats: CoinStatsArtifactV1 {
             file: COINSTATS_FILE.to_owned(),
             codec: COINSTATS_CODEC.to_owned(),
@@ -124,6 +130,7 @@ fn publish_fixture_at(
             utxo_count: 0,
             muhash: "00".repeat(32),
         },
+        engine: None,
     };
     commit_publication(stage, &manifest)
 }
@@ -188,8 +195,8 @@ fn publication_failpoints_preserve_the_previous_current() -> TestResult {
         };
         assert!(current.generation == 1 || failpoint == CheckpointFailpoint::CurrentRootSync);
         let identity = CheckpointIdentity {
-            network: bitcoin_rs_primitives::Network::Regtest,
-            genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+            network: bitcoin_rs_consensus::primitives::Network::Regtest,
+            genesis: bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash(),
         };
         let manifest = read_manifest(&generation_dir, &current, identity)?;
         verify_artifact(
@@ -198,12 +205,9 @@ fn publication_failpoints_preserve_the_previous_current() -> TestResult {
             manifest.headers.bytes,
             &manifest.headers.sha256,
         )?;
-        verify_artifact(
-            &generation_dir,
-            &manifest.utxo.file,
-            manifest.utxo.bytes,
-            &manifest.utxo.sha256,
-        )?;
+        if let Some(utxo) = &manifest.utxo {
+            verify_artifact(&generation_dir, &utxo.file, utxo.bytes, &utxo.sha256)?;
+        }
         verify_artifact(
             &generation_dir,
             &manifest.coinstats.file,
@@ -255,16 +259,13 @@ fn historical_publication_retains_head_generation_until_explicit_retirement() ->
             &generation_dir,
             &current,
             CheckpointIdentity {
-                network: bitcoin_rs_primitives::Network::Regtest,
-                genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+                network: bitcoin_rs_consensus::primitives::Network::Regtest,
+                genesis: bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash(),
             },
         )?;
-        verify_artifact(
-            &generation_dir,
-            &manifest.utxo.file,
-            manifest.utxo.bytes,
-            &manifest.utxo.sha256,
-        )?;
+        if let Some(utxo) = &manifest.utxo {
+            verify_artifact(&generation_dir, &utxo.file, utxo.bytes, &utxo.sha256)?;
+        }
         drop(generation_dir);
         let replacement = publish_fixture_at(
             &data,
@@ -326,6 +327,35 @@ fn clearing_checkpoint_namespace_preserves_unknown_entries_and_other_namespaces(
 }
 
 #[test]
+fn generation_cleanup_recurses_only_inside_engine_image() -> TestResult {
+    let dir = tempdir()?;
+    let data = open_root(dir.path())?;
+    let generation = publish_fixture(&data, None)?;
+    let root = dir.path().join(CHECKPOINT_ROOT);
+    let old = root.join(generation_name(generation));
+    fs::create_dir_all(old.join("chainstate/segments/nested"))?;
+    fs::write(old.join("chainstate/segments/nested/data"), b"engine")?;
+    fs::create_dir(old.join("operator-backup"))?;
+    fs::write(old.join("operator-backup/notes"), b"keep")?;
+    #[cfg(unix)]
+    {
+        let external = dir.path().join("external");
+        fs::create_dir(&external)?;
+        fs::write(external.join("sentinel"), b"keep")?;
+        std::os::unix::fs::symlink(&external, old.join("chainstate/link"))?;
+    }
+    publish_fixture(&data, None)?;
+    assert!(!old.join("chainstate").exists());
+    assert_eq!(fs::read(old.join("operator-backup/notes"))?, b"keep");
+    #[cfg(unix)]
+    assert_eq!(fs::read(dir.path().join("external/sentinel"))?, b"keep");
+    fs::remove_dir_all(old.join("operator-backup"))?;
+    publish_fixture(&data, None)?;
+    assert!(!old.exists());
+    Ok(())
+}
+
+#[test]
 fn direct_and_current_selection_share_publication_digest_validation() -> TestResult {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
@@ -354,8 +384,9 @@ fn direct_and_current_selection_share_publication_digest_validation() -> TestRes
                 &generation_dir,
                 &reference,
                 CheckpointIdentity {
-                    network: bitcoin_rs_primitives::Network::Regtest,
-                    genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+                    network: bitcoin_rs_consensus::primitives::Network::Regtest,
+                    genesis: bitcoin_rs_consensus::primitives::Network::Regtest
+                        .genesis_block_hash(),
                 }
             ),
             Err(CheckpointError::Invalid(_))
@@ -406,8 +437,9 @@ fn current_and_manifest_validation_reject_tampering() -> TestResult {
                         &generation,
                         &stale.reference()?,
                         CheckpointIdentity {
-                            network: bitcoin_rs_primitives::Network::Regtest,
-                            genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+                            network: bitcoin_rs_consensus::primitives::Network::Regtest,
+                            genesis: bitcoin_rs_consensus::primitives::Network::Regtest
+                                .genesis_block_hash(),
                         }
                     )
                     .is_err()
@@ -429,8 +461,9 @@ fn current_and_manifest_validation_reject_tampering() -> TestResult {
                 &generation,
                 &authenticated.reference()?,
                 CheckpointIdentity {
-                    network: bitcoin_rs_primitives::Network::Regtest,
-                    genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+                    network: bitcoin_rs_consensus::primitives::Network::Regtest,
+                    genesis: bitcoin_rs_consensus::primitives::Network::Regtest
+                        .genesis_block_hash(),
                 }
             ),
             Err(CheckpointError::Invalid(_))
@@ -520,12 +553,12 @@ fn commit_rejects_manifest_for_wrong_generation() -> TestResult {
         "version": MANIFEST_VERSION,
         "generation": generation + 1,
         "network": "regtest",
-        "network_magic": hex_encode(&bitcoin_rs_primitives::Network::Regtest.magic()),
-        "genesis_hash": bitcoin_rs_primitives::Network::Regtest.genesis_block_hash().to_string_be(),
+        "network_magic": hex_encode(&bitcoin_rs_consensus::primitives::Network::Regtest.magic()),
+        "genesis_hash": bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash().to_string_be(),
         "applied_tip": { "height": 0, "hash": "00".repeat(32), "chainwork": "00".repeat(32), "chain_tx_count": 0 },
         "best_header_tip": { "height": 0, "hash": "00".repeat(32), "chainwork": "00".repeat(32), "chain_tx_count": 0 },
         "headers": { "file": HEADERS_FILE, "codec": HEADER_CODEC, "version": 1, "bytes": 0, "sha256": "00".repeat(32), "header_count": 0, "best_chain_sha256": "00".repeat(32), "applied_chain_sha256": "00".repeat(32) },
-        "utxo": { "file": UTXO_FILE, "codec": UTXO_CODEC, "version": UTXO_VERSION, "bytes": 0, "sha256": "00".repeat(32), "record_count": 0, "output_count": 0, "muhash_trailer_sha256": "00".repeat(32) },
+        "utxo": { "file": "utxo-snapshot.dat", "codec": UTXO_CODEC, "version": UTXO_VERSION, "bytes": 0, "sha256": "00".repeat(32), "record_count": 0, "output_count": 0, "muhash_trailer_sha256": "00".repeat(32) },
         "coinstats": { "file": COINSTATS_FILE, "codec": COINSTATS_CODEC, "version": COINSTATS_VERSION, "bytes": COINSTATS_ARTIFACT_LEN, "sha256": "00".repeat(32), "height": 0, "total_amount": 0, "bogo_size": 0, "tx_count": 0, "utxo_count": 0, "muhash": "00".repeat(32) }
     }))?;
     assert!(matches!(
@@ -537,6 +570,23 @@ fn commit_rejects_manifest_for_wrong_generation() -> TestResult {
         CheckpointOpen::Cold
     ));
     Ok(())
+}
+
+fn assert_schema_refusal(error: std::io::Error, reason_tokens: &[&str]) {
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    let message = error.to_string();
+    assert!(
+        message.ends_with(
+            "; convert it with bitcoin-rs-storage-convert --from <old> --to <new>, or resync into a new datadir"
+        ),
+        "refusal message must end with operator conversion guidance: {message}"
+    );
+    for token in reason_tokens {
+        assert!(
+            message.contains(token),
+            "refusal message must contain {token:?}: {message}"
+        );
+    }
 }
 
 #[test]
@@ -556,7 +606,7 @@ fn format_and_schema_helpers_round_trip() -> TestResult {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     ensure_current_schema(&data)?;
-    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"2\n");
+    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"6\n");
     let mut oversized = data.create("oversized")?;
     oversized.write_all(&[0_u8; 17])?;
     oversized.sync_all()?;
@@ -565,11 +615,19 @@ fn format_and_schema_helpers_round_trip() -> TestResult {
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData
     ));
     data.remove_file(CURRENT_SCHEMA_FILE)?;
-    for epoch in [b"0\n", b"1\n"] {
+    for epoch in [b"0\n", b"1\n", b"2\n", b"3\n", b"4\n", b"5\n"] {
         let mut stale_schema = data.create(CURRENT_SCHEMA_FILE)?;
         stale_schema.write_all(epoch)?;
         stale_schema.sync_all()?;
-        assert!(ensure_current_schema(&data).is_err());
+        let error = match ensure_current_schema(&data) {
+            Ok(()) => {
+                return Err(TestError::UnexpectedSuccess(
+                    "stale schema epoch must be refused",
+                ));
+            }
+            Err(error) => error,
+        };
+        assert_schema_refusal(error, &["CURRENT_SCHEMA", "schema epoch"]);
         assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, epoch);
     }
     Ok(())
@@ -586,17 +644,43 @@ fn schema_init_exempts_only_a_regular_lock_file() -> TestResult {
         lock.sync_all()?;
     }
     ensure_current_schema(&data)?;
+    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"6\n");
     {
         let mut other = data.create("other")?;
         other.write_all(b"data")?;
         other.sync_all()?;
     }
     data.remove_file(CURRENT_SCHEMA_FILE)?;
-    assert!(ensure_current_schema(&data).is_err());
+    let error = match ensure_current_schema(&data) {
+        Ok(()) => {
+            return Err(TestError::UnexpectedSuccess(
+                "unmarked datadir with other entry must be refused",
+            ));
+        }
+        Err(error) => error,
+    };
+    assert_schema_refusal(error, &["CURRENT_SCHEMA", "epoch 0"]);
+    assert_eq!(read_file(&data, "other", 16)?, b"data");
+    assert!(matches!(
+        read_file(&data, CURRENT_SCHEMA_FILE, 16),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound
+    ));
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     data.create_dir(super::fs::DATA_DIR_LOCK_FILE)?;
-    assert!(ensure_current_schema(&data).is_err());
+    let error = match ensure_current_schema(&data) {
+        Ok(()) => {
+            return Err(TestError::UnexpectedSuccess(
+                "directory lock path must be refused",
+            ));
+        }
+        Err(error) => error,
+    };
+    assert_schema_refusal(error, &["CURRENT_SCHEMA", "epoch 0"]);
+    assert!(matches!(
+        read_file(&data, CURRENT_SCHEMA_FILE, 16),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound
+    ));
     Ok(())
 }
 
@@ -719,15 +803,15 @@ fn open_file_reads_regular_file() -> TestResult {
     use std::io::Read as _;
 
     let dir = tempdir()?;
-    std::fs::write(dir.path().join("utxo-v4.dat"), b"checkpoint-bytes")?;
+    std::fs::write(dir.path().join("artifact.dat"), b"checkpoint-bytes")?;
     let cap_dir = open_root(dir.path())?;
 
-    let mut file = super::fs::open_file(&cap_dir, "utxo-v4.dat")?;
+    let mut file = super::fs::open_file(&cap_dir, "artifact.dat")?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     assert_eq!(bytes, b"checkpoint-bytes");
     assert_eq!(
-        read_file(&cap_dir, "utxo-v4.dat", 1024)?,
+        read_file(&cap_dir, "artifact.dat", 1024)?,
         b"checkpoint-bytes"
     );
 
@@ -768,7 +852,7 @@ fn open_file_refuses_fifo_without_blocking() -> TestResult {
     use std::os::unix::fs::FileTypeExt as _;
 
     let dir = tempdir()?;
-    let fifo_path = dir.path().join("utxo-v4.dat");
+    let fifo_path = dir.path().join("fifo.dat");
     let created = std::process::Command::new("mkfifo")
         .arg(&fifo_path)
         .status()?;
@@ -778,7 +862,7 @@ fn open_file_refuses_fifo_without_blocking() -> TestResult {
     let worker_dir = cap_dir.try_clone()?;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
-        let result = super::fs::open_file(&worker_dir, "utxo-v4.dat").map(|_| ());
+        let result = super::fs::open_file(&worker_dir, "fifo.dat").map(|_| ());
         let _ = sender.send(result.map_err(|error| error.kind()));
     });
     let observed = receiver.recv_timeout(std::time::Duration::from_secs(5));
@@ -790,7 +874,7 @@ fn open_file_refuses_fifo_without_blocking() -> TestResult {
             .write(true)
             .follow(FollowSymlinks::No)
             .nonblock(true);
-        Some(cap_dir.open_with("utxo-v4.dat", &options)?)
+        Some(cap_dir.open_with("fifo.dat", &options)?)
     } else {
         None
     };
@@ -832,5 +916,61 @@ fn rename_noreplace_refuses_an_existing_destination_and_keeps_both_files() -> Te
     super::fs::rename_noreplace(&data, "staged", "free")?;
     assert_eq!(fs::read(dir.path().join("free"))?, b"new");
     assert!(!dir.path().join("staged").exists());
+    Ok(())
+}
+
+#[test]
+fn nonempty_write_ahead_log_refuses_digest() -> TestResult {
+    let dir = tempdir()?;
+    let image_path = dir.path().join("chainstate");
+    std::fs::create_dir_all(&image_path)?;
+    std::fs::write(image_path.join("000008.sst"), b"table")?;
+    std::fs::write(image_path.join("000009.log"), b"unflushed")?;
+    let image = open_root(&image_path)?;
+    let Err(CheckpointError::Invalid(_)) = super::digest::digest_engine_dir(&image) else {
+        return Err(TestError::Missing(
+            "digest accepted a WAL carrying unflushed writes",
+        ));
+    };
+    Ok(())
+}
+
+#[test]
+fn engine_manifest_byte_change_requires_resync() -> TestResult {
+    let live_temp = tempfile::tempdir()?;
+    let store = crate::RocksDbStore::open(live_temp.path().join("db"))?;
+    {
+        use crate::KvStore as _;
+        let mut batch = store.new_batch();
+        batch.put(crate::ColumnFamily::Coins, &[7u8; 32], &[9u8; 16]);
+        store.write(batch)?;
+    }
+    let image_temp = tempfile::tempdir()?;
+    let image_path = image_temp.path().join("chainstate");
+    {
+        use crate::KvStore as _;
+        store.checkpoint(&image_path)?;
+    }
+    drop(store);
+    let image = open_root(&image_path)?;
+    let artifact = super::digest::digest_engine_dir(&image)?;
+    let manifest_name = artifact
+        .files
+        .iter()
+        .find(|file| file.file.starts_with("MANIFEST-"))
+        .ok_or(TestError::Missing("checkpoint image has no manifest"))?
+        .file
+        .clone();
+    let manifest_path = image_path.join(&manifest_name);
+    let mut bytes = fs::read(&manifest_path)?;
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0x01;
+    fs::write(&manifest_path, &bytes)?;
+    let Err(CheckpointError::Invalid(_)) = super::digest::verify_engine_artifact(&image, &artifact)
+    else {
+        return Err(TestError::Missing(
+            "mutated engine manifest passed verification",
+        ));
+    };
     Ok(())
 }

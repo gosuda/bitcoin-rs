@@ -1,13 +1,13 @@
 use bitcoin_rs_consensus::kernel::BlockParse;
-#[cfg(feature = "kernel")]
-use bitcoin_rs_consensus::{BlockView, ScriptStageTimings, verify_block_input_scripts};
-use bitcoin_rs_consensus::{ConsensusError, UtxoView, ValidationEngine, verify_transaction};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, Block, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Txid, Witness, consensus_bytes,
 };
-use bitcoin_rs_script::opcode::OP_EQUAL;
-use bitcoin_rs_script::{VerifyFlags, push_int};
+use bitcoin_rs_consensus::script::opcode::OP_EQUAL;
+use bitcoin_rs_consensus::script::{VerifyFlags, push_int};
+#[cfg(feature = "kernel")]
+use bitcoin_rs_consensus::{BlockView, ScriptStageTimings, verify_block_input_scripts};
+use bitcoin_rs_consensus::{ConsensusError, UtxoView, ValidationEngine, verify_transaction};
 
 struct Coins(hashbrown::HashMap<OutPoint, TxOut>);
 

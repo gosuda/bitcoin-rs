@@ -17,7 +17,7 @@ enum TestError {
     #[error("bitcoin consensus error: {0}")]
     Consensus(#[from] bitcoin::consensus::encode::Error),
     #[error("primitives decode error: {0}")]
-    Primitives(#[from] bitcoin_rs_primitives::DecodeError),
+    Primitives(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error("addr parse error: {0}")]
     AddrParse(#[from] std::net::AddrParseError),
     #[error("adapter error: {0}")]
@@ -67,7 +67,7 @@ fn probe() -> TestResult {
         };
         let native_genesis = Network::Regtest.genesis_block();
         let expected: Block =
-            consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&native_genesis))?;
+            consensus::deserialize(&bitcoin_rs_consensus::primitives::consensus_bytes(&native_genesis))?;
         assert_eq!(block, expected);
         assert_eq!(block.block_hash(), hash);
         assert_eq!(
@@ -120,7 +120,7 @@ fn probe() -> TestResult {
         assert_eq!(validated.height, 0);
 
         let tx = orphan_transaction();
-        let native_tx = bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Tx>(
+        let native_tx = bitcoin_rs_consensus::primitives::deserialize::<bitcoin_rs_consensus::primitives::Tx>(
             &consensus::serialize(&tx),
         )?;
         assert_eq!(

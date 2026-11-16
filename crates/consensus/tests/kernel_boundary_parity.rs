@@ -5,10 +5,10 @@ use std::str::FromStr;
 
 use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_consensus::ValidationEngine;
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_script::VerifyFlags;
+use bitcoin_rs_consensus::script::VerifyFlags;
 
 use crate::support::error::TestError;
 

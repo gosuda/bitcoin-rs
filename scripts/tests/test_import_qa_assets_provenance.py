@@ -43,7 +43,7 @@ class ImportFlowTests(unittest.TestCase):
         scripts = self.root / "scripts"
         scripts.mkdir()
         (scripts / MAPPER.name).write_bytes(MAPPER.read_bytes())
-        inventory = self.root / "crates/p2p/src/compat.rs"
+        inventory = self.root / "crates/wire/src/compat.rs"
         inventory.parent.mkdir(parents=True)
         inventory.write_text('pub const COMMANDS: &[&str] = &["ping"];\n')
         harness = self.root / "fuzz/fuzz_targets/script_eval.rs"

@@ -11,7 +11,7 @@
 
 ### `VAL-02`: The native interpreter is the complete portable engine
 
-- `Interpreter::execute_with_prevouts` and `PreparedTransaction::verify_input` in `crates/script/src/interpreter.rs` verify every consensus spend class.
+- `Interpreter::execute_with_prevouts` and `PreparedTransaction::verify_input` in `crates/consensus/src/script/interpreter.rs` verify every consensus spend class.
 - The functions verify legacy and P2SH through `eval::eval_script`.
 - The functions verify SegWit v0 through BIP143.
 - The functions verify Taproot key-path and script-path through local BIP341/BIP342.
@@ -25,7 +25,7 @@
 - The native owner retains owned outputs against an immutable borrowed transaction after this check.
 - Block preparation transfers resolved outputs into that owner.
 - Borrowed callers clone their outputs when constructing the owner.
-- Core `script_tests.json`, `tx_valid.json`, and `tx_invalid.json` native columns pin zero mismatches on **runnable** rows in `crates/script/tests/core_vectors.rs`.
+- Core `script_tests.json`, `tx_valid.json`, and `tx_invalid.json` native columns pin zero mismatches on **runnable** rows in `crates/consensus/tests/script_core_vectors.rs`.
 - The columns pin skip counts **and** skip-reason allow-lists so silent coverage loss cannot remain green.
 - The only accepted `script_tests` skip is a one-string prose/section header.
 - The only accepted `tx_invalid` skip is `BADTX`, which fails `CheckTransaction` before script verification.
@@ -72,7 +72,7 @@
 - Spends with nonempty scriptSig are rejected.
 - Correctly signed nondefault hash modes are accepted.
 - Network activation heights, flag definitions, and the default validation engine are unchanged.
-- `crates/script/tests/taproot_spend_rules.rs` tests rust-bitcoin signatures and control blocks against both complete-prevout entry points.
+- `crates/consensus/tests/script_taproot_spend_rules.rs` tests rust-bitcoin signatures and control blocks against both complete-prevout entry points.
 - The tests verify flag activation, wrapped-v1 rules, and error-order cases.
 - `overhaul_process_harness::taproot_spend_cases` compares 40 transaction signature and scriptSig cases, 28 `OP_SUCCESS` cases, and 48 opcode-position signature cases.
 - The harness runs native and Core 31.1 block validation over identical funded regtest histories.
@@ -115,10 +115,10 @@
 
 ### `VAL-03`: Default binary stays kernel-free
 
-- `bin/bitcoin-rs` default features MUST be `fjall`, `redb`, and `zmq`.
+- `bin/bitcoin-rs` default features MUST be `zmq`.
 - Default features MUST never include `kernel`.
 - `--features kernel` means bitcoinkernel support is compiled in on the binary.
-- The Compose image `Dockerfile` builds `fjall,kernel`.
+- The Compose image `Dockerfile` builds `kernel`.
 - Compiling `kernel` does not select the engine.
 - Selection is `validation.engine = "kernel"` (`--validation-engine kernel`, `BITCOIN_RS_VALIDATION_ENGINE=kernel`, or TOML `validation_engine = "kernel"`).
 - The shipped image selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`, handed to the node with `--config`).

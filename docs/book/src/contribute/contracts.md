@@ -4,7 +4,7 @@ A contract clause states a rule. A tagged artifact proves a bounded part of it. 
 
 ## Clause ids
 
-[`docs/contracts/`](https://github.com/gosuda/bitcoin-rs/tree/main/docs/contracts) is normative. A clause id has a prefix and a number, and some ids carry a letter or word suffix. Examples are `API-05`, `ARCH-07a`, and `JW-BOOT-1`. The [contract index](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/README.md) lists every contract file and its clause range.
+[`docs/contracts/`](https://github.com/gosuda/bitcoin-rs/tree/main/docs/contracts) is normative. A clause id has a prefix and a number, and some ids carry a letter or word suffix. Examples are `API-05`, `ARCH-07a`, and `RCV-02`. The [contract index](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/README.md) lists every contract file and its clause range.
 
 Precedence is fixed: contracts rank above source comments, source comments rank above policies, and policies rank above informative docs. When code and a contract disagree, fix one in the same change-set. Cite the clause; do not paste the contract text into a second owner.
 

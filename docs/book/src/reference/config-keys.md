@@ -26,12 +26,17 @@ Environment booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `of
 | --- | --- | --- | --- |
 | `network` | `BITCOIN_RS_NETWORK` | no | `mainnet` |
 | `data_dir` | `BITCOIN_RS_DATA_DIR` | no | `.bitcoin-rs` |
+| `assumeutxo_manifest` | `BITCOIN_RS_ASSUMEUTXO_MANIFEST` | no | unset |
 | `persist_mempool` | `BITCOIN_RS_PERSIST_MEMPOOL` | no | `true` |
 | `mempool_snapshot_max_mb` | `BITCOIN_RS_MEMPOOL_SNAPSHOT_MAX_MB` | no | `64` |
 | `mempool_snapshot_restore_timeout_secs` | `BITCOIN_RS_MEMPOOL_SNAPSHOT_RESTORE_TIMEOUT_SECS` | no | `max(60, max_mb)` |
-| `storage_backend` | `BITCOIN_RS_STORAGE_BACKEND` | no | `fjall` |
+| `storage_backend` | `BITCOIN_RS_STORAGE_BACKEND` | no | `rocksdb` |
 | `dbcache_mb` | `BITCOIN_RS_DBCACHE_MB` | `dbcache` | `450` |
 | `prune_target_mb` | `BITCOIN_RS_PRUNE_TARGET_MB` | `prune` | `0` |
+
+`storage_backend` selects the underlying key-value engine. It accepts `rocksdb` (the default, always compiled), `surrealkv`, and `mdbx`. Build the binary with dependency-qualified Cargo feature `bitcoin-rs-node/surrealkv` or `bitcoin-rs-node/mdbx` to enable the corresponding optional engine; the binary does not expose bare `surrealkv` or `mdbx` forwarding features.
+
+`assumeutxo_manifest` takes a snapshot manifest file path for startup admission. Relative paths resolve under `data_dir`; absolute paths are used as given. Its CLI form is `--assumeutxo-manifest`.
 
 ### Peer-to-peer
 
@@ -140,31 +145,6 @@ endpoint = "tcp://127.0.0.1:55555"
 topics = ["hashblock", "hashtx", "rawblock", "rawtx", "sequence"]
 hwm = 1000
 ```
-
-### `chainstate_journal`
-
-The journal has a TOML table and environment names, but no CLI flags:
-
-```toml
-[chainstate_journal]
-enabled = true
-blocks = 500
-seconds = 5
-rotate_mib = 256
-max_journal_mib = 2048
-max_lag_blocks = 500
-max_lag_seconds = 30
-```
-
-| TOML key | Environment | Default |
-| --- | --- | --- |
-| `chainstate_journal.enabled` | `BITCOIN_RS_CHAINSTATE_JOURNAL` | `true` |
-| `chainstate_journal.blocks` | `BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS` | `500` |
-| `chainstate_journal.seconds` | `BITCOIN_RS_CHAINSTATE_JOURNAL_SECONDS` | `5` |
-| `chainstate_journal.rotate_mib` | `BITCOIN_RS_CHAINSTATE_JOURNAL_ROTATE_MIB` | `256` |
-| `chainstate_journal.max_journal_mib` | `BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_JOURNAL_MIB` | `2048` |
-| `chainstate_journal.max_lag_blocks` | `BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_LAG_BLOCKS` | `500` |
-| `chainstate_journal.max_lag_seconds` | `BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_LAG_SECONDS` | `30` |
 
 ## A complete regtest file
 

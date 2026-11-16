@@ -1,0 +1,105 @@
+use bitcoin_rs_consensus::ConsensusError;
+use bitcoin_rs_execution::chain::ChainError;
+use compact_str::CompactString;
+
+use crate::mining::{MiningControlError, MiningError};
+
+const SIGOPS_LIMIT_REASON: &str = "bad-blk-sigops";
+
+pub const STALE_PARENT_REASON: &str = "inconclusive-not-best-prevblk";
+
+pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
+    CompactString::from(match error {
+        ConsensusError::EmptyInputs => "bad-txns-vin-empty",
+        ConsensusError::EmptyOutputs => "bad-txns-vout-empty",
+        ConsensusError::CoinbaseScriptSigSize { .. } => "bad-cb-length",
+        ConsensusError::NullPrevout { .. } => "bad-txns-prevout-null",
+        ConsensusError::DuplicateInput { .. } => "bad-txns-inputs-duplicate",
+        ConsensusError::MissingPrevout { .. } => "bad-txns-inputs-missingorspent",
+        ConsensusError::OutputValueOverflow => "bad-txns-txouttotal-toolarge",
+        ConsensusError::InputsLessThanOutputs { .. } => "bad-txns-in-belowout",
+        ConsensusError::SigopsLimit { .. } => SIGOPS_LIMIT_REASON,
+        ConsensusError::EmptyBlock
+        | ConsensusError::MissingCoinbase
+        | ConsensusError::SixtyFourByteMutation => "bad-cb-missing",
+        ConsensusError::ExtraCoinbase { .. } => "bad-cb-multiple",
+        ConsensusError::MerkleMutation => "bad-txns-duplicate",
+        ConsensusError::MerkleRoot => "bad-txnmrklroot",
+        ConsensusError::CoinbaseAmount { .. } => "bad-cb-amount",
+        ConsensusError::BlockValueOverflow => "bad-txns-accumulated-fee-outofrange",
+        ConsensusError::WitnessNonceSize => "bad-witness-nonce-size",
+        ConsensusError::UnexpectedWitness => "unexpected-witness",
+        ConsensusError::WitnessCommitment => "bad-witness-merkle-match",
+        ConsensusError::BlockWeight { .. } => "bad-blk-weight",
+        ConsensusError::BlockBaseSize { .. } => "bad-blk-length",
+        ConsensusError::SignetSolution => "bad-signet-blksig",
+        ConsensusError::Script { reason, .. } => {
+            return CompactString::from(format!("block-script-verify-flag-failed ({reason})"));
+        }
+        ConsensusError::Bip { bip, reason } => {
+            return CompactString::from(match *bip {
+                "BIP30" => "bad-txns-BIP30",
+                "BIP34" => "bad-cb-height",
+                "BIP68" | "BIP113" => "bad-txns-nonfinal",
+                "COINBASE_MATURITY" => "bad-txns-premature-spend-of-coinbase",
+                _ => {
+                    return CompactString::from(format!(
+                        "block-script-verify-flag-failed ({bip}: {reason})"
+                    ));
+                }
+            });
+        }
+        ConsensusError::PrevoutMatrixSize { .. }
+        | ConsensusError::PrevoutCount { .. }
+        | ConsensusError::PrevoutMismatch { .. }
+        | ConsensusError::UnsupportedEngine { .. }
+        | ConsensusError::Kernel(_)
+        | ConsensusError::Encoding(_) => return CompactString::from(error.to_string()),
+    })
+}
+
+pub fn chain_reject_reason(error: &ChainError) -> CompactString {
+    CompactString::from(match error {
+        ChainError::InvalidPow { .. }
+        | ChainError::ZeroTarget { .. }
+        | ChainError::TargetExceedsLimit { .. }
+        | ChainError::TargetBitsOverflow { .. } => "high-hash",
+        ChainError::NbitsMismatch { .. } => "bad-diffbits",
+        ChainError::TimestampTooEarly { .. } => "time-too-old",
+        ChainError::TimestampTooFarAhead { .. } => "time-too-new",
+        ChainError::MissingParent { .. } => "prev-blk-not-found",
+        ChainError::InvalidParent { .. } => "bad-prevblk",
+        ChainError::KnownInvalidHeader { .. } => "duplicate-invalid",
+        ChainError::DuplicateHeader { .. } => "duplicate",
+        ChainError::BadVersion { version, .. } => {
+            return CompactString::from(format!(
+                "bad-version(0x{:08x})",
+                (*version).cast_unsigned()
+            ));
+        }
+        ChainError::TimewarpAttack { .. } => return CompactString::from("time-timewarp-attack"),
+        _ => return CompactString::from(error.to_string()),
+    })
+}
+
+pub fn header_reject_reason(error: ChainError) -> MiningControlError {
+    MiningControlError::Rejected(match error {
+        ChainError::MissingParent { prev_hash } => {
+            CompactString::from(format!("Must submit previous header ({prev_hash}) first"))
+        }
+        other => chain_reject_reason(&other),
+    })
+}
+
+pub fn ordered_assembly_error(error: &MiningError) -> MiningControlError {
+    if matches!(error, MiningError::CapacityExhausted { field: "sigops" }) {
+        MiningControlError::Rejected(CompactString::from(format!(
+            "TestBlockValidity failed: {SIGOPS_LIMIT_REASON}"
+        )))
+    } else {
+        MiningControlError::Failed(CompactString::from(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests;

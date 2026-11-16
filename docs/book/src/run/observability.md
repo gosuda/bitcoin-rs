@@ -34,8 +34,8 @@ The listener serves Prometheus text on any request path. It has no separate boun
 $ curl -s http://127.0.0.1:19100/
 # HELP storage_writes_total storage write batches applied, by backend and durability
 # TYPE storage_writes_total counter
-storage_writes_total{backend="fjall",durability="durable"} 1
-storage_writes_total{backend="fjall",durability="default"} 2
+storage_writes_total{backend="rocksdb",durability="durable"} 1
+storage_writes_total{backend="rocksdb",durability="default"} 2
 
 # HELP node_event_loop_sync_ticks block sync ticks
 # TYPE node_event_loop_sync_ticks counter

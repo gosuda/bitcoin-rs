@@ -7,6 +7,10 @@ use super::{p2sh_true_script, true_redeem_script_sig};
 use alloc::sync::Arc;
 use bitcoin_rs_consensus::ValidationEngine;
 
+use bitcoin_rs_consensus::primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
+use bitcoin_rs_consensus::script::opcode;
 use bitcoin_rs_mempool::standardness::{
     AcceptanceRejectReason, StandardnessError, StandardnessPolicy, is_standard_tx,
 };
@@ -15,10 +19,6 @@ use bitcoin_rs_mempool::{
     MempoolLimits, MutationOutcome, PolicyError, PrevoutMeta, RbfError, RemovalReason,
     ReplacementCandidate,
 };
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
-};
-use bitcoin_rs_script::opcode;
 use parking_lot::RwLock;
 
 const DUST_RELAY_FEE_SAT_PER_KVB: u64 = 3_000;
@@ -405,7 +405,7 @@ impl AdmissionChain for MetaChain {
             height: self.height,
             locktime_cutoff: self.locktime_cutoff,
             csv_active: self.csv_active,
-            next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+            next_block_script_flags: bitcoin_rs_consensus::script::VerifyFlags::STANDARD,
             confirmed: false,
         })
     }
@@ -827,7 +827,7 @@ fn mempool_min_fee_holds_until_a_block_connects_then_halves_each_half_life() -> 
     assert_eq!(pool.min_fee_sat_per_kvb(T0), floor);
     assert_eq!(pool.min_fee_sat_per_kvb(T0 + 30 * 24 * 60 * 60), floor);
 
-    pool.remove_for_block(&[], &[], 2, T0);
+    pool.remove_for_block(&bitcoin_rs_mempool::TransitionFacts::from_txs(&[]), 2, T0);
     assert_eq!(pool.min_fee_sat_per_kvb(T0), floor);
     assert_eq!(pool.min_fee_sat_per_kvb(T0 + HALF_LIFE_SECS), floor / 2);
     assert_eq!(pool.min_fee_sat_per_kvb(T0 + 2 * HALF_LIFE_SECS), floor / 4);

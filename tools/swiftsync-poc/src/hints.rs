@@ -3,7 +3,7 @@ use std::path::Path;
 
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::{OutPoint, TxOut};
-use bitcoin_rs_primitives::hex::{hex_decode, hex_encode};
+use bitcoin_rs_consensus::primitives::hex::{hex_decode, hex_encode};
 
 use crate::chain::{Chain, Coin};
 use crate::error::Error;

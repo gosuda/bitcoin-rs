@@ -7,11 +7,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  echo "usage: $0 {fmt|clippy|test-crates|test-binary|test-workspace|test|deny|contracts|book|deep|all|proofs}" >&2
+  echo "usage: $0 {fmt|clippy [lane]|test-crates [lane]|test-binary|test-workspace|test|deny|contracts|book|deep|all|proofs}" >&2
   exit 2
 }
 
-[[ $# -eq 1 ]] || usage
+[[ $# -ge 1 && $# -le 2 ]] || usage
+[[ $# -eq 1 || "$1" == "test-crates" || "$1" == "clippy" ]] || usage
 
 failures=0
 collect_failures=false
@@ -50,90 +51,157 @@ cargo_test() {
   fi
 }
 
-clippy_profiles() {
-  # Four kernel-free all-target profiles. The kernel capability is opt-in and
-  # never implied by a default, so these lanes exercise the plain builds. The
-  # explicit `--no-default-features` spellings keep the per-crate rows'
-  # feature sets pinned even if a default changes again; the workspace row
-  # builds with default features by design (it is the "plain build works"
-  # row).
-  profile "clippy: workspace (kernel-free)" \
+clippy_lane_services() {
+  profile "clippy: services and tools (kernel-free)" \
     cargo clippy --locked --workspace --all-targets \
-      --features bitcoin-rs/silent-payments \
-      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chainstate \
-      --exclude bitcoin-rs-node \
+      --features bitcoin-rs-serving/silent-payments,bitcoin-rs-serving/zmq \
+      --exclude bitcoin-rs --exclude bitcoin-rs-node \
+      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-execution \
+      --exclude bitcoin-rs-e2e --exclude bitcoin-rs-wire \
       -- -D warnings
+}
+
+clippy_lane_node_runtime() {
+  profile "clippy: node runtime and wire" \
+    cargo clippy --locked -p bitcoin-rs -p bitcoin-rs-e2e -p bitcoin-rs-wire \
+      --features bitcoin-rs/silent-payments,bitcoin-rs-wire/test-seam \
+      --all-targets -- -D warnings
   profile "clippy: bitcoin-rs-consensus (native)" \
     cargo clippy --locked -p bitcoin-rs-consensus \
       --no-default-features --all-targets -- -D warnings
-  profile "clippy: bitcoin-rs-chainstate (native,fjall)" \
-    cargo clippy --locked -p bitcoin-rs-chainstate \
-      --no-default-features --features fjall --all-targets -- -D warnings
-  profile "clippy: bitcoin-rs-node (fjall,zmq,silent-payments)" \
+  profile "clippy: bitcoin-rs-execution (native)" \
+    cargo clippy --locked -p bitcoin-rs-execution \
+      --all-targets -- -D warnings
+  profile "clippy: bitcoin-rs-node (zmq,silent-payments)" \
     cargo clippy --locked -p bitcoin-rs-node \
-      --no-default-features --features fjall,zmq,silent-payments --all-targets -- -D warnings
+      --no-default-features --features zmq,silent-payments --all-targets -- -D warnings
   # All-target builds unify test-seam features through dev-dependencies. Check
   # the operator build separately so test-only capabilities cannot hide here.
   profile "check: bitcoin-rs (production silent-payments)" \
     cargo check --locked -p bitcoin-rs \
-      --no-default-features --features fjall,silent-payments
+      --no-default-features --features silent-payments
 }
 
-test_crates_profiles() {
-  profile "test: bitcoin-rs-rpc (silent-payments adapter)" \
-    cargo_test -p bitcoin-rs-rpc --features silent-payments --lib handlers::silent_payments
+clippy_profiles() {
+  local lane="${1:-all}"
+  case "$lane" in
+    all)
+      clippy_lane_services
+      clippy_lane_node_runtime
+      ;;
+    services)
+      clippy_lane_services
+      ;;
+    node-runtime)
+      clippy_lane_node_runtime
+      ;;
+    *)
+      echo "unknown clippy lane: $lane" >&2
+      exit 2
+      ;;
+  esac
+}
+
+test_crates_silent_payments() {
+  profile "test: bitcoin-rs-serving (silent-payments adapter)" \
+    cargo_test -p bitcoin-rs-serving --features silent-payments --lib handlers::silent_payments
   profile "test: bitcoin-rs (silent-payments process)" \
-    cargo_test -p bitcoin-rs --no-default-features --features fjall,silent-payments --test suite silent_payments::
+    cargo_test -p bitcoin-rs --no-default-features --features silent-payments --test suite silent_payments::
   profile "test: bitcoin-rs (certified inputs process)" \
-    cargo_test -p bitcoin-rs --no-default-features --features fjall,silent-payments --test suite block_inputs::
-  profile "test: bitcoin-rs-index (silent-payments codec)" \
-    cargo_test -p bitcoin-rs-index --features silent-payments --test suite silent_payments::
+    cargo_test -p bitcoin-rs --no-default-features --features silent-payments --test suite block_inputs::
+  profile "test: bitcoin-rs-projection (silent-payments codec)" \
+    cargo_test -p bitcoin-rs-projection --features silent-payments --test suite silent_payments::
+}
+
+test_crates_storage() {
+  profile "test: bitcoin-rs-storage-convert" \
+    cargo_test -p bitcoin-rs-storage-convert
+  profile "test: bitcoin-rs-storage-convert (surrealkv, mdbx)" \
+    cargo_test -p bitcoin-rs-storage-convert --features surrealkv,mdbx --test suite engine_copy::
+  profile "test: bitcoin-rs-storage (surrealkv, mdbx)" \
+    cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx --test suite
+  profile "test: bitcoin-rs-storage mdbx_bounded_read_allocation (mdbx)" \
+    cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx --test mdbx_bounded_read_allocation
+  profile "test: bitcoin-rs-storage utxo_query_lifetime" \
+    cargo_test -p bitcoin-rs-storage --test utxo_query_lifetime
+}
+
+test_crates_consensus_execution() {
   # Per-crate profiles may use checked-in fixtures but need no pinned Core
   # daemon. Tests launching that daemon run in the workspace lane below.
   # Smallest first.
-  # primitives owns the QAC-05 corpus-decoder gate (BITCOIN_RS_FUZZ_CORPUS);
+  # consensus owns the QAC-05 corpus-decoder gate (BITCOIN_RS_FUZZ_CORPUS);
   # it must run in the PR lane, not only the merge-only workspace lane.
-  profile "test: bitcoin-rs-primitives" \
-    cargo_test -p bitcoin-rs-primitives
+  profile "test: bitcoin-rs-consensus" \
+    cargo_test -p bitcoin-rs-consensus
   # The offline CLI uses the checked-in Core snapshot, not a running daemon.
   profile "test: bitcoin-rs-snapshot" \
     cargo_test -p bitcoin-rs-snapshot
-  profile "test: bitcoin-rs-consensus (native)" \
-    cargo_test -p bitcoin-rs-consensus --no-default-features
-  profile "test: bitcoin-rs-chainstate (native,fjall)" \
-    cargo_test -p bitcoin-rs-chainstate \
-      --no-default-features --features fjall
-  profile "test: bitcoin-rs-p2p" \
-    cargo_test -p bitcoin-rs-p2p
-  profile "test: bitcoin-rs-node (fjall,zmq)" \
+  profile "test: bitcoin-rs-execution (native)" \
+    cargo_test -p bitcoin-rs-execution
+  profile "test: bitcoin-rs-wire" \
+    cargo_test -p bitcoin-rs-wire
+}
+
+test_crates_node_serving() {
+  profile "test: bitcoin-rs-node (zmq)" \
     cargo_test -p bitcoin-rs-node \
-      --no-default-features --features fjall,zmq
+      --no-default-features --features zmq
   # Isolated so node's default zmq feature cannot unify this package on.
-  profile "test: bitcoin-rs-rpc (no default features)" \
-    cargo_test -p bitcoin-rs-rpc --no-default-features
+  profile "test: bitcoin-rs-serving (no default features)" \
+    cargo_test -p bitcoin-rs-serving --no-default-features
+  profile "test: bitcoin-rs-serving (pool, pool-sv2)" \
+    cargo_test -p bitcoin-rs-serving --features pool,pool-sv2
+}
+
+test_crates_profiles() {
+  local lane="${1:-all}"
+  case "$lane" in
+    all)
+      test_crates_silent_payments
+      test_crates_storage
+      test_crates_consensus_execution
+      test_crates_node_serving
+      ;;
+    silent-payments)
+      test_crates_silent_payments
+      ;;
+    storage)
+      test_crates_storage
+      ;;
+    consensus-execution)
+      test_crates_consensus_execution
+      ;;
+    node-serving)
+      test_crates_node_serving
+      ;;
+    *)
+      echo "unknown test-crates lane: $lane" >&2
+      exit 2
+      ;;
+  esac
 }
 
 test_binary_profiles() {
   # Requires the pinned Core fixture. Formal checks have their own workflow.
-  profile "test: bitcoin-rs binary (rocksdb,fjall,redb)" \
-    cargo_test -p bitcoin-rs \
-      --no-default-features --features "rocksdb,fjall,redb"
+  profile "test: bitcoin-rs binary" \
+    cargo_test -p bitcoin-rs
 }
 
 test_workspace_profiles() {
   # Also expects the pinned fixtures: bin/bitcoin-rs is a workspace member,
-  # so this profile runs its default-feature (fjall,redb,zmq) test binaries,
+  # so this profile runs its default-feature (zmq) test binaries,
   # including the process-harness suite that launches the pinned bitcoind.
   profile "test: workspace (kernel-free)" \
     cargo_test --workspace \
-      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chainstate \
-      --exclude bitcoin-rs-p2p \
-      --exclude bitcoin-rs-node --exclude bitcoin-rs-rpc \
+      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-execution \
+      --exclude bitcoin-rs-wire \
+      --exclude bitcoin-rs-node --exclude bitcoin-rs-serving \
       --exclude bitcoin-rs-snapshot
-  # The RPC package owns libzmq. Its feature-gated process subscriber must
+  # The serving package owns libzmq. Its feature-gated process subscriber must
   # run explicitly so feature resolution cannot turn it into a zero-test
   # binary. Build and identify the daemon with the same default zmq profile.
-  profile "test: bitcoin-rs-rpc (zmq, process notifications)" test_rpc_reorg_notifications
+  profile "test: bitcoin-rs-serving (zmq, process notifications)" test_rpc_reorg_notifications
 }
 
 test_rpc_reorg_notifications() {
@@ -143,7 +211,7 @@ test_rpc_reorg_notifications() {
     target_dir="$PWD/$target_dir"
   fi
   BITCOIN_RS_NODE="$target_dir/debug/bitcoin-rs" \
-    cargo_test -p bitcoin-rs-rpc --features zmq
+    cargo_test -p bitcoin-rs-serving --features zmq
 }
 
 # Proof lanes. `all` does not call this stage: CI runners carry no Kani,
@@ -294,8 +362,10 @@ proofs_stage() {
   fi
 
   local -a running_kani=()
+  local -A kani_features=([crates/storage]=mdbx)
   local crate
   for crate in "${kani_crates[@]}"; do
+    crate="$(python3 -c 'import os, sys; root = os.path.realpath(os.getcwd()); print(os.path.relpath(os.path.realpath(sys.argv[1]), root))' "$crate")"
     local crate_name
     crate_name="${crate##*/}"
     local kani_target_dir
@@ -311,7 +381,10 @@ proofs_stage() {
     echo "==> ${kani_label}"
     (
       set -euo pipefail
-      local -a cmd=(cargo kani --tests)
+      local -a cmd=(cargo kani --tests -Z stubbing)
+      if [[ -n "${kani_features[$crate]:-}" ]]; then
+        cmd+=(--features "${kani_features[$crate]}")
+      fi
       if [[ -n "${PROOFS_KANI_CMD:-}" ]]; then
         read -r -a cmd <<< "${PROOFS_KANI_CMD}"
       fi
@@ -347,11 +420,11 @@ case "$1" in
     ;;
 
   clippy)
-    clippy_profiles
+    clippy_profiles "${2:-all}"
     ;;
 
   test-crates)
-    test_crates_profiles
+    test_crates_profiles "${2:-all}"
     ;;
 
   test-binary)
@@ -375,7 +448,7 @@ case "$1" in
     # Full dependency graph: every storage backend plus the kernel engine.
     # cargo-deny 0.20 takes the cargo metadata flags before the subcommand.
     cargo deny \
-      --workspace --no-default-features --features "rocksdb,fjall,redb,kernel" \
+      --workspace --features "kernel" \
       check
     ;;
 
@@ -401,7 +474,7 @@ case "$1" in
   deep)
     collect_failures=true
     clippy_profiles
-    test_crates_profiles
+    test_crates_profiles all
     test_binary_profiles
     test_workspace_profiles
     finish
