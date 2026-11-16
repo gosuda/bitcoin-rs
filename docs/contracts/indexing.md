@@ -612,6 +612,8 @@ That document gives consumer usage and defers to this clause for every consisten
   | Row, scan, body-read, and body-byte budgets, truncated scans, `BlockBodyMissing`, disabled capability, worker failure/stop, missing authority, lifecycle causes | `Unavailable(...)` with the identical variant |
   | Snapshot-open and body-read storage failures | `Storage(...)` |
 
+Proof: `crates/projection/src/runtime/query/scripts.rs::spender_uses_indexed_creation_when_funding_body_is_pruned` checks both spender APIs, full transaction identity, canonical block hashes, and zero funding-body reads. `crates/projection/src/runtime.rs::spender_at_prefix_distinguishes_recreated_outpoints_with_pruned_creation_bodies` checks the current outpoint lifetime when creation bodies are pruned. `crates/projection/src/segment/read.rs::funding_transaction_rows_preserve_full_identity_and_bound_all_scopes` checks full identity, encoded-byte accounting, and aggregate row limits across scopes, including excluded rows.
+
 ### Compact-filter data and serving
 
 - `index/filters.rs` selects BIP158 basic-filter scripts and owns BIP157 hash and header commitments.
