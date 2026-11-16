@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Portable script-history export streams sealed postings by chunk and closes each height across colliding scripts and generations before emission. Row and byte limits stop a page before the next height; a single oversized row remains permitted. Resumed pages seek below the cursor height instead of rereading newer sealed history.
 - BREAKING CHANGE: runtime `fjall` and `redb` backends and the `rocksdb` feature switch are removed. RocksDB is the mandatory, unconditionally compiled default; existing Fjall/Redb datadirs require offline conversion with `bitcoin-rs-storage-convert`, not an in-place reset.
 - BREAKING CHANGE: workspace crates are consolidated into the canonical `bitcoin-rs-consensus`, `bitcoin-rs-storage`, `bitcoin-rs-execution`, `bitcoin-rs-projection`, `bitcoin-rs-wire`, `bitcoin-rs-mempool`, `bitcoin-rs-serving`, and `bitcoin-rs-node` owners. Downstream dependencies and public type imports must use their owning crates; `BlockHeader` and `ChainWork` are available from `bitcoin_rs_consensus::header_rules`, not `bitcoin_rs_execution::chain::node`.
 - BREAKING CHANGE: storage `CreatedOutput::script` and `SpentPrevout::script` use immutable full-buffer `FactsScript` instead of arbitrary `Bytes`. Downstream constructors and consumers must use `FactsScript`; full-buffer ownership makes retained capacity and sharing accountable.
