@@ -459,9 +459,12 @@ pub fn read_message<R: Read>(
     expected_magic: Magic,
 ) -> Result<(Message, bytes::Bytes), PeerError> {
     loop {
-        if let Some(message) =
-            V1Receiver::default().read_message_with(reader, expected_magic, |_, _, _| Ok(()))?
-        {
+        if let Some(message) = V1Receiver::default().read_message_with(
+            reader,
+            expected_magic,
+            |_, _, _| {},
+            |_, _| Ok(()),
+        )? {
             return Ok(message);
         }
     }
@@ -525,7 +528,8 @@ impl V1Receiver {
         &mut self,
         reader: &mut R,
         expected_magic: Magic,
-        observe: impl FnOnce(&str, &[u8], usize) -> Result<(), PeerError>,
+        mut account: impl FnMut(&str, &[u8], usize),
+        admit: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
     ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         let mut body = if let Some(body) = self.body.take() {
             body
@@ -547,14 +551,15 @@ impl V1Receiver {
             return Err(PeerError::BadChecksum);
         }
 
-        observe(
+        account(
             &body.command,
             &body.payload,
             HEADER_LEN + body.payload.len(),
-        )?;
+        );
         if body.command == "block" && !body.payload.transfer_to_image() {
             return Ok(None);
         }
+        admit(&body.command, &body.payload)?;
         let payload = body.payload.into_bytes();
         let message = decode_payload(&body.command, &payload)?;
         Ok(Some((message, payload)))

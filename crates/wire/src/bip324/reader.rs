@@ -80,6 +80,23 @@ impl PacketReader {
         &mut self,
         reader: &mut R,
     ) -> Result<Option<Bytes>, TransportError> {
+        self.read_contents_inner(reader, false)
+    }
+
+    /// Same packet read, but a completed `block` payload that cannot move to
+    /// the image lane surfaces as [`TransportError::BudgetDrop`].
+    pub(crate) fn read_contents_with_transfer<R: Read>(
+        &mut self,
+        reader: &mut R,
+    ) -> Result<Option<Bytes>, TransportError> {
+        self.read_contents_inner(reader, true)
+    }
+
+    fn read_contents_inner<R: Read>(
+        &mut self,
+        reader: &mut R,
+        transfer_block: bool,
+    ) -> Result<Option<Bytes>, TransportError> {
         if self.failed {
             return Err(TransportError::Packet(
                 crate::bip324::packet::PacketError::AuthFailed(crate::bip324::cipher::AuthFailed),
@@ -121,7 +138,8 @@ impl PacketReader {
             return Ok(None);
         }
         let end = HEADER_LEN + opened.contents.len();
-        if let Some((command, offset)) = super::msg_type::split(&body.bytes[HEADER_LEN..end])
+        if transfer_block
+            && let Some((command, offset)) = super::msg_type::split(&body.bytes[HEADER_LEN..end])
             && command == "block"
             && !body.bytes.transfer_to_image()
         {

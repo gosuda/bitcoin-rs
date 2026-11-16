@@ -58,10 +58,14 @@ struct Inbox {
     bytes: VecDeque<u8>,
     closed: bool,
     max_read: usize,
+    error: Option<io::ErrorKind>,
 }
 
 impl Read for Inbox {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if let Some(kind) = self.error.take() {
+            return Err(kind.into());
+        }
         if buffer.is_empty() {
             return Ok(0);
         }
@@ -211,19 +215,11 @@ fn inbound_garbage_is_charged_before_peer_creation_and_released_on_termination()
                 );
             }
             io::ErrorKind::Interrupted => {
-                let lease = PeerLease::new(crossbeam_channel::unbounded().0);
-                lease.cancel();
-                let mut stream = io::Cursor::new(Vec::<u8>::new());
-                assert!(matches!(
-                    establish(
-                        &mut stream,
-                        &mut responder,
-                        MAGIC,
-                        &lease,
-                        Instant::now() + Duration::from_secs(1)
-                    ),
-                    Err(PeerError::Protocol(_))
-                ));
+                inbox.error = Some(io::ErrorKind::Interrupted);
+                inbox.closed = true;
+                assert!(
+                    matches!(responder.advance(&mut inbox), Err(TransportError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof)
+                );
             }
             _ => {
                 let lease = PeerLease::new(crossbeam_channel::unbounded().0);
@@ -444,9 +440,10 @@ fn detected_v1_fallback_retains_the_pre_peer_receive_binding() -> TestResult {
     ));
     assert!(negotiated.recv.bind_memory(&other).is_err());
     let mut observed = false;
-    let received = negotiated
-        .recv
-        .read_message(&mut stream, MAGIC, |command, payload, _| {
+    let received = negotiated.recv.read_message(
+        &mut stream,
+        MAGIC,
+        |command, payload, _| {
             assert_eq!(command, "version");
             assert!(*memory.used.lock() >= payload.len());
             assert!(
@@ -455,9 +452,11 @@ fn detected_v1_fallback_retains_the_pre_peer_receive_binding() -> TestResult {
                     .is_err()
             );
             observed = true;
-            Ok(())
-        });
+        },
+        |_, _| Ok(()),
+    );
     assert!(observed);
+    assert!(matches!(received, Ok(Some(_))), "{received:?}");
     drop(received);
     drop(negotiated);
     assert_eq!(*memory.used.lock(), 0);

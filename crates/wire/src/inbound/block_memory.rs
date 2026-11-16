@@ -94,9 +94,6 @@ impl IngressLedger for FixedIngressLedger {
             return false;
         }
         *receive_used -= bytes;
-        drop(used);
-        drop(receive_used);
-        self.released.notify_all();
         true
     }
 
@@ -155,8 +152,14 @@ impl BlockMemory {
         self: &Arc<Self>,
         bytes: usize,
     ) -> Result<BlockMemoryCredit, std::io::Error> {
-        if bytes > self.ledger.receive_capacity() || !self.ledger.try_take_receive(bytes) {
+        if bytes > self.ledger.receive_capacity() {
             return Err(std::io::Error::other(ResourceRefusal));
+        }
+        if !self.ledger.try_take_receive(bytes) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                ResourceRefusal,
+            ));
         }
         Ok(BlockMemoryCredit {
             owner: Arc::clone(self),

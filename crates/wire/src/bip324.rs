@@ -105,6 +105,8 @@ mod vector_tests {
                 assert_eq!(command, "block");
                 assert_eq!(payload.len(), 80);
                 called = true;
+            },
+            |_, _| {
                 Err(
                     std::io::Error::new(std::io::ErrorKind::Interrupted, "admission cancelled")
                         .into(),

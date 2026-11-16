@@ -51,8 +51,8 @@ fn observer_sees_valid_wire_payload_before_typed_decode() {
         Magic::REGTEST,
         |command, payload, _wire_len| {
             observed = Some((command.to_owned(), payload.to_vec()));
-            Ok(())
         },
+        |_, _| Ok(()),
     );
     assert!(matches!(result, Err(PeerError::Encode(_))));
     assert_eq!(observed, Some(("version".to_owned(), Vec::new())));
@@ -64,8 +64,8 @@ fn observer_sees_valid_wire_payload_before_typed_decode() {
         Magic::REGTEST,
         |_, _, _| {
             observed_bad_checksum = true;
-            Ok(())
         },
+        |_, _| Ok(()),
     );
     assert!(matches!(result, Err(PeerError::BadChecksum)));
     assert!(!observed_bad_checksum);
@@ -90,18 +90,19 @@ fn receiver_resumes_a_frame_split_by_poll_timeouts() -> Result<(), PeerError> {
 
     let mut receiver = super::V1Receiver::default();
     for stall in [ErrorKind::TimedOut, ErrorKind::WouldBlock] {
-        let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
+        let result =
+            receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()));
         assert!(
             matches!(&result, Err(PeerError::Io(error)) if error.kind() == stall),
             "a stall surfaces as a retryable timeout, got {result:?}"
         );
     }
     let (first, _) = receiver
-        .read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()))?
+        .read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()))?
         .ok_or(PeerError::Protocol("ping frame dropped"))?;
     assert_eq!(first, super::Message::Ping(42));
     let (second, _) = receiver
-        .read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()))?
+        .read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()))?
         .ok_or(PeerError::Protocol("pong frame dropped"))?;
     assert_eq!(second, super::Message::Pong(7));
     Ok(())
@@ -120,7 +121,8 @@ fn receiver_retains_only_received_bytes_for_a_stalled_frame() -> Result<(), Peer
         Inbound::Stall(ErrorKind::TimedOut),
     ]);
     let mut receiver = super::V1Receiver::default();
-    let empty = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
+    let empty =
+        receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()));
     assert!(matches!(
         empty,
         Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut
@@ -132,7 +134,8 @@ fn receiver_retains_only_received_bytes_for_a_stalled_frame() -> Result<(), Peer
             .map_or(0, |body| body.payload.capacity()),
         0
     );
-    let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
+    let result =
+        receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()));
     assert!(
         matches!(&result, Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut),
         "a stall surfaces as a retryable timeout, got {result:?}"
@@ -168,7 +171,8 @@ fn cancelled_legacy_frame_requests_at_most_a_16_kib_body_read_step() -> Result<(
         lengths: Vec::new(),
     };
     let mut receiver = super::V1Receiver::default();
-    let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
+    let result =
+        receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()));
     assert!(matches!(
         result,
         Err(PeerError::Io(error)) if error.kind() == ErrorKind::ConnectionAborted
@@ -199,10 +203,11 @@ fn receiver_restarts_at_a_frame_boundary_after_a_rejected_frame() -> Result<(), 
     let mut stream = Cursor::new([corrupt, valid].concat());
 
     let mut receiver = super::V1Receiver::default();
-    let rejected = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
+    let rejected =
+        receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()));
     assert!(matches!(rejected, Err(PeerError::BadChecksum)));
     let (message, _) = receiver
-        .read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()))?
+        .read_message_with(&mut stream, Magic::REGTEST, |_, _, _| {}, |_, _| Ok(()))?
         .ok_or(PeerError::Protocol("pong frame dropped"))?;
     assert_eq!(message, super::Message::Pong(2));
     Ok(())

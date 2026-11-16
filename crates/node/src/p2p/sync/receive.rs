@@ -679,28 +679,26 @@ impl BlockSync {
     pub(super) fn reclaim_staged_for_ingress(&self, bytes: u64) -> u64 {
         let expected = self.next_expected_block_hash();
         let target = usize::try_from(bytes).unwrap_or(usize::MAX);
-        let (evicted, freed) = {
+        let (evicted, mut freed) = {
             let mut scheduler = self.scheduler.lock();
             scheduler.stager.evict_for_reclaim(expected, target)
         };
-        if evicted.is_empty() {
-            return 0;
-        }
         let tree = self.chain.block_tree();
-        let heights: Vec<(Hash256, Option<u32>)> = evicted
-            .iter()
-            .map(|hash| {
+        let now = Instant::now();
+        if !evicted.is_empty() {
+            let mut scheduler = self.scheduler.lock();
+            for hash in &evicted {
                 let height = tree
                     .lookup(*hash)
                     .and_then(|node_id| tree.node(node_id).ok())
                     .map(|node| node.height);
-                (*hash, height)
-            })
-            .collect();
-        let now = Instant::now();
-        let mut scheduler = self.scheduler.lock();
-        for (hash, height) in &heights {
-            scheduler.window.requeue_for_retry(hash, *height, now);
+                scheduler.window.requeue_for_retry(hash, height, now);
+            }
+        }
+        if freed < bytes {
+            let remaining = usize::try_from(bytes - freed).unwrap_or(usize::MAX);
+            let mut historical = self.historical.lock();
+            freed = freed.saturating_add(historical.evict_for_reclaim(remaining, now, &tree));
         }
         freed
     }

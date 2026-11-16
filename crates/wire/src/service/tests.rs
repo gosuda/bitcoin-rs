@@ -1113,7 +1113,6 @@ fn shutdown_releases_parked_automatic_claims_before_restart() {
         },
         bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
     );
-    let outbound_rx = service.outbound_rx.lock().clone();
     let address = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 8333));
     let now = crate::addrman::now();
     service.address_book.learn_dns("seed", &[address], now);

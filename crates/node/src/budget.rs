@@ -551,8 +551,8 @@ impl bitcoin_rs_wire::inbound::block_memory::IngressLedger for BudgetedIngressLe
             return false;
         }
         let idx = BudgetOwner::PeerReceive.index();
-        ledger.reserved[idx] -= bytes;
-        ledger.charges[idx] += bytes;
+        ledger.reserved[idx] = ledger.reserved[idx].saturating_sub(bytes);
+        ledger.charges[idx] = ledger.charges[idx].saturating_add(bytes);
         true
     }
 

@@ -433,8 +433,6 @@ fn wire_and_compact_receipts_keep_their_accounting_through_staging() -> TestResu
         assert_eq!(inbound.source, Some(fixture.source));
         assert_eq!(fixture.headers_rx.try_recv()?.headers, vec![block.header]);
         let raw_charge = budget.charged_bytes(BudgetOwner::PeerReceive) - prior_receive;
-        // The completed wire backing moves to the image lane at decode, so
-        // the receive lane stays free while the staged image is charged.
         assert_eq!(raw_charge, 0);
         let expected_receipt = encoded_bytes + decoded_bytes;
         let expected_charge = u64::try_from(expected_receipt)?;

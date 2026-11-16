@@ -216,7 +216,7 @@ fn cancellation_precedes_typed_decode_and_malformed_decode_releases_credit() -> 
     let mut peer = Peer::new(Cursor::new(frame.clone()), Magic::REGTEST);
     assert!(matches!(
         peer.read_message_bounded(&memory, || true),
-        Err(PeerError::Io(_))
+        Ok(None)
     ));
     assert_eq!(*memory.used.lock(), BLOCK_INGRESS_BYTES);
     drop(held);
@@ -344,7 +344,7 @@ fn partial_receive_backing_holds_quota_until_terminal_error_or_peer_drop() -> Te
             let capacity = memory.ledger().receive_capacity();
             let competing = memory.reserve_receive(capacity);
             assert!(
-                matches!(&competing, Err(error) if error.kind() == std::io::ErrorKind::Other),
+                matches!(&competing, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
                 "partial receive must own quota before {terminal:?}"
             );
             drop(memory.try_reserve(memory.ledger().capacity())?);
@@ -391,8 +391,6 @@ fn completed_receive_backing_holds_quota_until_the_last_raw_slice_drops() -> Tes
         drop(raw);
         drop(decoder_credit);
         assert!(*memory.used.lock() >= received_backing_minimum);
-        // The completed backing moved to the image lane: the receive lane is
-        // free while a live raw slice still owns image quota.
         let capacity = memory.ledger().receive_capacity();
         drop(memory.reserve_receive(capacity)?);
         let competing = memory.try_reserve(memory.ledger().capacity());
@@ -641,7 +639,7 @@ fn receive_capacity_and_growth_overlap_are_admitted_before_consuming_more_bytes(
         let refused = peer.read_message_bounded(&memory, || false);
         assert!(matches!(
             &refused,
-            Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::Other
+            Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
         ));
         assert!(
             !refused
@@ -658,7 +656,11 @@ fn receive_capacity_and_growth_overlap_are_admitted_before_consuming_more_bytes(
         );
         assert!(received <= initial_chunk + crate::wire::HEADER_LEN);
         assert!(received < end);
-        assert_eq!(ledger.used.lock().1, 0);
+        let retained = ledger.used.lock().1;
+        assert!(
+            retained >= received_body && retained <= initial_chunk * 2,
+            "a refused growth retains only the admitted backing capacity"
+        );
         assert_eq!(ledger.used.lock().0, 0);
     }
     Ok(())
@@ -675,7 +677,7 @@ fn raw_admission_refuses_before_reading_body_and_recovers_after_release() -> Tes
         let mut peer = make_peer()?;
         let result = peer.read_message_bounded(&memory, || false);
         assert!(
-            matches!(&result, Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::Other)
+            matches!(&result, Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
         );
         assert_eq!(
             peer.stream.bytes.position(),
@@ -714,15 +716,7 @@ fn decode_admission_refuses_without_waiting_on_retained_raw_memory() -> TestResu
                 .join()
                 .map_err(|_| TestError::Panicked("decoder waiter"))?;
             let refused = result?;
-            assert!(
-                matches!(&refused, Err(PeerError::Io(error)) if error.kind() == std::io::ErrorKind::Other)
-            );
-            assert!(
-                !refused
-                    .as_ref()
-                    .err()
-                    .is_some_and(PeerError::is_misbehavior)
-            );
+            assert!(matches!(&refused, Ok(None)), "{refused:?}");
             Ok(())
         })?;
         assert_eq!(*memory.used.lock(), 0);

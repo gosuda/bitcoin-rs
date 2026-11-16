@@ -190,7 +190,7 @@ mod tests {
         budget
             .allocate(BudgetOwner::StagedImages, staged)
             .expect("staged allocation fits");
-        let receiving = 1_170;
+        let receiving = budget.caps().receive_cap();
         budget
             .reserve(BudgetOwner::PeerReceive, receiving)
             .expect("receive reservation fits");

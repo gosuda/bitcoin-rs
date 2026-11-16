@@ -623,6 +623,7 @@ fn engine_sampling_leaves_room_for_outstanding_reservations() {
     assert!(budget.is_safe());
 }
 
+// BUD-05
 #[test]
 fn receive_partition_preserves_total_for_default_small_and_zero_quotas() {
     for (staged, foreground, expected) in [

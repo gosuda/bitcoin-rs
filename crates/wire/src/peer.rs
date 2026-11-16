@@ -410,8 +410,8 @@ impl<S: Read> Peer<S> {
                     if let Some(counters) = counters.as_ref() {
                         counters.record_msg_recv(command, wire_len);
                     }
-                    admit(command, payload)
                 },
+                admit,
             )
             .map_err(PeerError::inbound)
     }

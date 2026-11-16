@@ -27,6 +27,8 @@ fn any_budget_state() -> BudgetState {
     let foreground_reserve: u32 = 1;
     let consensus_invalid: bool = kani::any();
     kani::assume(!consensus_invalid);
+    let ingress_cap: u32 = kani::any();
+    kani::assume(ingress_cap <= total_budget);
 
     BudgetState {
         charges,
@@ -38,7 +40,7 @@ fn any_budget_state() -> BudgetState {
         total_budget,
         foreground_reserve,
         owner_caps,
-        ingress_cap: total_budget,
+        ingress_cap,
     }
 }
 
@@ -211,6 +213,7 @@ fn harness_receive_partition_preserves_total_and_ingress_headroom() {
     let (receive, image, ingress) = super::ingress_partition(staged, foreground, ceiling);
     assert_eq!(u64::from(receive) + u64::from(image), u64::from(staged));
     assert!(receive <= staged / 8);
+    assert!(receive <= ceiling);
     assert!(ingress >= receive);
     assert!(ingress <= image);
     assert!(image - ingress <= foreground);

@@ -116,6 +116,25 @@ ApplyBlock(b, amt) ==
   /\ blockConsensusValid' = [blockConsensusValid EXCEPT ![b] = "valid"]
   /\ UNCHANGED << reserved, blockRefused >>
 
+\* Execution reserves staged_images outside ingress against the full I cap.
+ReserveStagedExecution(amt) ==
+  /\ TotalCommitted + amt <= TotalBudget
+  /\ NonReceiveCommitted + amt <= TotalBudget - ReceiveCap
+  /\ ImageCommitted + amt <= ImageCap
+  /\ reserved' = [reserved EXCEPT !["staged_images"] = @ + amt]
+  /\ UNCHANGED << charges, blockStatus, blockConsensusValid, blockRefused >>
+
+AllocateStagedExecution(amt) ==
+  /\ reserved["staged_images"] >= amt
+  /\ reserved' = [reserved EXCEPT !["staged_images"] = @ - amt]
+  /\ charges' = [charges EXCEPT !["staged_images"] = @ + amt]
+  /\ UNCHANGED << blockStatus, blockConsensusValid, blockRefused >>
+
+ReleaseStagedExecution(amt) ==
+  /\ charges["staged_images"] >= amt
+  /\ charges' = [charges EXCEPT !["staged_images"] = @ - amt]
+  /\ UNCHANGED << reserved, blockStatus, blockConsensusValid, blockRefused >>
+
 ReserveBackground(o, amt) ==
   /\ o \in BackgroundOwners
   /\ BackgroundCommitted + amt <= TotalBudget - ForegroundReserve
@@ -208,6 +227,9 @@ Next ==
   \/ \E b \in 1..MaxBlockId, amt \in 1..2 : RefuseIngress(b, amt)
   \/ \E b \in 1..MaxBlockId, amt \in 1..2 : AllocateIngress(b, amt)
   \/ \E b \in 1..MaxBlockId, amt \in 1..2 : ApplyBlock(b, amt)
+  \/ \E amt \in 1..2 : ReserveStagedExecution(amt)
+  \/ \E amt \in 1..2 : AllocateStagedExecution(amt)
+  \/ \E amt \in 1..2 : ReleaseStagedExecution(amt)
   \/ \E o \in BackgroundOwners, amt \in 1..2 : ReserveBackground(o, amt)
   \/ \E o \in BackgroundOwners, amt \in 1..2 : AllocateBackground(o, amt)
   \/ \E o \in BackgroundOwners, amt \in 1..2 : ReleaseBackground(o, amt)

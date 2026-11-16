@@ -88,31 +88,35 @@ impl RecvTransport {
     /// Reads at most one message: `Ok(None)` when the v2 transport carried a decoy
     /// packet or a message of an empty or undefined type, which BIP324 peers drop.
     /// An empty or undefined type still spent the packet's bytes on the wire, so
-    /// `observe` sees it (folded into the `*other*` bucket, like a v1 frame under
+    /// `account` sees it (folded into the `*other*` bucket, like a v1 frame under
     /// an unknown command) before the drop; a decoy packet carries no message and
     /// keeps no per-message charge.
     ///
-    /// `observe` receives the command, its payload, and the frame's exact wire
-    /// size: header plus payload for v1, or the BIP324 packet's ciphertext
-    /// length for v2.
-    /// A `block` frame refused for image budget is also `None`, after it is
-    /// observed with its real command, payload, and wire size.
+    /// `account` receives the command, its payload, and the frame's exact wire
+    /// size for every frame observed on the wire: header plus payload for v1,
+    /// or the BIP324 packet's ciphertext length for v2. It is infallible and
+    /// runs for dropped frames too.
+    /// `admit` runs only for a frame about to be delivered, and its error
+    /// rejects the delivery.
+    /// A `block` frame refused for image budget is also `None`, after
+    /// `account` sees its real command, payload, and wire size.
     pub(crate) fn read_message<R: Read>(
         &mut self,
         reader: &mut R,
         magic: Magic,
-        observe: impl FnOnce(&str, &[u8], usize) -> Result<(), PeerError>,
+        mut account: impl FnMut(&str, &[u8], usize),
+        admit: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
     ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         match self {
-            Self::V1(receiver) => receiver.read_message_with(reader, magic, observe),
+            Self::V1(receiver) => receiver.read_message_with(reader, magic, account, admit),
             Self::V2(packets) => {
-                let contents = match packets.read_contents(reader) {
+                let contents = match packets.read_contents_with_transfer(reader) {
                     Err(TransportError::BudgetDrop {
                         command,
                         payload,
                         wire_len,
                     }) => {
-                        observe(&command, &payload, wire_len)?;
+                        account(&command, &payload, wire_len);
                         return Ok(None);
                     }
                     contents => contents.map_err(transport_error)?,
@@ -121,14 +125,15 @@ impl RecvTransport {
                     return Ok(None);
                 };
                 let Some((command, payload)) = msg_type::decode(&contents) else {
-                    observe("", &[], crate::bip324::PACKET_OVERHEAD + contents.len())?;
+                    account("", &[], crate::bip324::PACKET_OVERHEAD + contents.len());
                     return Ok(None);
                 };
-                observe(
+                account(
                     &command,
                     &payload,
                     crate::bip324::PACKET_OVERHEAD + contents.len(),
-                )?;
+                );
+                admit(&command, &payload)?;
                 let message = decode_payload(&command, &payload)?;
                 Ok(Some((message, payload)))
             }
@@ -236,8 +241,8 @@ mod tests {
                 |command, payload, len| {
                     counters.record_msg_recv(command, len);
                     observed.push((command.to_owned(), payload.to_vec(), len));
-                    Ok(())
                 },
+                |_, _| Ok(()),
             )
             .expect("an undefined type drops the message, never errors");
 
@@ -289,8 +294,8 @@ mod tests {
                 |command, payload, len| {
                     counters.record_msg_recv(command, len);
                     observed.push((command.to_owned(), payload.to_vec(), len));
-                    Ok(())
                 },
+                |_, _| Ok(()),
             )
             .expect("a budget refusal drops the frame, never errors");
 
@@ -321,9 +326,12 @@ mod tests {
         let decoy = cipher.seal(&[], &[], true).expect("seal decoy");
 
         let message = transport
-            .read_message(&mut Cursor::new(decoy), Magic::BITCOIN, |_, _, _| {
-                panic!("a decoy packet carries no message to account");
-            })
+            .read_message(
+                &mut Cursor::new(decoy),
+                Magic::BITCOIN,
+                |_, _, _| panic!("a decoy packet carries no message to account"),
+                |_, _| panic!("a decoy packet carries no message to admit"),
+            )
             .expect("a decoy drops, never errors");
 
         assert!(message.is_none());

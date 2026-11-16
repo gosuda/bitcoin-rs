@@ -744,7 +744,7 @@ impl NodeState {
             assumeutxo: Some(Arc::clone(&assumeutxo)),
             budget: Arc::clone(&budget),
         }));
-        let staged_cap = usize::try_from(budget.caps().staged_images).unwrap_or(usize::MAX);
+        let staged_cap = usize::try_from(budget.caps().image_ingress_cap()).unwrap_or(usize::MAX);
         let sync_budget = if config.p2p.fast_sync {
             fast_sync_budget(config.network).with_byte_ceiling(staged_cap)
         } else {

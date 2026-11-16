@@ -390,6 +390,9 @@ pub(crate) fn safety(s: &BudgetState) -> bool {
         && (0..8).all(|idx| {
             u64::from(s.charges[idx]) + u64::from(s.reserved[idx]) <= u64::from(s.owner_caps[idx])
         })
+        && u64::from(s.charges[AllocationOwner::StagedImages.index()])
+            + u64::from(s.reserved[AllocationOwner::StagedImages.index()])
+            <= u64::from(s.ingress_cap)
         && (!s.block_refused || !s.consensus_invalid)
         && (!s.is_mdbx || (s.charges[engine_idx] == 0 && s.reserved[engine_idx] == 0))
 }
@@ -515,74 +518,77 @@ mod tests {
     #[test]
     fn exhaustive_bfs_safety_verification() {
         for is_mdbx in [false, true] {
-            let initial = if is_mdbx {
-                BudgetState::init_mdbx(4, 1)
-            } else {
-                BudgetState::init(4, 1)
-            };
-            assert!(safety(&initial));
+            for ingress_cap in [4, 3] {
+                let mut initial = if is_mdbx {
+                    BudgetState::init_mdbx(4, 1)
+                } else {
+                    BudgetState::init(4, 1)
+                };
+                initial.ingress_cap = ingress_cap;
+                assert!(safety(&initial));
 
-            let mut visited = HashSet::new();
-            let mut queue = VecDeque::new();
+                let mut visited = HashSet::new();
+                let mut queue = VecDeque::new();
 
-            visited.insert((
-                initial.charges,
-                initial.reserved,
-                initial.block_refused,
-                initial.consensus_invalid,
-            ));
-            queue.push_back(initial);
+                visited.insert((
+                    initial.charges,
+                    initial.reserved,
+                    initial.block_refused,
+                    initial.consensus_invalid,
+                ));
+                queue.push_back(initial);
 
-            while let Some(curr) = queue.pop_front() {
-                let amounts = [1, 2];
-                let mut actions = Vec::new();
+                while let Some(curr) = queue.pop_front() {
+                    let amounts = [1, 2];
+                    let mut actions = Vec::new();
 
-                for &amt in &amounts {
-                    actions.push(Action::ReserveIngress(amt));
-                    actions.push(Action::RefuseIngress(amt));
-                    actions.push(Action::AllocateIngress(amt));
-                    actions.push(Action::ApplyBlock(amt));
-                    actions.push(Action::ReserveCoinCache(amt));
-                    actions.push(Action::AllocateCoinCache(amt));
-                    actions.push(Action::ReleaseCoinCache(amt));
-                    actions.push(Action::GrowEngineCache(amt));
-                    actions.push(Action::ShrinkEngineCache(amt));
-                    actions.push(Action::ReserveEngineCache(amt));
-                    actions.push(Action::AllocateEngineCache(amt));
-                    actions.push(Action::ReleaseEngineCache(amt));
-                    actions.push(Action::ReservePeerOutbound(amt));
-                    actions.push(Action::AllocatePeerOutbound(amt));
-                    actions.push(Action::ReleasePeerOutbound(amt));
-                    actions.push(Action::ReservePeerReceive(amt));
-                    actions.push(Action::AllocatePeerReceive(amt));
-                    actions.push(Action::ReleasePeerReceive(amt));
-                    for owner in [
-                        AllocationOwner::FactsQueue,
-                        AllocationOwner::IndexBuilder,
-                        AllocationOwner::QueryViews,
-                    ] {
-                        actions.push(Action::ReserveBackground(owner, amt));
-                        actions.push(Action::AllocateBackground(owner, amt));
-                        actions.push(Action::ReleaseBackground(owner, amt));
+                    for &amt in &amounts {
+                        actions.push(Action::ReserveIngress(amt));
+                        actions.push(Action::RefuseIngress(amt));
+                        actions.push(Action::AllocateIngress(amt));
+                        actions.push(Action::ApplyBlock(amt));
+                        actions.push(Action::ReserveCoinCache(amt));
+                        actions.push(Action::AllocateCoinCache(amt));
+                        actions.push(Action::ReleaseCoinCache(amt));
+                        actions.push(Action::GrowEngineCache(amt));
+                        actions.push(Action::ShrinkEngineCache(amt));
+                        actions.push(Action::ReserveEngineCache(amt));
+                        actions.push(Action::AllocateEngineCache(amt));
+                        actions.push(Action::ReleaseEngineCache(amt));
+                        actions.push(Action::ReservePeerOutbound(amt));
+                        actions.push(Action::AllocatePeerOutbound(amt));
+                        actions.push(Action::ReleasePeerOutbound(amt));
+                        actions.push(Action::ReservePeerReceive(amt));
+                        actions.push(Action::AllocatePeerReceive(amt));
+                        actions.push(Action::ReleasePeerReceive(amt));
+                        for owner in [
+                            AllocationOwner::FactsQueue,
+                            AllocationOwner::IndexBuilder,
+                            AllocationOwner::QueryViews,
+                        ] {
+                            actions.push(Action::ReserveBackground(owner, amt));
+                            actions.push(Action::AllocateBackground(owner, amt));
+                            actions.push(Action::ReleaseBackground(owner, amt));
+                        }
+                    }
+                    actions.push(Action::Stutter);
+
+                    for a in actions {
+                        let next = step(&curr, a);
+                        assert!(safety(&next), "safety violated at state: {next:?}");
+                        let key = (
+                            next.charges,
+                            next.reserved,
+                            next.block_refused,
+                            next.consensus_invalid,
+                        );
+                        if visited.insert(key) {
+                            queue.push_back(next);
+                        }
                     }
                 }
-                actions.push(Action::Stutter);
-
-                for a in actions {
-                    let next = step(&curr, a);
-                    assert!(safety(&next), "safety violated at state: {next:?}");
-                    let key = (
-                        next.charges,
-                        next.reserved,
-                        next.block_refused,
-                        next.consensus_invalid,
-                    );
-                    if visited.insert(key) {
-                        queue.push_back(next);
-                    }
-                }
+                assert!(visited.len() > 100);
             }
-            assert!(visited.len() > 100);
         }
     }
 
