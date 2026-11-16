@@ -1686,7 +1686,8 @@ mod tests {
                         })
                     })
                     .collect::<Vec<_>>();
-                let body = r#"{"jsonrpc":"2.0","id":1,"method":"decoderawtransaction","params":["00"]}"#;
+                let body =
+                    r#"{"jsonrpc":"2.0","id":1,"method":"decoderawtransaction","params":["00"]}"#;
                 let request = format!(
                     "POST / HTTP/1.1\r\nAuthorization: Basic {GOOD_TOKEN}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -1702,12 +1703,13 @@ mod tests {
                     task.join().expect("public worker");
                 }
             });
-            let response =
-                public.request(b"POST / HTTP/1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")?;
+            let response = public
+                .request(b"POST / HTTP/1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")?;
             assert!(response.starts_with("HTTP/1.1 404"));
             drop(permits);
-            let response = public
-                .request(b"POST /api/tx HTTP/1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n00")?;
+            let response = public.request(
+                b"POST /api/tx HTTP/1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n00",
+            )?;
             assert!(
                 response.starts_with("HTTP/1.1 400"),
                 "decode resumes: {response}"
