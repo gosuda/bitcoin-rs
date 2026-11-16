@@ -29,7 +29,7 @@ pub(super) fn regtest_pin() -> TestResult<&'static bitcoin_rs_consensus::primiti
 
 fn core_headers() -> TestResult<Vec<Header>> {
     let raw: Vec<String> = sonic_rs::from_str(include_str!(
-        "../../../crates/storage/tests/fixtures/core-v2/blocks200.json"
+        "../../../testdata/storage/fixtures/core-v2/blocks200.json"
     ))?;
     raw.iter()
         .map(|hex| {
@@ -43,7 +43,7 @@ fn core_headers() -> TestResult<Vec<Header>> {
 
 fn write_snapshot_archive(from: &Path) -> TestResult<()> {
     let pinned = regtest_pin()?;
-    let raw = include_bytes!("../../../crates/storage/tests/fixtures/core-v2/core200.dat");
+    let raw = include_bytes!("../../../testdata/storage/fixtures/core-v2/core200.dat");
     let loaded = read_and_verify(
         &mut raw.as_slice(),
         Network::Regtest,
@@ -95,7 +95,7 @@ fn write_snapshot_archive(from: &Path) -> TestResult<()> {
 
 fn write_snapshot_engine(from: &Path) -> TestResult<()> {
     let pinned = regtest_pin()?;
-    let raw = include_bytes!("../../../crates/storage/tests/fixtures/core-v2/core200.dat");
+    let raw = include_bytes!("../../../testdata/storage/fixtures/core-v2/core200.dat");
     let loaded = read_and_verify(
         &mut raw.as_slice(),
         Network::Regtest,

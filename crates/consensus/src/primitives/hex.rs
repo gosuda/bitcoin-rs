@@ -125,7 +125,15 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(proptest_config(1024))]
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/consensus/regressions/primitives/hex.txt"
+            )),
+        )),
+        ..(proptest_config(1024))
+    })]
 
         #[test]
         fn hex_encoding_and_decoding_roundtrip_with_oracle_differential(

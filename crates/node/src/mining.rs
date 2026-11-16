@@ -704,4 +704,187 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::{map_apply_error, test_block_validity_error};
+    use bitcoin_rs_consensus::ConsensusError;
+    use bitcoin_rs_consensus::header_rules::ChainWork;
+    use bitcoin_rs_consensus::primitives::Hash256;
+    use bitcoin_rs_consensus::primitives::Txid;
+    use bitcoin_rs_execution::ApplyError;
+    use bitcoin_rs_execution::chain::ChainError;
+    use bitcoin_rs_execution::chain::NodeId;
+    use bitcoin_rs_serving::mining::BlockValidationResult;
+    use bitcoin_rs_serving::mining::MiningControlError;
+    use compact_str::CompactString;
+
+    #[test]
+    fn operational_failures_are_not_block_rejections() {
+        fn failures() -> Vec<ApplyError> {
+            use bitcoin_rs_storage::StorageError;
+            vec![
+                ApplyError::PruneDuringHistoricalValidation { base_height: 110 },
+                ApplyError::DisconnectBelowSnapshotBase {
+                    height: 110,
+                    base_height: 110,
+                },
+                ApplyError::ConnectPastHistoricalTarget {
+                    height: 111,
+                    base_height: 110,
+                },
+                ApplyError::HistoricalTargetHashMismatch {
+                    base_height: 110,
+                    expected: Hash256::default(),
+                    found: Hash256::from_le_bytes(&[1; 32]),
+                },
+                ApplyError::UtxoCommit(bitcoin_rs_storage::utxo::UtxoError::CorruptRecord),
+                ApplyError::BlockBodyPersistence(StorageError::InvalidOperation(
+                    "body write failed",
+                )),
+                ApplyError::UndoPersistence(StorageError::InvalidOperation("undo write failed")),
+                ApplyError::DurableHeadCommit(StorageError::InvalidOperation("head write failed")),
+                ApplyError::DurableHeadLineage {
+                    head: Hash256::default(),
+                    prev: Hash256::from_le_bytes(&[1; 32]),
+                },
+                ApplyError::WindowWorkspaceIncomplete {
+                    staged: 2,
+                    covered: 1,
+                },
+                ApplyError::RecoveryCoinStats(Box::new(
+                    bitcoin_rs_execution::recovery::RecoveryError::Storage(
+                        StorageError::InvalidOperation("recovery coin statistics read failed"),
+                    ),
+                )),
+                ApplyError::CoinStoreRead(StorageError::InvalidOperation("coin read failed")),
+                ApplyError::Consensus(ConsensusError::Kernel("verifier unavailable".to_owned())),
+                ApplyError::Consensus(ConsensusError::PrevoutMatrixSize {
+                    expected: 1,
+                    actual: 0,
+                }),
+            ]
+        }
+
+        for error in failures() {
+            let result = map_apply_error(error);
+            assert!(
+                matches!(result, Err(MiningControlError::Failed(_))),
+                "operational failure became a block verdict: {result:?}"
+            );
+        }
+        for error in failures() {
+            let result = test_block_validity_error(&error);
+            assert!(
+                matches!(result, MiningControlError::Failed(_)),
+                "generateblock hid an operational error: {result:?}"
+            );
+        }
+    }
+
+    fn rejected(error: ApplyError) -> CompactString {
+        match map_apply_error(error) {
+            Ok(BlockValidationResult::Rejected(reason)) => reason,
+            other => panic!("expected rejected, got {other:?}"),
+        }
+    }
+
+    // API-30
+    #[test]
+    fn generateblock_validity_wraps_bip22_reason() {
+        let error = test_block_validity_error(&ApplyError::UndoPrevoutMissing {
+            txid: Txid::from(Hash256::from_le_bytes(&[0x11; 32])),
+            vout: 0,
+        });
+        match error {
+            MiningControlError::Rejected(reason) => {
+                assert_eq!(
+                    reason.as_str(),
+                    "TestBlockValidity failed: bad-txns-inputs-missingorspent"
+                );
+            }
+            other => panic!("expected rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generateblock_validity_keeps_shutdown_operational() {
+        assert!(matches!(
+            test_block_validity_error(&ApplyError::Shutdown),
+            MiningControlError::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn apply_errors_delegate_consensus_and_chain_reasons() {
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::MissingCoinbase)),
+            "bad-cb-missing"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::SixtyFourByteMutation)),
+            "bad-cb-missing"
+        );
+        assert_eq!(
+            rejected(ApplyError::Chain(ChainError::InvalidPow {
+                hash: Hash256::default(),
+                target: ChainWork::ZERO,
+            })),
+            "high-hash"
+        );
+        assert_eq!(
+            rejected(ApplyError::Chain(ChainError::TargetBitsOverflow {
+                bits: 0x2300_0001,
+            })),
+            "high-hash"
+        );
+        assert_eq!(
+            rejected(ApplyError::Chain(ChainError::KnownInvalidHeader {
+                hash: Hash256::default(),
+            })),
+            "duplicate-invalid"
+        );
+        assert_eq!(
+            rejected(ApplyError::Chain(ChainError::BadVersion {
+                version: 1,
+                required: 2,
+                height: 500,
+            })),
+            "bad-version(0x00000001)"
+        );
+        assert_eq!(
+            rejected(ApplyError::Chain(ChainError::TimewarpAttack {
+                height: 2016,
+                timestamp: 1,
+                minimum: 601,
+            })),
+            "time-timewarp-attack"
+        );
+        assert_eq!(
+            rejected(ApplyError::Chain(ChainError::InvalidParent {
+                parent: NodeId::new(3),
+            })),
+            "bad-prevblk"
+        );
+    }
+
+    #[test]
+    fn generation_overflow_is_terminal_unavailability_is_transient() {
+        assert!(
+            matches!(
+                map_apply_error(ApplyError::ChainChangeGenerationOverflow),
+                Err(MiningControlError::Failed(_))
+            ),
+            "a generation overflow requires restart, not a retry hint"
+        );
+        assert!(matches!(
+            test_block_validity_error(&ApplyError::ChainChangeGenerationOverflow),
+            MiningControlError::Failed(_)
+        ));
+        assert!(
+            matches!(
+                map_apply_error(ApplyError::ConcurrentChainChange),
+                Err(MiningControlError::Unavailable(_))
+            ),
+            "an in-flight chain change is a transient refusal"
+        );
+    }
+}

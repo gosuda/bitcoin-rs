@@ -2,20 +2,13 @@
 
 ## Supported Versions
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
-
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+This policy does not promise security maintenance for any release.
+Include the affected release or commit in your report.
 
 ## Reporting a Vulnerability
 
-Use this section to tell people how to report a vulnerability.
+Report vulnerabilities privately at:
+https://github.com/gosuda/bitcoin-rs/security/advisories/new
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+Include the affected revision, impact, and steps to reproduce.
+Do not publish exploit details in a public issue before coordinated disclosure.
