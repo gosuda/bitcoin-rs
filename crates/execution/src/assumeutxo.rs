@@ -1850,6 +1850,13 @@ impl AssumeUtxoManager {
     }
 }
 
+fn known_progress(tip: Option<&TipSnapshot>, progress: f64) -> Option<f64> {
+    match tip {
+        None => None,
+        Some(tip) => tip.chain_tx_count.get().map(|_| progress),
+    }
+}
+
 #[cfg(any(test, verification, kani))]
 pub(crate) mod proofs;
 #[cfg(test)]
@@ -6007,12 +6014,5 @@ mod tests {
             "the preserved cause must name the corrupt row, got {source:?}"
         );
         Ok(())
-    }
-}
-
-fn known_progress(tip: Option<&TipSnapshot>, progress: f64) -> Option<f64> {
-    match tip {
-        None => None,
-        Some(tip) => tip.chain_tx_count.get().map(|_| progress),
     }
 }

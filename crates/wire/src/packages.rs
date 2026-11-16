@@ -20,6 +20,8 @@ pub const PKG_RELAY_ANC: u64 = 1 << 1;
 
 pub const MAX_GETPKGTXNS: usize = 100;
 
+pub const MAX_PACKAGE_COUNT: usize = 25;
+
 pub const MSG_ANCPKGINFO: u32 = 0x7;
 
 pub const MSG_PKGTXNS: u32 = 0x6;
@@ -710,5 +712,3 @@ mod tests {
         ));
     }
 }
-
-pub const MAX_PACKAGE_COUNT: usize = 25;

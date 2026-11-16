@@ -492,7 +492,6 @@ impl Iterator for Merge {
 }
 
 #[cfg(test)]
-
 mod tests {
     use super::{SpillBudget, SpillSet, cursor_peak, merge, reset_cursor_peak};
     use std::io::Result as IoResult;
