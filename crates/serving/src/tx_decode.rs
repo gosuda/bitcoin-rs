@@ -1,5 +1,3 @@
-//! Admission for raw transaction materialization, shared by RPC and Esplora.
-
 use parking_lot::Mutex;
 
 use crate::RpcError;
