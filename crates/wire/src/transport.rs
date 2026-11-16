@@ -64,6 +64,27 @@ impl Negotiated {
 }
 
 impl RecvTransport {
+    pub(crate) fn receive_pending(&self) -> bool {
+        match self {
+            Self::V1(receiver) => receiver.receive_pending(),
+            Self::V2(reader) => reader.receive_pending(),
+        }
+    }
+
+    pub(crate) fn bind_memory(
+        &mut self,
+        memory: &std::sync::Arc<crate::inbound::block_memory::BlockMemory>,
+    ) -> io::Result<()> {
+        match self {
+            Self::V1(receiver) => receiver.bind_memory(memory),
+            Self::V2(reader) => reader.bind_memory(memory),
+        }
+    }
+
+    pub(crate) fn cancel_receive(&mut self) {
+        *self = Self::V1(V1Receiver::default());
+    }
+
     /// Reads at most one message: `Ok(None)` when the v2 transport carried a decoy
     /// packet or a message of an empty or undefined type, which BIP324 peers drop.
     /// An empty or undefined type still spent the packet's bytes on the wire, so
@@ -128,19 +149,25 @@ pub(crate) fn establish<S: Read + Write>(
 ) -> Result<Negotiated, PeerError> {
     loop {
         if lease.is_cancelled() {
+            handshake.cancel_receive();
             return Err(PeerError::Protocol("peer lease revoked during handshake"));
         }
         if Instant::now() >= deadline {
+            handshake.cancel_receive();
             return Err(PeerError::Io(io::ErrorKind::TimedOut.into()));
         }
         match handshake.advance(stream) {
             Ok(Step::Send) => stream.write_all(&handshake.take_outbound())?,
             Ok(Step::Yield) => {}
             Ok(Step::V1(prefix)) => {
-                return Ok(Negotiated {
+                let mut negotiated = Negotiated {
                     recv: RecvTransport::V1(V1Receiver::with_prefix(&prefix)),
                     ..Negotiated::v1(magic)
-                });
+                };
+                if let Some(memory) = handshake.memory() {
+                    negotiated.recv.bind_memory(memory)?;
+                }
+                return Ok(negotiated);
             }
             Ok(Step::Established(session)) => {
                 let Established {

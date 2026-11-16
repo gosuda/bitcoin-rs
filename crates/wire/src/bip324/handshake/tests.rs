@@ -85,6 +85,160 @@ impl Read for Inbox {
     }
 }
 
+#[test]
+fn pre_peer_scan_aad_and_version_backing_share_the_bound_receive_lane() -> TestResult {
+    let memory = std::sync::Arc::new(crate::inbound::block_memory::BlockMemory::default());
+    let mut rng = StdRng::seed_from_u64(142);
+    let mut initiator = Handshake::initiator(MAGIC, &mut rng);
+    initiator.garbage = vec![7; 200];
+    initiator.outbound.clear();
+    initiator.queue_key();
+    let mut responder = Handshake::responder(MAGIC, &mut rng);
+    responder.garbage = vec![9; 300];
+    initiator.bind_memory(&memory)?;
+    responder.bind_memory(&memory)?;
+    let mut to_responder = Inbox {
+        bytes: initiator.take_outbound().into(),
+        ..Inbox::default()
+    };
+    let mut to_initiator = Inbox::default();
+
+    assert!(matches!(responder.advance(&mut to_responder)?, Step::Send));
+    to_initiator.bytes.extend(responder.take_outbound());
+    assert!(matches!(responder.advance(&mut to_responder)?, Step::Send));
+    let responder_version = responder.take_outbound();
+    to_initiator
+        .bytes
+        .extend(&responder_version[..GARBAGE_TERMINATOR_LEN]);
+    assert!(matches!(initiator.advance(&mut to_initiator)?, Step::Send));
+    let initiator_version = initiator.take_outbound();
+    to_responder
+        .bytes
+        .extend(&initiator_version[..GARBAGE_TERMINATOR_LEN]);
+
+    assert!(
+        initiator
+            .advance(&mut to_initiator)
+            .as_ref()
+            .is_err_and(is_poll_timeout)
+    );
+    assert!(
+        responder
+            .advance(&mut to_responder)
+            .as_ref()
+            .is_err_and(is_poll_timeout)
+    );
+    assert!(matches!(initiator.state, State::ReadVersion { .. }));
+    assert!(matches!(responder.state, State::ReadVersion { .. }));
+    let aad_charge = *memory.used.lock();
+    assert!(aad_charge >= initiator.garbage.len() + responder.garbage.len());
+    assert!(
+        memory
+            .reserve_receive(memory.ledger().receive_capacity())
+            .is_err()
+    );
+    drop(memory.try_reserve(memory.ledger().capacity())?);
+
+    let version = &initiator_version[GARBAGE_TERMINATOR_LEN..];
+    let split = version.len() / 2;
+    to_responder.bytes.extend(&version[..split]);
+    assert!(
+        responder
+            .advance(&mut to_responder)
+            .as_ref()
+            .is_err_and(is_poll_timeout)
+    );
+    assert!(*memory.used.lock() >= aad_charge + split.saturating_sub(3));
+    to_responder.bytes.extend(&version[split..]);
+    let Step::Established(mut responder_session) = responder.advance(&mut to_responder)? else {
+        return Err(TestError::HandshakeIncomplete);
+    };
+    to_initiator
+        .bytes
+        .extend(&responder_version[GARBAGE_TERMINATOR_LEN..]);
+    let Step::Established(mut initiator_session) = initiator.advance(&mut to_initiator)? else {
+        return Err(TestError::HandshakeIncomplete);
+    };
+    assert_eq!(*memory.used.lock(), 0);
+    let packet = initiator_session.send.seal(b"live contents", &[], false)?;
+    to_responder.bytes.extend(&packet);
+    let contents = responder_session
+        .recv
+        .read_contents(&mut to_responder)?
+        .ok_or(TestError::Missing("post-handshake contents"))?;
+    let retained = contents.slice(1..);
+    drop(contents);
+    drop(initiator_session);
+    drop(responder_session);
+    assert!(*memory.used.lock() >= packet.len() - 3);
+    drop(retained);
+    assert_eq!(*memory.used.lock(), 0);
+    Ok(())
+}
+
+#[test]
+fn inbound_garbage_is_charged_before_peer_creation_and_released_on_termination() -> TestResult {
+    for termination in [
+        io::ErrorKind::UnexpectedEof,
+        io::ErrorKind::Interrupted,
+        io::ErrorKind::TimedOut,
+    ] {
+        let memory = std::sync::Arc::new(crate::inbound::block_memory::BlockMemory::default());
+        let mut rng = StdRng::seed_from_u64(142);
+        let mut initiator = Handshake::initiator(MAGIC, &mut rng);
+        initiator.garbage = vec![7; 200];
+        initiator.outbound.clear();
+        initiator.queue_key();
+        let mut responder = Handshake::responder(MAGIC, &mut rng);
+        responder.bind_memory(&memory)?;
+        let mut inbox = Inbox {
+            bytes: initiator.take_outbound().into(),
+            ..Inbox::default()
+        };
+        loop {
+            match responder.advance(&mut inbox) {
+                Ok(Step::Send) => drop(responder.take_outbound()),
+                Err(error) if is_poll_timeout(&error) => break,
+                other => return Err(TestError::UnexpectedStep(format!("{other:?}"))),
+            }
+        }
+        assert!(*memory.used.lock() >= 200);
+        match termination {
+            io::ErrorKind::UnexpectedEof => {
+                inbox.closed = true;
+                assert!(
+                    matches!(responder.advance(&mut inbox), Err(TransportError::Io(error)) if error.kind() == termination)
+                );
+            }
+            io::ErrorKind::Interrupted => {
+                let lease = PeerLease::new(crossbeam_channel::unbounded().0);
+                lease.cancel();
+                let mut stream = io::Cursor::new(Vec::<u8>::new());
+                assert!(matches!(
+                    establish(
+                        &mut stream,
+                        &mut responder,
+                        MAGIC,
+                        &lease,
+                        Instant::now() + Duration::from_secs(1)
+                    ),
+                    Err(PeerError::Protocol(_))
+                ));
+            }
+            _ => {
+                let lease = PeerLease::new(crossbeam_channel::unbounded().0);
+                let mut stream = io::Cursor::new(Vec::<u8>::new());
+                assert!(
+                    matches!(establish(&mut stream, &mut responder, MAGIC, &lease, Instant::now()),
+                Err(PeerError::Io(error)) if error.kind() == io::ErrorKind::TimedOut)
+                );
+            }
+        }
+        assert_eq!(*memory.used.lock(), 0);
+    }
+    Ok(())
+}
+
 struct Connected {
     initiator: Established,
     responder: Established,
@@ -259,6 +413,55 @@ fn responder_hands_a_v1_peer_back_after_sixteen_bytes() -> TestResult {
         header.len() - V1_PREFIX_LEN,
         "the rest is unread"
     );
+    Ok(())
+}
+
+#[test]
+fn detected_v1_fallback_retains_the_pre_peer_receive_binding() -> TestResult {
+    let memory = std::sync::Arc::new(crate::inbound::block_memory::BlockMemory::default());
+    let other = std::sync::Arc::new(crate::inbound::block_memory::BlockMemory::default());
+    let mut rng = StdRng::seed_from_u64(5);
+    let mut responder = Handshake::responder(MAGIC, &mut rng);
+    responder.bind_memory(&memory)?;
+    let message = crate::Message::Unknown {
+        command: "version".parse().map_err(io::Error::other)?,
+        payload: vec![0; 100],
+    };
+    let mut frame = Vec::new();
+    crate::wire::write_message(&mut frame, MAGIC, &message)?;
+    let mut stream = io::Cursor::new(frame);
+    let lease = PeerLease::new(crossbeam_channel::unbounded().0);
+    let mut negotiated = establish(
+        &mut stream,
+        &mut responder,
+        MAGIC,
+        &lease,
+        Instant::now() + Duration::from_secs(1),
+    )?;
+    assert!(matches!(
+        negotiated.protocol,
+        crate::transport::TransportProtocol::V1
+    ));
+    assert!(negotiated.recv.bind_memory(&other).is_err());
+    let mut observed = false;
+    let received = negotiated
+        .recv
+        .read_message(&mut stream, MAGIC, |command, payload, _| {
+            assert_eq!(command, "version");
+            assert!(*memory.used.lock() >= payload.len());
+            assert!(
+                memory
+                    .reserve_receive(memory.ledger().receive_capacity())
+                    .is_err()
+            );
+            observed = true;
+            Ok(())
+        });
+    assert!(observed);
+    drop(received);
+    drop(negotiated);
+    assert_eq!(*memory.used.lock(), 0);
+    assert_eq!(*other.used.lock(), 0);
     Ok(())
 }
 
@@ -703,6 +906,7 @@ fn connect_custom(
         garbage: initiator.garbage,
         outbound: Vec::new(),
         received_any: false,
+        memory: None,
         state: State::ReadKey {
             key: [0; ELLSWIFT_LEN],
             filled: 0,
@@ -717,6 +921,7 @@ fn connect_custom(
         garbage: responder.garbage,
         outbound: Vec::new(),
         received_any: false,
+        memory: None,
         state: State::DetectV1 {
             prefix: [0; V1_PREFIX_LEN],
             filled: 0,

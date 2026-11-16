@@ -11,7 +11,7 @@ use super::TransportError;
 use super::keys::{GARBAGE_TERMINATOR_LEN, KeyMaterial, Role, Session, shared_secret};
 use super::packet::{RecvCipher, SendCipher};
 use super::reader::{PacketReader, is_poll_timeout};
-use crate::recv::{fill, read_up_to};
+use crate::recv::{fill, read_backing_up_to};
 
 const ELLSWIFT_LEN: usize = 64;
 
@@ -46,6 +46,7 @@ pub struct Handshake {
     outbound: Vec<u8>,
     received_any: bool,
     state: State,
+    memory: Option<std::sync::Arc<crate::inbound::block_memory::BlockMemory>>,
 }
 
 #[derive(Debug)]
@@ -63,7 +64,7 @@ enum State {
         recv: RecvCipher,
         terminator: [u8; GARBAGE_TERMINATOR_LEN],
         session_id: [u8; 32],
-        scanned: Vec<u8>,
+        scanned: crate::recv::Backing,
     },
     ReadVersion {
         send: SendCipher,
@@ -115,6 +116,7 @@ impl Handshake {
             outbound: Vec::new(),
             received_any: false,
             state,
+            memory: None,
         }
     }
 
@@ -124,6 +126,26 @@ impl Handshake {
 
     pub(crate) const fn received_any(&self) -> bool {
         self.received_any
+    }
+
+    pub(crate) fn bind_memory(
+        &mut self,
+        memory: &std::sync::Arc<crate::inbound::block_memory::BlockMemory>,
+    ) -> std::io::Result<()> {
+        if self.memory.is_none() && self.received_any {
+            return Err(std::io::Error::other("cannot bind a live handshake"));
+        }
+        crate::recv::bind_memory(&mut self.memory, memory)
+    }
+
+    pub(crate) fn memory(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::inbound::block_memory::BlockMemory>> {
+        self.memory.as_ref()
+    }
+
+    pub(crate) fn cancel_receive(&mut self) {
+        self.state = State::Finished;
     }
 
     pub fn advance<R: Read>(&mut self, reader: &mut R) -> Result<Step, TransportError> {
@@ -191,7 +213,7 @@ impl Handshake {
                     }
                     let window =
                         (GARBAGE_TERMINATOR_LEN - partial_match(scanned, terminator)).min(room);
-                    read_up_to(reader, scanned, window)?;
+                    read_backing_up_to(reader, scanned, window, self.memory.as_ref())?;
                 }
                 let State::ScanTerminator {
                     send,
@@ -206,7 +228,7 @@ impl Handshake {
                 scanned.truncate(scanned.len() - GARBAGE_TERMINATOR_LEN);
                 self.state = State::ReadVersion {
                     send,
-                    recv: PacketReader::new(recv, scanned),
+                    recv: PacketReader::from_backing(recv, scanned, self.memory.clone()),
                     session_id,
                 };
             }
@@ -253,7 +275,7 @@ impl Handshake {
             recv,
             terminator: recv_garbage_terminator,
             session_id,
-            scanned: Vec::new(),
+            scanned: crate::recv::Backing::default(),
         })
     }
 

@@ -3,6 +3,17 @@
 #[cfg(kani)]
 mod proofs;
 
+pub(crate) fn ingress_partition(
+    staged: u32,
+    foreground: u32,
+    receive_ceiling: u32,
+) -> (u32, u32, u32) {
+    let receive = (staged / 8).min(receive_ceiling);
+    let image = staged - receive;
+    let image_foreground = foreground.min(image - receive);
+    (receive, image, image - image_foreground)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AllocationOwner {
     CoinCache = 0,
@@ -12,6 +23,7 @@ pub(crate) enum AllocationOwner {
     StagedImages = 4,
     QueryViews = 5,
     PeerOutbound = 6,
+    PeerReceive = 7,
 }
 
 impl AllocationOwner {
@@ -26,6 +38,7 @@ impl AllocationOwner {
             Self::StagedImages => 4,
             Self::QueryViews => 5,
             Self::PeerOutbound => 6,
+            Self::PeerReceive => 7,
         }
     }
 
@@ -52,15 +65,16 @@ pub(crate) enum BudgetError {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BudgetState {
-    pub(crate) charges: [u32; 7],
-    pub(crate) reserved: [u32; 7],
+    pub(crate) charges: [u32; 8],
+    pub(crate) reserved: [u32; 8],
     pub(crate) block_staged: bool,
     pub(crate) block_refused: bool,
     pub(crate) consensus_invalid: bool,
     pub(crate) is_mdbx: bool,
     pub(crate) total_budget: u32,
     pub(crate) foreground_reserve: u32,
-    pub(crate) owner_caps: [u32; 7],
+    pub(crate) owner_caps: [u32; 8],
+    pub(crate) ingress_cap: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +97,9 @@ pub(crate) enum Action {
     ReservePeerOutbound(u32),
     AllocatePeerOutbound(u32),
     ReleasePeerOutbound(u32),
+    ReservePeerReceive(u32),
+    AllocatePeerReceive(u32),
+    ReleasePeerReceive(u32),
     Stutter,
 }
 
@@ -90,30 +107,32 @@ impl BudgetState {
     #[must_use]
     pub(crate) const fn init(total_budget: u32, foreground_reserve: u32) -> Self {
         Self {
-            charges: [0; 7],
-            reserved: [0; 7],
+            charges: [0; 8],
+            reserved: [0; 8],
             block_staged: false,
             block_refused: false,
             consensus_invalid: false,
             is_mdbx: false,
             total_budget,
             foreground_reserve,
-            owner_caps: [total_budget; 7],
+            owner_caps: [total_budget; 8],
+            ingress_cap: total_budget,
         }
     }
 
     #[must_use]
     pub(crate) const fn init_mdbx(total_budget: u32, foreground_reserve: u32) -> Self {
         Self {
-            charges: [0; 7],
-            reserved: [0; 7],
+            charges: [0; 8],
+            reserved: [0; 8],
             block_staged: false,
             block_refused: false,
             consensus_invalid: false,
             is_mdbx: true,
             total_budget,
             foreground_reserve,
-            owner_caps: [total_budget; 7],
+            owner_caps: [total_budget; 8],
+            ingress_cap: total_budget,
         }
     }
 
@@ -202,6 +221,13 @@ impl BudgetState {
     }
 
     pub(crate) fn reserve_ingress(&mut self, amt: u32) -> Result<(), BudgetError> {
+        let idx = AllocationOwner::StagedImages.index();
+        if u64::from(self.charges[idx]) + u64::from(self.reserved[idx]) + u64::from(amt)
+            > u64::from(self.ingress_cap)
+        {
+            self.block_refused = true;
+            return Err(BudgetError::BudgetExhausted);
+        }
         self.reserve(AllocationOwner::StagedImages, amt)
     }
 
@@ -295,6 +321,15 @@ pub(crate) fn step(s: &BudgetState, a: Action) -> BudgetState {
         Action::ReleasePeerOutbound(amt) => {
             let _ = next.release(AllocationOwner::PeerOutbound, amt);
         }
+        Action::ReservePeerReceive(amt) => {
+            let _ = next.reserve(AllocationOwner::PeerReceive, amt);
+        }
+        Action::AllocatePeerReceive(amt) => {
+            let _ = next.allocate(AllocationOwner::PeerReceive, amt);
+        }
+        Action::ReleasePeerReceive(amt) => {
+            let _ = next.release(AllocationOwner::PeerReceive, amt);
+        }
         Action::Stutter => {}
     }
     next
@@ -352,7 +387,7 @@ pub(crate) fn safety(s: &BudgetState) -> bool {
 
     total_committed <= u64::from(s.total_budget)
         && bg_committed <= u64::from(s.total_budget.saturating_sub(s.foreground_reserve))
-        && (0..7).all(|idx| {
+        && (0..8).all(|idx| {
             u64::from(s.charges[idx]) + u64::from(s.reserved[idx]) <= u64::from(s.owner_caps[idx])
         })
         && (!s.block_refused || !s.consensus_invalid)
@@ -515,6 +550,12 @@ mod tests {
                     actions.push(Action::ReserveEngineCache(amt));
                     actions.push(Action::AllocateEngineCache(amt));
                     actions.push(Action::ReleaseEngineCache(amt));
+                    actions.push(Action::ReservePeerOutbound(amt));
+                    actions.push(Action::AllocatePeerOutbound(amt));
+                    actions.push(Action::ReleasePeerOutbound(amt));
+                    actions.push(Action::ReservePeerReceive(amt));
+                    actions.push(Action::AllocatePeerReceive(amt));
+                    actions.push(Action::ReleasePeerReceive(amt));
                     for owner in [
                         AllocationOwner::FactsQueue,
                         AllocationOwner::IndexBuilder,

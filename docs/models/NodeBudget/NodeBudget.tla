@@ -22,14 +22,24 @@ CONSTANTS
   \* @type: Int;
   ForegroundReserve,
   \* @type: Int;
+  StagedBudget,
+  \* @type: Int;
+  ReceiveCeiling,
+  \* @type: Int;
   MaxBlockId,
   \* @type: Bool;
   IsMdbx
 
 Owners == { "coin_cache", "engine_cache", "facts_queue", "index_builder",
-            "staged_images", "query_views", "peer_outbound" }
-ForegroundOwners == { "coin_cache", "engine_cache", "staged_images", "peer_outbound" }
+            "staged_images", "query_views", "peer_outbound", "peer_receive" }
+ForegroundOwners == { "coin_cache", "engine_cache", "staged_images", "peer_outbound", "peer_receive" }
 BackgroundOwners == { "facts_queue", "index_builder", "query_views" }
+
+ReceiveCap == IF StagedBudget \div 8 < ReceiveCeiling THEN StagedBudget \div 8 ELSE ReceiveCeiling
+ImageCap == StagedBudget - ReceiveCap
+ImageForegroundReserve == IF ForegroundReserve < ImageCap - ReceiveCap
+                          THEN ForegroundReserve ELSE ImageCap - ReceiveCap
+ImageIngressCap == ImageCap - ImageForegroundReserve
 
 VARIABLES
   \* @type: Str -> Int;
@@ -48,14 +58,18 @@ vars == << charges, reserved, blockStatus, blockConsensusValid, blockRefused >>
 TotalCharges ==
   charges["coin_cache"] + charges["engine_cache"] + charges["facts_queue"] +
   charges["index_builder"] + charges["staged_images"] + charges["query_views"] +
-  charges["peer_outbound"]
+  charges["peer_outbound"] + charges["peer_receive"]
 
 TotalReserved ==
   reserved["coin_cache"] + reserved["engine_cache"] + reserved["facts_queue"] +
   reserved["index_builder"] + reserved["staged_images"] + reserved["query_views"] +
-  reserved["peer_outbound"]
+  reserved["peer_outbound"] + reserved["peer_receive"]
 
 TotalCommitted == TotalCharges + TotalReserved
+
+NonReceiveCommitted == TotalCommitted - charges["peer_receive"] - reserved["peer_receive"]
+ReceiveCommitted == charges["peer_receive"] + reserved["peer_receive"]
+ImageCommitted == charges["staged_images"] + reserved["staged_images"]
 
 BackgroundCommitted ==
   charges["facts_queue"] + charges["index_builder"] + charges["query_views"] +
@@ -71,13 +85,17 @@ Init ==
 ReserveIngress(b, amt) ==
   /\ blockStatus[b] = "idle"
   /\ TotalCommitted + amt <= TotalBudget
+  /\ NonReceiveCommitted + amt <= TotalBudget - ReceiveCap
+  /\ ImageCommitted + amt <= ImageIngressCap
   /\ reserved' = [reserved EXCEPT !["staged_images"] = @ + amt]
   /\ blockStatus' = [blockStatus EXCEPT ![b] = "reserved"]
   /\ UNCHANGED << charges, blockConsensusValid, blockRefused >>
 
 RefuseIngress(b, amt) ==
   /\ blockStatus[b] = "idle"
-  /\ TotalCommitted + amt > TotalBudget
+  /\ \/ TotalCommitted + amt > TotalBudget
+     \/ NonReceiveCommitted + amt > TotalBudget - ReceiveCap
+     \/ ImageCommitted + amt > ImageIngressCap
   /\ blockRefused' = [blockRefused EXCEPT ![b] = TRUE]
   \* BUD-03: refusal NEVER marks block consensus invalid
   /\ UNCHANGED << charges, reserved, blockStatus, blockConsensusValid >>
@@ -100,7 +118,8 @@ ApplyBlock(b, amt) ==
 
 ReserveBackground(o, amt) ==
   /\ o \in BackgroundOwners
-  /\ TotalCommitted + amt <= TotalBudget - ForegroundReserve
+  /\ BackgroundCommitted + amt <= TotalBudget - ForegroundReserve
+  /\ NonReceiveCommitted + amt <= TotalBudget - ReceiveCap
   /\ reserved' = [reserved EXCEPT ![o] = @ + amt]
   /\ UNCHANGED << charges, blockStatus, blockConsensusValid, blockRefused >>
 
@@ -119,6 +138,7 @@ ReleaseBackground(o, amt) ==
 
 ReserveCoinCache(amt) ==
   /\ TotalCommitted + amt <= TotalBudget
+  /\ NonReceiveCommitted + amt <= TotalBudget - ReceiveCap
   /\ reserved' = [reserved EXCEPT !["coin_cache"] = @ + amt]
   /\ UNCHANGED << charges, blockStatus, blockConsensusValid, blockRefused >>
 
@@ -138,6 +158,7 @@ AdjustEngineCache(amt) ==
      THEN /\ charges' = [charges EXCEPT !["engine_cache"] = 0]
           /\ reserved' = [reserved EXCEPT !["engine_cache"] = 0]
      ELSE \/ /\ TotalCommitted + amt <= TotalBudget
+             /\ NonReceiveCommitted + amt <= TotalBudget - ReceiveCap
              /\ charges' = [charges EXCEPT !["engine_cache"] = @ + amt]
              /\ UNCHANGED reserved
           \/ /\ charges["engine_cache"] >= amt
@@ -147,6 +168,7 @@ AdjustEngineCache(amt) ==
 
 ReservePeerOutbound(amt) ==
   /\ TotalCommitted + amt <= TotalBudget
+  /\ NonReceiveCommitted + amt <= TotalBudget - ReceiveCap
   /\ reserved' = [reserved EXCEPT !["peer_outbound"] = @ + amt]
   /\ UNCHANGED << charges, blockStatus, blockConsensusValid, blockRefused >>
 
@@ -159,6 +181,23 @@ AllocatePeerOutbound(amt) ==
 ReleasePeerOutbound(amt) ==
   /\ charges["peer_outbound"] >= amt
   /\ charges' = [charges EXCEPT !["peer_outbound"] = @ - amt]
+  /\ UNCHANGED << reserved, blockStatus, blockConsensusValid, blockRefused >>
+
+ReservePeerReceive(amt) ==
+  /\ TotalCommitted + amt <= TotalBudget
+  /\ ReceiveCommitted + amt <= ReceiveCap
+  /\ reserved' = [reserved EXCEPT !["peer_receive"] = @ + amt]
+  /\ UNCHANGED << charges, blockStatus, blockConsensusValid, blockRefused >>
+
+AllocatePeerReceive(amt) ==
+  /\ reserved["peer_receive"] >= amt
+  /\ reserved' = [reserved EXCEPT !["peer_receive"] = @ - amt]
+  /\ charges' = [charges EXCEPT !["peer_receive"] = @ + amt]
+  /\ UNCHANGED << blockStatus, blockConsensusValid, blockRefused >>
+
+ReleasePeerReceive(amt) ==
+  /\ charges["peer_receive"] >= amt
+  /\ charges' = [charges EXCEPT !["peer_receive"] = @ - amt]
   /\ UNCHANGED << reserved, blockStatus, blockConsensusValid, blockRefused >>
 
 Stutter ==
@@ -179,6 +218,9 @@ Next ==
   \/ \E amt \in 1..2 : ReservePeerOutbound(amt)
   \/ \E amt \in 1..2 : AllocatePeerOutbound(amt)
   \/ \E amt \in 1..2 : ReleasePeerOutbound(amt)
+  \/ \E amt \in 1..2 : ReservePeerReceive(amt)
+  \/ \E amt \in 1..2 : AllocatePeerReceive(amt)
+  \/ \E amt \in 1..2 : ReleasePeerReceive(amt)
   \/ Stutter
 
 TypeOK ==
@@ -192,6 +234,9 @@ TypeOK ==
 Safety ==
   \* BUD-06 & BUD-07: Total committed never exceeds TotalBudget
   /\ TotalCommitted <= TotalBudget
+  /\ ReceiveCommitted <= ReceiveCap
+  /\ NonReceiveCommitted <= TotalBudget - ReceiveCap
+  /\ ImageCommitted <= ImageCap
   \* BUD-05: Foreground chain progress retains reserved capacity
   /\ BackgroundCommitted <= TotalBudget - ForegroundReserve
   \* BUD-03: Ingress refusal at exhaustion never invalidates consensus data

@@ -427,13 +427,31 @@ impl<S: Read> Peer<S> {
         )>,
         PeerError,
     > {
+        self.recv.bind_memory(memory)?;
+        if self.recv.receive_pending() && cancelled() {
+            self.recv.cancel_receive();
+            return Err(
+                std::io::Error::new(std::io::ErrorKind::Interrupted, "receive cancelled").into(),
+            );
+        }
         let mut credit = None;
         let Some((message, raw)) = self.read_message_admitted(|command, payload| {
             if crate::inbound::block_memory::expands_on_decode(command) {
-                credit = Some(memory.reserve(
-                    bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len()),
-                    cancelled,
-                )?);
+                if cancelled() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "decode cancelled",
+                    )
+                    .into());
+                }
+                let bound =
+                    bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len());
+                let distinct = if command == "block" {
+                    bound.saturating_sub(payload.len())
+                } else {
+                    bound
+                };
+                credit = Some(memory.try_reserve_decode(distinct)?);
             }
             Ok(())
         })?
@@ -441,12 +459,9 @@ impl<S: Read> Peer<S> {
             return Ok(None);
         };
         match (&message, credit.as_mut()) {
-            (Message::Block(payload), Some(credit)) => credit.retain(
-                payload
-                    .bytes()
-                    .len()
-                    .saturating_add(payload.retained_heap_bytes()),
-            )?,
+            (Message::Block(payload), Some(credit)) => {
+                credit.retain(payload.retained_heap_bytes())?
+            }
             (Message::Tx(tx), Some(credit)) => {
                 credit.retain(tx.total_size().saturating_add(tx.retained_heap_bytes()))?;
             }

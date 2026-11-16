@@ -466,6 +466,7 @@ pub(crate) struct V1Receiver {
     header: [u8; HEADER_LEN],
     header_filled: usize,
     body: Option<PendingBody>,
+    memory: Option<std::sync::Arc<crate::inbound::block_memory::BlockMemory>>,
 }
 
 #[derive(Debug)]
@@ -473,10 +474,31 @@ struct PendingBody {
     command: String,
     checksum: [u8; 4],
     expected: usize,
-    payload: Vec<u8>,
+    payload: crate::recv::Backing,
 }
 
 impl V1Receiver {
+    pub(crate) fn receive_pending(&self) -> bool {
+        self.body.is_some()
+    }
+
+    pub(crate) fn bind_memory(
+        &mut self,
+        memory: &std::sync::Arc<crate::inbound::block_memory::BlockMemory>,
+    ) -> std::io::Result<()> {
+        if self.memory.is_none()
+            && self
+                .body
+                .as_ref()
+                .is_some_and(|body| body.payload.capacity() != 0)
+        {
+            return Err(std::io::Error::other(
+                "cannot bind a live uncharged receive",
+            ));
+        }
+        crate::recv::bind_memory(&mut self.memory, memory)
+    }
+
     pub(crate) fn with_prefix(prefix: &[u8]) -> Self {
         let mut receiver = Self::default();
         let len = prefix.len().min(HEADER_LEN);
@@ -499,7 +521,12 @@ impl V1Receiver {
         } else {
             self.read_header(reader, expected_magic)?
         };
-        if let Err(error) = crate::recv::fill_growing(reader, &mut body.payload, body.expected) {
+        if let Err(error) = crate::recv::fill_backing(
+            reader,
+            &mut body.payload,
+            body.expected,
+            self.memory.as_ref(),
+        ) {
             if crate::recv::is_poll_timeout(&error) {
                 self.body = Some(body);
             }
@@ -514,7 +541,7 @@ impl V1Receiver {
             &body.payload,
             HEADER_LEN + body.payload.len(),
         )?;
-        let payload = bytes::Bytes::from(body.payload);
+        let payload = body.payload.into_bytes();
         let message = decode_payload(&body.command, &payload)?;
         Ok((message, payload))
     }
@@ -564,7 +591,7 @@ fn pending_body(
         command,
         checksum,
         expected: payload_len,
-        payload: Vec::new(),
+        payload: crate::recv::Backing::default(),
     })
 }
 

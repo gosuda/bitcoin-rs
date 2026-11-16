@@ -80,6 +80,7 @@ fn full_budget_refuses_ingress_without_marking_invalid() {
         BudgetOwner::IndexBuilder,
         BudgetOwner::QueryViews,
         BudgetOwner::PeerOutbound,
+        BudgetOwner::PeerReceive,
     ];
     for owner in owners {
         let avail = budget.available(owner);

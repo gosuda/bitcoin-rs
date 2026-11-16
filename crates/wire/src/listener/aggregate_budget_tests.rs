@@ -98,7 +98,6 @@ fn compact_completion_reserves_before_consuming_pending_and_transfers_image_cred
             &sink,
             bitcoin_rs_consensus::primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333)),
             &shared,
-            None,
         );
         if scenario != "complete" {
             assert_eq!(reconstruction.pending_len(), 1);
@@ -995,5 +994,384 @@ fn releasing_credits_returns_used_to_zero() -> TestResult {
         0,
         "independent oracle: dropping credit returns aggregate pending bytes to 0"
     );
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CompactIngressTestError {
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+    #[error(transparent)]
+    Compact(#[from] bitcoin::bip152::Error),
+    #[error(transparent)]
+    HeaderReceive(#[from] crossbeam_channel::TryRecvError),
+    #[error(transparent)]
+    ForwardReceive(#[from] crossbeam_channel::RecvTimeoutError),
+    #[error(transparent)]
+    ForwardSignal(#[from] crossbeam_channel::SendError<()>),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+    #[error("block decoder returned another command")]
+    UnexpectedCommand,
+    #[error("compact worker panicked: {0:?}")]
+    WorkerPanicked(Box<dyn std::any::Any + Send>),
+}
+
+type CompactTestResult = Result<(), CompactIngressTestError>;
+
+struct CompactForwarding {
+    reached: crossbeam_channel::Sender<()>,
+    result: parking_lot::Mutex<Option<Result<(), crossbeam_channel::SendError<()>>>>,
+}
+
+struct CompactAdmissionObserver {
+    forwarding: Option<Arc<CompactForwarding>>,
+}
+
+impl super::BlockSyncObserver for CompactAdmissionObserver {
+    fn announce_block(&self, _: crate::PeerSource, _: bitcoin_rs_consensus::primitives::Hash256) {}
+    fn block_not_found(&self, _: crate::PeerSource, _: &[Inventory]) -> bool {
+        false
+    }
+    fn note_header_response_received(&self, _: crate::PeerSource) {}
+    fn owns_body_fetch(
+        &self,
+        _: crate::PeerSource,
+        _: bitcoin_rs_consensus::primitives::Hash256,
+    ) -> bool {
+        if let Some(forwarding) = &self.forwarding {
+            let result = forwarding.reached.send(());
+            let delivered = result.is_ok();
+            *forwarding.result.lock() = Some(result);
+            return delivered;
+        }
+        true
+    }
+    fn compact_reconstruction_admissible(&self, _: crate::PeerSource, _: &Header) -> bool {
+        true
+    }
+    fn enqueue_owned_body_fetch(
+        &self,
+        _: crate::PeerSource,
+        _: bitcoin_rs_consensus::primitives::Hash256,
+        follow_up: &mut dyn FnMut() -> bool,
+    ) -> bool {
+        follow_up()
+    }
+    fn note_stale_tip_heard(
+        &self,
+        _: crate::PeerSource,
+        _: bitcoin_rs_consensus::primitives::Hash256,
+    ) {
+    }
+    fn allow_extra_full_relay_dial(&self) -> bool {
+        false
+    }
+    fn is_downloading_bodies(&self, _: crate::PeerSource) -> bool {
+        true
+    }
+}
+
+struct NoCompactTransactions;
+
+impl crate::compact_blocks::CompactBlockHints for NoCompactTransactions {
+    fn for_each_identity(
+        &self,
+        _: &mut dyn FnMut(
+            bitcoin_rs_consensus::primitives::Txid,
+            bitcoin_rs_consensus::primitives::Wtxid,
+        ),
+    ) {
+    }
+    fn get_tx_by_txid(
+        &self,
+        _: bitcoin_rs_consensus::primitives::Txid,
+    ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+        None
+    }
+    fn get_tx_by_wtxid(
+        &self,
+        _: bitcoin_rs_consensus::primitives::Wtxid,
+    ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+        None
+    }
+}
+
+// BUD-03, BUD-07, P2P-06, SYNC-03
+#[test]
+fn compact_admission_refusal_preserves_header_for_ordinary_sync() -> CompactTestResult {
+    for remaining in [0, crate::compact_blocks::MAX_PENDING_RETAINED_BYTES] {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let message = Message::CmpctBlock(CmpctBlock {
+            compact_block: HeaderAndShortIds::from_block(&block, 7, 2, &[])?,
+        });
+        let expected = crate::compact_blocks::native_header(&block.header)
+            .ok_or(CompactIngressTestError::Missing("native header"))?;
+        let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
+        shared.block_sync = Some(Arc::new(CompactAdmissionObserver { forwarding: None }));
+        let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
+        shared.headers_tx = headers_tx;
+        let ledger = shared.block_memory.ledger();
+        let held = shared
+            .block_memory
+            .try_reserve(ledger.capacity() - remaining)?;
+        let (queue, _receiver) = crate::test_support::message_channel();
+        let lease = PeerLease::new(queue);
+        let endpoint = bitcoin_rs_consensus::primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
+        let mut reconstruction = crate::compact_blocks::Reconstruction::new();
+        super::process_compact_wire_message(
+            &message,
+            &mut reconstruction,
+            Some(2),
+            Some(&NoCompactTransactions),
+            &ProductionSink::new(&lease, None),
+            endpoint,
+            &shared,
+        );
+        let delivered = headers_rx.try_recv()?;
+        assert_eq!(delivered.headers, vec![expected]);
+        assert_eq!(delivered.source, Some(lease.source(Some(endpoint))));
+        assert!(!delivered.wire_response);
+        assert!(
+            headers_rx.is_empty(),
+            "one discovery announcement per refused compact block"
+        );
+        assert_eq!(reconstruction.pending_len(), 0);
+        drop(held);
+        assert!(
+            ledger.try_take(ledger.capacity()),
+            "refused optional work retains no reservation"
+        );
+        ledger.give_back(ledger.capacity());
+    }
+    Ok(())
+}
+
+// BUD-01, BUD-06
+#[test]
+fn compact_forward_backpressure_keeps_source_and_image_charged() -> CompactTestResult {
+    for (completion, deliver) in [
+        ("cmpctblock", true),
+        ("blocktxn", true),
+        ("cmpctblock", false),
+        ("blocktxn", false),
+    ] {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut reconstruction = crate::compact_blocks::Reconstruction::new();
+        let compact = HeaderAndShortIds::from_block(&block, 7, 2, &[])?;
+        let message = if completion == "cmpctblock" {
+            Message::CmpctBlock(CmpctBlock {
+                compact_block: compact,
+            })
+        } else {
+            let mut missing = compact;
+            let keys = ShortId::calculate_siphash_keys(&block.header, 7);
+            missing.prefilled_txs.clear();
+            missing.short_ids = vec![ShortId::with_siphash_keys(
+                block.txdata[0].compute_wtxid().as_byte_array(),
+                keys,
+            )];
+            assert!(matches!(
+                reconstruction.receive_cmpctblock(
+                    &CmpctBlock {
+                        compact_block: missing
+                    },
+                    2,
+                    &NoCompactTransactions,
+                    Instant::now(),
+                ),
+                crate::compact_blocks::Outcome::RequestMissing(_)
+            ));
+            Message::BlockTxn(bitcoin::p2p::message_compact_blocks::BlockTxn {
+                transactions: bitcoin::bip152::BlockTransactions {
+                    block_hash: block.block_hash(),
+                    transactions: block.txdata.clone(),
+                },
+            })
+        };
+        let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
+        let (forwarding_tx, forwarding_rx) = crossbeam_channel::bounded(1);
+        let forwarding = Arc::new(CompactForwarding {
+            reached: forwarding_tx,
+            result: parking_lot::Mutex::new(None),
+        });
+        shared.block_sync = Some(Arc::new(CompactAdmissionObserver {
+            forwarding: Some(Arc::clone(&forwarding)),
+        }));
+        let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(0);
+        shared.blocks_tx = blocks_tx;
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        shared.headers_tx = headers_tx;
+        let ledger = Arc::clone(shared.block_memory.ledger());
+        let payload = bytes::Bytes::from(bitcoin::consensus::serialize(&block));
+        let Message::Block(image) = crate::wire::decode_payload("block", &payload)? else {
+            return Err(CompactIngressTestError::UnexpectedCommand);
+        };
+        let image_bytes = image.bytes().len() + image.retained_heap_bytes();
+        drop(image);
+        let mut frame = Vec::new();
+        crate::wire::write_message(&mut frame, MAGIC, &message)?;
+        let mut peer = crate::Peer::new(std::io::Cursor::new(frame), MAGIC);
+        peer.state = crate::PeerState::Ready;
+        let (source_message, raw, source_credit) = peer
+            .read_message_bounded(&shared.block_memory, || false)?
+            .ok_or(CompactIngressTestError::Missing(
+                "one compact source message",
+            ))?;
+        let used_bytes = || {
+            let mut available = 0;
+            let mut upper = ledger.capacity();
+            while available < upper {
+                let probe = available + (upper - available).div_ceil(2);
+                if ledger.try_take(probe) {
+                    ledger.give_back(probe);
+                    available = probe;
+                } else {
+                    upper = probe - 1;
+                }
+            }
+            ledger.capacity() - available
+        };
+        let source_bytes = used_bytes();
+        assert!(
+            source_bytes > 0,
+            "bounded receive must charge its live source"
+        );
+        let (queue, _receiver) = crate::test_support::message_channel();
+        let lease = PeerLease::new(queue);
+        let source = (source_credit, source_message, raw);
+        let worker = std::thread::spawn(move || {
+            let (source_credit, source_message, raw) = source;
+            super::process_compact_wire_message(
+                &source_message,
+                &mut reconstruction,
+                Some(2),
+                Some(&NoCompactTransactions),
+                &ProductionSink::new(&lease, None),
+                bitcoin_rs_consensus::primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333)),
+                &shared,
+            );
+            drop(source_message);
+            drop(raw);
+            drop(source_credit);
+        });
+        forwarding_rx.recv_timeout(FAILSAFE)?;
+        let blocked_bytes = used_bytes();
+        let inbound = if deliver {
+            Some(blocks_rx.recv_timeout(FAILSAFE)?)
+        } else {
+            drop(blocks_rx);
+            None
+        };
+        worker
+            .join()
+            .map_err(CompactIngressTestError::WorkerPanicked)?;
+        forwarding
+            .result
+            .lock()
+            .take()
+            .ok_or(CompactIngressTestError::Missing(
+                "forwarding observer result",
+            ))??;
+        let downstream_bytes = used_bytes();
+        drop(inbound);
+        assert_eq!(
+            blocked_bytes,
+            source_bytes + image_bytes,
+            "{completion}: blocked forwarding retains both source and reconstructed image"
+        );
+        assert_eq!(
+            downstream_bytes,
+            if deliver { image_bytes } else { 0 },
+            "{completion}: source disposal leaves only the delivered image charged"
+        );
+        assert!(
+            ledger.try_take(ledger.capacity()),
+            "all retained allocations released"
+        );
+        ledger.give_back(ledger.capacity());
+    }
+    Ok(())
+}
+
+// BUD-06
+#[test]
+fn refused_block_forward_keeps_image_charged_until_backing_disposal() -> CompactTestResult {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct ImageBacking {
+        bytes: Vec<u8>,
+        ledger: Arc<dyn crate::inbound::block_memory::IngressLedger>,
+        charge: Arc<AtomicUsize>,
+        observed: Arc<AtomicBool>,
+    }
+
+    impl AsRef<[u8]> for ImageBacking {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+
+    impl Drop for ImageBacking {
+        fn drop(&mut self) {
+            let headroom = self.ledger.capacity() - self.charge.load(Ordering::Acquire);
+            let admitted_headroom = self.ledger.try_take(headroom);
+            let admitted_extra = self.ledger.try_take(1);
+            if admitted_extra {
+                self.ledger.give_back(1);
+            }
+            if admitted_headroom {
+                self.ledger.give_back(headroom);
+            }
+            self.observed
+                .store(admitted_headroom && !admitted_extra, Ordering::Release);
+        }
+    }
+
+    let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
+    shared.block_sync = None;
+    let ledger = Arc::clone(shared.block_memory.ledger());
+    let charge = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::new(AtomicBool::new(false));
+    let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let raw = bytes::Bytes::from_owner(ImageBacking {
+        bytes: bitcoin::consensus::serialize(&block),
+        ledger: Arc::clone(&ledger),
+        charge: Arc::clone(&charge),
+        observed: Arc::clone(&observed),
+    });
+    let Message::Block(image) = crate::wire::decode_payload("block", &raw)? else {
+        return Err(CompactIngressTestError::UnexpectedCommand);
+    };
+    let image_bytes = image.bytes().len() + image.retained_heap_bytes();
+    let image_credit = shared.block_memory.try_reserve(image_bytes)?;
+    charge.store(image_bytes, Ordering::Release);
+    drop(raw);
+    let (queue, _receiver) = crate::test_support::message_channel();
+    let lease = PeerLease::new(queue);
+    let endpoint = bitcoin_rs_consensus::primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
+    let source = lease.source(Some(endpoint));
+    let hash = bitcoin_rs_consensus::primitives::Hash256::from(image.block_hash());
+    let forwards: Vec<_> =
+        (0..crate::connection::MAX_UNSOLICITED_BLOCK_FORWARDS)
+            .map(|_| {
+                lease.admit_block_forward(source, hash, false).ok_or(
+                    CompactIngressTestError::Missing("unsolicited forwarding slot"),
+                )
+            })
+            .collect::<Result<_, _>>()?;
+
+    shared.send_block(&lease, endpoint, image, Some(image_credit));
+
+    assert!(
+        observed.load(Ordering::Acquire),
+        "final image backing disposal must observe its complete retained-image charge"
+    );
+    assert!(
+        ledger.try_take(ledger.capacity()),
+        "refused image releases its full charge"
+    );
+    ledger.give_back(ledger.capacity());
+    drop(forwards);
     Ok(())
 }

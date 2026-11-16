@@ -57,15 +57,47 @@ impl BudgetCaps {
     }
 
     #[must_use]
+    pub const fn receive_cap(self) -> u64 {
+        let ceiling = 64 * 1024 * 1024;
+        let proportional = self.staged_images / 8;
+        if proportional < ceiling {
+            proportional
+        } else {
+            ceiling
+        }
+    }
+
+    #[must_use]
+    pub const fn image_cap(self) -> u64 {
+        self.staged_images - self.receive_cap()
+    }
+
+    #[must_use]
+    pub const fn image_foreground_reserve(self) -> u64 {
+        let ceiling = self.image_cap() - self.receive_cap();
+        if self.foreground_reserve < ceiling {
+            self.foreground_reserve
+        } else {
+            ceiling
+        }
+    }
+
+    #[must_use]
+    pub const fn image_ingress_cap(self) -> u64 {
+        self.image_cap() - self.image_foreground_reserve()
+    }
+
+    #[must_use]
     pub const fn owner_cap(self, owner: BudgetOwner) -> u64 {
         match owner {
             BudgetOwner::CoinCache => self.coin_cache,
             BudgetOwner::EngineCache => self.engine_cache,
             BudgetOwner::FactsQueue => self.facts_queue,
             BudgetOwner::IndexBuilder => self.index_builder,
-            BudgetOwner::StagedImages => self.staged_images,
+            BudgetOwner::StagedImages => self.image_cap(),
             BudgetOwner::QueryViews => self.query_views,
             BudgetOwner::PeerOutbound => self.peer_outbound,
+            BudgetOwner::PeerReceive => self.receive_cap(),
         }
     }
 
@@ -83,8 +115,8 @@ impl BudgetCaps {
 
 #[derive(Default)]
 struct Ledger {
-    charges: [u64; 7],
-    reserved: [u64; 7],
+    charges: [u64; 8],
+    reserved: [u64; 8],
     ingress_refused: bool,
 }
 
@@ -272,10 +304,7 @@ impl NodeBudget {
         let owner = BudgetOwner::StagedImages;
         let idx = owner.index();
         let committed = ledger.charges[idx].saturating_add(ledger.reserved[idx]);
-        let ceiling = self
-            .caps
-            .staged_images
-            .saturating_sub(self.caps.foreground_reserve);
+        let ceiling = self.caps.image_ingress_cap();
         if bytes > ceiling.saturating_sub(committed) {
             ledger.ingress_refused = true;
             return Err(BudgetError::BudgetExhausted);
@@ -332,12 +361,18 @@ impl NodeBudget {
     pub fn is_safe(&self) -> bool {
         let ledger = self.ledger.lock();
         let engine_idx = BudgetOwner::EngineCache.index();
+        let image_idx = BudgetOwner::StagedImages.index();
+        let receive_idx = BudgetOwner::PeerReceive.index();
         let total = self.caps.total();
         total_charges(&ledger).saturating_add(total_reserved(&ledger)) <= total
             && background_committed_of(&ledger)
                 <= total.saturating_sub(self.caps.foreground_reserve)
             && ledger.charges[engine_idx].saturating_add(ledger.reserved[engine_idx])
                 <= self.caps.engine_cache
+            && ledger.charges[image_idx].saturating_add(ledger.reserved[image_idx])
+                <= self.caps.image_cap()
+            && ledger.charges[receive_idx].saturating_add(ledger.reserved[receive_idx])
+                <= self.caps.receive_cap()
             && (!self.is_mdbx.load(Ordering::Relaxed)
                 || (ledger.charges[engine_idx] == 0 && ledger.reserved[engine_idx] == 0))
     }
@@ -438,13 +473,7 @@ impl BudgetedIngressLedger {
 
 impl bitcoin_rs_wire::inbound::block_memory::IngressLedger for BudgetedIngressLedger {
     fn capacity(&self) -> usize {
-        usize::try_from(
-            self.budget
-                .caps
-                .staged_images
-                .saturating_sub(self.budget.caps.foreground_reserve),
-        )
-        .unwrap_or(usize::MAX)
+        usize::try_from(self.budget.caps.image_ingress_cap()).unwrap_or(usize::MAX)
     }
 
     fn try_take(&self, bytes: usize) -> bool {
@@ -463,6 +492,31 @@ impl bitcoin_rs_wire::inbound::block_memory::IngressLedger for BudgetedIngressLe
 
     fn wait_released(&self, timeout: Duration) {
         self.budget.wait_released(timeout);
+    }
+
+    fn receive_capacity(&self) -> usize {
+        usize::try_from(self.budget.caps.receive_cap()).unwrap_or(usize::MAX)
+    }
+
+    fn try_take_receive(&self, bytes: usize) -> bool {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let mut ledger = self.budget.ledger.lock();
+        if self
+            .budget
+            .reserve_locked(&mut ledger, BudgetOwner::PeerReceive, bytes)
+            .is_err()
+        {
+            return false;
+        }
+        let idx = BudgetOwner::PeerReceive.index();
+        ledger.reserved[idx] -= bytes;
+        ledger.charges[idx] += bytes;
+        true
+    }
+
+    fn give_back_receive(&self, bytes: usize) {
+        let bytes = u64::try_from(bytes).unwrap_or(0);
+        let _ = self.budget.release(BudgetOwner::PeerReceive, bytes);
     }
 }
 

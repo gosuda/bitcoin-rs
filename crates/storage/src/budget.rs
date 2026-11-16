@@ -20,6 +20,7 @@ pub enum BudgetOwner {
     StagedImages = 4,
     QueryViews = 5,
     PeerOutbound = 6,
+    PeerReceive = 7,
 }
 
 impl BudgetOwner {
@@ -33,6 +34,7 @@ impl BudgetOwner {
             Self::StagedImages => 4,
             Self::QueryViews => 5,
             Self::PeerOutbound => 6,
+            Self::PeerReceive => 7,
         }
     }
 

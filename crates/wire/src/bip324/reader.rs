@@ -15,7 +15,8 @@ pub(crate) const MAX_RECV_CONTENTS_LEN: usize = 1 + 12 + MAX_MESSAGE_PAYLOAD;
 #[derive(Debug)]
 pub struct PacketReader {
     cipher: RecvCipher,
-    aad: Vec<u8>,
+    aad: recv::Backing,
+    memory: Option<std::sync::Arc<crate::inbound::block_memory::BlockMemory>>,
     field: [u8; LENGTH_FIELD_LEN],
     field_filled: usize,
     body: Option<PendingBody>,
@@ -25,18 +26,53 @@ pub struct PacketReader {
 #[derive(Debug)]
 struct PendingBody {
     len: usize,
-    bytes: Vec<u8>,
+    bytes: recv::Backing,
 }
 
 impl PacketReader {
+    pub(crate) fn receive_pending(&self) -> bool {
+        self.body.is_some()
+    }
+
     pub const fn new(cipher: RecvCipher, aad: Vec<u8>) -> Self {
         Self {
             cipher,
-            aad,
+            aad: recv::Backing::from_vec(aad),
+            memory: None,
             field: [0; LENGTH_FIELD_LEN],
             field_filled: 0,
             body: None,
             failed: false,
+        }
+    }
+
+    pub(crate) fn bind_memory(
+        &mut self,
+        memory: &std::sync::Arc<crate::inbound::block_memory::BlockMemory>,
+    ) -> std::io::Result<()> {
+        if self.memory.is_none()
+            && (self.aad.capacity() != 0
+                || self
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| body.bytes.capacity() != 0))
+        {
+            return Err(std::io::Error::other(
+                "cannot bind a live uncharged receive",
+            ));
+        }
+        recv::bind_memory(&mut self.memory, memory)
+    }
+
+    pub(crate) fn from_backing(
+        cipher: RecvCipher,
+        aad: recv::Backing,
+        memory: Option<std::sync::Arc<crate::inbound::block_memory::BlockMemory>>,
+    ) -> Self {
+        Self {
+            aad,
+            memory,
+            ..Self::new(cipher, Vec::new())
         }
     }
 
@@ -56,16 +92,20 @@ impl PacketReader {
                 Err(error) => {
                     if !is_poll_timeout(&error) {
                         self.failed = true;
+                        self.aad = recv::Backing::default();
                     }
                     return Err(error);
                 }
             },
         };
-        if let Err(error) = recv::fill_growing(reader, &mut body.bytes, body.len) {
+        if let Err(error) =
+            recv::fill_backing(reader, &mut body.bytes, body.len, self.memory.as_ref())
+        {
             if recv::is_poll_timeout(&error) {
                 self.body = Some(body);
             } else {
                 self.failed = true;
+                self.aad = recv::Backing::default();
             }
             return Err(error.into());
         }
@@ -81,7 +121,7 @@ impl PacketReader {
             return Ok(None);
         }
         let end = HEADER_LEN + opened.contents.len();
-        Ok(Some(Bytes::from(body.bytes).slice(HEADER_LEN..end)))
+        Ok(Some(body.bytes.into_bytes().slice(HEADER_LEN..end)))
     }
 
     fn read_length<R: Read>(&mut self, reader: &mut R) -> Result<PendingBody, TransportError> {
@@ -98,7 +138,7 @@ impl PacketReader {
         }
         Ok(PendingBody {
             len: HEADER_LEN + contents_len + TAG_LEN,
-            bytes: Vec::new(),
+            bytes: recv::Backing::default(),
         })
     }
 }

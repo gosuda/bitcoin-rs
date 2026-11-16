@@ -554,6 +554,7 @@ impl ConnectionShared {
         payload: bitcoin_rs_consensus::primitives::BlockImage,
         memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
     ) {
+        let (memory_credit, payload) = (memory_credit, payload);
         let peer_addr = peer_addr.into();
         let source = lease.source(peer_addr.endpoint());
         let hash = bitcoin_rs_consensus::primitives::Hash256::from(payload.block_hash());
@@ -1055,11 +1056,12 @@ fn dial(
 
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let mut stream = stream;
-    let negotiated = if transport_choice == TransportChoice::PreferV2 {
+    let mut negotiated = if transport_choice == TransportChoice::PreferV2 {
         let mut handshake = crate::bip324::Handshake::initiator(
             shared.magic,
             &mut bitcoin::secp256k1::rand::thread_rng(),
         );
+        handshake.bind_memory(&shared.block_memory)?;
         match crate::transport::establish(
             &mut stream,
             &mut handshake,
@@ -1088,6 +1090,7 @@ fn dial(
     } else {
         crate::transport::Negotiated::v1(shared.magic)
     };
+    negotiated.recv.bind_memory(&shared.block_memory)?;
 
     let nonce = generate_nonce(addr);
     let nonce_guard = shared.peer_table.begin_outbound_handshake_nonce(nonce);
@@ -1282,12 +1285,15 @@ fn negotiate_inbound(
     deadline: Instant,
 ) -> Result<crate::transport::Negotiated, crate::wire::PeerError> {
     if !shared.v2_transport {
-        return Ok(crate::transport::Negotiated::v1(shared.magic));
+        let mut negotiated = crate::transport::Negotiated::v1(shared.magic);
+        negotiated.recv.bind_memory(&shared.block_memory)?;
+        return Ok(negotiated);
     }
     let mut handshake = crate::bip324::Handshake::responder(
         shared.magic,
         &mut bitcoin::secp256k1::rand::thread_rng(),
     );
+    handshake.bind_memory(&shared.block_memory)?;
     crate::transport::establish(stream, &mut handshake, shared.magic, lease, deadline)
 }
 
@@ -2263,8 +2269,8 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
         }
 
-        let (message, _raw, reply, memory_credit) = if let Some((message, reply)) = resumed {
-            (message, bytes::Bytes::new(), reply, None)
+        let (memory_credit, message, _raw, reply) = if let Some((message, reply)) = resumed {
+            (None, message, bytes::Bytes::new(), reply)
         } else {
             let read_result = peer.read_message_bounded(&shared.block_memory, || {
                 lease.is_cancelled() || shared.is_session_cancelled()
@@ -2285,7 +2291,11 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
             match read_result {
                 Ok(None) => continue,
-                Ok(Some((message, raw, memory_credit))) => {
+                Ok(Some(received)) => {
+                    let (memory_credit, message, raw) = {
+                        let (message, raw, memory_credit) = received;
+                        (memory_credit, message, raw)
+                    };
                     keepalive.record_recv(Instant::now());
                     let Some(message) = enforce_relay_role(lease.role(), message)? else {
                         continue;
@@ -2321,7 +2331,7 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
                             continue;
                         }
                     };
-                    (message, raw, reply, memory_credit)
+                    (memory_credit, message, raw, reply)
                 }
                 Err(crate::wire::PeerError::Io(error))
                     if matches!(
@@ -2610,7 +2620,6 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
                     &sink,
                     peer_addr,
                     shared,
-                    memory_credit,
                 );
             }
             _ => {}
@@ -2830,6 +2839,8 @@ fn reserve_compact_materialization(
     credit
 }
 
+/// The caller retains the source decoder credit until its message and raw bytes are disposed.
+/// A completed image receives a separate credit that follows the forwarded image.
 pub fn process_compact_wire_message(
     message: &crate::Message,
     compact_reconstruction: &mut crate::compact_blocks::Reconstruction,
@@ -2838,7 +2849,6 @@ pub fn process_compact_wire_message(
     sink: &ProductionSink<'_>,
     peer_addr: impl Into<crate::PeerRemote>,
     shared: &ConnectionShared,
-    memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
 ) {
     let peer_addr = peer_addr.into();
     let lease = sink.lease;
@@ -2866,6 +2876,16 @@ pub fn process_compact_wire_message(
         Ok(credit) => credit,
         Err(error) => {
             tracing::debug!(peer_addr = %peer_addr, %error, "compact reconstruction admission refused");
+            if let crate::Message::CmpctBlock(cmpct) = message
+                && let Some(header) =
+                    crate::compact_blocks::native_header(&cmpct.compact_block.header)
+            {
+                shared.send_embedded_headers(
+                    lease,
+                    lease.source(peer_addr.endpoint()),
+                    vec![header],
+                );
+            }
             return;
         }
     };
@@ -2894,7 +2914,6 @@ pub fn process_compact_wire_message(
     } else {
         None
     };
-    drop(memory_credit);
     let announced_header = if let crate::Message::CmpctBlock(cmpct) = message
         && !matches!(outcome, crate::compact_blocks::Outcome::Complete(_))
     {
