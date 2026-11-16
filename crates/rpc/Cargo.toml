@@ -7,7 +7,7 @@ license.workspace = true
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "bitcoin-rs :: serving (RPC, REST, Esplora, ZMQ, Mining & Pool)"
+description = "bitcoin-rs :: rpc (RPC, REST, Esplora, ZMQ, Mining & Pool)"
 
 [lints]
 workspace = true

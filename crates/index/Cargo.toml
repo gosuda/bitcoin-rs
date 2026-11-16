@@ -7,7 +7,7 @@ license.workspace = true
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "bitcoin-rs :: projection"
+description = "bitcoin-rs :: index"
 
 [lints]
 workspace = true

@@ -7,7 +7,7 @@ license.workspace = true
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "bitcoin-rs :: wire"
+description = "bitcoin-rs :: p2p"
 
 [lints]
 workspace = true
