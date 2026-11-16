@@ -3100,6 +3100,7 @@ mod tests {
             .outbound_tx
             .try_send(OutboundDial::auto(address))
             .expect("queue");
+        let outbound_rx = service.outbound_rx.lock().clone();
         service
             .start(
                 None,
@@ -3109,18 +3110,11 @@ mod tests {
             )
             .expect("start");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if service
-                .outbound_rx
-                .try_lock()
-                .is_some_and(|rx| rx.is_empty())
-            {
-                break;
-            }
+        while !outbound_rx.is_empty() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(
-            service.outbound_rx.lock().is_empty(),
+            outbound_rx.is_empty(),
             "worker must have parked the request"
         );
         assert_eq!(service.address_book.pending_count_excluding(&[]), 1);
