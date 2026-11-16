@@ -906,9 +906,7 @@ mod tests {
         -> Result<(), DerivedIndexWorkerError> {
             assert_linked_namespace_preserved(
                 bitcoin_rs_storage::StorageBackend::SurrealKv,
-                |path| {
-                    bitcoin_rs_storage::SurrealKvStore::open_with_cache(path, 8 * 1024 * 1024)
-                },
+                |path| bitcoin_rs_storage::SurrealKvStore::open_with_cache(path, 8 * 1024 * 1024),
             )
         }
 
@@ -984,7 +982,10 @@ mod tests {
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
                 assert!(!root.path().join(".txindex.reset").exists());
                 assert!(std::fs::symlink_metadata(&path)?.file_type().is_symlink());
-                assert_eq!(std::fs::read(target.path().join("keep"))?, b"operator bytes");
+                assert_eq!(
+                    std::fs::read(target.path().join("keep"))?,
+                    b"operator bytes"
+                );
                 let store = open_store(target.path())?;
                 for &family in ColumnFamily::ALL {
                     assert_eq!(
