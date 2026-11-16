@@ -475,6 +475,8 @@ Proof: `crates/node/src/budget.rs::saturated_ingress_preserves_execution_headroo
 - Staged-image reclamation must stop once the requested ledger release or attributed eviction work is reached. Active and historical stagers share this work limit. Attributed eviction bytes are not released credit; admission still requires the ledger's reservation retry.
 - The component must not add unbounded memory buffering.
 
+Proof: `crates/wire/src/inbound/block_memory.rs::message_loop_refuses_receive_pressure_once_and_releases_partial_backing` checks terminal local receive refusal and released partial backing for both transports. `crates/wire/src/inbound/block_memory.rs::decode_admission_refuses_without_waiting_on_retained_raw_memory` checks terminal decoder refusal without waiting on retained raw memory. `crates/wire/src/inbound/block_memory.rs::cancellation_precedes_typed_decode_and_malformed_decode_releases_credit` checks cancellation before decoder admission and credit release after malformed decoding. `crates/node/src/p2p/block_stager.rs::reclaim_work_stays_bounded_when_admissions_replace_released_credit` checks the eviction work limit under replacement charges and zero requests. `crates/node/src/p2p/sync.rs::shared_staged_backing_bounds_reclaim_before_historical_eviction` and `crates/node/src/p2p/sync.rs::reclaimed_credit_preserves_historical_bodies_after_the_target_is_met` check historical preservation when either the work limit or actual release target is reached. `crates/node/src/budget.rs::transfer_reclaims_staged_image_and_retries_once` checks the authoritative transfer retry and conserved receive credit on refusal.
+
 ### `MPS-01`: Mempool dependency graph and settlement
 
 - The mempool must own its transaction dependency graph and policy state.

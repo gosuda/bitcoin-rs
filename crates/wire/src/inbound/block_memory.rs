@@ -1095,6 +1095,7 @@ mod tests {
         Ok(())
     }
 
+    // BUD-07
     #[test]
     fn decode_admission_refuses_without_waiting_on_retained_raw_memory() -> TestResult {
         for make_peer in [legacy_receive_peer, encrypted_receive_peer] {
