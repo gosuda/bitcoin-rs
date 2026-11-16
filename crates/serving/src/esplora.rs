@@ -2348,6 +2348,7 @@ mod tests {
         Ok(())
     }
 
+    // WF-02
     #[test]
     fn composed_history_and_mempool_routes_refuse_reorg_and_aba_publications()
     -> Result<(), TestError> {

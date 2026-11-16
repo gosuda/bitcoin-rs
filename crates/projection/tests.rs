@@ -7451,12 +7451,7 @@ mod portable_bundle {
                     let inner = RocksDbStore::open_with_cache(dir, STORE_CACHE_BYTES).map_err(
                         bitcoin_rs_projection::runtime::DerivedIndexWorkerError::Storage,
                     )?;
-                    let scratch = dir.join("seal-scratch");
-                    fs::create_dir_all(&scratch).map_err(|error| {
-                        bitcoin_rs_projection::runtime::DerivedIndexWorkerError::Storage(
-                            StorageError::Io(error),
-                        )
-                    })?;
+                    let scratch = dir.with_file_name("seal-scratch");
                     if crash {
                         let store = Arc::new(CrashAfterBulkImport {
                             inner,
@@ -7751,6 +7746,8 @@ mod portable_bundle {
                 ..Start::default()
             },
         );
+        let restore_scratch = receiver.join("seal-scratch");
+        assert!(!restore_scratch.exists());
         let restored = Node::start(
             &fixture,
             &receiver,
@@ -7790,6 +7787,14 @@ mod portable_bundle {
         restored.stop();
         source_node.stop();
 
+        assert!(restore_scratch.is_dir());
+        assert_eq!(
+            fs::read_dir(&restore_scratch)
+                .expect("restore scratch root")
+                .count(),
+            0,
+            "restore releases validation and import scratch directories"
+        );
         assert_eq!(durable(&receiver), source_state);
         assert_eq!(
             read_dir_files(&bundle),

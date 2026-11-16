@@ -1546,6 +1546,7 @@ mod tests {
         Ok(())
     }
 
+    // IDX-02
     #[test]
     fn spend_event_codec_preserves_full_identity_and_rejects_noncanonical_lengths() {
         use crate::segment::format::{

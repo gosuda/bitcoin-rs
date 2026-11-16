@@ -1598,6 +1598,7 @@ mod tests {
         }
     }
 
+    // PRJ-08
     #[test]
     fn history_rows_merge_same_transaction_inputs_and_outputs() {
         let scripthash = ScriptHash::from_byte_array([0x51; 32]);
@@ -1663,6 +1664,7 @@ mod tests {
         );
     }
 
+    // PRJ-08
     #[test]
     fn history_window_merges_duplicates_before_charging_older_height() {
         let scripthash = ScriptHash::from_byte_array([0x52; 32]);

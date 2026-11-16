@@ -1121,7 +1121,7 @@ mod tests {
         Ok(())
     }
 
-    // IDX-11, IDX-12
+    // IDX-12
     #[test]
     fn positive_floor_portable_restore_preserves_spend_without_funding_creation() -> TestResult {
         use crate::TxIndexSnapshot;

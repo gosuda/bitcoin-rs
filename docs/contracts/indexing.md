@@ -468,6 +468,10 @@ Owners:
 - In withhold cases, restore writes nothing, logs a warning, and normal backfill proceeds.
 - Any identity refusal is reported before a withhold.
 - Restore apply:
+  - Locator validation and row import MUST create the configured scratch root before they create temporary work directories.
+  - Scratch creation failures return the existing I/O refusal with the failing path.
+  - Each phase removes its temporary work directory when it finishes.
+  - Proof: `crates/projection/tests.rs` (`export_then_restore_serves_the_same_queries_as_backfill`) starts with no receiver scratch directory, checks restored queries against backfill, and checks that temporary directories are removed.
   - The row stream writes the receiver's 80-byte header for every height from 0 to the base (from its block tree, not the bundle).
   - The stream then writes the `TxConfirmed` rows.
   - A batch commits after 65,536 rows (headers included) or 8 MiB.

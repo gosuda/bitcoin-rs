@@ -1308,6 +1308,7 @@ mod tests {
         }
         assert!(finish_portable_bundle(Ok(None)).is_ok());
     }
+    // SNP-10
     #[test]
     fn populated_manifest_capability_does_not_skip_fresh_siblings() -> Result<(), AttachTestError> {
         use crate::portable::{IndexBundleDirective, IndexBundleRequest, ManifestArtifactTarget};

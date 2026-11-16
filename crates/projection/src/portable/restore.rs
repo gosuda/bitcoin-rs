@@ -1748,6 +1748,30 @@ impl LocatorCheck<'_> {
     }
 }
 
+fn restore_work_dir(
+    host: &BundleHost<'_>,
+    path: &Path,
+    prefix: &str,
+) -> Result<tempfile::TempDir, IndexBundleError> {
+    let scratch_root = host
+        .writer
+        .restore_scratch()
+        .or_else(|| path.parent().map(Path::to_path_buf));
+    match scratch_root {
+        Some(root) => {
+            fs::create_dir_all(&root).map_err(|error| io_error(&root, error))?;
+            tempfile::Builder::new()
+                .prefix(prefix)
+                .tempdir_in(&root)
+                .map_err(|error| io_error(&root, error))
+        }
+        None => tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .map_err(|error| io_error(path, error)),
+    }
+}
+
 fn validate_artifact(
     host: &BundleHost<'_>,
     path: &Path,
@@ -1765,20 +1789,7 @@ fn validate_artifact_with_budget(
     chain: Option<&ChainBase>,
     budget: &SpillBudget,
 ) -> Result<(ArtifactHeader, LocatorOutcome), IndexBundleError> {
-    let scratch_root = host
-        .writer
-        .restore_scratch()
-        .or_else(|| path.parent().map(Path::to_path_buf));
-    let work = match &scratch_root {
-        Some(root) => tempfile::Builder::new()
-            .prefix("restore-locators-")
-            .tempdir_in(root)
-            .map_err(|error| io_error(path, error))?,
-        None => tempfile::Builder::new()
-            .prefix("restore-locators-")
-            .tempdir()
-            .map_err(|error| io_error(path, error))?,
-    };
+    let work = restore_work_dir(host, path, "restore-locators-")?;
     let set = SpillSet::new(budget, work.path().to_path_buf());
     let mut sorter = set.sorter("occurrences");
     let name = BundleFamily::TxLookup.file_name();
@@ -2009,21 +2020,7 @@ impl ImportPlan<'_> {
             headers.push(header);
         }
         let header_refs: Vec<&[u8; crate::types::HEADER_ROW_SIZE]> = headers.iter().collect();
-        let scratch_root = self
-            .host
-            .writer
-            .restore_scratch()
-            .or_else(|| self.path.parent().map(Path::to_path_buf));
-        let work = match &scratch_root {
-            Some(root) => tempfile::Builder::new()
-                .prefix("restore-import-")
-                .tempdir_in(root)
-                .map_err(|error| io_error(self.path, error))?,
-            None => tempfile::Builder::new()
-                .prefix("restore-import-")
-                .tempdir()
-                .map_err(|error| io_error(self.path, error))?,
-        };
+        let work = restore_work_dir(self.host, self.path, "restore-import-")?;
         self.import_streamed(&header_refs, work.path(), hashed, base)
     }
 
@@ -2125,8 +2122,8 @@ mod tests {
     use crate::types::TxPosition;
     use std::cell::Cell;
 
-    #[test]
     // IDX-11
+    #[test]
     fn restore_locator_spills_check_canonical_positions_and_late_completeness()
     -> Result<(), crate::portable::TestError> {
         use bitcoin::consensus::serialize;
