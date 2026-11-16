@@ -323,11 +323,12 @@ fn interpret(bytes: &[u8], ip: IpAddr) -> Option<u32> {
 }
 
 #[cfg(test)]
-pub(crate) const CORE_ASMAP: &[u8] = include_bytes!("../tests/data/asmap-core-v31.1.raw");
+pub(crate) const CORE_ASMAP: &[u8] =
+    include_bytes!("../../../testdata/wire/data/asmap-core-v31.1.raw");
 
 #[cfg(test)]
 pub(crate) const LINKED_ASMAP: &[u8] =
-    include_bytes!("../tests/data/asmap-linked-ipv4-core-v31.1.raw");
+    include_bytes!("../../../testdata/wire/data/asmap-linked-ipv4-core-v31.1.raw");
 
 #[cfg(test)]
 #[expect(clippy::expect_used)]
@@ -717,10 +718,18 @@ mod tests {
     }
 
     proptest::proptest! {
-        #![proptest_config(proptest::prelude::ProptestConfig {
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/wire/regressions/netgroup.txt"
+            )),
+        )),
+        ..(proptest::prelude::ProptestConfig {
             cases: netgroup_cases(),
             ..proptest::prelude::ProptestConfig::default()
-        })]
+        })
+    })]
 
         #[test]
         fn netgroup_matches_independent_reference_for_all_network_classes(

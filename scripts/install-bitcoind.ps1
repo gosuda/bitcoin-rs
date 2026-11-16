@@ -70,7 +70,7 @@ $CLI           = Join-Path $PREFIX 'bin\bitcoin-cli.exe'
 $STAMP         = Join-Path $PREFIX '.bitcoin-rs-core-tarball-sha256'
 
 # Component-exact match against the canonical pin, mirroring the bash
-# installer and crates/wire/tests/core_interop_live.rs version_is_pinned_line:
+# installer and crates/wire/tests.rs version_is_pinned_line:
 # "31.1" accepts 31.1(.N) but not 31.10(.N), 31.2(.N), or 30.1(.N).
 function VersionMatchesPin {
     # A binary that cannot launch at all (corrupt, wrong arch) rejects the

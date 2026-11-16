@@ -21,12 +21,12 @@ Startup ignores an unreferenced generation.
 
 Owners:
 - Authoritative durable root and ordered commit protocol (`crates/execution/src/connect.rs`, `disconnect.rs`, `durable.rs`).
-- Recovery and schema admission (`crates/execution/src/recovery.rs`, with process-composition tests in `crates/node/src/state/tests/`).
+- Recovery and schema admission (`crates/execution/src/recovery.rs`, with process-composition tests in `crates/node/src/lib.rs`).
 - Persistent coin transition boundary (`crates/storage/src/commit.rs`, `crates/storage/src/coins.rs`; durable form in `crates/storage/src/durable_head.rs`).
-- Crash and lost-write fault tests (`crates/node/tests/crash_recovery.rs`).
+- Crash and lost-write fault tests (`crates/node/crash_recovery_tests.rs`).
 - Reorg and disconnect (`crates/execution/src/reorg.rs`, `disconnect.rs`).
 - Checkpoint publication and recovery (`crates/execution/src/checkpoint.rs` and companions, `crates/storage/src/checkpoint/`).
-- Index worker recovery (`crates/projection/src/runtime/recovery_tests.rs`).
+- Index worker recovery (`crates/projection/src/runtime.rs`).
 - Policy (`docs/policies/db-migration.md`).
 
 ## Durable root
@@ -131,7 +131,7 @@ struct DurableHead {
 - Startup retries this cleanup for a committed `Finalized` head.
 - Cleanup failures are warnings, not recovery failures.
 - Ordinary checkpoints and unknown files are preserved.
-- Proof: `crates/execution/src/assumeutxo/tests.rs` covers commitment verification, isolated replay, terminal-write failures, and role guards.
+- Proof: `crates/execution/src/assumeutxo.rs` covers commitment verification, isolated replay, terminal-write failures, and role guards.
 - Proof: `assumeutxo_recovery_tests.rs` covers real-storage restart, process-kill boundaries, and lost failure receipts.
 - The tests also cover root-preserving archive replay, checkpoint pin binding, pruning, and below-base reorg restart.
 
@@ -196,7 +196,7 @@ Commit details:
 - The hook fires in `PublishMode::Now` only for a direct child of the published tip.
 - The hook fires in `PublishMode::Grouped` only for the newest block of the staged prefix immediately before group sync.
 - A failing window hands off only the last successful block.
-- The hook is gated on the IBD latch in `crates/node/src/state/open.rs`.
+- The hook is gated on the IBD latch in `crates/node/src/lib.rs`.
 - The hook never fires in `PublishMode::Replay`.
 - The hook enqueues without waiting.
 - Commit order remains strict: block sync in step 3, atomic batch in step 4, cache install in step 5, publication in step 6, follower dispatch in step 8.
@@ -216,8 +216,8 @@ Commit details:
 - Only committed prefixes are published.
 - Group caps are stated constants or budget limits; a failure at block j commits the prefix before j (`WIN-08`).
 - An ambiguous storage failure closes mutation admission until recovery resolves the durable outcome (`CMT-04`).
-- Proof: `crates/execution/src/tests/` (grouped-window staging).
-- Proof: `crates/node/src/mining/coordinator/tests.rs` (receipt install, mismatch fallback, waiter release).
+- Proof: `crates/execution/src/lib.rs` (grouped-window staging).
+- Proof: `crates/node/src/mining/coordinator.rs` (receipt install, mismatch fallback, waiter release).
 
 Replay validation rules:
 - Cold durable-head replay (no accepted checkpoint, including a full-revalidation marker) rechecks scripts for every replayed spend against the rebuilt UTXO view.
@@ -231,7 +231,7 @@ Replay validation rules:
 - Script failure stops admission before publishing the invalid block.
 - Script failure preserves the durable head and full-revalidation marker.
 - Script failure leaves checkpoint publication as the marker-retirement owner.
-- Proof: `crates/execution/src/durable/tests/revalidation.rs` tests script-invalid AssumeValid commits rejected in cold recovery.
+- Proof: `crates/execution/src/durable.rs` tests script-invalid AssumeValid commits rejected in cold recovery.
 - A `Full` start over such a head rebuilds cold.
 - A completed rebuild attests `Full`.
 - The tests verify valid-spend receipt reuse and corrupt-undo refusal.
@@ -370,7 +370,7 @@ The crash and error points produce exactly these results:
 - It is evidence publication, not chainstate authority.
 - It publishes a recovery fact only after the restored authoritative position is known.
 - Neither the warning store nor the marker MAY move chainstate.
-- The node crate keeps `RecoveryReporter` (`crates/node/src/state/storage.rs`) as the composition adapter.
+- The node crate keeps `RecoveryReporter` (`crates/node/src/lib.rs`) as the composition adapter.
 - That adapter implements `IndexAheadSink` and `RollbackWarningSource` alongside the storage capabilities it adapts.
 - For checkpoint fallback and index-watermark-ahead evidence, the publisher first renders/logs the warning.
 - The publisher updates the process-visible warning snapshot, then attempts the atomic durable marker write.
@@ -396,7 +396,7 @@ The crash and error points produce exactly these results:
 - Publication acquires the exclusive apply fence, then admission's publication mutex, and checks recovery closure before writing artifacts.
 - Recovery closure takes only the publication mutex, so it can run while its caller holds an apply permit. A publication admitted first completes before closure; closure that wins first refuses later publication.
 - Recovery closure triggers its latch and wakes waiters under the publication mutex. It releases that mutex before it runs cancellation hooks. A hook can call recovery closure again without a lock cycle.
-- Proof: `crates/execution/src/tests/checkpoint_debt_tests.rs::recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication` (paused body sync), `checkpoint_refuses_a_closed_for_recovery_chainstate` (closure first), and `crates/execution/src/tests/admission_tests.rs::recovery_closure_does_not_upgrade_an_apply_permit` (lock order) and `recovery_closure_hooks_can_reenter_after_publication_unlocks` (cancellation hooks). The interleaving proof does not inject marker-retirement faults.
+- Proof: `crates/execution/src/lib.rs::recovery_closure_waits_for_admitted_checkpoint_and_refuses_later_publication` (paused body sync), `checkpoint_refuses_a_closed_for_recovery_chainstate` (closure first), and `crates/execution/src/lib.rs::recovery_closure_does_not_upgrade_an_apply_permit` (lock order) and `recovery_closure_hooks_can_reenter_after_publication_unlocks` (cancellation hooks). The interleaving proof does not inject marker-retirement faults.
 - The checkpoint publisher freezes the published state.
 - The published state always trails or meets the durable head, because publication follows the batch.
 - Before writing, the publisher loads the head.

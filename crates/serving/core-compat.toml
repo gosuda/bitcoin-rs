@@ -17,7 +17,7 @@
 # `crates/serving/src/manifest.rs` -- Supported, Deviation, Implemented
 # (unverified), Extension, Disabled, Unimplemented -- and only a shipped
 # JSON-RPC row also carries a dispatch arm (REST, ZMQ, `Unimplemented` and
-# `pending` rows set `handler: None`). `crates/serving/tests/manifest_coverage.rs`
+# `pending` rows set `handler: None`). `testdata/serving.rs`
 # renders `docs/rpc-reference.md` from that table, checks it against the
 # dispatcher, the REST router and the fixed Core ZMQ topic list, and refuses
 # a `Supported` claim while `[reference].differential_harness` below is false.

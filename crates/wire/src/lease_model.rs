@@ -420,7 +420,18 @@ mod tests {
 
     // P2P-02
     prop_state_machine! {
-        #![proptest_config(ProptestConfig { cases: lease_model_cases(), ..ProptestConfig::default() })]
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/wire/regressions/lease_model.txt"
+            )),
+        )),
+        ..(ProptestConfig {
+            cases: lease_model_cases(),
+            ..ProptestConfig::default()
+        })
+    })]
         #[test]
         fn peer_leases_match_the_reference_model(sequential 1..32 => LeaseMachine);
     }
@@ -433,7 +444,18 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig { cases: lease_model_cases(), ..ProptestConfig::default() })]
+    #![proptest_config(proptest::test_runner::Config {
+        failure_persistence: Some(std::boxed::Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/wire/regressions/lease_model.txt"
+            )),
+        )),
+        ..(ProptestConfig {
+            cases: lease_model_cases(),
+            ..ProptestConfig::default()
+        })
+    })]
 
         #[test]
         fn lease_model_safety_holds_for_arbitrary_command_sequences(

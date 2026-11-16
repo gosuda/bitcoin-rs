@@ -146,7 +146,7 @@ the identical start and shutdown path.
 ### Data-dir lock
 The process-exclusive lock a node takes on its data directory before
 the schema check or process epoch runs
-(`crates/node/src/state/data_dir_lock.rs`). The lock file is
+(`crates/node/src/lib.rs`). The lock file is
 `{datadir}/.lock`. Ownership is the open-file lock, never the file's
 existence, so a stale file after a crash opens normally. The lock has
 no owner of its own. Every store the node opens carries it and drops it
@@ -234,7 +234,7 @@ the two makes every network report difficulty `1.0` at its easiest target.
 Equal IEEE-754 values versus equal serialized spellings. Core's UniValue uses
 `%.16g`; the RPC path's sonic-rs serializer uses shortest round-trip. Compatibility
 means preserving value and operation order, not forcing JSON text to match.
-Owners: `crates/serving/tests/support/compare.rs` (bitwise numeric comparison) and `crates/serving/tests/policy_contract.rs`.
+Owners: `crates/serving/tests.rs` (bitwise numeric comparison) and `crates/serving/tests.rs`.
 
 ### Provably unspendable outputs (UTXO admission)
 Outputs the UTXO set never admits: a `scriptPubKey` starting with `OP_RETURN`, or longer than `MAX_SCRIPT_SIZE`. Excluding them changes no consensus outcome, so the snapshot codec carries the version tag `bitcoin-rs-utxo-spendable-v1`; a change to admission semantics is a codec change.

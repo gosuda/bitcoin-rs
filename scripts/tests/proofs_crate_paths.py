@@ -72,7 +72,7 @@ class ProofsCratePathsTest(unittest.TestCase):
                     "        assert!(super::bounded_read(requested, available) <= available);\n"
                     "    }\n}\n"
                 ),
-                "crates/storage/tests/mdbx_bounded_read_allocation.rs": (
+                "crates/storage/mdbx_bounded_read_allocation_tests.rs": (
                     "#[cfg(kani)]\n#[kani::proof]\n"
                     "fn read_never_exceeds_request() {\n"
                     "    let requested: u8 = kani::any();\n"
