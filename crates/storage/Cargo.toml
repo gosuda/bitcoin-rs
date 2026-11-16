@@ -58,13 +58,13 @@ tempfile.workspace = true
 
 [[test]]
 name = "suite"
-path = "tests/suite.rs"
+path = "tests.rs"
 
 [[test]]
 name = "mdbx_bounded_read_allocation"
-path = "tests/mdbx_bounded_read_allocation.rs"
+path = "mdbx_bounded_read_allocation_tests.rs"
 required-features = ["mdbx"]
 
 [[test]]
 name = "utxo_query_lifetime"
-path = "tests/utxo_query_lifetime.rs"
+path = "utxo_query_lifetime_tests.rs"

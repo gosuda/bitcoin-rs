@@ -88,8 +88,8 @@ The shutdown latch and chainstate shutdown request propagate to every service. `
 |---|---|---|
 | Event-loop progress uses elapsed time | `telemetry_uses_elapsed_time_not_wake_count` | `crates/node/src/event_loop.rs:105` |
 | Startup window depth and level | `STARTUP_VERIFY_DEPTH = 6`, `CheckLevel::CheckUndoAndCommitments` | `crates/execution/src/verify.rs:24`, `open.rs` |
-| Durable head recovery | `torn_disconnect_replays_parent_tip` | `crates/node/tests/crash_recovery.rs` |
-| Crash recovery end to end | `crates/node/tests/crash_recovery.rs` (clause `SYNC-05` evidence) |
+| Durable head recovery | `torn_disconnect_replays_parent_tip` | `crates/node/crash_recovery_tests.rs` |
+| Crash recovery end to end | crash-recovery suite | `crates/node/crash_recovery_tests.rs` (clause `SYNC-05` evidence) |
 
 Commands run for this page: the regtest traces above come from `./target/release/bitcoin-rs --network regtest --data-dir $DATA --log-level debug` with `generatetoaddress` over RPC; the restart traces (checkpoint restore lines) come from a second and third start on the same datadir.
 

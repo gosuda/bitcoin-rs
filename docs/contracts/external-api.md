@@ -25,7 +25,7 @@ wallet interoperability remain unverified.
 - Unsupported Core surfaces stay `Unimplemented` and answer `RpcError::MethodNotFound` (`-32601`).
 - No wallet-only RPC is a disguised successful no-op.
 - The build generates `docs/rpc-reference.md` from the registry. Maintainers MUST NOT edit that file by hand.
-- `crates/serving/tests/manifest_coverage.rs` enforces set equality between registry and live dispatch in both directions.
+- `crates/serving/tests.rs` enforces set equality between registry and live dispatch in both directions.
 - The test regenerates the reference (`REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-serving --test suite manifest_coverage::regenerate_reference -- --ignored`).
 
 ### `API-02`: JSON-RPC mechanics and the wallet-free surface
@@ -246,7 +246,7 @@ wallet interoperability remain unverified.
 - Malformed hashes return `-8`.
 - REST keeps its JSON-only format with 400 for malformed or unknown hashes.
 - Excess arguments keep the local JSON-RPC parameter-shape error, not Core help text.
-- Envelope proof: `crates/serving/src/server.rs` envelope and batch tests plus `crates/serving/tests/auth.rs` legacy-envelope pin.
+- Envelope proof: `crates/serving/src/server.rs` envelope and batch tests plus `crates/serving/tests.rs` legacy-envelope pin.
 - Pinned Core sources: `src/rpc/request.cpp`, `src/httprpc.cpp` (rules read from pinned source, no Core binary run).
 
 ### `API-03`: REST dialect
@@ -321,7 +321,7 @@ wallet interoperability remain unverified.
 
 ### `API-07`: RPC fixture reference provenance
 
-- Owner: the corpus loader in `crates/serving/tests/support/fixture.rs` owns `core_version` and `core_binary_sha256` pins and their validation.
+- Owner: the corpus loader in `crates/serving/tests.rs` owns `core_version` and `core_binary_sha256` pins and their validation.
 - Every fixture records the version and exact binary digest of its capture.
 - Missing, empty, or mismatched values fail loading before replay.
 - The pins describe the released Core node used for recorded responses.
@@ -387,9 +387,10 @@ wallet interoperability remain unverified.
 - Preview runs the identical pipeline and mutates nothing (no membership, estimator, relay, admission sequence, or victims; `POL-06`).
 - `testmempoolaccept` returns preview rows in the frozen Core 31.1 shape with frozen reject-reason strings.
 - Raw transaction materialization shares one `Context` admission across RPC bindings and Esplora: at most eight active requests and 8 MiB of aggregate reserved wire bytes, acquired before hex decoding and held through the handler's projection or gateway call. `sendrawtransaction`, `submitpackage`, `testmempoolaccept`, `decoderawtransaction`, `compressrawtransaction`, and raw entries in `generateblock` use this owner (`crates/serving/src/tx_decode.rs`). A package reserves all of its raw entries before decoding any entry.
+- `generateblock` MUST reserve only its raw transaction entries. A transaction ID uses the parser's `Txid::from_str` classification and consumes no decode bytes. A request without raw entries consumes no decode slot.
 - Authenticated raw transaction input and aggregate package hex are bounded before decoding by the existing HTTP envelope's 16 MiB hex / 8 MiB wire allowance, not by broadcast standardness. Direct dispatch above that allowance answers `-22`; actual HTTP envelope overflow keeps its existing refusal. Decode budget exhaustion answers retryable RPC `-1` or Esplora HTTP 503. Neither uses a blocking-wait slot or changes registry execution classes; the compressed-transaction methods keep their existing blocking classification and tighter format limits.
 - Primitive native decode heap is bounded by `layout::decode_reservation` over the admitted wire bytes. Request bodies, parsed JSON, response serialization/socket buffers, and retained mempool entries have their existing owners and are not charged to this native decode budget. Existing connection limits still apply per listener; they do not constitute an aggregate byte reservation across listeners. This is not a whole-process RSS bound.
-- Proof: `tx_decode::tests` checks shared byte/worker admission, package limits and reservation release; `server::tests::listeners::raw_transaction_budget_is_shared_across_public_and_authenticated_listeners` checks concurrent HTTP overload and public/authenticated exposure; `handlers::mining::tests::generateblock_raw_entries_share_the_decode_budget` checks the budget gate inside `generateblock`. The separate `tx_decode_heap` counting-allocator executable measures native retained/peak heap, inspection projection, eight simultaneous authenticated witness-heavy HTTP inspections, and public oversize refusal. Its fixture ceiling is not a bound on all response shapes or real allocator RSS. Existing `handlers::tx::tests` and Esplora broadcast tests retain valid broadcasts, oversize Core policy outcomes and inspection beyond standard weight.
+- Proof: `tx_decode::tests::byte_and_worker_reservations_are_shared_and_released`, `tx_decode::tests::rpc_and_public_broadcast_refuse_before_decode_without_taking_blocking_slots`, and `tx_decode::tests::oversized_hex_and_package_do_not_consume_a_reservation` check shared byte and worker admission, package limits, and reservation release. `server::tests::listeners::raw_transaction_budget_is_shared_across_public_and_authenticated_listeners` checks concurrent HTTP overload and public and authenticated exposure. `handlers::mining::tests::generateblock_raw_entries_share_the_decode_budget` checks raw-entry refusal and release; `generateblock_without_raw_entries_does_not_use_the_decode_budget` and `generateblock_charges_only_raw_transaction_bytes` in that module check exclusion of transaction IDs and empty lists. The registered `tx_decode_heap` executable's `raw_transaction_heap_is_bounded_for_single_and_concurrent_inspection` test measures native retained and peak heap, inspection projection, eight simultaneous authenticated witness-heavy HTTP inspections, and public oversize refusal. Its fixture ceiling is not a bound on all response shapes or real allocator RSS. Existing `handlers::tx::tests` and Esplora broadcast tests retain valid broadcasts, oversize Core policy outcomes, and inspection beyond standard weight.
 - Esplora `POST /tx` keeps its own broadcast hex bound and answers 400 beyond it.
 - A transaction above `MAX_STANDARD_TX_WEIGHT` reaches the gateway: `sendrawtransaction` answers Core `-26` (`tx-size`), preview marks its row `tx-size`, and packages above `MAX_PACKAGE_WEIGHT` report Core `package-too-large` rows.
 - Broadcast rejections map to the Esplora dialect: a rejected transaction is a 400 with the reason, not a retryable 503.
@@ -732,7 +733,7 @@ wallet interoperability remain unverified.
 - Interrupted export or full blocking quota returns `-1`.
 - Error `-32603` covers no-rename platform, closed admission, missing applied tip, unestablished chain tx count, concurrent export, and encode/write/length/sync failure.
 - Export evidence needs the pinned Core 31.1 `bitcoind`.
-- Test `e2e/tests/assumeutxo.rs::bitcoin_rs_export_is_accepted_by_a_fresh_core_node` submits the 200 fixture blocks and compares against `crates/storage/tests/fixtures/core-v2/core200.dat`.
+- Test `e2e/tests/assumeutxo.rs::bitcoin_rs_export_is_accepted_by_a_fresh_core_node` submits the 200 fixture blocks and compares against `testdata/storage/fixtures/core-v2/core200.dat`.
 - The test loads the export into a fresh Core node.
 - The test fails (does not skip) when the binary is missing or its digest differs per `crates/serving/core-compat.toml` (`scripts/install-bitcoind.sh`).
 - This covers regtest height-200 only; there is no mainnet memory, throughput, or commit-blocking claim.

@@ -59,7 +59,7 @@ class ProofsCratePathsTest(unittest.TestCase):
                     'edition = "2021"\nautotests = false\n'
                     "[features]\ndefault = []\nmdbx = []\n"
                     '[[test]]\nname = "mdbx_bounded_read_allocation"\n'
-                    'path = "tests/mdbx_bounded_read_allocation.rs"\n'
+                    'path = "mdbx_bounded_read_allocation_tests.rs"\n'
                     'required-features = ["mdbx"]\n'
                 ),
                 "crates/storage/src/lib.rs": (
@@ -72,7 +72,7 @@ class ProofsCratePathsTest(unittest.TestCase):
                     "        assert!(super::bounded_read(requested, available) <= available);\n"
                     "    }\n}\n"
                 ),
-                "crates/storage/tests/mdbx_bounded_read_allocation.rs": (
+                "crates/storage/mdbx_bounded_read_allocation_tests.rs": (
                     "#[cfg(kani)]\n#[kani::proof]\n"
                     "fn read_never_exceeds_request() {\n"
                     "    let requested: u8 = kani::any();\n"

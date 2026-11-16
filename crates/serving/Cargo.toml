@@ -86,4 +86,8 @@ cap-fs-ext.workspace = true
 
 [[test]]
 name = "suite"
-path = "tests/suite.rs"
+path = "tests.rs"
+
+[[test]]
+name = "tx_decode_heap"
+path = "tx_decode_heap_tests.rs"
