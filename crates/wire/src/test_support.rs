@@ -177,6 +177,18 @@ impl std::io::Read for StallingStream {
     }
 }
 
+pub struct ReadRequests<R> {
+    pub reader: R,
+    pub lengths: Vec<usize>,
+}
+
+impl<R: std::io::Read> std::io::Read for ReadRequests<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.lengths.push(buffer.len());
+        self.reader.read(buffer)
+    }
+}
+
 impl std::io::Write for StallingStream {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         self.written.extend_from_slice(buffer);

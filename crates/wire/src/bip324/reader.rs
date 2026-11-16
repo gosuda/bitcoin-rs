@@ -167,6 +167,8 @@ mod tests {
 
     type TestResult = Result<(), TestError>;
 
+    const APPROVED_RECEIVE_READ_STEP: usize = 16 * 1024;
+
     struct Dribble(VecDeque<u8>);
 
     impl Read for Dribble {
@@ -282,29 +284,36 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_stops_a_partial_packet_without_retaining_a_read_chunk() -> TestResult {
-        struct Cancelled;
-        impl Read for Cancelled {
-            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-                Err(io::ErrorKind::ConnectionAborted.into())
-            }
-        }
+    fn cancelled_packet_requests_at_most_a_16_kib_body_read_step() -> TestResult {
+        use crate::test_support::{Inbound, ReadRequests, StallingStream};
+
         let (mut sender, mut reader) = pair();
-        let packet = sender.seal(&vec![9; 1024], &[], false)?;
-        let mut stream = Dribble(packet[..103].iter().copied().collect());
-        let stalled = reader.read_contents(&mut stream);
-        assert!(stalled.as_ref().is_err_and(is_poll_timeout));
-        let cancelled = reader.read_contents(&mut Cancelled);
+        let packet = sender.seal(&vec![9; 1024 * 1024], &[], false)?;
+        let mut stream = ReadRequests {
+            reader: StallingStream::new([
+                Inbound::Bytes(packet[..103].to_vec()),
+                Inbound::Stall(io::ErrorKind::ConnectionAborted),
+            ]),
+            lengths: Vec::new(),
+        };
+        let cancelled = reader.read_contents(&mut stream);
         assert!(matches!(
             cancelled,
             Err(super::TransportError::Io(error))
                 if error.kind() == io::ErrorKind::ConnectionAborted
         ));
+        assert_eq!(stream.lengths.first(), Some(&super::LENGTH_FIELD_LEN));
+        let largest_body_read = stream
+            .lengths
+            .iter()
+            .skip(1)
+            .copied()
+            .max()
+            .ok_or_else(|| io::Error::other("no encrypted body read was requested"))?;
+        assert!(largest_body_read > 0);
         assert!(
-            reader
-                .body
-                .as_ref()
-                .is_none_or(|body| body.bytes.capacity() <= 206)
+            largest_body_read <= APPROVED_RECEIVE_READ_STEP,
+            "encrypted body read requested {largest_body_read} bytes"
         );
         Ok(())
     }

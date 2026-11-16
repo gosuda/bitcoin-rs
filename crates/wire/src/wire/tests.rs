@@ -10,6 +10,8 @@ use super::{
     write_message,
 };
 
+const APPROVED_RECEIVE_READ_STEP: usize = 16 * 1024;
+
 struct HeaderOnlyReader {
     header: Cursor<Vec<u8>>,
 }
@@ -144,27 +146,41 @@ fn receiver_retains_only_received_bytes_for_a_stalled_frame() -> Result<(), Peer
 }
 
 #[test]
-fn cancellation_stops_a_partial_legacy_frame_without_retaining_a_read_chunk()
--> Result<(), PeerError> {
-    use crate::test_support::{Inbound, StallingStream};
+fn cancelled_legacy_frame_requests_at_most_a_16_kib_body_read_step() -> Result<(), PeerError> {
+    use crate::test_support::{Inbound, ReadRequests, StallingStream};
     use std::io::ErrorKind;
+
     let mut frame = Vec::new();
-    write_message(&mut frame, Magic::REGTEST, &super::Message::Ping(42))?;
-    let mut stream = StallingStream::new([
-        Inbound::Bytes(frame[..HEADER_LEN + 3].to_vec()),
-        Inbound::Stall(ErrorKind::ConnectionAborted),
-    ]);
+    write_message(
+        &mut frame,
+        Magic::REGTEST,
+        &Message::BlockBytes(vec![7; 1024 * 1024].into()),
+    )?;
+    let mut stream = ReadRequests {
+        reader: StallingStream::new([
+            Inbound::Bytes(frame[..HEADER_LEN + 100].to_vec()),
+            Inbound::Stall(ErrorKind::ConnectionAborted),
+        ]),
+        lengths: Vec::new(),
+    };
     let mut receiver = super::V1Receiver::default();
     let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
     assert!(matches!(
         result,
         Err(PeerError::Io(error)) if error.kind() == ErrorKind::ConnectionAborted
     ));
+    assert_eq!(stream.lengths.first(), Some(&HEADER_LEN));
+    let largest_body_read = stream
+        .lengths
+        .iter()
+        .skip(1)
+        .copied()
+        .max()
+        .ok_or(PeerError::Protocol("no legacy body read was requested"))?;
+    assert!(largest_body_read > 0);
     assert!(
-        receiver
-            .body
-            .as_ref()
-            .is_none_or(|body| body.payload.capacity() <= 8)
+        largest_body_read <= APPROVED_RECEIVE_READ_STEP,
+        "legacy body read requested {largest_body_read} bytes"
     );
     Ok(())
 }
