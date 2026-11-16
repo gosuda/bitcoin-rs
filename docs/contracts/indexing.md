@@ -188,6 +188,9 @@ Owners:
 - In that case, worker startup MUST close the rejected store and recreate only its dedicated namespace before it opens the replacement store.
 - An unversioned populated store and a valid interrupted full-capability reset claim use the same path.
 - Startup MUST publish and sync a `.txindex.reset` intent in the data root before it removes the namespace.
+- A crash before fixed-name intent publication can leave an unpublished temporary file in the data root.
+- Only the fixed `.txindex.reset` path with the expected intent contents authorizes namespace removal. An unpublished temporary file does not authorize removal.
+- Reset recovery does not scan or delete arbitrary temporary files in the data root.
 - A pending intent MUST complete recreation before the backend opens.
 - Startup MUST remove and sync the intent only after the replacement store opens successfully. An unexpectedly missing intent at retirement MUST refuse publication.
 - A failed or cancelled recreation MUST retain the intent for the next start.
