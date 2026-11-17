@@ -920,6 +920,7 @@ mod compact_filter_artifact {
         )
         .expect("a bounded re-encode attaches");
         assert_eq!(attached, artifact.records);
+
         assert!(
             budget.peak_bytes() > 0,
             "the bounded re-encode charges its rows to the budget"
@@ -1355,8 +1356,8 @@ mod generation_parity {
         BulkSegmentBuilder, StreamingSegmentBuilder,
     };
     use bitcoin_rs_projection::segment::{
-        Coverage, NoSealedTxOrdinals, TailWriterState, append_tail_block, meta_gen_key,
-        seal_tail_generation, sealed_generations,
+        Coverage, TailWriterState, append_tail_block, meta_gen_key, seal_tail_generation,
+        sealed_generations,
     };
     use bitcoin_rs_projection::{
         IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter,
@@ -1628,7 +1629,7 @@ mod generation_parity {
         let mut tail_state = TailWriterState::new();
         for block in blocks {
             let mut batch = store.new_batch();
-            append_tail_block(&mut batch, block, &mut tail_state, &NoSealedTxOrdinals)?;
+            append_tail_block(&mut batch, block, &mut tail_state)?;
             store.write_durable(batch)?;
         }
         Ok(())
@@ -1744,17 +1745,10 @@ mod generation_parity {
         }];
 
         for pair in tail_seal_and_bulk_family_digests(&blocks, 1)? {
+            assert!(pair.tail_rows > 0, "{:?} has no sealed rows", pair.family);
             if pair.family == ColumnFamily::SpendDir {
-                assert_eq!(
-                    pair.tail_rows, 0,
-                    "input CC names no in-generation creation"
-                );
-                assert_eq!(
-                    pair.bulk_rows, 0,
-                    "input CC names no in-generation creation"
-                );
-            } else {
-                assert!(pair.tail_rows > 0, "{:?} has no sealed rows", pair.family);
+                assert_eq!(pair.tail_rows, 1);
+                assert_eq!(pair.bulk_rows, 1);
             }
             assert_eq!(
                 pair.tail, pair.bulk,
@@ -1789,34 +1783,17 @@ mod generation_parity {
         );
         {
             use bitcoin_rs_projection::segment::format::{
-                decode_tx_dir_key, decode_tx_dir_value, encode_spend_dir_key, encode_tx_dir_key,
+                decode_spend_dir_key, decode_spend_dir_value,
             };
-            let funded_key = encode_tx_dir_key(1, &[0xD2; 32], 1);
-            let funded_value = snapshot
-                .get(ColumnFamily::TxDir, &funded_key)?
-                .ok_or("funded D2 has a TxDir row at height 1")?;
-            let (_, creation, _, _) =
-                decode_tx_dir_value(&funded_value).ok_or("decode funded TxDir value")?;
-            for item in snapshot.iter_prefix(ColumnFamily::TxDir, &1u64.to_be_bytes())? {
-                let (key, _) = item?;
-                if let Some((_, txid, _)) = decode_tx_dir_key(&key) {
-                    assert_ne!(
-                        txid, [0xCC; 32],
-                        "spent CC has no TxDir creation in generation 1"
-                    );
-                }
-            }
-            let spend_key = encode_spend_dir_key(1, creation, 0);
-            assert!(
-                snapshot.get(ColumnFamily::SpendDir, &spend_key)?.is_none(),
-                "funded D2 vout 0 has no spender in generation 1"
+            let spends = snapshot
+                .iter_prefix(ColumnFamily::SpendDir, &1u64.to_be_bytes())?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(spends.len(), 1);
+            assert_eq!(
+                decode_spend_dir_key(&spends[0].0),
+                Some((1, [0xCC; 32], 0, 1))
             );
-            let mut spend_rows = 0u64;
-            for item in snapshot.iter_prefix(ColumnFamily::SpendDir, &1u64.to_be_bytes())? {
-                let _ = item?;
-                spend_rows = spend_rows.saturating_add(1);
-            }
-            assert_eq!(spend_rows, 0, "input CC names no in-generation creation");
+            assert_eq!(decode_spend_dir_value(&spends[0].1), Some(0));
         }
         Ok(())
     }
@@ -3364,7 +3341,7 @@ mod index_roundtrip {
         batch
     }
 
-    // IDX-09
+    // IDX-09, IDX-12
     #[test]
     fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), TestError> {
         for height in [0_u32, 170, 481_824] {
@@ -3386,17 +3363,17 @@ mod index_roundtrip {
                 "height {height} keeps at least one row per funding script"
             );
             assert_eq!(
-                totals.funding, facts.funding_outputs,
-                "height {height} writes one funding occurrence per output"
+                totals.funding, facts.funding_occurrences,
+                "height {height} exposes one funding occurrence per distinct script and transaction"
             );
             assert_eq!(
-                totals.spending, facts.spending_inputs,
-                "height {height} writes one spending occurrence per non-coinbase input"
+                totals.spending, facts.spending_occurrences,
+                "height {height} exposes one spending occurrence per distinct spent script and transaction"
             );
             assert_eq!(
                 spent_row_count(&indexer, &block)?,
-                facts.in_block_spends,
-                "height {height} spender rows name only in-block creations"
+                facts.spending_inputs,
+                "height {height} writes one spender row per non-coinbase input regardless of funding coverage"
             );
         }
         Ok(())
@@ -3456,39 +3433,49 @@ mod index_roundtrip {
     }
 
     struct GoldenFacts {
-        funding_outputs: usize,
+        funding_occurrences: usize,
         funding_scripts: std::collections::BTreeSet<Vec<u8>>,
         spending_inputs: usize,
-        in_block_spends: usize,
+        spending_occurrences: usize,
     }
 
     fn golden_facts(block: &Block) -> GoldenFacts {
+        let mut funding = std::collections::BTreeSet::new();
+        let mut spending = std::collections::BTreeSet::new();
+        let mut created: std::collections::BTreeMap<([u8; 32], u32), &[u8]> =
+            std::collections::BTreeMap::new();
         let mut facts = GoldenFacts {
-            funding_outputs: 0,
+            funding_occurrences: 0,
             funding_scripts: std::collections::BTreeSet::new(),
             spending_inputs: 0,
-            in_block_spends: 0,
+            spending_occurrences: 0,
         };
-        let mut earlier_txids: std::collections::BTreeSet<[u8; 32]> =
-            std::collections::BTreeSet::new();
         for tx in &block.txs {
+            let txid = *tx.txid().as_bytes();
             if !tx.is_coinbase() {
                 facts.spending_inputs += tx.inputs.len();
-                facts.in_block_spends += tx
-                    .inputs
-                    .iter()
-                    .filter(|input| earlier_txids.contains(input.previous_output.txid.as_bytes()))
-                    .count();
+                for input in &tx.inputs {
+                    let outpoint = &input.previous_output;
+                    let script = created
+                        .get(&(*outpoint.txid.as_bytes(), outpoint.vout))
+                        .copied()
+                        .unwrap_or(FIXTURE_SPENT_SCRIPT.as_slice());
+                    if script.first() != Some(&0x6a) {
+                        spending.insert((script.to_vec(), txid));
+                    }
+                }
             }
-            for output in &tx.outputs {
+            for (vout, output) in (0_u32..).zip(&tx.outputs) {
                 let script = output.script_pubkey.as_bytes();
-                if !script.is_empty() && script[0] != 0x6a {
-                    facts.funding_outputs += 1;
+                created.insert((txid, vout), script);
+                if script.first() != Some(&0x6a) {
+                    funding.insert((script.to_vec(), txid));
                     facts.funding_scripts.insert(script.to_vec());
                 }
             }
-            earlier_txids.insert(*tx.txid().as_bytes());
         }
+        facts.funding_occurrences = funding.len();
+        facts.spending_occurrences = spending.len();
         facts
     }
 
@@ -7464,17 +7451,24 @@ mod portable_bundle {
                     let inner = RocksDbStore::open_with_cache(dir, STORE_CACHE_BYTES).map_err(
                         bitcoin_rs_projection::runtime::DerivedIndexWorkerError::Storage,
                     )?;
+                    let scratch = dir.with_file_name("seal-scratch");
                     if crash {
                         let store = Arc::new(CrashAfterBulkImport {
                             inner,
                             crashed: AtomicBool::new(false),
                         });
-                        open_derived_index_store_on_worker(store, DEFAULT_BATCH_LIMITS, epoch)
+                        bitcoin_rs_projection::runtime::open_derived_index_store_with_scratch(
+                            store,
+                            DEFAULT_BATCH_LIMITS,
+                            epoch,
+                            scratch,
+                        )
                     } else {
-                        open_derived_index_store_on_worker(
+                        bitcoin_rs_projection::runtime::open_derived_index_store_with_scratch(
                             Arc::new(inner),
                             DEFAULT_BATCH_LIMITS,
                             epoch,
+                            scratch,
                         )
                     }
                 }),
@@ -7752,6 +7746,8 @@ mod portable_bundle {
                 ..Start::default()
             },
         );
+        let restore_scratch = receiver.join("seal-scratch");
+        assert!(!restore_scratch.exists());
         let restored = Node::start(
             &fixture,
             &receiver,
@@ -7791,6 +7787,14 @@ mod portable_bundle {
         restored.stop();
         source_node.stop();
 
+        assert!(restore_scratch.is_dir());
+        assert_eq!(
+            fs::read_dir(&restore_scratch)
+                .expect("restore scratch root")
+                .count(),
+            0,
+            "restore releases validation and import scratch directories"
+        );
         assert_eq!(durable(&receiver), source_state);
         assert_eq!(
             read_dir_files(&bundle),
@@ -8443,6 +8447,171 @@ mod portable_bundle {
         node.wait_synced(fixture.tip.height);
         node.stop();
         assert_eq!(durable(&receiver), source_state);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn restore_reads_bundle_from_nonwritable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct BundlePermissions {
+            path: PathBuf,
+            original: fs::Permissions,
+        }
+        impl Drop for BundlePermissions {
+            fn drop(&mut self) {
+                fs::set_permissions(&self.path, self.original.clone())
+                    .expect("restore bundle directory permissions");
+            }
+        }
+        let fixture = ChainFixture::new(1, 1);
+        let root = tempfile::tempdir().expect("read-only bundle fixture");
+        let source = root.path().join("source");
+        let receiver = root.path().join("receiver");
+        let bundle = root.path().join("bundle");
+        backfilled_source(&fixture, &source);
+        exported_bundle(&fixture, &source, &bundle);
+        let expected_files = read_dir_files(&bundle);
+        let permissions = BundlePermissions {
+            path: bundle.clone(),
+            original: fs::metadata(&bundle)
+                .expect("bundle directory metadata")
+                .permissions(),
+        };
+        fs::set_permissions(&bundle, fs::Permissions::from_mode(0o555))
+            .expect("make bundle directory nonwritable");
+        let restored = Node::start(
+            &fixture,
+            &receiver,
+            Start {
+                bundle: restore(&bundle),
+                ..Start::default()
+            },
+        );
+        restored.wait_reconciling();
+        assert!(
+            restored.synced_at(fixture.tip.height),
+            "read-only bundle restore readiness"
+        );
+        for (txid, height) in &fixture.txids {
+            let (tx, identity) = restored
+                .adapter
+                .transaction_block(txid)
+                .expect("read-only bundle query")
+                .expect("canonical transaction");
+            assert_eq!(tx.txid(), *txid);
+            assert_eq!(
+                identity,
+                bitcoin_rs_projection::TransactionBlock {
+                    height: *height,
+                    hash: fixture.block_hashes
+                        [usize::try_from(*height).expect("height fits usize")],
+                }
+            );
+        }
+        restored.stop();
+        let state = durable(&receiver);
+        assert_eq!(state.floor, Some(0));
+        assert_eq!(state.watermark, Some(fixture.tip_watermark()));
+        assert_eq!(read_dir_files(&bundle), expected_files);
+        drop(permissions);
+    }
+
+    #[test]
+    fn restore_accepts_aggregate_positions_across_canonical_heights() {
+        for (blocks, extra, expected_counts) in [
+            (2, 3, vec![1_usize, 4, 4]),
+            (4, 1, vec![1_usize, 2, 2, 2, 2]),
+        ] {
+            let fixture = ChainFixture::new(blocks, extra);
+            let mut expected_rows = Vec::new();
+            let mut expected_transactions = Vec::new();
+            let mut counts = Vec::new();
+            for height in 0..=blocks {
+                let hash = fixture.block_hashes
+                    [usize::try_from(height).expect("fixture height fits usize")];
+                let body = &fixture.bodies[&(height, hash.to_le_bytes())];
+                let block: bitcoin::Block =
+                    bitcoin::consensus::deserialize(body).expect("independent block decode");
+                assert_eq!(block.block_hash().to_byte_array(), hash.to_le_bytes());
+                let mut offset = 80
+                    + serialize(&bitcoin::VarInt(
+                        u64::try_from(block.txdata.len()).expect("transaction count fits u64"),
+                    ))
+                    .len();
+                counts.push(block.txdata.len());
+                for tx in &block.txdata {
+                    let bytes = serialize(tx);
+                    let end = offset + bytes.len();
+                    assert_eq!(&body[offset..end], bytes.as_slice());
+                    let txid_bytes = tx.compute_txid().to_byte_array();
+                    let txid = Txid::from(Hash256::from_le_bytes(&txid_bytes));
+                    expected_rows.push((
+                        txid_bytes,
+                        height,
+                        hash.to_le_bytes(),
+                        u32::try_from(offset).expect("canonical offset fits u32"),
+                        u32::try_from(bytes.len()).expect("transaction length fits u32"),
+                    ));
+                    expected_transactions.push((txid, height, hash, bytes));
+                    offset = end;
+                }
+                assert_eq!(
+                    offset,
+                    body.len(),
+                    "canonical transactions consume the body"
+                );
+            }
+            assert_eq!(counts, expected_counts);
+            assert_eq!(counts.iter().sum::<usize>(), 9);
+            assert!(counts.iter().all(|&count| count <= 4));
+            expected_rows.sort_unstable();
+            let root = tempfile::tempdir().expect("tempdir");
+            let source = root.path().join("source");
+            let receiver = root.path().join("receiver");
+            let bundle = root.path().join("bundle");
+            backfilled_source(&fixture, &source);
+            exported_bundle(&fixture, &source, &bundle);
+            let restored = Node::start(
+                &fixture,
+                &receiver,
+                Start {
+                    bundle: restore(&bundle),
+                    ..Start::default()
+                },
+            );
+            restored.wait_reconciling();
+            let info = restored
+                .adapter
+                .index_info()
+                .expect("restored capability status");
+            assert!(
+                info.synced,
+                "restore did not establish synced capability: {info:?}"
+            );
+            assert_eq!(info.best_block_height, fixture.tip.height);
+            assert_eq!(info.coverage_height, fixture.tip.height);
+            for (txid, height, hash, bytes) in expected_transactions {
+                let (tx, identity) = restored
+                    .adapter
+                    .transaction_block(&txid)
+                    .expect("restored transaction lookup")
+                    .expect("canonical transaction is served");
+                assert_eq!(tx.txid(), txid);
+                assert_eq!(
+                    bitcoin_rs_consensus::primitives::consensus_bytes(&tx),
+                    bytes
+                );
+                assert_eq!(
+                    identity,
+                    bitcoin_rs_projection::TransactionBlock { height, hash }
+                );
+            }
+            restored.stop();
+            let state = durable(&receiver);
+            assert_eq!(state.tx_confirmed, expected_rows);
+            assert_eq!(state.floor, Some(0));
+            assert_eq!(state.watermark, Some(fixture.tip_watermark()));
+        }
     }
 }
 mod query_answers {
@@ -11132,9 +11301,9 @@ mod script_live {
 mod segment_recovery {
     use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
     use bitcoin_rs_projection::segment::{
-        IndexGeneration, NoSealedTxOrdinals, RetireFault, SealFault, TailWriterState,
-        append_tail_block, arm_retire_fault, arm_seal_fault, meta_gen_key, publish_sealed,
-        recover_segments, seal_tail_generation,
+        IndexGeneration, RetireFault, SealFault, TailWriterState, append_tail_block,
+        arm_retire_fault, arm_seal_fault, meta_gen_key, publish_sealed, recover_segments,
+        seal_tail_generation,
     };
     use bitcoin_rs_projection::{IndexCapabilities, IndexCapability};
     use bitcoin_rs_storage::budget::UnboundedBudget;
@@ -11241,7 +11410,7 @@ mod segment_recovery {
         let mut state = TailWriterState::new();
         for block in blocks {
             let mut batch = store.new_batch();
-            append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals)?;
+            append_tail_block(&mut batch, block, &mut state)?;
             store.write_durable(batch)?;
         }
         Ok((dir, store))
@@ -11391,7 +11560,7 @@ mod segment_recovery {
         let mut state = TailWriterState::new();
         for block in &blocks {
             let mut batch = store.new_batch();
-            append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals)?;
+            append_tail_block(&mut batch, block, &mut state)?;
             store.write_durable(batch)?;
         }
         let mut marker_batch = store.new_batch();
@@ -11636,6 +11805,139 @@ mod segment_recovery {
             )?
             .rows;
         assert!(tombstones.is_empty(), "tombstone must clear after recovery");
+        Ok(())
+    }
+    // IDX-06, IDX-12
+    #[test]
+    fn positive_floor_spend_survives_seal_reopen_and_disappears_on_rollback()
+    -> Result<(), TestError> {
+        use bitcoin_rs_consensus::primitives::encode::double_sha256;
+        use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
+        use bitcoin_rs_projection::{
+            ConsumerCursorUpdate, IndexReader, IndexWatermark, IndexWriter, PreparedBatch,
+            PreparedBatchLimits, TxPositionValue,
+        };
+        use bitcoin_rs_storage::PrefixScanLimit;
+
+        let mut blocks = one_spend_generation();
+        let block = &mut blocks[0];
+        block.height = 2;
+        block.parent_hash = [0x81; 32];
+        block.txs.remove(0);
+        let tx = &mut block.txs[0];
+        let input = &tx.inputs[0];
+        let outpoint = OutPoint {
+            txid: Txid::from(Hash256::from_le_bytes(&input.txid)),
+            vout: input.vout,
+        };
+        assert!(input.height < block.height);
+        let mut transaction = 1_i32.to_le_bytes().to_vec();
+        transaction.push(1);
+        transaction.extend_from_slice(&input.txid);
+        transaction.extend_from_slice(&input.vout.to_le_bytes());
+        transaction.push(0);
+        transaction.extend_from_slice(&u32::MAX.to_le_bytes());
+        transaction.push(1);
+        transaction.extend_from_slice(&tx.outputs[0].value.to_le_bytes());
+        transaction.push(1);
+        transaction.push(0x51);
+        transaction.extend_from_slice(&0_u32.to_le_bytes());
+        tx.outputs[0].script = FactsScript::copy_from_slice(&[0x51]);
+        tx.txid = double_sha256(&transaction).to_le_bytes();
+        tx.offset = 81;
+        tx.len = u32::try_from(transaction.len())?;
+        block.header[4..36].copy_from_slice(&block.parent_hash);
+        block.hash = double_sha256(&block.header).to_le_bytes();
+        let mut body = block.header.to_vec();
+        body.push(1);
+        body.extend_from_slice(&transaction);
+
+        let dir = tempdir()?;
+        let scratch = tempdir()?;
+        let caps = IndexCapabilities::HISTORICAL;
+        {
+            let store = Arc::new(RocksDbStore::open(dir.path())?);
+            let writer = parking_lot::RwLock::new(IndexWriter::open(Arc::clone(&store), 1)?);
+            bitcoin_rs_projection::TxIndexWriter::anchor_watermark(
+                &writer,
+                caps,
+                IndexWatermark {
+                    height: block.height - 1,
+                    hash: block.parent_hash,
+                },
+                block.height,
+            )?;
+            let mut writer = writer.into_inner();
+            let prepared = writer.prepare_block_from_facts(caps, block.clone())?;
+            let mut batch = PreparedBatch::new(PreparedBatchLimits {
+                max_rows: usize::MAX,
+                max_bytes: usize::MAX,
+            });
+            batch
+                .try_push(prepared)
+                .map_err(|_| "prepared block must fit")?;
+            writer.commit_forward(batch)?;
+            seal_tail_generation(store.as_ref(), 1, 2, caps, scratch.path())?;
+        }
+        let store = Arc::new(RocksDbStore::open(dir.path())?);
+        let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+        let limit = PrefixScanLimit {
+            max_rows: 16,
+            max_bytes: 1 << 20,
+        };
+        {
+            let view = writer.snapshot()?;
+            assert!(
+                view.transaction_rows(&outpoint.txid, limit)?
+                    .rows
+                    .is_empty()
+            );
+            let unrelated = OutPoint {
+                vout: 1,
+                ..outpoint
+            };
+            assert!(view.spending_rows(&unrelated, limit)?.rows.is_empty());
+            let answer = view.spending_rows(&outpoint, limit)?;
+            assert!(answer.complete);
+            assert_eq!(
+                answer.rows.len(),
+                1,
+                "seal and reopen must retain the below-floor spend"
+            );
+            assert_eq!(answer.rows[0].row.height(), block.height);
+            let positions = TxPositionValue::decode(&answer.rows[0].value)
+                .ok_or("spender positions must decode")?;
+            assert_eq!(
+                positions
+                    .iter()
+                    .map(|p| (p.offset(), p.byte_len()))
+                    .collect::<Vec<_>>(),
+                vec![(block.txs[0].offset, block.txs[0].len)]
+            );
+        }
+        let fence = writer.fenced_watermarks()?.0;
+        writer.commit_rollback_one_for_with_cursor(
+            fence,
+            caps,
+            Some(IndexWatermark {
+                height: 1,
+                hash: block.parent_hash,
+            }),
+            &body,
+            ConsumerCursorUpdate::Keep,
+        )?;
+        let view = writer.snapshot()?;
+        let answer = view.spending_rows(&outpoint, limit)?;
+        assert!(answer.complete);
+        assert!(
+            answer.rows.is_empty(),
+            "rollback must remove the disconnected spender"
+        );
+        assert!(
+            view.transaction_rows(&outpoint.txid, limit)?
+                .rows
+                .is_empty()
+        );
         Ok(())
     }
 }

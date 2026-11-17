@@ -18,4 +18,5 @@
 - Give each new test an expected value from a specification, an external vector, a reference implementation, or an invariant, never from the code under test. Make the test fail before the fix. Do not add snapshot, wording, or source-text tests.
 - Do not write source comments, except `// SAFETY:` comments, legal notices, contract tag lines, and rustdoc that states an invariant that no name, type, or test can carry.
 - Do not use `anyhow` or `Box<dyn Error>` for errors. Define a `thiserror` enum for each failure domain, in libraries, binaries, tests, and tools alike. Keep each variant's source with `#[from]` or `#[source]`.
+- Use the `log` crate for logging. Do not use `tracing` for logging.
 - Write contracts, policies, and other maintainer documents in ASD-STE100. Write operator guides in plain language.

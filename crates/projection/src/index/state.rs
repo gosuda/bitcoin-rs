@@ -13,7 +13,8 @@ use tracing::debug;
 /// data row keys begin with ASCII letters and can never collide.
 pub(super) const FORMAT_VERSION_KEY: &[u8] = crate::types::INDEX_FORMAT_VERSION_KEY;
 
-/// On-disk format 9: newest-first exact `ScriptHistory` occurrences, 43-byte
+/// On-disk format 10: outpoint-and-spending-height `SpendDir` events,
+/// newest-first exact `ScriptHistory` occurrences, 43-byte
 /// `ScriptLive` keys with u24 `vout`, 6-byte `TxPosition` locators, and
 /// self-contained `ScriptLive` rows whose column value carries the full
 /// script hash followed by the compact varint payload
@@ -23,7 +24,7 @@ pub(super) const FORMAT_VERSION_KEY: &[u8] = crate::types::INDEX_FORMAT_VERSION_
 /// (`UnsupportedTxIndexFormatVersion`), so `open_writer` resets the derived
 /// store and rebuilds it from chainstate; no in-place upgrade or dual-read
 /// path exists. `bitcoin-rs-storage-convert rebuild-index` performs the same
-/// reset offline. On-disk format 9 carries the block hash anchor in every per-block tail log record.
+/// reset offline. Every per-block tail log record carries the block hash anchor.
 pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = crate::types::INDEX_FORMAT_VERSION_VALUE;
 pub(super) const LEGACY_FILTER_ROW_PREFIX: &[u8] = &[1, b'F'];
 

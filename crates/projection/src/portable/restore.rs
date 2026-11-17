@@ -23,14 +23,12 @@ use crate::types::TxPosition;
 use crate::writer::TxIndexWriter;
 use crate::writer::{CompactFilterAttachment, CompactFilterRow};
 use crate::{IndexCapabilities, IndexCapability, IndexError, IndexWatermark, IndexWatermarks};
-use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::encode::double_sha256;
 use bitcoin_rs_execution::chain::BlockTreeReader;
 use bitcoin_rs_execution::chain::TipSnapshot;
 use bitcoin_rs_storage::{ColumnFamily, StorageError};
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read};
 use std::ops::ControlFlow;
@@ -752,10 +750,12 @@ fn push_spend2_row(
     spent_txid: &[u8; 32],
     spending: u32,
     vout: u32,
+    height: u32,
 ) -> Result<(), IndexBundleError> {
-    let mut key = Vec::with_capacity(36);
+    let mut key = Vec::with_capacity(40);
     key.extend_from_slice(spent_txid);
     key.extend_from_slice(&spending.to_be_bytes());
+    key.extend_from_slice(&height.to_be_bytes());
     spend2
         .push(key, vout.to_be_bytes().to_vec())
         .map_err(|error| io_error(path, error))
@@ -775,8 +775,8 @@ impl ScriptHistoryStream<'_> {
         let (base, next_ordinal) = ordinal_window(self.chain_tx_count, distinct)?;
         let mut emission = ScriptEmission::new(self, base, distinct);
         emission.join_funded(&decoded.funding, &ord_runs)?;
-        let (spend2_runs, created_runs) = emission.join_spenders(&decoded.spending, &ord_runs)?;
-        let spend_raw_runs = emission.spend_rows(&spend2_runs, &created_runs)?;
+        let spend2_runs = emission.join_spenders(&decoded.spending, &ord_runs)?;
+        let spend_raw_runs = emission.spend_rows(&spend2_runs)?;
         let spend_family = emission.finish_spend_dir(&spend_raw_runs)?;
         let post_in_runs = emission.take_post_in()?;
         let (dict_family, post_family) = emission.posting_families(&post_in_runs)?;
@@ -809,7 +809,6 @@ struct ScriptEmission<'a> {
     dir_rows: u64,
     post_in: Option<SpillSorter<'a>>,
     post_in_rows: u64,
-    created: Option<SpillSorter<'a>>,
 }
 impl<'a> ScriptEmission<'a> {
     fn new(stream: &'a ScriptHistoryStream<'_>, base: u64, distinct: u64) -> ScriptEmission<'a> {
@@ -824,7 +823,6 @@ impl<'a> ScriptEmission<'a> {
             dir_rows: 0,
             post_in: Some(stream.set.sorter("sh-post-in")),
             post_in_rows: 0,
-            created: Some(stream.set.sorter("sh-created")),
         }
     }
 
@@ -847,12 +845,6 @@ impl<'a> ScriptEmission<'a> {
             .ok_or(IndexBundleError::ScriptHistoryImport(
                 crate::segment::import::ScriptHistoryImportError::MissingHeader { height },
             ))
-    }
-
-    fn take_created(&mut self) -> Result<SpillSorter<'a>, IndexBundleError> {
-        self.created.take().ok_or_else(|| {
-            IndexBundleError::Identity("the created sorter is already staged".to_owned())
-        })
     }
 
     fn take_post_in(&mut self) -> Result<Vec<RunFile>, IndexBundleError> {
@@ -1082,22 +1074,6 @@ impl ScriptEmission<'_> {
         Ok(())
     }
 
-    fn push_created(&mut self, txid: &[u8; 32], ordinal: u32) -> Result<(), IndexBundleError> {
-        let Some(created) = self.created.as_mut() else {
-            return Err(IndexBundleError::Identity(
-                "the created sorter is already staged".to_owned(),
-            ));
-        };
-        let path = self.path;
-        let mut key = Vec::with_capacity(36);
-        key.extend_from_slice(txid);
-        key.extend_from_slice(&ordinal.to_be_bytes());
-        created
-            .push(key, Vec::new())
-            .map_err(|error| io_error(path, error))?;
-        Ok(())
-    }
-
     fn join_funded(
         &mut self,
         funding_runs: &[RunFile],
@@ -1127,7 +1103,6 @@ impl ScriptEmission<'_> {
                 self.push_tx_rows(&tx, &block_hash, ordinal)?;
             }
             self.push_posting_input(&scripthash, ordinal, flags)?;
-            self.push_created(&txid, ordinal)?;
         }
         Ok(())
     }
@@ -1136,7 +1111,7 @@ impl ScriptEmission<'_> {
         &mut self,
         spending_runs: &[RunFile],
         ord_runs: &[RunFile],
-    ) -> Result<(Vec<RunFile>, Vec<RunFile>), IndexBundleError> {
+    ) -> Result<Vec<RunFile>, IndexBundleError> {
         let mut spending = MergeCursor::open(spending_runs, self.path)?;
         let mut ord = MergeCursor::open(ord_runs, self.path)?;
         let mut current_ord = ord.take()?;
@@ -1147,13 +1122,13 @@ impl ScriptEmission<'_> {
                 split_identity(&skey).map_err(|error| io_error(self.path, error))?;
             let (orank, ofunded) = ord_at(&mut ord, &mut current_ord, &skey, self.path)?;
             let sos = self.ordinal(orank)?;
-            push_spend2_row(&mut spend2, self.path, &spent_txid, sos, vout)?;
+            push_spend2_row(&mut spend2, self.path, &spent_txid, sos, vout, height)?;
             loop {
                 if !matches!(spending.key(), Some(key) if key == skey.as_slice()) {
                     break;
                 }
                 let (_, spent_txid, vout) = take_spend_row(&mut spending)?;
-                push_spend2_row(&mut spend2, self.path, &spent_txid, sos, vout)?;
+                push_spend2_row(&mut spend2, self.path, &spent_txid, sos, vout, height)?;
             }
             if !ofunded {
                 self.push_spend_only_ordinal(height, offset, len, sos)?;
@@ -1162,40 +1137,33 @@ impl ScriptEmission<'_> {
         let spend2_runs = spend2
             .finish()
             .map_err(|error| io_error(self.path, error))?;
-        let created = self.take_created()?;
-        let created_runs = created
-            .finish()
-            .map_err(|error| io_error(self.path, error))?;
-        Ok((spend2_runs, created_runs))
+        Ok(spend2_runs)
     }
 }
 
-fn split_spend_key(key: &[u8]) -> Result<([u8; 32], u32), std::io::Error> {
-    if key.len() != 36 {
+fn split_spend_key(key: &[u8]) -> Result<([u8; 32], u32, u32), std::io::Error> {
+    if key.len() != 40 {
         return Err(truncated_run());
     }
     let mut txid = [0_u8; 32];
     txid.copy_from_slice(&key[..32]);
     let mut ordinal = [0_u8; 4];
     ordinal.copy_from_slice(&key[32..36]);
-    Ok((txid, u32::from_be_bytes(ordinal)))
+    let mut height = [0_u8; 4];
+    height.copy_from_slice(&key[36..40]);
+    Ok((
+        txid,
+        u32::from_be_bytes(ordinal),
+        u32::from_be_bytes(height),
+    ))
 }
 
 impl ScriptEmission<'_> {
-    fn spend_rows(
-        &self,
-        spend2_runs: &[RunFile],
-        created_runs: &[RunFile],
-    ) -> Result<Vec<RunFile>, IndexBundleError> {
+    fn spend_rows(&self, spend2_runs: &[RunFile]) -> Result<Vec<RunFile>, IndexBundleError> {
         let mut spend_raw = self.set.sorter("sh-spendraw");
         let mut spends = MergeCursor::open(spend2_runs, self.path)?;
-        let mut creations = MergeCursor::open(created_runs, self.path)?;
-        let mut current_spend = spends.take()?;
-        let mut current_creation = creations.take()?;
-        let mut active: Option<[u8; 32]> = None;
-        let mut last: Option<u32> = None;
-        while let Some((skey, sval)) = current_spend {
-            let (spent_txid, spending) =
+        while let Some((skey, sval)) = spends.take()? {
+            let (spent_txid, spending, height) =
                 split_spend_key(&skey).map_err(|error| io_error(self.path, error))?;
             if sval.len() != 4 {
                 return Err(io_error(self.path, truncated_run()));
@@ -1203,35 +1171,12 @@ impl ScriptEmission<'_> {
             let mut vout = [0_u8; 4];
             vout.copy_from_slice(&sval);
             let vout = u32::from_be_bytes(vout);
-            if active != Some(spent_txid) {
-                active = Some(spent_txid);
-                last = None;
-            }
-            while let Some((ckey, _)) = &current_creation {
-                let (created_txid, creation) =
-                    split_spend_key(ckey).map_err(|error| io_error(self.path, error))?;
-                if created_txid < spent_txid {
-                    current_creation = creations.take()?;
-                    continue;
-                }
-                if created_txid != spent_txid {
-                    break;
-                }
-                if creation < spending {
-                    last = Some(creation);
-                    current_creation = creations.take()?;
-                    continue;
-                }
-                break;
-            }
-            if let Some(creation) = last {
-                let key = crate::segment::format::encode_spend_dir_key(0, creation, vout).to_vec();
-                let value = crate::segment::format::encode_spend_dir_value(spending).to_vec();
-                spend_raw
-                    .push(key, value)
-                    .map_err(|error| io_error(self.path, error))?;
-            }
-            current_spend = spends.take()?;
+            let key =
+                crate::segment::format::encode_spend_dir_key(0, &spent_txid, vout, height).to_vec();
+            let value = crate::segment::format::encode_spend_dir_value(spending).to_vec();
+            spend_raw
+                .push(key, value)
+                .map_err(|error| io_error(self.path, error))?;
         }
         spend_raw
             .finish()
@@ -1669,82 +1614,53 @@ enum LocatorOutcome {
     NotChecked,
 }
 
-const MAX_RESTORE_POSITIONS: usize = 4_194_304;
-
 struct LocatorCheck<'a> {
     chain: &'a ChainBase,
     tree: &'a BlockTreeReader,
-    bodies: BodyReader<'a>,
-    pending: HashMap<u32, Vec<(TxPosition, [u8; 32])>>,
-    pending_positions: usize,
-    counts: HashMap<u32, u64>,
+    source: &'a dyn bitcoin_rs_storage::block_body::BlockBodySource,
     outcome: LocatorOutcome,
 }
 
 impl LocatorCheck<'_> {
-    fn check(&mut self, record: &TxLookupRecord<'_>) -> Result<(), IndexBundleError> {
-        if !matches!(self.outcome, LocatorOutcome::Verified) {
-            return Ok(());
+    fn check(
+        &self,
+        record: &TxLookupRecord<'_>,
+        sorter: &mut SpillSorter<'_>,
+        path: &Path,
+    ) -> Result<(), IndexBundleError> {
+        self.chain
+            .hash_at(self.tree, record.height)
+            .ok_or_else(|| {
+                IndexBundleError::Identity(
+                    "the receiver chain has no block at a record height".to_owned(),
+                )
+            })?;
+        for position in record.positions {
+            let mut key = Vec::with_capacity(44);
+            key.extend_from_slice(&record.height.to_be_bytes());
+            key.extend_from_slice(&position.offset().to_be_bytes());
+            key.extend_from_slice(&position.byte_len().to_be_bytes());
+            key.extend_from_slice(&record.txid);
+            sorter
+                .push(key, Vec::new())
+                .map_err(|error| io_error(path, error))?;
         }
-        let height = record.height;
-        self.chain.hash_at(self.tree, height).ok_or_else(|| {
-            IndexBundleError::Identity(
-                "the receiver chain has no block at a record height".to_owned(),
-            )
-        })?;
-        let added = record.positions.len();
-        let pending_positions = self
-            .pending_positions
-            .checked_add(added)
-            .filter(|&positions| positions <= MAX_RESTORE_POSITIONS)
-            .ok_or(IndexBundleError::RestoreTooLarge)?;
-        self.pending.entry(height).or_default().extend(
-            record
-                .positions
-                .iter()
-                .map(|&position| (position, record.txid)),
-        );
-        self.pending_positions = pending_positions;
         Ok(())
     }
 
-    fn verify_height_positions(
-        &mut self,
-        height: u32,
-        hash: Hash256,
-        positions: &[(TxPosition, [u8; 32])],
-    ) -> Result<Option<u64>, IndexBundleError> {
-        for &(position, expected) in positions {
-            match self.bodies.transaction(height, hash, position)? {
-                Located::Found(tx) if tx.txid().0.to_le_bytes() == expected => {
-                    *self.counts.entry(height).or_default() += 1;
-                }
-                Located::Found(_) | Located::Mismatch => {
-                    self.outcome = LocatorOutcome::Mismatch { height };
-                    return Ok(None);
-                }
-                Located::BodyMissing => {
-                    self.outcome = LocatorOutcome::Withheld(Withheld::BodyUnavailable { height });
-                    return Ok(None);
-                }
-            }
-        }
-        if let Some(count) = self.bodies.block_tx_count(height, hash)? {
-            Ok(Some(count))
-        } else {
-            self.outcome = LocatorOutcome::Withheld(Withheld::BodyUnavailable { height });
-            Ok(None)
-        }
-    }
     fn verify_locators(
         &mut self,
+        runs: &[RunFile],
+        path: &Path,
         floor: u32,
         base: u32,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(), IndexBundleError> {
-        let mut block_counts: HashMap<u32, u64> = HashMap::new();
+        let mut occurrences = MergeCursor::open(runs, path)?;
+        let mut incomplete = None;
+        let mut checked = 0_u64;
         for height in floor..=base {
-            if u64::from(height) % CANCEL_POLL_RECORDS == 0 && cancelled() {
+            if cancelled() {
                 return Err(IndexBundleError::Cancelled);
             }
             let hash = self.chain.hash_at(self.tree, height).ok_or_else(|| {
@@ -1752,51 +1668,108 @@ impl LocatorCheck<'_> {
                     "the receiver chain has no block at a covered height".to_owned(),
                 )
             })?;
-            let count = match self.verify_height_count(height, hash)? {
-                Some(count) => count,
-                None => return Ok(()),
+            let mut bodies = BodyReader::new(self.source);
+            let mut actual = 0_u64;
+            let mut previous_offset = None;
+            while let Some(key) = occurrences.key() {
+                if key.len() != 44 {
+                    return Err(io_error(path, truncated_run()));
+                }
+                let row_height = u32::from_be_bytes(
+                    key[..4]
+                        .try_into()
+                        .map_err(|_| io_error(path, truncated_run()))?,
+                );
+                if row_height != height {
+                    if row_height < height {
+                        return Err(io_error(path, truncated_run()));
+                    }
+                    break;
+                }
+                if checked.is_multiple_of(CANCEL_POLL_RECORDS) && cancelled() {
+                    return Err(IndexBundleError::Cancelled);
+                }
+                let (key, value) = occurrences
+                    .take()?
+                    .ok_or_else(|| io_error(path, truncated_run()))?;
+                if !value.is_empty() {
+                    return Err(io_error(path, truncated_run()));
+                }
+                let offset = u32::from_be_bytes(
+                    key[4..8]
+                        .try_into()
+                        .map_err(|_| io_error(path, truncated_run()))?,
+                );
+                let len = u32::from_be_bytes(
+                    key[8..12]
+                        .try_into()
+                        .map_err(|_| io_error(path, truncated_run()))?,
+                );
+                if previous_offset == Some(offset) {
+                    self.outcome = LocatorOutcome::Mismatch { height };
+                    return Ok(());
+                }
+                previous_offset = Some(offset);
+                match bodies.transaction(height, hash, TxPosition::new(offset, len))? {
+                    Located::Found(tx) if tx.txid().0.to_le_bytes().as_slice() == &key[12..] => {
+                        actual += 1;
+                    }
+                    Located::Found(_) | Located::Mismatch => {
+                        self.outcome = LocatorOutcome::Mismatch { height };
+                        return Ok(());
+                    }
+                    Located::BodyMissing => {
+                        self.outcome =
+                            LocatorOutcome::Withheld(Withheld::BodyUnavailable { height });
+                        return Ok(());
+                    }
+                }
+                checked += 1;
+            }
+            let Some(expected) = bodies.block_tx_count(height, hash)? else {
+                self.outcome = LocatorOutcome::Withheld(Withheld::BodyUnavailable { height });
+                return Ok(());
             };
-            block_counts.insert(height, count);
+            if actual != expected && incomplete.is_none() {
+                incomplete = Some(IndexBundleError::Incomplete {
+                    height,
+                    expected,
+                    actual,
+                });
+            }
         }
-        for height in floor..=base {
-            if u64::from(height) % CANCEL_POLL_RECORDS == 0 && cancelled() {
-                return Err(IndexBundleError::Cancelled);
-            }
-            let expected = block_counts.get(&height).copied().unwrap_or(0);
-            if let Some(error) = incomplete_at(&self.counts, height, expected) {
-                return Err(error);
-            }
+        if occurrences.key().is_some() {
+            return Err(io_error(path, truncated_run()));
+        }
+        if let Some(error) = incomplete {
+            return Err(error);
         }
         Ok(())
     }
-    fn verify_height_count(
-        &mut self,
-        height: u32,
-        hash: Hash256,
-    ) -> Result<Option<u64>, IndexBundleError> {
-        if let Some(positions) = self.pending.remove(&height) {
-            self.pending_positions = self.pending_positions.saturating_sub(positions.len());
-            self.verify_height_positions(height, hash, &positions)
-        } else if let Some(count) = self.bodies.block_tx_count(height, hash)? {
-            Ok(Some(count))
-        } else {
-            self.outcome = LocatorOutcome::Withheld(Withheld::BodyUnavailable { height });
-            Ok(None)
-        }
-    }
 }
 
-fn incomplete_at(
-    counts: &HashMap<u32, u64>,
-    height: u32,
-    expected: u64,
-) -> Option<IndexBundleError> {
-    let actual = counts.get(&height).copied().unwrap_or(0);
-    (actual != expected).then_some(IndexBundleError::Incomplete {
-        height,
-        expected,
-        actual,
-    })
+fn restore_work_dir(
+    host: &BundleHost<'_>,
+    path: &Path,
+    prefix: &str,
+) -> Result<tempfile::TempDir, IndexBundleError> {
+    let scratch_root = host
+        .writer
+        .restore_scratch()
+        .or_else(|| path.parent().map(Path::to_path_buf));
+    match scratch_root {
+        Some(root) => {
+            fs::create_dir_all(&root).map_err(|error| io_error(&root, error))?;
+            tempfile::Builder::new()
+                .prefix(prefix)
+                .tempdir_in(&root)
+                .map_err(|error| io_error(&root, error))
+        }
+        None => tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .map_err(|error| io_error(path, error)),
+    }
 }
 
 fn validate_artifact(
@@ -1805,6 +1778,20 @@ fn validate_artifact(
     manifest: &ValidatedManifest,
     chain: Option<&ChainBase>,
 ) -> Result<(ArtifactHeader, LocatorOutcome), IndexBundleError> {
+    let budget = SpillBudget::new(RESTORE_SPILL_BUDGET_BYTES);
+    validate_artifact_with_budget(host, path, manifest, chain, &budget)
+}
+
+fn validate_artifact_with_budget(
+    host: &BundleHost<'_>,
+    path: &Path,
+    manifest: &ValidatedManifest,
+    chain: Option<&ChainBase>,
+    budget: &SpillBudget,
+) -> Result<(ArtifactHeader, LocatorOutcome), IndexBundleError> {
+    let work = restore_work_dir(host, path, "restore-locators-")?;
+    let set = SpillSet::new(budget, work.path().to_path_buf());
+    let mut sorter = set.sorter("occurrences");
     let name = BundleFamily::TxLookup.file_name();
     let fail = |error| io_error(path, error);
     let expectation = manifest_artifact_expectation(manifest)?;
@@ -1822,10 +1809,7 @@ fn validate_artifact(
         (Some(chain), Some(source)) => Some(LocatorCheck {
             chain,
             tree: host.block_tree,
-            bodies: BodyReader::new(source),
-            pending: HashMap::new(),
-            pending_positions: 0,
-            counts: HashMap::new(),
+            source,
             outcome: LocatorOutcome::Verified,
         }),
         _ => None,
@@ -1835,7 +1819,7 @@ fn validate_artifact(
             let mut records = RecordReader::new(&mut reader, header, manifest.tx_lookup.floor);
             read_records(&mut records, host, path, |record| {
                 if let Some(locators) = locators.as_mut() {
-                    locators.check(record)?;
+                    locators.check(record, &mut sorter, path)?;
                 }
                 Ok(ControlFlow::Continue(()))
             })
@@ -1851,9 +1835,15 @@ fn validate_artifact(
     }
     let header = header.map_err(|reason| IndexBundleError::ArtifactHeader { name, reason })?;
     framing?;
+    if (host.cancelled)() {
+        return Err(IndexBundleError::Cancelled);
+    }
+    let runs = sorter.finish().map_err(|error| io_error(path, error))?;
     if let Some(check) = locators.as_mut() {
         if matches!(check.outcome, LocatorOutcome::Verified) {
             check.verify_locators(
+                &runs,
+                path,
                 manifest.tx_lookup.floor,
                 manifest.identity.base_height,
                 host.cancelled,
@@ -2030,17 +2020,8 @@ impl ImportPlan<'_> {
             headers.push(header);
         }
         let header_refs: Vec<&[u8; crate::types::HEADER_ROW_SIZE]> = headers.iter().collect();
-        let scratch = self.path.parent().unwrap_or(self.path);
-        let work = scratch.join(TX_LOOKUP_WORK_DIR);
-        match fs::remove_dir_all(&work) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error(self.path, error)),
-        }
-        fs::create_dir_all(&work).map_err(|error| io_error(self.path, error))?;
-        let result = self.import_streamed(&header_refs, &work, hashed, base);
-        let _ = fs::remove_dir_all(&work);
-        result
+        let work = restore_work_dir(self.host, self.path, "restore-import-")?;
+        self.import_streamed(&header_refs, work.path(), hashed, base)
     }
 
     fn import_streamed(
@@ -2092,7 +2073,7 @@ impl ImportPlan<'_> {
             headers: header_refs,
             base,
             floor: self.manifest.tx_lookup.floor,
-            scratch: self.path.parent().unwrap_or(self.path),
+            scratch: work,
         };
         let imported = self
             .host
@@ -2141,92 +2122,234 @@ mod tests {
     use crate::types::TxPosition;
     use std::cell::Cell;
 
+    // IDX-11
     #[test]
-    fn restore_locator_admission_bounds_accepted_positions_before_extension()
+    fn restore_locator_spills_check_canonical_positions_and_late_completeness()
     -> Result<(), crate::portable::TestError> {
-        use bitcoin_rs_consensus::primitives::{BlockHash, Network, consensus_bytes};
-        use bitcoin_rs_execution::chain::{BlockTree, ChainTxCount, NodeStatus, TipSnapshot};
+        use bitcoin::consensus::serialize;
+        use bitcoin::hashes::Hash as _;
+        use bitcoin_rs_consensus::primitives::{BlockHash, Network};
+        use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, TipReader};
         use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
+        use sha2::{Digest, Sha256};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
 
-        struct GenesisBody {
-            hash: BlockHash,
-            body: Vec<u8>,
+        struct Bodies {
+            blocks: Vec<(BlockHash, Vec<u8>)>,
+            reads: AtomicU64,
+            hidden: Option<u32>,
         }
-        impl BlockBodySource for GenesisBody {
+        impl BlockBodySource for Bodies {
             fn block_body(
                 &self,
                 height: u32,
                 hash: BlockHash,
             ) -> Result<Option<Vec<u8>>, BlockBodyReadError> {
-                Ok((height == 0 && hash == self.hash).then(|| self.body.clone()))
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                if self.hidden == Some(height) {
+                    return Ok(None);
+                }
+                Ok(self
+                    .blocks
+                    .get(usize::try_from(height).unwrap_or(usize::MAX))
+                    .filter(|(expected, _)| *expected == hash)
+                    .map(|(_, body)| body.clone()))
             }
         }
-        let genesis = Network::Regtest.genesis_block();
-        let source = GenesisBody {
-            hash: genesis.block_hash(),
-            body: consensus_bytes(&genesis),
-        };
         let mut tree = BlockTree::new();
-        let id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+        let mut block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut blocks = Vec::new();
+        let mut oracle = Vec::new();
+        let mut tip_id = None;
+        for height in 0..3_u32 {
+            block.txdata[0].lock_time = bitcoin::absolute::LockTime::from_consensus(height);
+            block.header.merkle_root = block.compute_merkle_root().ok_or("merkle root")?;
+            let body = serialize(&block);
+            let tx = serialize(&block.txdata[0]);
+            let offset = 80 + serialize(&bitcoin::VarInt(1)).len();
+            assert_eq!(&body[offset..], tx.as_slice());
+            let native: bitcoin_rs_consensus::primitives::Block =
+                bitcoin_rs_consensus::primitives::deserialize(&body)?;
+            let hash = native.block_hash();
+            let id = tree.insert_header(native.header, NodeStatus::HeaderValid)?;
+            tree.record_applied_tx_count(id, 1)?;
+            blocks.push((hash, body));
+            oracle.push((
+                block.txdata[0].compute_txid().to_byte_array(),
+                height,
+                TxPosition::new(u32::try_from(offset)?, u32::try_from(tx.len())?),
+            ));
+            block.header.prev_blockhash = block.block_hash();
+            block.header.time += 1;
+            tip_id = Some(id);
+        }
+        let id = tip_id.ok_or("tip")?;
         let node = tree.node(id)?;
-        let tip = TipSnapshot {
+        let tip = Arc::new(TipSnapshot {
             tip_id: id,
-            height: 0,
+            height: 2,
             hash: node.hash,
             chainwork: node.chainwork,
-            chain_tx_count: ChainTxCount::established(1),
-        };
+            chain_tx_count: node.chain_tx_count,
+        });
         let tree = BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(tree)));
-        let chain = ChainBase::capture(&tree, &tip, 0, &|| false)?;
-        let tx = &genesis.txs[0];
-        let bytes = consensus_bytes(tx);
-        let offset = source
-            .body
-            .windows(bytes.len())
-            .position(|window| window == bytes)
-            .ok_or("genesis transaction")?;
-        let positions = [TxPosition::new(
-            u32::try_from(offset)?,
-            u32::try_from(bytes.len())?,
-        )];
-        let record = TxLookupRecord {
-            txid: tx.txid().0.to_le_bytes(),
-            height: 0,
-            positions: &positions,
-        };
-        let mut check = LocatorCheck {
-            chain: &chain,
-            tree: &tree,
-            bodies: BodyReader::new(&source),
-            pending: HashMap::new(),
-            pending_positions: 0,
-            counts: HashMap::new(),
-            outcome: LocatorOutcome::Verified,
-        };
-        for _ in 0..MAX_RESTORE_POSITIONS {
-            check.check(&record)?;
+        let chain = ChainBase::capture(&tree, &tip, 2, &|| false)?;
+        let applied = TipReader::new(Arc::new(arc_swap::ArcSwapOption::from(Some(tip))));
+        let dir = tempfile::tempdir()?;
+        let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(
+            dir.path().join("index"),
+        )?);
+        let reader = crate::Indexer::new(Arc::clone(&store));
+        let scratch = dir.path().join("seal-scratch");
+        assert!(!scratch.exists());
+        let writer = parking_lot::RwLock::new(
+            crate::IndexWriter::open(store, 1)?.with_seal_scratch(scratch),
+        );
+        #[derive(Clone, Copy)]
+        enum Case {
+            Complete,
+            MissingFinal,
+            WrongPosition,
+            ConflictingPosition,
+            WrongHash,
+            MissingBody,
+            RepeatedIdentity,
+            Cancelled,
         }
-        assert!(matches!(
-            check.check(&record),
-            Err(IndexBundleError::RestoreTooLarge)
-        ));
-        assert_eq!(check.pending[&0].len(), MAX_RESTORE_POSITIONS);
-        assert_eq!(check.pending_positions, MAX_RESTORE_POSITIONS);
-        check.outcome = LocatorOutcome::Mismatch { height: 0 };
-        check.check(&record)?;
-        assert!(matches!(
-            check.outcome,
-            LocatorOutcome::Mismatch { height: 0 }
-        ));
-        assert_eq!(check.pending[&0].len(), MAX_RESTORE_POSITIONS);
-        check.outcome = LocatorOutcome::Withheld(Withheld::BodyUnavailable { height: 0 });
-        check.check(&record)?;
-        assert!(matches!(
-            check.outcome,
-            LocatorOutcome::Withheld(Withheld::BodyUnavailable { height: 0 })
-        ));
-        assert_eq!(check.pending[&0].len(), MAX_RESTORE_POSITIONS);
+        for case in [
+            Case::Complete,
+            Case::MissingFinal,
+            Case::WrongPosition,
+            Case::ConflictingPosition,
+            Case::WrongHash,
+            Case::MissingBody,
+            Case::RepeatedIdentity,
+            Case::Cancelled,
+        ] {
+            let mut rows = oracle.clone();
+            if matches!(case, Case::MissingFinal | Case::MissingBody) {
+                rows.retain(|(_, height, _)| *height != 2);
+            }
+            if matches!(case, Case::WrongPosition | Case::WrongHash) {
+                rows[2].2 = TxPosition::new(oracle[2].2.offset() + 1, oracle[2].2.byte_len());
+            }
+            if matches!(case, Case::ConflictingPosition) {
+                let mut conflict = oracle[2];
+                conflict.0[0] ^= 1;
+                rows.push(conflict);
+            }
+            if matches!(case, Case::RepeatedIdentity | Case::WrongHash) {
+                rows.push(oracle[2]);
+            }
+            rows.sort_by(|left, right| {
+                left.0[..8]
+                    .cmp(&right.0[..8])
+                    .then_with(|| left.1.cmp(&right.1))
+                    .then_with(|| left.0[8..].cmp(&right.0[8..]))
+            });
+            let mut payload = Vec::new();
+            for (txid, height, position) in &rows {
+                super::super::artifact::write_record(&mut payload, txid, *height, &[*position])?;
+            }
+            let header = ArtifactHeader {
+                family: BundleFamily::TxLookup,
+                artifact_version: ARTIFACT_VERSION,
+                index_format: crate::index_format_version(),
+                network_magic: Network::Regtest.magic(),
+                base_height: 2,
+                base_hash: chain.hash,
+                records: u64::try_from(rows.len())?,
+                payload_bytes: u64::try_from(payload.len())?,
+            };
+            let mut bytes = header.encode().to_vec();
+            bytes.extend_from_slice(&payload);
+            let path = dir.path().join("locators.artifact");
+            fs::write(&path, &bytes)?;
+            let mut digest: [u8; 32] = Sha256::digest(&bytes).into();
+            if matches!(case, Case::WrongHash) {
+                digest[0] ^= 1;
+            }
+            let manifest = ValidatedManifest {
+                identity: super::super::manifest::BundleIdentity {
+                    network: Network::Regtest,
+                    genesis: Network::Regtest
+                        .genesis_block()
+                        .block_hash()
+                        .0
+                        .to_le_bytes(),
+                    format_version: crate::index_format_version(),
+                    base_height: 2,
+                    base_hash: chain.hash,
+                    chainwork: chain.chainwork,
+                    chain_tx_count: 3,
+                },
+                tx_lookup: super::super::manifest::TxLookupArtifact {
+                    sha256: digest,
+                    bytes: u64::try_from(bytes.len())?,
+                    records: u64::try_from(rows.len())?,
+                    floor: 0,
+                },
+            };
+            let source = Bodies {
+                blocks: blocks.clone(),
+                reads: AtomicU64::new(0),
+                hidden: matches!(case, Case::MissingBody).then_some(2),
+            };
+            let cancelled = || matches!(case, Case::Cancelled);
+            let host = BundleHost {
+                writer: &writer,
+                reader: &reader,
+                block_tree: &tree,
+                applied_tip: &applied,
+                body_source: Some(&source),
+                enabled: IndexCapabilities::TX_LOOKUP,
+                cancelled: &cancelled,
+            };
+            let budget = SpillBudget::new(1);
+            let result =
+                validate_artifact_with_budget(&host, &path, &manifest, Some(&chain), &budget);
+            match case {
+                Case::Complete => {
+                    let (_, outcome) = result?;
+                    assert!(matches!(outcome, LocatorOutcome::Verified));
+                }
+                Case::MissingFinal => assert!(matches!(
+                    result,
+                    Err(IndexBundleError::Incomplete {
+                        height: 2,
+                        expected: 1,
+                        actual: 0,
+                    })
+                )),
+                Case::WrongPosition | Case::ConflictingPosition => assert!(matches!(
+                    result,
+                    Ok((_, LocatorOutcome::Mismatch { height: 2 }))
+                )),
+                Case::WrongHash => {
+                    assert!(matches!(result, Err(IndexBundleError::ArtifactHash { .. })));
+                    assert_eq!(source.reads.load(Ordering::Relaxed), 0);
+                }
+                Case::MissingBody => assert!(matches!(
+                    result,
+                    Ok((
+                        _,
+                        LocatorOutcome::Withheld(Withheld::BodyUnavailable { height: 2 })
+                    ))
+                )),
+                Case::RepeatedIdentity => {
+                    assert!(matches!(
+                        result,
+                        Err(IndexBundleError::ArtifactFraming { .. })
+                    ));
+                    assert_eq!(source.reads.load(Ordering::Relaxed), 0);
+                }
+                Case::Cancelled => {
+                    assert!(matches!(result, Err(IndexBundleError::Cancelled)));
+                    assert_eq!(source.reads.load(Ordering::Relaxed), 0);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2294,34 +2417,6 @@ mod tests {
         assert!(
             !is_top_level_span(position, 90, 210),
             "an overlapping span is not the transaction boundary"
-        );
-    }
-
-    #[test]
-    fn omitted_positions_report_first_missing_height() {
-        let counts = HashMap::from([(0_u32, 2_u64), (1_u32, 1_u64)]);
-        assert!(incomplete_at(&counts, 0, 2).is_none());
-        assert!(
-            matches!(
-                incomplete_at(&counts, 1, 2),
-                Some(IndexBundleError::Incomplete {
-                    height: 1,
-                    expected: 2,
-                    actual: 1,
-                })
-            ),
-            "an omitted transaction must be refused at its height"
-        );
-        assert!(
-            matches!(
-                incomplete_at(&counts, 2, 1),
-                Some(IndexBundleError::Incomplete {
-                    height: 2,
-                    expected: 1,
-                    actual: 0,
-                })
-            ),
-            "a height with no bundle positions reports zero"
         );
     }
 

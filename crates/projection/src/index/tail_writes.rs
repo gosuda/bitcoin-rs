@@ -3,9 +3,7 @@ use super::error::IndexError;
 use super::rows::IndexRowBytes;
 use super::write::IndexWriter;
 use crate::segment::format::SCRIPT_STATS_VALUE_LEN;
-use crate::segment::tail::{
-    self, CreationOrdinals, PreparedTail, SealedTxOrdinals, TailWriterState,
-};
+use crate::segment::tail::{self, PreparedTail, TailWriterState};
 use crate::segment::{self, SealedGen, sealed_generations};
 use bitcoin_rs_storage::{
     BatchOp, BufferedWriteBatch, ColumnFamily, CommittedBlock, KvSnapshot, KvStore,
@@ -36,19 +34,6 @@ pub(super) struct RollbackStep<'a> {
     pub current: IndexWatermark,
     pub prev: Option<IndexWatermark>,
     pub batch: &'a mut BufferedWriteBatch,
-}
-struct CreationsAcross<'a> {
-    tail_gens: SealedTxOrdinals<'a>,
-    script_gens: SealedTxOrdinals<'a>,
-}
-
-impl CreationOrdinals for CreationsAcross<'_> {
-    fn creation_ordinal(&self, txid: &[u8; 32]) -> Result<Option<u32>, IndexError> {
-        match self.script_gens.creation_ordinal(txid)? {
-            Some(ordinal) => Ok(Some(ordinal)),
-            None => self.tail_gens.creation_ordinal(txid),
-        }
-    }
 }
 
 impl RollbackTail {
@@ -136,25 +121,12 @@ impl<S: KvStore> IndexWriter<S> {
         batch: &mut BufferedWriteBatch,
     ) -> Result<(), IndexError> {
         let snapshot = self.indexer.store.snapshot()?;
-        let gens = state.sealed.clone();
-        let script_gens = sealed_generations(snapshot.as_ref(), IndexCapability::ScriptHistory)?;
-        let older = CreationsAcross {
-            tail_gens: SealedTxOrdinals {
-                snapshot: snapshot.as_ref(),
-                gens: &gens,
-            },
-            script_gens: SealedTxOrdinals {
-                snapshot: snapshot.as_ref(),
-                gens: &script_gens,
-            },
-        };
         for (block, prepared) in blocks {
             tail::append_prepared_tail_block(
                 batch,
                 block,
                 prepared,
                 state,
-                &older,
                 snapshot
                     .get(ColumnFamily::IdxMeta, &tail::log_key(block.height))?
                     .as_deref(),
@@ -285,8 +257,8 @@ fn segment_capabilities(capabilities: IndexCapabilities) -> impl Iterator<Item =
 
 /// Upper bound on the bytes one block's tail append writes. The append runs
 /// on a scratch state that takes every state-dependent branch at its widest:
-/// each spend resolves, ordinals take the widest varint, and each stats row
-/// is charged the prior value its undo-log entry may carry.
+/// ordinals take the widest varint, and each stats row is charged the prior
+/// value its undo-log entry may carry.
 pub(super) fn planned_tail_bytes(
     block: &CommittedBlock,
     prepared: &PreparedTail,
@@ -294,14 +266,7 @@ pub(super) fn planned_tail_bytes(
     let mut batch = BufferedWriteBatch::default();
     let mut state = TailWriterState::new();
     state.next_ordinal = u32::MAX;
-    tail::append_prepared_tail_block(
-        &mut batch,
-        block,
-        prepared,
-        &mut state,
-        &tail::AllCreated,
-        None,
-    )?;
+    tail::append_prepared_tail_block(&mut batch, block, prepared, &mut state, None)?;
     let mut bytes = IndexRowBytes::ZERO;
     let mut stats_rows = 0usize;
     for op in batch.into_ops() {
@@ -975,19 +940,17 @@ mod rollback_retire_tests {
         actual.sort();
         let mut expected = Vec::new();
         for (height, block) in blocks.iter().take(present).enumerate() {
-            let mut events = vec![crate::types::ScriptHistoryOccurrence::FUNDING];
-            if blocks[height].txs[0].inputs[0].previous_output != OutPoint::null() {
-                events.push(crate::types::ScriptHistoryOccurrence::SPENDING);
+            let mut flags = crate::types::ScriptHistoryOccurrence::FUNDING;
+            if block.txs[0].inputs[0].previous_output != OutPoint::null() {
+                flags |= crate::types::ScriptHistoryOccurrence::SPENDING;
             }
-            for flags in events {
-                expected.push((
-                    u32::try_from(height)?,
-                    *block.txs[0].txid().as_bytes(),
-                    81,
-                    u32::try_from(consensus_bytes(block).len() - 81)?,
-                    flags,
-                ));
-            }
+            expected.push((
+                u32::try_from(height)?,
+                *block.txs[0].txid().as_bytes(),
+                81,
+                u32::try_from(consensus_bytes(block).len() - 81)?,
+                flags,
+            ));
         }
         expected.sort();
         assert_eq!(

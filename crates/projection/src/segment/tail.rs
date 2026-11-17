@@ -182,61 +182,6 @@ pub struct TailBounds {
     pub at: Option<(u32, [u8; 32])>,
 }
 
-/// Resolves creation ordinals of transactions that no longer live in the tail.
-pub trait CreationOrdinals {
-    fn creation_ordinal(&self, txid: &[u8; 32]) -> Result<Option<u32>, IndexError>;
-}
-
-/// Resolves through the sealed generations of one captured snapshot.
-pub struct SealedTxOrdinals<'a> {
-    pub snapshot: &'a dyn KvSnapshot,
-    pub gens: &'a [SealedGen],
-}
-
-impl CreationOrdinals for SealedTxOrdinals<'_> {
-    fn creation_ordinal(&self, txid: &[u8; 32]) -> Result<Option<u32>, IndexError> {
-        for sealed in self.gens.iter().rev() {
-            let mut prefix =
-                format::tx_dir_kind_prefix(sealed.gen_id, format::TX_KIND_TXID).to_vec();
-            prefix.extend_from_slice(txid);
-            let mut latest = None;
-            for item in self.snapshot.iter_prefix(ColumnFamily::TxDir, &prefix)? {
-                let (key, value) = item?;
-                if format::decode_tx_dir_key(&key).is_none() {
-                    continue;
-                }
-                if let Some((_, ordinal, _, _)) = format::decode_tx_dir_value(&value) {
-                    latest = Some(ordinal);
-                }
-            }
-            if latest.is_some() {
-                return Ok(latest);
-            }
-        }
-        Ok(None)
-    }
-}
-
-/// Resolver for callers that hold no sealed generations.
-pub struct NoSealedTxOrdinals;
-
-impl CreationOrdinals for NoSealedTxOrdinals {
-    fn creation_ordinal(&self, _txid: &[u8; 32]) -> Result<Option<u32>, IndexError> {
-        Ok(None)
-    }
-}
-
-/// Resolves every creation to ordinal zero. Planning uses it so every spend
-/// row a block can emit is counted, including spends of outputs that live
-/// in the tail or in a sealed generation.
-pub struct AllCreated;
-
-impl CreationOrdinals for AllCreated {
-    fn creation_ordinal(&self, _txid: &[u8; 32]) -> Result<Option<u32>, IndexError> {
-        Ok(Some(0))
-    }
-}
-
 /// Undo-log recorder. Row keys are inserted, so undo deletes them; stats
 /// changes are logged as deltas so that a sealed prefix can be subtracted.
 struct Recorder<'a> {
@@ -304,7 +249,7 @@ pub fn block_tail_bytes_bound(block: &CommittedBlock) -> u64 {
         format::encode_script_dict_value(0).len(),
     );
     let spend = row(
-        format::encode_spend_dir_key(0, 0, 0).len(),
+        format::SPEND_DIR_KEY_LEN,
         format::encode_spend_dir_value(0).len(),
     );
     let tx_rows = row(
@@ -430,13 +375,12 @@ pub fn append_tail_block(
     batch: &mut BufferedWriteBatch,
     block: &CommittedBlock,
     state: &mut TailWriterState,
-    older: &dyn CreationOrdinals,
 ) -> Result<(), IndexError> {
     let prepared = PreparedTail::for_capabilities(
         block,
         IndexCapabilities::HISTORICAL.with_compact_filters(true),
     );
-    append_prepared_tail_block(batch, block, &prepared, state, older, None)
+    append_prepared_tail_block(batch, block, &prepared, state, None)
 }
 
 /// Appends one block whose block-only rows were prepared from `block`.
@@ -445,7 +389,6 @@ pub(crate) fn append_prepared_tail_block(
     block: &CommittedBlock,
     prepared: &PreparedTail,
     state: &mut TailWriterState,
-    older: &dyn CreationOrdinals,
     existing_log: Option<&[u8]>,
 ) -> Result<(), IndexError> {
     if let Some(value) = existing_log {
@@ -510,10 +453,11 @@ pub(crate) fn append_prepared_tail_block(
         {
             let spends = SpendingInputs {
                 ordinal,
+                height: block.height,
                 prevouts: &tx.inputs,
                 hashes: input_hashes,
             };
-            append_inputs(&mut rec, spends, state, older)?;
+            append_inputs(&mut rec, spends, state);
             let funding = FundingOutputs {
                 ordinal,
                 outputs: &tx.outputs,
@@ -576,6 +520,7 @@ fn needs_transaction_directory(prepared: &PreparedTail) -> bool {
 /// The spending inputs of one transaction, with the script hash of each.
 struct SpendingInputs<'a> {
     ordinal: u32,
+    height: u32,
     prevouts: &'a [SpentPrevout],
     hashes: &'a [Option<[u8; 32]>],
 }
@@ -587,25 +532,14 @@ struct FundingOutputs<'a> {
     hashes: &'a [Option<[u8; 32]>],
 }
 
-fn append_inputs(
-    rec: &mut Recorder<'_>,
-    spends: SpendingInputs<'_>,
-    state: &mut TailWriterState,
-    older: &dyn CreationOrdinals,
-) -> Result<(), IndexError> {
+fn append_inputs(rec: &mut Recorder<'_>, spends: SpendingInputs<'_>, state: &mut TailWriterState) {
     for (input, hash) in spends.prevouts.iter().zip(spends.hashes) {
         if is_coinbase_marker(&input.txid, input.vout) {
             continue;
         }
-        let creation = match state.txid_to_ordinal.get(&input.txid) {
-            Some(&ordinal) => Some(ordinal),
-            None => older.creation_ordinal(&input.txid)?,
-        };
-        if let Some(creation_ord) = creation {
-            let key = format::encode_spend_dir_key(0, creation_ord, input.vout);
-            let val = format::encode_spend_dir_value(spends.ordinal);
-            rec.put(Family::SpendDir, &key, &val);
-        }
+        let key = format::encode_spend_dir_key(0, &input.txid, input.vout, spends.height);
+        let val = format::encode_spend_dir_value(spends.ordinal);
+        rec.put(Family::SpendDir, &key, &val);
         if let Some(hash) = hash {
             let script_id = script_id_for(rec, hash, state);
             record_occurrence(
@@ -618,7 +552,6 @@ fn append_inputs(
             );
         }
     }
-    Ok(())
 }
 
 fn append_outputs(

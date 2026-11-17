@@ -354,3 +354,73 @@ fn epoch2_generic_redb_preserves_rows_and_refuses_nonempty_legacy_coins() -> Tes
     }
     Ok(())
 }
+
+#[test]
+fn epoch2_redb_empty_legacy_table_does_not_mask_specialized_index() -> TestResult<()> {
+    for (specialized, populated) in [(true, false), (true, true), (false, false)] {
+        let source = tempdir()?;
+        let destination = tempdir()?;
+        let target = destination.path().join("converted");
+        write_schema_marker(source.path(), 2)?;
+        let index = source.path().join("txindex");
+        if specialized {
+            write_redb_txindex(&index, &build_txindex_fixture())?;
+        } else {
+            fs::create_dir_all(&index)?;
+        }
+        {
+            let db = redb::Database::create(index.join("redb.db"))?;
+            let txn = db.begin_write()?;
+            {
+                let mut table =
+                    txn.open_table(redb::TableDefinition::<&[u8], &[u8]>::new("coin_records"))?;
+                if populated {
+                    table.insert(
+                        b"legacy-coin".as_slice(),
+                        b"unmapped-authoritative-value".as_slice(),
+                    )?;
+                }
+            }
+            txn.commit()?;
+        }
+        let before = recursive_dir_digest(source.path())?;
+        let output = run_converter(&[
+            "--from",
+            source.path().to_str().expect("utf8"),
+            "--to",
+            target.to_str().expect("utf8"),
+            "--to-engine",
+            "rocksdb",
+        ])?;
+        assert_eq!(before, recursive_dir_digest(source.path())?);
+        if populated {
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(
+                    "incompatible or corrupt storage data: nonempty legacy coin_records requires a semantic migration"
+                ),
+                "unexpected refusal: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!target.join("CURRENT_SCHEMA").exists());
+        } else {
+            let report = parse_report(&output)?;
+            let expected = if specialized {
+                build_expected_txindex()
+            } else {
+                ColumnFamily::ALL
+                    .iter()
+                    .map(|cf| (*cf, Vec::new()))
+                    .collect()
+            };
+            verify_cf_rows(
+                "txindex",
+                &read_rocksdb_all_rows(&target.join("txindex"))?,
+                &expected,
+            )?;
+            verify_namespace_report(&report, "txindex", "redb", &expected)?;
+            assert_eq!(fs::read_to_string(target.join("CURRENT_SCHEMA"))?, "3\n");
+        }
+    }
+    Ok(())
+}
