@@ -1762,10 +1762,29 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Debug, thiserror::Error)]
+    enum AttachTestError {
+        #[error(transparent)]
+        Io(#[from] std::io::Error),
+        #[error(transparent)]
+        Storage(#[from] bitcoin_rs_storage::StorageError),
+        #[error(transparent)]
+        Index(#[from] IndexError),
+        #[error(transparent)]
+        Bundle(#[from] IndexBundleError),
+        #[error(transparent)]
+        Chain(#[from] bitcoin_rs_execution::chain::ChainError),
+        #[error(transparent)]
+        Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
+        #[error(transparent)]
+        Integer(#[from] std::num::TryFromIntError),
+        #[error("missing fixture tip after inserting two headers")]
+        MissingFixtureTip,
+    }
+
     // SNP-10
     #[test]
-    fn populated_attach_refusal_preserves_sibling_coverage()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn populated_attach_refusal_preserves_sibling_coverage() -> Result<(), AttachTestError> {
         let dir = tempfile::tempdir()?;
         let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
             dir.path(),
@@ -1832,5 +1851,240 @@ mod tests {
             ));
         }
         assert!(finish_portable_bundle(Ok(None)).is_ok());
+    }
+    // SNP-10
+    #[test]
+    fn populated_manifest_capability_does_not_skip_fresh_siblings() -> Result<(), AttachTestError> {
+        use crate::portable::{IndexBundleDirective, IndexBundleRequest, ManifestArtifactTarget};
+        use bitcoin::hashes::Hash as _;
+        use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Network};
+        use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, TipSnapshot};
+        use sha2::{Digest as _, Sha256};
+
+        struct Bodies(Vec<([u8; 32], Vec<u8>)>);
+        impl bitcoin_rs_storage::block_body::BlockBodySource for Bodies {
+            fn block_body(
+                &self,
+                height: u32,
+                hash: BlockHash,
+            ) -> Result<Option<Vec<u8>>, bitcoin_rs_storage::block_body::BlockBodyReadError>
+            {
+                Ok(usize::try_from(height)
+                    .ok()
+                    .and_then(|height| self.0.get(height))
+                    .filter(|(expected, _)| *expected == Hash256::from(hash).to_le_bytes())
+                    .map(|(_, bytes)| bytes.clone()))
+            }
+
+            fn block_body_range(
+                &self,
+                height: u32,
+                hash: BlockHash,
+                offset: u32,
+                length: u32,
+            ) -> Option<Vec<u8>> {
+                let height = usize::try_from(height).ok()?;
+                let offset = usize::try_from(offset).ok()?;
+                let length = usize::try_from(length).ok()?;
+                let (_, bytes) = self
+                    .0
+                    .get(height)
+                    .filter(|(expected, _)| *expected == Hash256::from(hash).to_le_bytes())?;
+                bytes
+                    .get(offset..offset.checked_add(length)?)
+                    .map(<[u8]>::to_vec)
+            }
+        }
+
+        struct CoinbaseOnly;
+        impl crate::SpentCoins for CoinbaseOnly {
+            fn spent_coin(&self, _txid: &[u8; 32], _vout: u32) -> Option<crate::SpentCoin<'_>> {
+                None
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        let source_store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
+            dir.path().join("source"),
+            8 * 1024 * 1024,
+        )?);
+        let mut source = IndexWriter::open(Arc::clone(&source_store), 1)?;
+        let mut tree = BlockTree::new();
+        let mut bodies = Bodies(Vec::new());
+        let mut block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut tip_id = None;
+        let enabled = crate::IndexCapabilities::HISTORICAL.with_compact_filters(true);
+        for height in 0..=1 {
+            if height != 0 {
+                block.header.prev_blockhash = block.block_hash();
+                block.header.time += 1;
+            }
+            let hash = block.block_hash().to_byte_array();
+            let bytes = bitcoin::consensus::serialize(&block);
+            let header = bitcoin_rs_consensus::primitives::deserialize(
+                &bitcoin::consensus::serialize(&block.header),
+            )?;
+            let id = tree.insert_header(header, NodeStatus::HeaderValid)?;
+            tree.record_applied_tx_count(id, 1)?;
+            tip_id = Some(id);
+            let prepared = source.prepare_block_with_spent_scripts(
+                enabled,
+                height,
+                hash,
+                &bytes,
+                &CoinbaseOnly,
+            )?;
+            let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+                max_rows: usize::MAX,
+                max_bytes: usize::MAX,
+            });
+            assert!(batch.try_push(prepared).is_ok());
+            source.commit_forward(batch)?;
+            bodies.0.push((hash, bytes));
+        }
+        let tip_id = tip_id.ok_or(AttachTestError::MissingFixtureTip)?;
+        let node = tree.node(tip_id)?;
+        let base = crate::IndexWatermark {
+            height: 1,
+            hash: node.hash.to_le_bytes(),
+        };
+        let tip = Arc::new(TipSnapshot {
+            tip_id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+            chain_tx_count: node.chain_tx_count,
+        });
+        let tree = bitcoin_rs_execution::chain::BlockTreeReader::new(Arc::new(
+            parking_lot::RwLock::new(tree),
+        ));
+        let applied_tip = bitcoin_rs_execution::chain::TipReader::new(Arc::new(
+            arc_swap::ArcSwapOption::from(Some(tip)),
+        ));
+        let source = parking_lot::RwLock::new(source);
+        let source_reader = crate::Indexer::new(source_store);
+        let bundle_dir = dir.path().join("bundle");
+        let source_host = BundleHost {
+            writer: &source,
+            reader: &source_reader,
+            block_tree: &tree,
+            applied_tip: &applied_tip,
+            body_source: Some(&bodies),
+            enabled,
+            cancelled: &|| false,
+        };
+        crate::portable::run(
+            &source_host,
+            &IndexBundleDirective::Export(IndexBundleRequest {
+                dir: bundle_dir.clone(),
+                network: Network::Regtest,
+            }),
+        )?;
+        let script_path = bundle_dir.join("script.artifact");
+        crate::portable::write_script_history_artifact(
+            &source.read(),
+            Network::Regtest,
+            &script_path,
+        )?;
+        let filter_path = bundle_dir.join("filters.artifact");
+        crate::portable::write_compact_filter_artifact(
+            &*source.read(),
+            Network::Regtest,
+            &bodies.0.iter().map(|(hash, _)| *hash).collect::<Vec<_>>(),
+            &filter_path,
+        )?;
+        let target =
+            |path: std::path::PathBuf| -> Result<Box<ManifestArtifactTarget>, AttachTestError> {
+                let bytes = std::fs::read(&path)?;
+                Ok(Box::new(ManifestArtifactTarget {
+                    artifact_path: path,
+                    base_height: base.height,
+                    base_hash: base.hash,
+                    floor: 0,
+                    network: Network::Regtest,
+                    index_format: crate::index_format_version(),
+                    sha256: Sha256::digest(&bytes).into(),
+                    size_bytes: u64::try_from(bytes.len())?,
+                    chain_tx_count: 2,
+                }))
+            };
+        let tx = IndexBundleDirective::AttachManifestArtifact(target(
+            bundle_dir.join("txlookup-v1.dat"),
+        )?);
+        let script = IndexBundleDirective::AttachManifestScriptHistory(target(script_path)?);
+        let filters = IndexBundleDirective::AttachManifestCompactFilters(target(filter_path)?);
+
+        let control_store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
+            dir.path().join("fresh-control"),
+            8 * 1024 * 1024,
+        )?);
+        let control = parking_lot::RwLock::new(IndexWriter::open(Arc::clone(&control_store), 1)?);
+        let control_reader = crate::Indexer::new(control_store);
+        let control_host = BundleHost {
+            writer: &control,
+            reader: &control_reader,
+            block_tree: &tree,
+            applied_tip: &applied_tip,
+            body_source: Some(&bodies),
+            enabled,
+            cancelled: &|| false,
+        };
+        for directive in [&tx, &script, &filters] {
+            crate::portable::run(&control_host, directive)?;
+        }
+        let control_marks = control.read().watermarks()?;
+        assert_eq!(control_marks.tx_lookup, Some(base));
+        assert_eq!(control_marks.script_history, Some(base));
+        assert_eq!(control_marks.compact_filters, Some(base));
+
+        for (name, populated, directives) in [
+            (
+                "tx-first",
+                crate::IndexCapabilities::TX_LOOKUP,
+                vec![tx.clone(), script.clone(), filters.clone()],
+            ),
+            (
+                "script-first",
+                crate::IndexCapabilities::SCRIPT_HISTORY,
+                vec![script, tx, filters],
+            ),
+        ] {
+            let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open_with_cache(
+                dir.path().join(name),
+                8 * 1024 * 1024,
+            )?);
+            let receiver = IndexWriter::open(Arc::clone(&store), 1)?;
+            let existing = crate::IndexWatermark {
+                height: 0,
+                hash: bodies.0[0].0,
+            };
+            receiver.anchor_watermark(populated, existing, 0)?;
+            let receiver = parking_lot::RwLock::new(receiver);
+            let reader = crate::Indexer::new(store);
+            let host = BundleHost {
+                writer: &receiver,
+                reader: &reader,
+                block_tree: &tree,
+                applied_tip: &applied_tip,
+                body_source: Some(&bodies),
+                enabled,
+                cancelled: &|| false,
+            };
+            let outcome = crate::portable::run(&host, &IndexBundleDirective::Manifest(directives))?;
+            assert!(finish_portable_bundle(Ok(outcome)).is_ok());
+            let marks = receiver.read().watermarks()?;
+            assert_eq!(
+                marks.compact_filters,
+                Some(base),
+                "{name}: fresh filters were skipped"
+            );
+            if populated == crate::IndexCapabilities::TX_LOOKUP {
+                assert_eq!(marks.tx_lookup, Some(existing));
+                assert_eq!(marks.script_history, Some(base));
+            } else {
+                assert_eq!(marks.script_history, Some(existing));
+                assert_eq!(marks.tx_lookup, Some(base));
+            }
+        }
+        Ok(())
     }
 }

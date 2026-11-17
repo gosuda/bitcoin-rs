@@ -183,6 +183,18 @@ pub mod test_support {
         }
     }
 
+    pub struct ReadRequests<R> {
+        pub reader: R,
+        pub lengths: Vec<usize>,
+    }
+
+    impl<R: std::io::Read> std::io::Read for ReadRequests<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.lengths.push(buffer.len());
+            self.reader.read(buffer)
+        }
+    }
+
     pub fn message_channel_bounded(
         capacity: usize,
     ) -> (

@@ -121,7 +121,6 @@ fn needs_tip_fence(path: &str) -> bool {
             | ["internal", "block", _, "txs"]
             | ["mempool", ..]
             | ["fee-estimates"]
-            | ["address" | "scripthash", _, "txs", "mempool"]
     )
 }
 
@@ -2349,62 +2348,153 @@ mod tests {
         Ok(())
     }
 
+    // WF-02
     #[test]
     fn composed_history_and_mempool_routes_refuse_reorg_and_aba_publications()
     -> Result<(), TestError> {
-        for aba in [false, true] {
-            for (path, post) in [
-                (
-                    format!("/scripthash/{}/txs/summary", "00".repeat(32)),
-                    false,
-                ),
-                (format!("/scripthash/{}/txs/chain", "00".repeat(32)), false),
+        for (same_height, aba) in [(false, false), (true, false), (false, true)] {
+            let block = fixture_genesis();
+            let mut context = Context::new();
+            let coinbase = &block.txs[0];
+            let coinbase_txid = coinbase.txid();
+            let script_hash = ScriptHash::new(&coinbase.outputs[0].script_pubkey)
+                .to_byte_array()
+                .to_lower_hex_string();
+            let spend = paying_transaction(
+                &[OutPoint::new(coinbase_txid, 0)],
+                &[(4_000_000_000, vec![0x52])],
+            );
+            let funding_txid = coinbase_txid.to_string();
+            let confirmed_funding = ScriptIndexRecord {
+                txid: coinbase_txid,
+                height: 0,
+                value: coinbase.outputs[0].value.to_sat(),
+                vout: 0,
+            };
+            context
+                .chain
+                .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
+                    0, &block,
+                ));
+            let (tip, extended, _) = extend_tip(&context, &block)?;
+            context.chain.applied_tip.store(Some(Arc::clone(&tip)));
+            context.indexes.script_index = Some(Arc::new(MonitoredScriptIndex {
+                history: vec![ScriptHistoryRecord {
+                    txid: coinbase_txid,
+                    height: 0,
+                }],
+                funding: vec![confirmed_funding],
+                unspent: vec![confirmed_funding],
+                unspent_calls: Arc::new(AtomicUsize::new(0)),
+                history_calls: Arc::new(AtomicUsize::new(0)),
+            }));
+            context.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(coinbase.clone())));
+            context
+                .mempool
+                .gateway
+                .pool()
+                .write()
+                .insert_entry(MempoolEntry::new(
+                    Arc::new(spend.clone()),
+                    100,
+                    1_000,
+                    0,
+                    0,
+                    0,
+                ))?;
+            let spend_txid = spend.txid().to_string();
+            let post_body = sonic_rs::to_vec(std::slice::from_ref(&spend_txid))?;
+            let cases = [
+                (format!("/scripthash/{script_hash}/txs/summary"), false),
+                (format!("/scripthash/{script_hash}/txs/chain"), false),
+                (format!("/scripthash/{script_hash}/txs/mempool"), false),
                 ("/internal/mempool/txs".to_owned(), false),
                 ("/internal/mempool/txs".to_owned(), true),
-            ] {
-                let block = fixture_genesis();
-                let mut context = Context::new();
-                context
-                    .chain
-                    .add_block(bitcoin_rs_projection::block_log::BlockRecord::from_block(
-                        0, &block,
-                    ));
-                let (tip, extended, _) = extend_tip(&context, &block)?;
-                context.chain.applied_tip.store(Some(Arc::clone(&tip)));
-                context.indexes.script_index = Some(Arc::new(MonitoredScriptIndex {
-                    history: Vec::new(),
-                    funding: Vec::new(),
-                    unspent: Vec::new(),
-                    unspent_calls: Arc::new(AtomicUsize::new(0)),
-                    history_calls: Arc::new(AtomicUsize::new(0)),
-                }));
-                let ctx = Arc::new(context);
+            ];
+            let ctx = Arc::new(context);
+            for (path, post) in cases {
                 let handler = Handler::new(Arc::clone(&ctx));
                 let stable = if post {
-                    backend_route_post(&handler, &path, b"[]")
-                } else {
+                    backend_route_post(&handler, &path, &post_body)
+                } else if path.starts_with("/internal/") {
                     backend_route(&handler, &path, "")
+                } else {
+                    route(&handler, &path, "")
                 };
                 assert_eq!(stable.status, 200, "stable route {path}");
+                let stable_body: Value = sonic_rs::from_slice(&stable.body)?;
+                let entries = stable_body.as_array().ok_or("route must return a list")?;
+                if path.ends_with("/txs/mempool") || path == "/internal/mempool/txs" {
+                    assert_eq!(entries.len(), 1, "populated mempool route {path}");
+                    let entry = entries.first().ok_or("mempool entry missing")?;
+                    assert_eq!(
+                        entry["txid"].as_str(),
+                        Some(spend_txid.as_str()),
+                        "mempool route {path} must return the admitted spend"
+                    );
+                    assert_eq!(
+                        entry["status"]["confirmed"].as_bool(),
+                        Some(false),
+                        "the spend stays unconfirmed on route {path}"
+                    );
+                    assert_eq!(
+                        entry["vin"][0]["txid"].as_str(),
+                        Some(funding_txid.as_str()),
+                        "route {path} must name the confirmed funding parent"
+                    );
+                    assert_eq!(
+                        entry["vin"][0]["prevout"]["value"].as_u64(),
+                        Some(coinbase.outputs[0].value.to_sat()),
+                        "route {path} must resolve the confirmed funding prevout"
+                    );
+                } else if path.ends_with("/txs/chain") {
+                    assert_eq!(
+                        entries.first().map(|entry| entry["txid"].as_str()),
+                        Some(Some(funding_txid.as_str())),
+                        "chain route {path} keeps confirmed-only history"
+                    );
+                } else {
+                    assert_eq!(
+                        entries.first().map(|entry| entry["txid"].as_str()),
+                        Some(Some(funding_txid.as_str())),
+                        "summary route {path} lists the confirmed funding"
+                    );
+                }
                 let (entered_send, entered_recv) = channel();
                 let (release_send, release_recv) = channel();
-                let request = std::thread::spawn(move || {
-                    arm_route_gate(entered_send, release_recv);
-                    if post {
-                        backend_route_post(&handler, &path, b"[]")
-                    } else {
-                        backend_route(&handler, &path, "")
-                    }
-                });
+                let request = {
+                    let path = path.clone();
+                    let post_body = post_body.clone();
+                    std::thread::spawn(move || {
+                        arm_route_gate(entered_send, release_recv);
+                        if post {
+                            backend_route_post(&handler, &path, &post_body)
+                        } else if path.starts_with("/internal/") {
+                            backend_route(&handler, &path, "")
+                        } else {
+                            route(&handler, &path, "")
+                        }
+                    })
+                };
                 let entered = entered_recv.recv_timeout(GATE_TIMEOUT);
-                ctx.chain.applied_tip.store(Some(extended));
+                let publication = if same_height {
+                    let mut replacement = (*tip).clone();
+                    replacement.hash = extended.hash;
+                    Arc::new(replacement)
+                } else {
+                    Arc::new((*extended).clone())
+                };
+                ctx.chain.applied_tip.store(Some(publication));
                 if aba {
                     ctx.chain.applied_tip.store(Some(Arc::new((*tip).clone())));
                 }
                 let _ = release_send.send(());
                 let response = request.join().map_err(|_| "route thread failed")?;
+                assert_eq!(
+                    response.status, 503,
+                    "composed read must refuse a changed publication (same_height={same_height}, aba={aba})"
+                );
                 entered.map_err(|_| "request did not capture its publication")?;
-                assert_eq!(response.status, 503);
             }
         }
         Ok(())

@@ -5,9 +5,7 @@ mod read;
 pub mod spill;
 pub mod tail;
 pub(crate) use read::{RecordPage, SegmentSnapshot};
-pub use tail::{
-    CreationOrdinals, NoSealedTxOrdinals, SealedTxOrdinals, TailWriterState, append_tail_block,
-};
+pub use tail::{TailWriterState, append_tail_block};
 #[cfg(test)]
 mod tests {
     use super::format::*;
@@ -553,8 +551,7 @@ mod tests {
     ) -> Result<crate::BasicFilter, crate::portable::TestError> {
         use crate::segment::SegmentSnapshot;
         use crate::segment::tail::{
-            NoSealedTxOrdinals, TailBounds, TailWriterState, append_tail_block,
-            put_generation_descriptors,
+            TailBounds, TailWriterState, append_tail_block, put_generation_descriptors,
         };
         use crate::{IndexCapability, TxIndexSnapshot};
         use bitcoin_rs_storage::{KvStore, RocksDbStore};
@@ -564,7 +561,7 @@ mod tests {
         let mut state = TailWriterState::new();
         state.prev_filter_header = previous_header;
         let mut batch = store.new_batch();
-        append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals)?;
+        append_tail_block(&mut batch, block, &mut state)?;
         put_generation_descriptors(
             &mut batch,
             [IndexCapability::CompactFilters],
@@ -1071,9 +1068,7 @@ mod tests {
     #[test]
     #[expect(clippy::expect_used)]
     fn block_tail_bound_covers_the_bytes_the_append_records() {
-        use crate::segment::tail::{
-            NoSealedTxOrdinals, TailWriterState, append_tail_block, block_tail_bytes_bound,
-        };
+        use crate::segment::tail::{TailWriterState, append_tail_block, block_tail_bytes_bound};
         use bitcoin_rs_storage::KvStore as _;
         let dir = tempfile::tempdir().expect("dir");
         let store = bitcoin_rs_storage::RocksDbStore::open(dir.path()).expect("store");
@@ -1083,8 +1078,7 @@ mod tests {
             let block = dense_block(height, previous, 3_000);
             previous = block.hash;
             let mut batch = store.new_batch();
-            append_tail_block(&mut batch, &block, &mut dense_state, &NoSealedTxOrdinals)
-                .expect("append");
+            append_tail_block(&mut batch, &block, &mut dense_state).expect("append");
             let recorded = dense_state.window.back().expect("appended").bytes;
             let bound = block_tail_bytes_bound(&block);
             assert!(
@@ -1099,8 +1093,7 @@ mod tests {
         let mut shared_state = TailWriterState::new();
         for block in &shared_script_blocks(6) {
             let mut batch = store.new_batch();
-            append_tail_block(&mut batch, block, &mut shared_state, &NoSealedTxOrdinals)
-                .expect("append");
+            append_tail_block(&mut batch, block, &mut shared_state).expect("append");
             let recorded = shared_state.window.back().expect("appended").bytes;
             let bound = block_tail_bytes_bound(block);
             assert!(
@@ -1166,9 +1159,7 @@ mod tests {
     #[test]
     #[expect(clippy::expect_used)]
     fn block_tail_bound_counts_empty_script_occurrences() {
-        use crate::segment::tail::{
-            NoSealedTxOrdinals, TailWriterState, append_tail_block, block_tail_bytes_bound,
-        };
+        use crate::segment::tail::{TailWriterState, append_tail_block, block_tail_bytes_bound};
         use bitcoin_rs_storage::KvStore as _;
         let dir = tempfile::tempdir().expect("dir");
         let store = bitcoin_rs_storage::RocksDbStore::open(dir.path()).expect("store");
@@ -1177,7 +1168,7 @@ mod tests {
         let shared_script = fund_and_spend_blocks(64, &[0x51]);
         for (block, same_shape) in empty_script.iter().zip(&shared_script) {
             let mut batch = store.new_batch();
-            append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals).expect("append");
+            append_tail_block(&mut batch, block, &mut state).expect("append");
             let recorded = state.window.back().expect("appended").bytes;
             let bound = block_tail_bytes_bound(block);
             assert!(
@@ -1531,12 +1522,12 @@ mod tests {
     #[test]
     #[expect(clippy::expect_used)]
     fn script_stats_rows_count_toward_the_tail_byte_budget() {
-        use super::tail::{NoSealedTxOrdinals, TailWriterState, append_tail_block};
+        use super::tail::{TailWriterState, append_tail_block};
         use bitcoin_rs_storage::{BatchOp, BufferedWriteBatch, ColumnFamily};
         let block = dense_block(0, [0u8; 32], 8);
         let mut state = TailWriterState::new();
         let mut batch = BufferedWriteBatch::default();
-        append_tail_block(&mut batch, &block, &mut state, &NoSealedTxOrdinals).expect("append");
+        append_tail_block(&mut batch, &block, &mut state).expect("append");
         let recorded = state.window.back().expect("appended").bytes;
         let mut row_bytes = 0_u64;
         let mut stats_rows = 0_u64;
@@ -1634,12 +1625,12 @@ mod tests {
 
     // PRJ-06, PRJ-07
     #[test]
-    fn spend_after_seal_names_the_latest_duplicate_creation()
+    fn spends_after_seal_preserve_repeated_outpoint_events()
     -> Result<(), crate::portable::TestError> {
-        use super::tail::{
-            NoSealedTxOrdinals, SealedTxOrdinals, TailWriterState, append_tail_block,
-        };
-        use super::{Coverage, SealedGen, seal_tail_generation};
+        use super::seal_tail_generation;
+        use super::tail::{TailWriterState, append_tail_block};
+        use crate::TxIndexSnapshot;
+        use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
         use bitcoin_rs_storage::committed_facts::{
             CommittedBlock, CreatedOutput, SpentPrevout, TxFacts,
         };
@@ -1669,12 +1660,11 @@ mod tests {
                 }],
             })
             .collect();
-        let later_creation_ordinal = u32::try_from(creations[0].txs.len())?;
         let spending_ordinal = u32::try_from(creations.iter().map(|b| b.txs.len()).sum::<usize>())?;
         let mut state = TailWriterState::new();
         for block in &creations {
             let mut batch = store.new_batch();
-            append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals)?;
+            append_tail_block(&mut batch, block, &mut state)?;
             store.write_durable(batch)?;
         }
         let gen_id = 4;
@@ -1685,16 +1675,6 @@ mod tests {
             crate::IndexCapabilities::SCRIPT_HISTORY,
             scratch.path(),
         )?;
-        let gens = [SealedGen {
-            gen_id,
-            coverage: Coverage::new(1, 2, [2; 32]),
-            next_ordinal: spending_ordinal,
-        }];
-        let snapshot = store.snapshot()?;
-        let resolver = SealedTxOrdinals {
-            snapshot: snapshot.as_ref(),
-            gens: &gens,
-        };
         let spending = CommittedBlock {
             height: 3,
             hash: [3; 32],
@@ -1702,8 +1682,8 @@ mod tests {
             header: [0; 80],
             txs: vec![TxFacts {
                 txid: [0xb2; 32],
-                offset: 0,
-                len: 100,
+                offset: 100,
+                len: 120,
                 inputs: vec![SpentPrevout {
                     txid,
                     vout: 0,
@@ -1718,19 +1698,176 @@ mod tests {
         let mut state = TailWriterState::new();
         state.next_ordinal = spending_ordinal;
         let mut batch = store.new_batch();
-        append_tail_block(&mut batch, &spending, &mut state, &resolver)?;
+        append_tail_block(&mut batch, &spending, &mut state)?;
+        store.write_durable(batch)?;
+        let mut recreated = creations[1].clone();
+        recreated.height = spending.height + 1;
+        recreated.hash = [4; 32];
+        recreated.parent_hash = spending.hash;
+        let mut batch = store.new_batch();
+        append_tail_block(&mut batch, &recreated, &mut state)?;
+        store.write_durable(batch)?;
+        let mut repeated = spending.clone();
+        repeated.height = recreated.height + 1;
+        repeated.hash = [5; 32];
+        repeated.parent_hash = recreated.hash;
+        repeated.txs[0].txid = [0xb3; 32];
+        repeated.txs[0].inputs[0].height = recreated.height;
+        repeated.txs[0].offset = 200;
+        repeated.txs[0].len = 140;
+        let mut batch = store.new_batch();
+        append_tail_block(&mut batch, &repeated, &mut state)?;
         store.write_durable(batch)?;
         let spends: Vec<_> = store
             .iter_prefix(ColumnFamily::SpendDir, &0_u64.to_be_bytes())?
-            .collect::<Result<_, _>>()?;
+            .map(|row| {
+                let (key, _) = row?;
+                Ok(decode_spend_dir_key(&key))
+            })
+            .collect::<Result<_, bitcoin_rs_storage::StorageError>>()?;
+        let input = &spending.txs[0].inputs[0];
         assert_eq!(
             spends,
-            vec![(
-                encode_spend_dir_key(0, later_creation_ordinal, 0).to_vec(),
-                encode_spend_dir_value(spending_ordinal).to_vec(),
-            )],
-            "the spend names the later creation in block order, not the overwritten occurrence"
+            vec![
+                Some((0, input.txid, input.vout, spending.height)),
+                Some((0, input.txid, input.vout, repeated.height)),
+            ],
+            "each spending height retains its own event for the exact repeated outpoint"
         );
+        seal_tail_generation(
+            &store,
+            gen_id + 1,
+            repeated.height,
+            crate::IndexCapabilities::SCRIPT_HISTORY,
+            scratch.path(),
+        )?;
+        let view = super::SegmentSnapshot::open(store.snapshot()?)?;
+        let answer = view.spending_rows(
+            &OutPoint {
+                txid: Txid::from(Hash256::from_le_bytes(&input.txid)),
+                vout: input.vout,
+            },
+            bitcoin_rs_storage::PrefixScanLimit {
+                max_rows: 16,
+                max_bytes: 1 << 20,
+            },
+        )?;
+        assert!(answer.complete);
+        let actual = answer
+            .rows
+            .iter()
+            .map(|row| {
+                let positions = crate::TxPositionValue::decode(&row.value)
+                    .ok_or("spender positions must decode")?;
+                Ok((
+                    row.row.height(),
+                    positions
+                        .iter()
+                        .map(|p| (p.offset(), p.byte_len()))
+                        .collect::<Vec<_>>(),
+                ))
+            })
+            .collect::<Result<Vec<_>, crate::portable::TestError>>()?;
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    spending.height,
+                    vec![(spending.txs[0].offset, spending.txs[0].len)]
+                ),
+                (
+                    repeated.height,
+                    vec![(repeated.txs[0].offset, repeated.txs[0].len)]
+                ),
+            ],
+            "public spender lookup retains both historical events, not only the latest one"
+        );
+        Ok(())
+    }
+
+    // IDX-12
+    #[test]
+    fn positive_floor_bulk_and_tail_preserve_spends_without_indexed_funding()
+    -> Result<(), crate::portable::TestError> {
+        use crate::{IndexReader, TxPositionValue};
+        use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
+        use bitcoin_rs_storage::{PrefixScanLimit, RocksDbStore};
+
+        let [funding, spending] = fund_and_spend_blocks(1, &[0x51]);
+        let input = &spending.txs[0].inputs[0];
+        assert!(input.height < spending.height);
+        assert_eq!(input.txid, funding.txs[0].txid);
+        let outpoint = OutPoint {
+            txid: Txid::from(Hash256::from_le_bytes(&input.txid)),
+            vout: input.vout,
+        };
+        let limit = PrefixScanLimit {
+            max_rows: 16,
+            max_bytes: 1 << 20,
+        };
+        for bulk in [false, true] {
+            let dir = tempfile::tempdir()?;
+            let scratch = tempfile::tempdir()?;
+            let store = std::sync::Arc::new(RocksDbStore::open(dir.path())?);
+            if bulk {
+                let builder = super::bulk_builder::BulkSegmentBuilder::new(
+                    std::sync::Arc::new(bitcoin_rs_storage::budget::UnboundedBudget),
+                    None,
+                    scratch.path().to_path_buf(),
+                );
+                let coverage = builder
+                    .build_and_ingest(store.as_ref(), 1, std::slice::from_ref(&spending))
+                    .map_err(std::io::Error::other)?;
+                super::publish_sealed(
+                    store.as_ref(),
+                    1,
+                    coverage,
+                    1,
+                    crate::IndexCapabilities::HISTORICAL,
+                )?;
+            } else {
+                let mut writer = crate::IndexWriter::open(std::sync::Arc::clone(&store), 1)?;
+                writer.anchor_watermark(
+                    crate::IndexCapabilities::HISTORICAL,
+                    crate::IndexWatermark {
+                        height: spending.height - 1,
+                        hash: spending.parent_hash,
+                    },
+                    spending.height,
+                )?;
+                commit_from_facts(&mut writer, crate::IndexCapabilities::HISTORICAL, &spending)?;
+            }
+            let indexer = crate::Indexer::new(std::sync::Arc::clone(&store));
+            let view = indexer.snapshot()?;
+            assert!(
+                view.transaction_rows(&outpoint.txid, limit)?
+                    .rows
+                    .is_empty(),
+                "funding below coverage must not acquire a synthetic transaction"
+            );
+            let unrelated = OutPoint {
+                vout: 1,
+                ..outpoint
+            };
+            assert!(view.spending_rows(&unrelated, limit)?.rows.is_empty());
+            let answer = view.spending_rows(&outpoint, limit)?;
+            assert!(answer.complete);
+            assert_eq!(
+                answer.rows.len(),
+                1,
+                "bulk={bulk}: the covered input spends an exact outpoint created below the floor"
+            );
+            assert_eq!(answer.rows[0].row.height(), spending.height);
+            let positions = TxPositionValue::decode(&answer.rows[0].value)
+                .ok_or("spender positions must decode")?;
+            assert_eq!(
+                positions
+                    .iter()
+                    .map(|p| (p.offset(), p.byte_len()))
+                    .collect::<Vec<_>>(),
+                vec![(spending.txs[0].offset, spending.txs[0].len)]
+            );
+        }
         Ok(())
     }
 }

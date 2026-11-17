@@ -15,7 +15,8 @@ pub(crate) const MAX_RECV_CONTENTS_LEN: usize = 1 + 12 + MAX_MESSAGE_PAYLOAD;
 #[derive(Debug)]
 pub struct PacketReader {
     cipher: RecvCipher,
-    aad: Vec<u8>,
+    aad: recv::Backing,
+    memory: Option<std::sync::Arc<crate::inbound::block_memory::BlockMemory>>,
     field: [u8; LENGTH_FIELD_LEN],
     field_filled: usize,
     body: Option<PendingBody>,
@@ -25,14 +26,19 @@ pub struct PacketReader {
 #[derive(Debug)]
 struct PendingBody {
     len: usize,
-    bytes: Vec<u8>,
+    bytes: recv::Backing,
 }
 
 impl PacketReader {
+    pub(crate) fn receive_pending(&self) -> bool {
+        self.body.is_some()
+    }
+
     pub const fn new(cipher: RecvCipher, aad: Vec<u8>) -> Self {
         Self {
             cipher,
-            aad,
+            aad: recv::Backing::from_vec(aad),
+            memory: None,
             field: [0; LENGTH_FIELD_LEN],
             field_filled: 0,
             body: None,
@@ -40,9 +46,56 @@ impl PacketReader {
         }
     }
 
+    pub(crate) fn bind_memory(
+        &mut self,
+        memory: &std::sync::Arc<crate::inbound::block_memory::BlockMemory>,
+    ) -> std::io::Result<()> {
+        if self.memory.is_none()
+            && (self.aad.capacity() != 0
+                || self
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| body.bytes.capacity() != 0))
+        {
+            return Err(std::io::Error::other(
+                "cannot bind a live uncharged receive",
+            ));
+        }
+        recv::bind_memory(&mut self.memory, memory)
+    }
+
+    pub(crate) fn from_backing(
+        cipher: RecvCipher,
+        aad: recv::Backing,
+        memory: Option<std::sync::Arc<crate::inbound::block_memory::BlockMemory>>,
+    ) -> Self {
+        Self {
+            aad,
+            memory,
+            ..Self::new(cipher, Vec::new())
+        }
+    }
+
     pub fn read_contents<R: Read>(
         &mut self,
         reader: &mut R,
+    ) -> Result<Option<Bytes>, TransportError> {
+        self.read_contents_inner(reader, false)
+    }
+
+    /// Same packet read, but a completed `block` payload that cannot move to
+    /// the image lane surfaces as [`TransportError::BudgetDrop`].
+    pub(crate) fn read_contents_with_transfer<R: Read>(
+        &mut self,
+        reader: &mut R,
+    ) -> Result<Option<Bytes>, TransportError> {
+        self.read_contents_inner(reader, true)
+    }
+
+    fn read_contents_inner<R: Read>(
+        &mut self,
+        reader: &mut R,
+        transfer_block: bool,
     ) -> Result<Option<Bytes>, TransportError> {
         if self.failed {
             return Err(TransportError::Packet(
@@ -56,16 +109,20 @@ impl PacketReader {
                 Err(error) => {
                     if !is_poll_timeout(&error) {
                         self.failed = true;
+                        self.aad = recv::Backing::default();
                     }
                     return Err(error);
                 }
             },
         };
-        if let Err(error) = recv::fill_growing(reader, &mut body.bytes, body.len) {
+        if let Err(error) =
+            recv::fill_backing(reader, &mut body.bytes, body.len, self.memory.as_ref())
+        {
             if recv::is_poll_timeout(&error) {
                 self.body = Some(body);
             } else {
                 self.failed = true;
+                self.aad = recv::Backing::default();
             }
             return Err(error.into());
         }
@@ -81,7 +138,21 @@ impl PacketReader {
             return Ok(None);
         }
         let end = HEADER_LEN + opened.contents.len();
-        Ok(Some(Bytes::from(body.bytes).slice(HEADER_LEN..end)))
+        if transfer_block
+            && let Some((command, offset)) = super::msg_type::split(&body.bytes[HEADER_LEN..end])
+            && command == "block"
+            && !body.bytes.transfer_to_image()
+        {
+            let wire_len = super::PACKET_OVERHEAD + (end - HEADER_LEN);
+            let raw = body.bytes.into_bytes();
+            let payload = raw.slice(HEADER_LEN + offset..end);
+            return Err(TransportError::BudgetDrop {
+                command: "block".to_owned(),
+                payload,
+                wire_len,
+            });
+        }
+        Ok(Some(body.bytes.into_bytes().slice(HEADER_LEN..end)))
     }
 
     fn read_length<R: Read>(&mut self, reader: &mut R) -> Result<PendingBody, TransportError> {
@@ -98,7 +169,7 @@ impl PacketReader {
         }
         Ok(PendingBody {
             len: HEADER_LEN + contents_len + TAG_LEN,
-            bytes: Vec::new(),
+            bytes: recv::Backing::default(),
         })
     }
 }
@@ -126,6 +197,8 @@ mod tests {
     }
 
     type TestResult = Result<(), TestError>;
+
+    const APPROVED_RECEIVE_READ_STEP: usize = 16 * 1024;
 
     struct Dribble(VecDeque<u8>);
 
@@ -242,29 +315,36 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_stops_a_partial_packet_without_retaining_a_read_chunk() -> TestResult {
-        struct Cancelled;
-        impl Read for Cancelled {
-            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-                Err(io::ErrorKind::ConnectionAborted.into())
-            }
-        }
+    fn cancelled_packet_requests_at_most_a_16_kib_body_read_step() -> TestResult {
+        use crate::test_support::{Inbound, ReadRequests, StallingStream};
+
         let (mut sender, mut reader) = pair();
-        let packet = sender.seal(&vec![9; 1024], &[], false)?;
-        let mut stream = Dribble(packet[..103].iter().copied().collect());
-        let stalled = reader.read_contents(&mut stream);
-        assert!(stalled.as_ref().is_err_and(is_poll_timeout));
-        let cancelled = reader.read_contents(&mut Cancelled);
+        let packet = sender.seal(&vec![9; 1024 * 1024], &[], false)?;
+        let mut stream = ReadRequests {
+            reader: StallingStream::new([
+                Inbound::Bytes(packet[..103].to_vec()),
+                Inbound::Stall(io::ErrorKind::ConnectionAborted),
+            ]),
+            lengths: Vec::new(),
+        };
+        let cancelled = reader.read_contents(&mut stream);
         assert!(matches!(
             cancelled,
             Err(super::TransportError::Io(error))
                 if error.kind() == io::ErrorKind::ConnectionAborted
         ));
+        assert_eq!(stream.lengths.first(), Some(&super::LENGTH_FIELD_LEN));
+        let largest_body_read = stream
+            .lengths
+            .iter()
+            .skip(1)
+            .copied()
+            .max()
+            .ok_or_else(|| io::Error::other("no encrypted body read was requested"))?;
+        assert!(largest_body_read > 0);
         assert!(
-            reader
-                .body
-                .as_ref()
-                .is_none_or(|body| body.bytes.capacity() <= 206)
+            largest_body_read <= APPROVED_RECEIVE_READ_STEP,
+            "encrypted body read requested {largest_body_read} bytes"
         );
         Ok(())
     }

@@ -1161,6 +1161,14 @@ mod tests {
             Err(Self::lookup_error())
         }
 
+        fn funding_transaction_rows(
+            &self,
+            _txid: &Txid,
+            _limit: PrefixScanLimit,
+        ) -> Result<crate::FundingTransactionScan, IndexError> {
+            Err(Self::lookup_error())
+        }
+
         fn funding_rows(
             &self,
             _scripthash: ScriptHash,

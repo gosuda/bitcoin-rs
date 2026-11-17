@@ -51,7 +51,7 @@ struct SorterState {
     buffer: Vec<(Vec<u8>, Vec<u8>)>,
     buffered: u64,
     runs: Vec<RunFile>,
-    next_run: u32,
+    next_run: u64,
 }
 
 pub struct SpillSorter<'a> {
@@ -62,6 +62,7 @@ pub struct SpillSorter<'a> {
 #[derive(Clone, Debug)]
 pub struct RunFile {
     path: PathBuf,
+    level: u32,
 }
 
 impl RunFile {
@@ -155,7 +156,12 @@ impl<'a> SpillSet<'a> {
             let path = self
                 .dir
                 .join(format!("{}-{:06}.bin", state.prefix, state.next_run));
-            state.next_run = state.next_run.saturating_add(1);
+            state.next_run = state.next_run.checked_add(1).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "spill run sequence overflow",
+                )
+            })?;
             path
         };
         let file = OpenOptions::new()
@@ -174,12 +180,56 @@ impl<'a> SpillSet<'a> {
             let _unused = std::fs::remove_file(&path);
         }
         result?;
-        let mut sorters = self.sorters.borrow_mut();
-        let state = &mut sorters[id];
-        state.runs.push(RunFile { path });
-        drop(std::mem::take(&mut state.buffer));
-        self.budget.sub(std::mem::take(&mut state.buffered));
-        Ok(())
+        {
+            let mut sorters = self.sorters.borrow_mut();
+            let state = &mut sorters[id];
+            state.runs.push(RunFile { path, level: 0 });
+            drop(std::mem::take(&mut state.buffer));
+            self.budget.sub(std::mem::take(&mut state.buffered));
+        }
+        self.compact(id)
+    }
+
+    fn compact(&self, id: usize) -> std::io::Result<()> {
+        loop {
+            let (chunk, level, path) = {
+                let sorters = self.sorters.borrow();
+                let state = &sorters[id];
+                let Some(last) = state.runs.last() else {
+                    return Ok(());
+                };
+                let count = state
+                    .runs
+                    .iter()
+                    .rev()
+                    .take_while(|run| run.level == last.level)
+                    .count();
+                if count < MAX_MERGE_FAN_IN {
+                    return Ok(());
+                }
+                let start = state.runs.len() - MAX_MERGE_FAN_IN;
+                let sequence = MERGE_TMP_ID.fetch_add(1, SeqCst);
+                (
+                    state.runs[start..].to_vec(),
+                    last.level + 1,
+                    self.dir
+                        .join(format!("{}-compact-{sequence:016x}.bin", state.prefix)),
+                )
+            };
+            let output = OwnedIntermediates {
+                paths: vec![path.clone()],
+            };
+            merge_chunk(&chunk, &path)?;
+            for run in &chunk {
+                std::fs::remove_file(&run.path)?;
+            }
+            let mut sorters = self.sorters.borrow_mut();
+            let state = &mut sorters[id];
+            let start = state.runs.len() - MAX_MERGE_FAN_IN;
+            state.runs.truncate(start);
+            state.runs.push(RunFile { path, level });
+            let _ = output.disarm();
+        }
     }
 
     fn finish(&self, id: usize) -> std::io::Result<Vec<RunFile>> {
@@ -434,7 +484,10 @@ pub fn merge(runs: &[RunFile]) -> std::io::Result<Merge> {
                 }
             }
             owned.paths.push(out.clone());
-            next.push(RunFile { path: out });
+            next.push(RunFile {
+                path: out,
+                level: 0,
+            });
         }
         current = next;
     }
@@ -493,7 +546,25 @@ impl Iterator for Merge {
 
 #[cfg(test)]
 mod tests {
-    use super::{SpillBudget, SpillSet, cursor_peak, merge, reset_cursor_peak};
+
+    fn single_row_runs(
+        scratch: &std::path::Path,
+        rows: &[(Vec<u8>, Vec<u8>)],
+    ) -> IoResult<Vec<RunFile>> {
+        rows.iter()
+            .enumerate()
+            .map(|(index, (key, value))| {
+                let path = scratch.join(format!("input-{index}.bin"));
+                let mut file = std::fs::File::create(&path)?;
+                super::write_row(&mut file, key, value)?;
+                Ok(RunFile { path, level: 0 })
+            })
+            .collect()
+    }
+
+    use super::{
+        MAX_MERGE_FAN_IN, RunFile, SpillBudget, SpillSet, cursor_peak, merge, reset_cursor_peak,
+    };
     use std::io::Result as IoResult;
 
     fn retained_capacity(buffer: &Vec<(Vec<u8>, Vec<u8>)>) -> IoResult<u64> {
@@ -599,17 +670,13 @@ mod tests {
         reset_cursor_peak();
         const ROWS: u64 = 21;
         let scratch = tempfile::tempdir()?;
-        let budget = SpillBudget::new(0);
-        let set = SpillSet::new(&budget, scratch.path().to_path_buf());
-        let mut sorter = set.sorter("fanin");
         let mut pushed: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         for order in 0..ROWS {
             let key = ((order * 5) % ROWS).to_be_bytes().to_vec();
             let value = (((order * 5) % ROWS) ^ 0x9e37).to_be_bytes().to_vec();
-            sorter.push(key.clone(), value.clone())?;
             pushed.push((key, value));
         }
-        let runs = sorter.finish()?;
+        let runs = single_row_runs(scratch.path(), &pushed)?;
         assert!(
             runs.len() > 16,
             "the test needs more runs than the fan-in bound"
@@ -648,17 +715,13 @@ mod tests {
     fn three_level_merge_keeps_only_final_intermediates() -> IoResult<()> {
         const ROWS: u64 = 300;
         let scratch = tempfile::tempdir()?;
-        let budget = SpillBudget::new(0);
-        let set = SpillSet::new(&budget, scratch.path().to_path_buf());
-        let mut sorter = set.sorter("levels");
         let mut pushed: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         for order in 0..ROWS {
             let key = ((order * 5) % ROWS).to_be_bytes().to_vec();
             let value = (((order * 5) % ROWS) ^ 0x9e37).to_be_bytes().to_vec();
-            sorter.push(key.clone(), value.clone())?;
             pushed.push((key, value));
         }
-        let runs = sorter.finish()?;
+        let runs = single_row_runs(scratch.path(), &pushed)?;
         assert!(
             runs.len() > 256,
             "the test needs more runs than two fan-in levels hold"
@@ -701,13 +764,10 @@ mod tests {
     fn failed_chunk_removes_earlier_intermediates() -> IoResult<()> {
         const ROWS: u64 = 20;
         let scratch = tempfile::tempdir()?;
-        let budget = SpillBudget::new(0);
-        let set = SpillSet::new(&budget, scratch.path().to_path_buf());
-        let mut sorter = set.sorter("fault");
-        for order in 0..ROWS {
-            sorter.push(order.to_be_bytes().to_vec(), vec![0u8; 8])?;
-        }
-        let runs = sorter.finish()?;
+        let pushed = (0..ROWS)
+            .map(|order| (order.to_be_bytes().to_vec(), vec![0u8; 8]))
+            .collect::<Vec<_>>();
+        let runs = single_row_runs(scratch.path(), &pushed)?;
         assert!(
             runs.len() > 16,
             "the test needs more runs than one chunk holds"
@@ -757,6 +817,80 @@ mod tests {
             ));
         };
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        Ok(())
+    }
+    #[test]
+    fn online_compaction_bounds_live_runs_and_preserves_equal_key_order() -> IoResult<()> {
+        const ROWS: u64 = 4097;
+        reset_cursor_peak();
+        let scratch = tempfile::tempdir()?;
+        let budget = SpillBudget::new(0);
+        let set = SpillSet::new(&budget, scratch.path().to_path_buf());
+        let mut sorter = set.sorter("online");
+        let levels =
+            usize::try_from(u64::BITS / MAX_MERGE_FAN_IN.ilog2()).map_err(std::io::Error::other)?;
+        let live_run_bound = (MAX_MERGE_FAN_IN - 1) * levels;
+        for sequence in 0..ROWS {
+            sorter.push(
+                (sequence % 7).to_be_bytes().to_vec(),
+                sequence.to_be_bytes().to_vec(),
+            )?;
+            let live_files = std::fs::read_dir(scratch.path())?.collect::<IoResult<Vec<_>>>()?;
+            assert!(
+                live_files.len() <= live_run_bound,
+                "online run ownership exceeded its integer-domain metadata bound"
+            );
+        }
+        assert!(cursor_peak() > 0, "ingestion must actually compact runs");
+        assert!(cursor_peak() <= MAX_MERGE_FAN_IN);
+        let runs = sorter.finish()?;
+        let mut rows = merge(&runs)?;
+        for key in 0..7_u64 {
+            for sequence in (key..ROWS).step_by(7) {
+                assert_eq!(
+                    rows.next().transpose()?,
+                    Some((key.to_be_bytes().to_vec(), sequence.to_be_bytes().to_vec())),
+                    "equal keys retain original run order and every value"
+                );
+            }
+        }
+        assert!(rows.next().is_none());
+        assert!(cursor_peak() <= MAX_MERGE_FAN_IN);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_online_compaction_cleans_partial_output_and_owned_inputs() -> IoResult<()> {
+        let scratch = tempfile::tempdir()?;
+        let budget = SpillBudget::new(0);
+        let set = SpillSet::new(&budget, scratch.path().to_path_buf());
+        let mut sorter = set.sorter("online-fault");
+        for sequence in 0..MAX_MERGE_FAN_IN {
+            sorter.push(sequence.to_be_bytes().to_vec(), vec![1])?;
+        }
+        let first = std::fs::read_dir(scratch.path())?
+            .next()
+            .ok_or_else(|| std::io::Error::other("spill input missing"))??;
+        let bytes = std::fs::read(first.path())?;
+        let key_len = usize::try_from(u32::from_le_bytes(
+            bytes[..4]
+                .try_into()
+                .map_err(|_| std::io::Error::other("spill header missing"))?,
+        ))
+        .map_err(|_| std::io::Error::other("spill header overflow"))?;
+        let value_len = usize::try_from(u32::from_le_bytes(
+            bytes[4..8]
+                .try_into()
+                .map_err(|_| std::io::Error::other("spill header missing"))?,
+        ))
+        .map_err(|_| std::io::Error::other("spill header overflow"))?;
+        let mut truncated = bytes[..8 + key_len + value_len].to_vec();
+        truncated.extend_from_slice(&[0x02, 0x00]);
+        std::fs::write(first.path(), &truncated)?;
+        assert!(sorter.push(vec![255], vec![2]).is_err());
+        drop(set);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(std::fs::read_dir(scratch.path())?.next().is_none());
         Ok(())
     }
 }

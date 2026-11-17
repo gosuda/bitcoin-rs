@@ -3,7 +3,7 @@ use std::time::Instant;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_execution::chain::TipSnapshot;
+use bitcoin_rs_execution::chain::{BlockTree, TipSnapshot};
 
 use super::BlockSync;
 use super::chain::HistoricalAdvance;
@@ -41,6 +41,27 @@ impl HistoricalDownload {
         if self.next_expected.is_some() {
             *self = Self::new(self.budget);
         }
+    }
+
+    /// Evict staged bodies the frontier does not protect and requeue them.
+    pub(super) fn evict_for_reclaim(
+        &mut self,
+        bytes: usize,
+        now: Instant,
+        tree: &BlockTree,
+        charged: impl Fn() -> u64,
+    ) -> u64 {
+        let (evicted, progress) = self
+            .stager
+            .evict_for_reclaim(self.next_expected, bytes, charged);
+        for hash in &evicted {
+            let height = tree
+                .lookup(*hash)
+                .and_then(|node_id| tree.node(node_id).ok())
+                .map(|node| node.height);
+            self.window.requeue_for_retry(hash, height, now);
+        }
+        progress.released_bytes
     }
 }
 
