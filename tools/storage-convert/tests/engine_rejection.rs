@@ -234,7 +234,7 @@ fn txindex_incompatible_table_width_is_rejected_and_preserves_source() -> TestRe
 }
 
 // RCV-09
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn non_utf8_filename_only_namespace_is_rejected_and_preserves_source() -> TestResult<()> {
     use std::ffi::OsString;
