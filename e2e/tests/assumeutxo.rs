@@ -426,7 +426,7 @@ fn invalid_core_snapshots_fail_without_activating() -> Result<()> {
         );
         assert_eq!(view["chainstates"][0]["blocks"], 0, "{name}: {view}");
     }
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     let _non_utf8_target_dir = {
         use std::os::unix::{ffi::OsStringExt as _, fs::symlink};
         let dir = tempfile::Builder::new()

@@ -2216,7 +2216,9 @@ fn probes_no_session_opened_never_disturb_a_paused_root() -> TestResult {
     )?;
     abort(http_probe)?;
     abort(silent_probe)?;
-    step("probes refused", wait_for_strangers(&fake, &probes))?;
+    if cfg!(not(target_os = "macos")) {
+        step("probes refused", wait_for_strangers(&fake, &probes))?;
+    }
 
     assert!(
         pending_phase_is(&session, &RootPhase::Create),

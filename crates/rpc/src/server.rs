@@ -565,8 +565,15 @@ impl Read for RequestDeadlineStream {
         }
         let timeout = self.idle_timeout.min(remaining);
         if self.applied_timeout != Some(timeout) {
-            self.stream.set_read_timeout(Some(timeout))?;
-            self.applied_timeout = Some(timeout);
+            match self.stream.set_read_timeout(Some(timeout)) {
+                Ok(()) => self.applied_timeout = Some(timeout),
+                // Darwin refuses SO_RCVTIMEO after shutdown(SHUT_WR); a read
+                // timeout applied before the shutdown still bounds the read.
+                Err(error)
+                    if cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput => {
+                }
+                Err(error) => return Err(error),
+            }
         }
         self.stream.read(buffer)
     }
