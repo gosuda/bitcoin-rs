@@ -188,12 +188,10 @@ pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
         .map_err(Into::into)
 }
 
-/// Windows has no `renameat2`; `FILE_RENAME_INFO` renames the `from` handle to
-/// an absolute destination resolved through the `dir` handle, and
-/// `check_confined_endpoint` keeps `to` a single component under it.
-/// `FILE_RENAME_INFO_EX`'s `RootDirectory` field is rejected with
-/// `ERROR_INVALID_PARAMETER` on this kernel, so the target cannot be
-/// handle-relative.
+/// `FILE_RENAME_INFO` requires an absolute destination, resolved here through
+/// the `dir` handle; `FILE_RENAME_INFO_EX`'s `RootDirectory` field would make
+/// it handle-relative but is rejected with `ERROR_INVALID_PARAMETER` on this
+/// kernel.
 #[cfg(windows)]
 pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
     check_confined_endpoint(from)?;
@@ -228,31 +226,45 @@ pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     let root = &root[..usize::try_from(root_len).unwrap_or(usize::MAX)];
-    let prefix = [
+    let win_prefix = [
         u16::from(b'\\'),
         u16::from(b'\\'),
         u16::from(b'?'),
         u16::from(b'\\'),
     ];
-    let base = if root.starts_with(&prefix) {
-        &root[4..]
+    let unc_prefix = [
+        u16::from(b'\\'),
+        u16::from(b'\\'),
+        u16::from(b'?'),
+        u16::from(b'\\'),
+        u16::from(b'U'),
+        u16::from(b'N'),
+        u16::from(b'C'),
+        u16::from(b'\\'),
+    ];
+    let mut name: Vec<u16> = Vec::with_capacity(root.len() + to.len() + 2);
+    if root.starts_with(&unc_prefix) {
+        name.extend_from_slice(&win_prefix[..2]);
+        name.extend_from_slice(&root[unc_prefix.len()..]);
+    } else if root.starts_with(&win_prefix) {
+        name.extend_from_slice(&root[win_prefix.len()..]);
     } else {
-        root
-    };
-    let mut name: Vec<u16> = Vec::with_capacity(base.len() + 1 + to.len() + 1);
-    name.extend_from_slice(base);
+        name.extend_from_slice(root);
+    }
     name.push(u16::from(b'\\'));
     name.extend(to.encode_utf16());
     name.push(0);
 
-    let mut info = vec![0_u8; 20 + name.len() * 2];
-    info[16..20].copy_from_slice(
+    let name_offset = 2 * core::mem::size_of::<usize>() + 4;
+    let mut info = vec![0_u8; name_offset + name.len() * 2];
+    info[name_offset - 4..name_offset].copy_from_slice(
         &u32::try_from(name.len() * 2)
             .unwrap_or(u32::MAX)
             .to_le_bytes(),
     );
     for (index, unit) in name.iter().enumerate() {
-        info[20 + index * 2..22 + index * 2].copy_from_slice(&unit.to_le_bytes());
+        info[name_offset + index * 2..name_offset + 2 + index * 2]
+            .copy_from_slice(&unit.to_le_bytes());
     }
     // SAFETY: `info` is a correctly laid out `FILE_RENAME_INFO` buffer (u8
     // replace flag, padding, NULL `RootDirectory`, u32 name length, NUL-
