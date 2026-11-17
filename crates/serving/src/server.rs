@@ -590,9 +590,7 @@ impl Read for RequestDeadlineStream {
                     Ok(()) => self.applied_timeout = Some(timeout),
                     Err(error)
                         if cfg!(target_os = "macos")
-                            && error.kind() == io::ErrorKind::InvalidInput =>
-                    {
-                    }
+                            && error.kind() == io::ErrorKind::InvalidInput => {}
                     Err(error) => return Err(error),
                 }
             }

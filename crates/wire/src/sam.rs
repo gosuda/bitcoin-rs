@@ -2046,8 +2046,7 @@ mod tests {
                     return Ok(None);
                 }
                 if error.kind() == io::ErrorKind::ConnectionReset
-                    || (cfg!(target_os = "macos")
-                        && error.kind() == io::ErrorKind::InvalidInput)
+                    || (cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput)
                 {
                     if pending.is_empty() && !ctx.last_command.is_empty() {
                         return Ok(None);
