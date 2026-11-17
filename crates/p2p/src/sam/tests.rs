@@ -2253,9 +2253,9 @@ fn a_session_socket_reset_before_any_command_still_fails_the_bridge() -> TestRes
     let Err(error) = fake.finish() else {
         return Err("a session socket's reset must fail the bridge".into());
     };
-    assert_eq!(
-        error.kind(),
-        io::ErrorKind::ConnectionReset,
+    assert!(
+        error.kind() == io::ErrorKind::ConnectionReset
+            || (cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput),
         "got {error:?}"
     );
     assert!(

@@ -232,11 +232,7 @@ impl<'a> TxSignatureChecker<'a> {
             Some(inp) => inp,
             None => return false,
         };
-        if input.sequence.to_consensus() == SEQUENCE_FINAL {
-            return false;
-        }
-
-        true
+        input.sequence.to_consensus() != SEQUENCE_FINAL
     }
 
     #[must_use]

@@ -200,8 +200,13 @@ impl FeeEstimator {
         }
         let bucket = &mut self.buckets[bucket_index];
         if waited > MAX_CONF_TARGET {
-            for target in entry.resolved_through..MAX_CONF_TARGET {
-                bucket.resolved_within[target] += 1.0;
+            for resolved in bucket
+                .resolved_within
+                .iter_mut()
+                .take(MAX_CONF_TARGET)
+                .skip(entry.resolved_through)
+            {
+                *resolved += 1.0;
             }
             return;
         }
