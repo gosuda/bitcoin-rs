@@ -183,6 +183,7 @@ dependencies = [
  "sonic-rs",
  "thiserror",
  "tracing",
+ "windows-sys 0.61.2",
  "zerocopy",
 ]
 
