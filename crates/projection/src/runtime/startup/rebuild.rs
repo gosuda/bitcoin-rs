@@ -41,7 +41,7 @@ pub(super) fn open(
                     return Err(DerivedIndexWorkerError::Stopped);
                 }
                 validate_namespace(&root, namespace, dir)?;
-                tracing::warn!(%error, dir = %dir.display(), "recreating incompatible derived index namespace for rebuild");
+                log::warn!(target: "projection", "recreating incompatible derived index namespace for rebuild at {}: {error}", dir.display());
                 let mut intent = tempfile::NamedTempFile::new_in(&root)?;
                 intent.write_all(RESET_INTENT)?;
                 intent.as_file().sync_all()?;
