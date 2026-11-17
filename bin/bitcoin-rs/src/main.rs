@@ -10,6 +10,7 @@ use config::BinError;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(test)]
+#[allow(clippy::result_large_err)]
 fn load(
     args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
     vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
@@ -77,4 +78,5 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
+#[allow(clippy::result_large_err)]
 mod tests;

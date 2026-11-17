@@ -3,9 +3,11 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
+use cap_fs_ext::{
+    DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt, OpenOptionsMaybeDirExt,
+};
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir, File, MetadataExt, OpenOptions};
+use cap_std::fs::{Dir, File, OpenOptions};
 
 use crate::cli::CliArgs;
 use crate::error::ConvertError;

@@ -125,7 +125,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn non_utf8_names_are_incompatible_not_empty() -> Result<(), StorageError> {
         use std::os::unix::ffi::OsStrExt as _;
