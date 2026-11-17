@@ -180,7 +180,8 @@ pub(crate) struct GenerationPaths {
         target_vendor = "apple",
         target_os = "linux",
         target_os = "android",
-        target_os = "redox"
+        target_os = "redox",
+        windows
     ))]
     pub staging: String,
     pub final_dir: String,

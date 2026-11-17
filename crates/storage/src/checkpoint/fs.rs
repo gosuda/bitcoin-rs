@@ -141,7 +141,8 @@ impl CheckpointRoot {
         target_vendor = "apple",
         target_os = "linux",
         target_os = "android",
-        target_os = "redox"
+        target_os = "redox",
+        windows
     ))]
     pub(crate) fn entry_exists(&self, name: &str) -> io::Result<bool> {
         match self.dir.symlink_metadata(name) {
@@ -168,7 +169,8 @@ pub const HAS_ATOMIC_NOREPLACE_RENAME: bool = cfg!(any(
     target_vendor = "apple",
     target_os = "linux",
     target_os = "android",
-    target_os = "redox"
+    target_os = "redox",
+    windows
 ));
 
 /// Renames `from` to `to` inside `dir` in one filesystem step that fails with
@@ -186,17 +188,85 @@ pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
         .map_err(Into::into)
 }
 
+/// `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` is an atomic same-volume
+/// rename that fails when `to` exists.
+#[cfg(windows)]
+pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
+    check_confined_endpoint(from)?;
+    check_confined_endpoint(to)?;
+    let base = dir_path(dir)?;
+    rename_noreplace_at(&base.join(from), &base.join(to))
+}
+
 #[cfg(not(any(
     target_vendor = "apple",
     target_os = "linux",
     target_os = "android",
-    target_os = "redox"
+    target_os = "redox",
+    windows
 )))]
 pub fn rename_noreplace(_dir: &Dir, _from: &str, _to: &str) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "this platform has no atomic no-replace rename",
     ))
+}
+
+#[cfg(windows)]
+fn dir_path(dir: &Dir) -> io::Result<std::path::PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+
+    let mut buffer = vec![0u16; 260];
+    loop {
+        // SAFETY: `dir` is an open handle and `buffer` is valid for `buffer.len()` writes.
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                dir.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                u32::try_from(buffer.len()).unwrap_or(u32::MAX),
+                0,
+            )
+        };
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let needed = usize::try_from(length).unwrap_or(usize::MAX);
+        if needed > buffer.len() {
+            buffer.resize(needed.saturating_add(1), 0);
+            continue;
+        }
+        buffer.truncate(needed);
+        return Ok(std::path::PathBuf::from(OsString::from_wide(&buffer)));
+    }
+}
+
+#[cfg(windows)]
+fn rename_noreplace_at(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    let mut source: Vec<u16> = source.as_os_str().encode_wide().collect();
+    source.push(0);
+    let mut destination: Vec<u16> = destination.as_os_str().encode_wide().collect();
+    destination.push(0);
+    // SAFETY: both vectors are NUL-terminated UTF-16 buffers that outlive the call.
+    let moved = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) };
+    if moved != 0 {
+        return Ok(());
+    }
+    // SAFETY: reads the calling thread's last-error code; no invariants.
+    let code = unsafe { GetLastError() };
+    let error = io::Error::from_raw_os_error(i32::try_from(code).unwrap_or(i32::MAX));
+    if code == ERROR_ALREADY_EXISTS {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, error));
+    }
+    Err(error)
 }
 
 pub fn create_file(dir: &Dir, name: &str) -> io::Result<File> {
@@ -283,6 +353,13 @@ pub fn sync_dir(_dir: &Dir) -> io::Result<()> {
 }
 
 /// Rejects any rename endpoint that could resolve outside the checkpoint root.
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox",
+    windows
+))]
 fn check_confined_endpoint(name: &str) -> io::Result<()> {
     fn invalid(name: &str, reason: &str) -> io::Error {
         io::Error::new(

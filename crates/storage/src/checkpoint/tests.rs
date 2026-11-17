@@ -604,7 +604,8 @@ fn schema_init_exempts_only_a_regular_lock_file() -> TestResult {
     target_vendor = "apple",
     target_os = "linux",
     target_os = "android",
-    target_os = "redox"
+    target_os = "redox",
+    windows
 ))]
 #[test]
 fn rename_noreplace_refuses_escape_but_keeps_same_dir_renames() -> TestResult {
@@ -813,7 +814,8 @@ fn open_file_refuses_fifo_without_blocking() -> TestResult {
     target_vendor = "apple",
     target_os = "linux",
     target_os = "android",
-    target_os = "redox"
+    target_os = "redox",
+    windows
 ))]
 #[test]
 fn rename_noreplace_refuses_an_existing_destination_and_keeps_both_files() -> TestResult {

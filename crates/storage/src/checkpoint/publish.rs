@@ -198,13 +198,18 @@ pub fn commit_publication(
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::StageSync)?;
     sync_dir(&staging)?;
+    // cap-std opens directories without FILE_SHARE_DELETE; the staging handle and
+    // the manifest file must be closed before the directory can be renamed.
+    drop(mf);
+    drop(staging);
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::GenerationRename)?;
     #[cfg(any(
         target_vendor = "apple",
         target_os = "linux",
         target_os = "android",
-        target_os = "redox"
+        target_os = "redox",
+        windows
     ))]
     super::fs::rename_noreplace(root.dir(), &paths.staging, &paths.final_dir)?;
     #[cfg(any(test, feature = "test-seam"))]
@@ -275,7 +280,8 @@ fn allocate_generation(
             target_vendor = "apple",
             target_os = "linux",
             target_os = "android",
-            target_os = "redox"
+            target_os = "redox",
+            windows
         ))]
         if root.entry_exists(&paths.final_dir)? || root.entry_exists(&paths.current_temp)? {
             generation = generation.checked_add(1).ok_or_else(|| {
@@ -287,14 +293,16 @@ fn allocate_generation(
             target_vendor = "apple",
             target_os = "linux",
             target_os = "android",
-            target_os = "redox"
+            target_os = "redox",
+            windows
         ))]
         let name = &paths.staging;
         #[cfg(not(any(
             target_vendor = "apple",
             target_os = "linux",
             target_os = "android",
-            target_os = "redox"
+            target_os = "redox",
+            windows
         )))]
         let name = &paths.final_dir;
         match root.create_dir(name) {
@@ -315,7 +323,8 @@ fn generation_paths(generation: u64) -> GenerationPaths {
             target_vendor = "apple",
             target_os = "linux",
             target_os = "android",
-            target_os = "redox"
+            target_os = "redox",
+            windows
         ))]
         staging: format!(".{directory}.tmp"),
         final_dir: directory.clone(),
