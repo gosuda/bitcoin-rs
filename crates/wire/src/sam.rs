@@ -1942,11 +1942,11 @@ mod tests {
         match stream.set_read_timeout(Some(Duration::from_millis(200))) {
             Ok(()) => {}
             Err(error)
-                if cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput =>
+                if cfg!(target_os = "macos")
+                    && error.kind() == io::ErrorKind::InvalidInput
+                    && !peer.opened_by_a_session() =>
             {
-                if !peer.opened_by_a_session() {
-                    let _ = strangers.send(peer.client);
-                }
+                let _ = strangers.send(peer.client);
                 return Ok(());
             }
             Err(error) => return Err(error),
