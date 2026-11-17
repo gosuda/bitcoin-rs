@@ -443,7 +443,13 @@ impl CoinCache {
         *resident += shard.backing_bytes();
     }
 
-    fn reindex(&self, shard: &mut ShardState, resident: &mut u64, value_bytes: u64) -> bool {
+    fn reindex(
+        &self,
+        shard: &mut ShardState,
+        resident: &mut u64,
+        value_bytes: u64,
+        released: &mut u64,
+    ) -> bool {
         let Some(needed) = shard.entries.len().checked_add(1) else {
             return false;
         };
@@ -464,9 +470,9 @@ impl CoinCache {
         let mut index = HashTable::new();
         if index.try_reserve(needed, |_| 0).is_err() {
             for entry in shard.entries.drain(..) {
-                *resident = resident.saturating_sub(
-                    u64::try_from(entry.value.len()).unwrap_or(u64::MAX),
-                );
+                let bytes = u64::try_from(entry.value.len()).unwrap_or(u64::MAX);
+                *resident = resident.saturating_sub(bytes);
+                *released = released.saturating_add(bytes);
             }
             shard.hand = 0;
             return false;
@@ -511,7 +517,7 @@ impl CoinCache {
         if shard.entries.len() < shard.entries.capacity()
             && shard.index.capacity() <= shard.entries.len()
         {
-            self.reindex(shard, resident, value_bytes);
+            self.reindex(shard, resident, value_bytes, &mut freed);
         }
         if value_bytes > self.budget_bytes.saturating_sub(*resident)
             || shard.entries.len() == shard.entries.capacity()
