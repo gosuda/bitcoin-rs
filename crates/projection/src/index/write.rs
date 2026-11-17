@@ -68,6 +68,11 @@ impl<S: KvStore> IndexWriter<S> {
         self
     }
 
+    /// The node-owned directory for large transient spill artifacts.
+    pub fn scratch_dir(&self) -> Option<&std::path::Path> {
+        self.seal_scratch.as_deref()
+    }
+
     pub fn watermark(&self) -> Result<Option<IndexWatermark>, IndexError> {
         self.indexer.watermark()
     }

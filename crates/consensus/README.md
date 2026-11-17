@@ -7,7 +7,7 @@ Core's C++ consensus engine) in alongside it. `kernel` is a capability, not a
 selection: which backend runs is the runtime `validation.engine` setting
 (`ValidationEngine`, default `Native`, `VAL-01`). Every crate is kernel-free by
 default, so `cargo build -p bitcoin-rs` needs no C++ toolchain and uses the
-native interpreter; see [`docs/contracts/validation-default.md`](../../docs/contracts/validation-default.md).
+native interpreter; see [`docs/contracts/validation-default.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/validation-default.md).
 
 Rule checks live in `verify_tx` and `verify_block` with per-subject helpers
 (`bip9`, `bip30`, `bip34`, `bip68`, `bip113`). These are surfaced through the
@@ -40,9 +40,9 @@ over a `DeploymentContext` with `DeploymentParams`. Consensus bounds are exporte
 variants.
 
 ## Features
-- `kernel` (off by default): compiles [bitcoinkernel](../../CONCEPTS.md#bitcoinkernel)
+- `kernel` (off by default): compiles [bitcoinkernel](https://github.com/gosuda/bitcoin-rs/blob/main/CONCEPTS.md#bitcoinkernel)
   support in. Selection is the runtime `validation.engine` setting (`native` by
   default); the feature alone never routes checks to the kernel.
 
-Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
+Part of [`bitcoin-rs`](https://github.com/gosuda/bitcoin-rs/blob/main/README.md); see [`CONCEPTS.md`](https://github.com/gosuda/bitcoin-rs/blob/main/CONCEPTS.md) for the
 project vocabulary.

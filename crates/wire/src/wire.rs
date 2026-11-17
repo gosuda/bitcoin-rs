@@ -464,7 +464,17 @@ pub fn read_message<R: Read>(
     reader: &mut R,
     expected_magic: Magic,
 ) -> Result<(Message, bytes::Bytes), PeerError> {
-    V1Receiver::default().read_message_with(reader, expected_magic, |_, _, _| Ok(()))
+    loop {
+        if let Some(message) = V1Receiver::default().read_message_with(
+            reader,
+            expected_magic,
+            |_, _, _| {},
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+        )? {
+            return Ok(message);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -472,6 +482,7 @@ pub(crate) struct V1Receiver {
     header: [u8; HEADER_LEN],
     header_filled: usize,
     body: Option<PendingBody>,
+    memory: Option<std::sync::Arc<crate::inbound::block_memory::BlockMemory>>,
 }
 
 #[derive(Debug)]
@@ -479,10 +490,31 @@ struct PendingBody {
     command: String,
     checksum: [u8; 4],
     expected: usize,
-    payload: Vec<u8>,
+    payload: crate::recv::Backing,
 }
 
 impl V1Receiver {
+    pub(crate) fn receive_pending(&self) -> bool {
+        self.body.is_some()
+    }
+
+    pub(crate) fn bind_memory(
+        &mut self,
+        memory: &std::sync::Arc<crate::inbound::block_memory::BlockMemory>,
+    ) -> std::io::Result<()> {
+        if self.memory.is_none()
+            && self
+                .body
+                .as_ref()
+                .is_some_and(|body| body.payload.capacity() != 0)
+        {
+            return Err(std::io::Error::other(
+                "cannot bind a live uncharged receive",
+            ));
+        }
+        crate::recv::bind_memory(&mut self.memory, memory)
+    }
+
     pub(crate) fn with_prefix(prefix: &[u8]) -> Self {
         let mut receiver = Self::default();
         let len = prefix.len().min(HEADER_LEN);
@@ -491,21 +523,34 @@ impl V1Receiver {
         receiver
     }
 
-    /// Reads one message, then hands `(command, payload, framed length)` to
-    /// `observe`: the framed length is the v1 header plus payload bytes this
-    /// frame took from the wire.
+    /// `account` receives the command, payload, and v1 header-plus-payload
+    /// length of each checksum-valid frame, including a budget-refused frame.
+    /// `check` validates that frame before an image-budget refusal can drop it.
+    /// `admit` reserves decoder memory only for frames that will be delivered.
+    ///
+    /// `Ok(None)` means a completed `block` frame was dropped because the
+    /// image lane refused its backing: the untouched receive charge releases
+    /// with the frame, the decode reservation (if any) releases with the
+    /// caller, and the connection stays up to read the next frame.
     pub(crate) fn read_message_with<R: Read>(
         &mut self,
         reader: &mut R,
         expected_magic: Magic,
-        observe: impl FnOnce(&str, &[u8], usize) -> Result<(), PeerError>,
-    ) -> Result<(Message, bytes::Bytes), PeerError> {
+        mut account: impl FnMut(&str, &[u8], usize),
+        check: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
+        admit: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
+    ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         let mut body = if let Some(body) = self.body.take() {
             body
         } else {
             self.read_header(reader, expected_magic)?
         };
-        if let Err(error) = crate::recv::fill_growing(reader, &mut body.payload, body.expected) {
+        if let Err(error) = crate::recv::fill_backing(
+            reader,
+            &mut body.payload,
+            body.expected,
+            self.memory.as_ref(),
+        ) {
             if crate::recv::is_poll_timeout(&error) {
                 self.body = Some(body);
             }
@@ -515,14 +560,19 @@ impl V1Receiver {
             return Err(PeerError::BadChecksum);
         }
 
-        observe(
+        account(
             &body.command,
             &body.payload,
             HEADER_LEN + body.payload.len(),
-        )?;
-        let payload = bytes::Bytes::from(body.payload);
+        );
+        check(&body.command, &body.payload)?;
+        if body.command == "block" && !body.payload.transfer_to_image() {
+            return Ok(None);
+        }
+        admit(&body.command, &body.payload)?;
+        let payload = body.payload.into_bytes();
         let message = decode_payload(&body.command, &payload)?;
-        Ok((message, payload))
+        Ok(Some((message, payload)))
     }
 
     fn read_header<R: Read>(
@@ -567,10 +617,10 @@ fn pending_body(
     let mut checksum = [0u8; 4];
     checksum.copy_from_slice(&header[20..24]);
     Ok(PendingBody {
-        command,
+        command: command.to_owned(),
         checksum,
         expected: payload_len,
-        payload: Vec::new(),
+        payload: crate::recv::Backing::default(),
     })
 }
 
@@ -991,7 +1041,7 @@ fn encode_command(command: &CommandString) -> Result<[u8; COMMAND_LEN], PeerErro
     Ok(raw)
 }
 
-pub(crate) fn read_command(raw: &[u8]) -> Result<String, PeerError> {
+pub(crate) fn read_command(raw: &[u8]) -> Result<&str, PeerError> {
     let end = raw.iter().position(|byte| *byte == 0).unwrap_or(raw.len());
     if raw[end..].iter().any(|byte| *byte != 0) {
         return Err(PeerError::InvalidCommand(
@@ -1008,7 +1058,6 @@ pub(crate) fn read_command(raw: &[u8]) -> Result<String, PeerError> {
         ));
     }
     std::str::from_utf8(command_bytes)
-        .map(str::to_owned)
         .map_err(|_| PeerError::InvalidCommand(String::from_utf8_lossy(raw).into_owned()))
 }
 
@@ -1142,6 +1191,8 @@ mod tests {
         wire_len, write_message,
     };
 
+    const APPROVED_RECEIVE_READ_STEP: usize = 16 * 1024;
+
     struct HeaderOnlyReader {
         header: Cursor<Vec<u8>>,
     }
@@ -1181,8 +1232,9 @@ mod tests {
             Magic::REGTEST,
             |command, payload, _wire_len| {
                 observed = Some((command.to_owned(), payload.to_vec()));
-                Ok(())
             },
+            |_, _| Ok(()),
+            |_, _| Ok(()),
         );
         assert!(matches!(result, Err(PeerError::Encode(_))));
         assert_eq!(observed, Some(("version".to_owned(), Vec::new())));
@@ -1194,8 +1246,9 @@ mod tests {
             Magic::REGTEST,
             |_, _, _| {
                 observed_bad_checksum = true;
-                Ok(())
             },
+            |_, _| Ok(()),
+            |_, _| Ok(()),
         );
         assert!(matches!(result, Err(PeerError::BadChecksum)));
         assert!(!observed_bad_checksum);
@@ -1220,17 +1273,37 @@ mod tests {
 
         let mut receiver = super::V1Receiver::default();
         for stall in [ErrorKind::TimedOut, ErrorKind::WouldBlock] {
-            let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
+            let result = receiver.read_message_with(
+                &mut stream,
+                Magic::REGTEST,
+                |_, _, _| {},
+                |_, _| Ok(()),
+                |_, _| Ok(()),
+            );
             assert!(
                 matches!(&result, Err(PeerError::Io(error)) if error.kind() == stall),
                 "a stall surfaces as a retryable timeout, got {result:?}"
             );
         }
-        let (first, _) =
-            receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()))?;
+        let (first, _) = receiver
+            .read_message_with(
+                &mut stream,
+                Magic::REGTEST,
+                |_, _, _| {},
+                |_, _| Ok(()),
+                |_, _| Ok(()),
+            )?
+            .ok_or(PeerError::Protocol("ping frame dropped"))?;
         assert_eq!(first, super::Message::Ping(42));
-        let (second, _) =
-            receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()))?;
+        let (second, _) = receiver
+            .read_message_with(
+                &mut stream,
+                Magic::REGTEST,
+                |_, _, _| {},
+                |_, _| Ok(()),
+                |_, _| Ok(()),
+            )?
+            .ok_or(PeerError::Protocol("pong frame dropped"))?;
         assert_eq!(second, super::Message::Pong(7));
         Ok(())
     }
@@ -1248,7 +1321,13 @@ mod tests {
             Inbound::Stall(ErrorKind::TimedOut),
         ]);
         let mut receiver = super::V1Receiver::default();
-        let empty = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
+        let empty = receiver.read_message_with(
+            &mut stream,
+            Magic::REGTEST,
+            |_, _, _| {},
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+        );
         assert!(matches!(
             empty,
             Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut
@@ -1260,7 +1339,13 @@ mod tests {
                 .map_or(0, |body| body.payload.capacity()),
             0
         );
-        let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
+        let result = receiver.read_message_with(
+            &mut stream,
+            Magic::REGTEST,
+            |_, _, _| {},
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+        );
         assert!(
             matches!(&result, Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut),
             "a stall surfaces as a retryable timeout, got {result:?}"
@@ -1278,27 +1363,47 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_stops_a_partial_legacy_frame_without_retaining_a_read_chunk()
-    -> Result<(), PeerError> {
-        use crate::test_support::{Inbound, StallingStream};
+    fn cancelled_legacy_frame_requests_at_most_a_16_kib_body_read_step() -> Result<(), PeerError> {
+        use crate::test_support::{Inbound, ReadRequests, StallingStream};
         use std::io::ErrorKind;
+
         let mut frame = Vec::new();
-        write_message(&mut frame, Magic::REGTEST, &super::Message::Ping(42))?;
-        let mut stream = StallingStream::new([
-            Inbound::Bytes(frame[..HEADER_LEN + 3].to_vec()),
-            Inbound::Stall(ErrorKind::ConnectionAborted),
-        ]);
+        write_message(
+            &mut frame,
+            Magic::REGTEST,
+            &Message::BlockBytes(vec![7; 1024 * 1024].into()),
+        )?;
+        let mut stream = ReadRequests {
+            reader: StallingStream::new([
+                Inbound::Bytes(frame[..HEADER_LEN + 100].to_vec()),
+                Inbound::Stall(ErrorKind::ConnectionAborted),
+            ]),
+            lengths: Vec::new(),
+        };
         let mut receiver = super::V1Receiver::default();
-        let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
+        let result = receiver.read_message_with(
+            &mut stream,
+            Magic::REGTEST,
+            |_, _, _| {},
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+        );
         assert!(matches!(
             result,
             Err(PeerError::Io(error)) if error.kind() == ErrorKind::ConnectionAborted
         ));
+        assert_eq!(stream.lengths.first(), Some(&HEADER_LEN));
+        let largest_body_read = stream
+            .lengths
+            .iter()
+            .skip(1)
+            .copied()
+            .max()
+            .ok_or(PeerError::Protocol("no legacy body read was requested"))?;
+        assert!(largest_body_read > 0);
         assert!(
-            receiver
-                .body
-                .as_ref()
-                .is_none_or(|body| body.payload.capacity() <= 8)
+            largest_body_read <= APPROVED_RECEIVE_READ_STEP,
+            "legacy body read requested {largest_body_read} bytes"
         );
         Ok(())
     }
@@ -1313,10 +1418,23 @@ mod tests {
         let mut stream = Cursor::new([corrupt, valid].concat());
 
         let mut receiver = super::V1Receiver::default();
-        let rejected = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()));
+        let rejected = receiver.read_message_with(
+            &mut stream,
+            Magic::REGTEST,
+            |_, _, _| {},
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+        );
         assert!(matches!(rejected, Err(PeerError::BadChecksum)));
-        let (message, _) =
-            receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _, _| Ok(()))?;
+        let (message, _) = receiver
+            .read_message_with(
+                &mut stream,
+                Magic::REGTEST,
+                |_, _, _| {},
+                |_, _| Ok(()),
+                |_, _| Ok(()),
+            )?
+            .ok_or(PeerError::Protocol("pong frame dropped"))?;
         assert_eq!(message, super::Message::Pong(2));
         Ok(())
     }

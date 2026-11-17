@@ -10,8 +10,8 @@ use bitcoin_rs_projection::IndexCapabilities;
 use bitcoin_rs_projection::runtime::{DEFAULT_BATCH_LIMITS, open_derived_index_store_with_scratch};
 use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
 use bitcoin_rs_projection::segment::{
-    Coverage, GenerationDescriptor, IndexGeneration, NoSealedTxOrdinals, TailDescriptor,
-    TailWriterState, append_tail_block, meta_gen_key, seal_tail_generation,
+    Coverage, GenerationDescriptor, IndexGeneration, TailDescriptor, TailWriterState,
+    append_tail_block, meta_gen_key, seal_tail_generation,
 };
 use bitcoin_rs_projection::{IndexCapability, IndexWatermark, IndexWriter};
 use bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus;
@@ -119,19 +119,18 @@ fn rebuild_index_resets_derived_rows_and_stamps_the_current_format() -> TestResu
     let output = rebuild(&datadir)?;
     let report = parse_rebuild_report(&output)?;
     assert_eq!(report.engine, "rocksdb");
-    assert_eq!(report.format_version, 9);
     assert_eq!(family_removed(&report, "script_live"), 3);
     assert_eq!(family_removed(&report, "funding"), 1);
     assert_eq!(family_removed(&report, "tx_confirmed"), 1);
 
     let store = RocksDbStore::open(datadir.join("txindex"))?;
+    let marker = store
+        .get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?
+        .expect("format marker row");
+    assert_eq!(marker.as_slice(), &[0x0a, 0x00, 0x00, 0x00]);
     assert_eq!(count_rows(&store, ColumnFamily::ScriptLive)?, 0);
     assert_eq!(count_rows(&store, ColumnFamily::Funding)?, 0);
     assert_eq!(count_rows(&store, ColumnFamily::TxConfirmed)?, 0);
-    let marker = store
-        .get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?
-        .expect("reset stamps the format marker");
-    assert_eq!(marker.as_slice(), &[0x09, 0x00, 0x00, 0x00]);
     drop(store);
 
     let store = Arc::new(RocksDbStore::open(datadir.join("txindex"))?);
@@ -228,13 +227,11 @@ fn rebuild_index_empty_txindex_follows_detected_chainstate_engine() -> TestResul
     let output = rebuild(&datadir)?;
     let report = parse_rebuild_report(&output)?;
     assert_eq!(report.engine, "rocksdb");
-    assert_eq!(report.format_version, 9);
-
     let store = RocksDbStore::open(datadir.join("txindex"))?;
     let marker = store
         .get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?
-        .expect("format marker in UtxoMeta");
-    assert_eq!(marker.as_slice(), &[0x09, 0x00, 0x00, 0x00]);
+        .expect("format marker row");
+    assert_eq!(marker.as_slice(), &[0x0a, 0x00, 0x00, 0x00]);
     let desc = store
         .get(
             ColumnFamily::IdxMeta,
@@ -246,6 +243,8 @@ fn rebuild_index_empty_txindex_follows_detected_chainstate_engine() -> TestResul
     assert!(!desc.is_empty());
     let idx_meta_marker = store.get(ColumnFamily::IdxMeta, &[0x00, b'V'])?;
     assert!(idx_meta_marker.is_none());
+    let writer = IndexWriter::open(Arc::new(store), 2)?;
+    assert_eq!(writer.watermarks()?.script_live, None);
     Ok(())
 }
 
@@ -762,7 +761,7 @@ fn live_reference(blocks: &[FixtureBlock]) -> TestResult<Reference> {
     let mut state = TailWriterState::new();
     for block in blocks {
         let mut batch = store.new_batch();
-        append_tail_block(&mut batch, &block.facts, &mut state, &NoSealedTxOrdinals)?;
+        append_tail_block(&mut batch, &block.facts, &mut state)?;
         store.write_durable(batch)?;
     }
     seal_tail_generation(
