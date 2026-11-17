@@ -60,7 +60,9 @@ struct FakeSam {
     listener_handle: Option<std::thread::JoinHandle<io::Result<()>>>,
     workers: std::sync::Arc<parking_lot::Mutex<Vec<std::thread::JoinHandle<io::Result<()>>>>>,
     live: std::sync::Arc<LiveWorkers>,
+    #[cfg_attr(not(unix), allow(dead_code))]
     strangers: mpsc::Receiver<SocketAddr>,
+    #[cfg_attr(not(unix), allow(dead_code))]
     accepted: mpsc::Receiver<SocketAddr>,
 }
 
@@ -510,6 +512,14 @@ fn read_fake_sam_line(
     match reader.read_until(b'\n', pending) {
         Ok(0) => Ok(None),
         Ok(_) => Ok(Some(())),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+            ) =>
+        {
+            Ok(None)
+        }
         Err(error)
             if matches!(
                 error.kind(),
@@ -2874,9 +2884,20 @@ fn a_bridge_that_never_accepted_is_abandoned_at_the_window_with_its_refusal() ->
         return Err("a refused bridge must not establish".into());
     };
     let returned = Instant::now();
+    #[cfg(unix)]
     assert_eq!(
         error.kind(),
         io::ErrorKind::ConnectionRefused,
+        "got {error:?}"
+    );
+    #[cfg(windows)]
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut, "got {error:?}");
+    #[cfg(not(any(unix, windows)))]
+    assert!(
+        matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut
+        ),
         "got {error:?}"
     );
     assert!(!reached.get(), "a refused connect never reached the bridge");
