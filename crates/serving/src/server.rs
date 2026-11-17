@@ -532,10 +532,8 @@ impl Drop for RpcStop {
     }
 }
 
-/// Windows cannot interrupt a pending `recv` (`wake_readers` only
-/// `shutdown`s a duplicate, which does not reach Winsock blocking calls), so
-/// the deadline stream caps its poll there and a `WouldBlock` retry observes
-/// the shutdown latch.
+/// A `shutdown` on a duplicated handle does not wake a pending `recv` on
+/// Windows; the deadline stream substitutes the wake with a capped poll.
 #[cfg(windows)]
 const CANCEL_POLL: Duration = Duration::from_millis(100);
 

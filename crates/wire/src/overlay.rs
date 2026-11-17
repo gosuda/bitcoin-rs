@@ -1186,10 +1186,8 @@ fn cancelled_error() -> io::Error {
 }
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
-/// A `shutdown()` on a duplicated socket handle does not wake a pending
-/// blocking `recv`/`send` on Windows, so cancel latency there is the socket
-/// poll itself; it is clamped to preserve the cancel bound POSIX gets from
-/// the socket wake.
+/// A `shutdown` on a duplicated handle does not wake a pending `recv`/`send`
+/// on Windows; cancel latency there is the socket poll itself.
 #[cfg(windows)]
 const SOCKET_POLL: Duration = Duration::from_millis(25);
 #[cfg(not(windows))]

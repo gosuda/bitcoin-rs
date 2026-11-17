@@ -1417,10 +1417,7 @@ impl Drop for TempCleanup<'_> {
     }
 }
 
-/// `File::open` cannot open a directory on Windows and `FlushFileBuffers`
-/// rejects read-only handles; a directory is opened with read-write access
-/// and `FILE_FLAG_BACKUP_SEMANTICS` instead. POSIX accepts a plain `O_RDONLY`
-/// directory handle for `fsync`.
+/// `FlushFileBuffers` rejects a read-only directory handle.
 #[cfg(all(test, windows))]
 fn open_dir_for_sync(path: &Path) -> io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt as _;
