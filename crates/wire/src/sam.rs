@@ -1461,16 +1461,17 @@ pub(crate) fn write_key_file(path: &Path, contents: &str) -> io::Result<()> {
         file.sync_all()?;
     }
 
-    if let Err(error) = std::fs::hard_link(&temp_path, path) {
-        #[cfg(windows)]
+    let linked = std::fs::hard_link(&temp_path, path);
+    #[cfg(windows)]
+    if let Err(error) = &linked {
         if error.kind() == io::ErrorKind::PermissionDenied && path.try_exists().unwrap_or(false) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "key file already exists",
             ));
         }
-        return Err(error);
     }
+    linked?;
 
     let _ = std::fs::remove_file(&temp_path);
     drop(cleanup);
@@ -2031,6 +2032,9 @@ mod tests {
             }
             Err(error) => {
                 if stop.load(Ordering::Acquire) {
+                    return Ok(None);
+                }
+                if error.kind() == io::ErrorKind::ConnectionReset && pending.is_empty() {
                     return Ok(None);
                 }
                 if ctx.last_command.is_empty() && !ctx.opened_by_session {
