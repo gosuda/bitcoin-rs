@@ -383,10 +383,8 @@ impl<S> CountingStream<S> {
         Ok(())
     }
 
-    /// Windows cannot interrupt a pending `recv` (neither `shutdown` on a
-    /// duplicate nor `CancelSynchronousIo` reaches it), so `with_cancel`
-    /// clamps the socket's read timeout to a short poll and a `WouldBlock`
-    /// retry observes the latch while the caller's deadline still stands.
+    /// A `shutdown` on a duplicated handle does not wake a pending `recv` on
+    /// Windows; `with_cancel` substitutes the wake with a short read timeout.
     fn retry_timed_out_read(&self, error: &std::io::Error, start: Instant) -> IoResult<bool> {
         if !matches!(
             error.kind(),
@@ -438,6 +436,7 @@ impl CountingStream<std::net::TcpStream> {
         #[cfg(windows)]
         {
             self.cancel = Some(cancel.clone());
+            self.read_timeout.set(self.inner.read_timeout()?);
             self.inner.set_read_timeout(Some(CANCEL_POLL))?;
         }
         Ok(self)
