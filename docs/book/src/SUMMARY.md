@@ -37,7 +37,7 @@
 - [Block connect and reorg](how/block-connect-and-reorg.md)
 - [Header sync and block download](how/header-sync-and-block-download.md)
 - [Chain state and storage](how/state-and-storage.md)
-- [Durability and the journal](how/durability-and-journal.md)
+- [Atomic durability](how/durability-and-commit.md)
 - [Checkpoints and recovery](how/checkpoints-and-recovery.md)
 - [Snapshots and assumeutxo](how/snapshots-and-assumeutxo.md)
 - [Pruning](how/pruning.md)

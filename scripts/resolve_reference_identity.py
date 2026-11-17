@@ -126,7 +126,7 @@ if len(sys.argv) != 3 or sys.argv[1] not in ("core", "formal"):
     raise SystemExit(f"usage: {Path(sys.argv[0]).name} {{core|formal}} <repo-root>")
 mode, root = sys.argv[1], Path(sys.argv[2])
 
-reference = load_manifest(root / "crates/rpc/core-compat.toml")["reference"]
+reference = load_manifest(root / "crates/serving/core-compat.toml")["reference"]
 
 if mode == "core":
     release = reference["release"]

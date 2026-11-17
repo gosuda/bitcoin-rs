@@ -5,6 +5,7 @@
 ## Index
 <!-- contract-index:start -->
 - [architecture.md](architecture.md): `ARCH-01`–`ARCH-07`, `ARCH-07a`, `ARCH-07b`, `ARCH-08`–`ARCH-09`.
+- [atomic-ownership.md](atomic-ownership.md): `BLK-01`–`BLK-08`, `SCR-01`–`SCR-06`, `WIN-01`–`WIN-08`, `CMT-01`–`CMT-09`, `REO-01`–`REO-06`, `PRJ-01`–`PRJ-13`, `QRY-01`–`QRY-08`, `SNP-01`–`SNP-11`, `BUD-01`–`BUD-07`, `MPS-01`–`MPS-04`, `MOD-01`–`MOD-05`.
 - [chain-events.md](chain-events.md): `EVT-01`–`EVT-06`.
 - [core-differential.md](core-differential.md): `CORE-01`–`CORE-07`.
 - [dependency-range.md](dependency-range.md): `DEP-01`–`DEP-03`, `FEAT-01`–`FEAT-02`.
@@ -18,7 +19,7 @@
 - [p2p-wire.md](p2p-wire.md): `P2P-01`–`P2P-11`.
 - [pool.md](pool.md): `POOL-01`–`POOL-09`.
 - [qa-corpus.md](qa-corpus.md): `QAC-01`–`QAC-05`.
-- [recovery.md](recovery.md): `RCV-01`–`RCV-15`, `JW-BOOT-1`, `JW-REC-1`, `JW-ORDER-1`, `JW-DUR-1`, `JW-ROT-1`, `JW-RET-1`, `JW-LIFE-1`, `JW-MARK-1`–`JW-MARK-2`, `JW-FAIL-1`.
+- [recovery.md](recovery.md): `RCV-01`–`RCV-15`.
 - [reference-set.md](reference-set.md): `REF-01`–`REF-04`, `REF-06`–`REF-07`.
 - [storage-footprint.md](storage-footprint.md): `FP-01`–`FP-04`.
 - [synchronization.md](synchronization.md): `CONV-1`, `SYNC-01`–`SYNC-07`.

@@ -1,9 +1,9 @@
 use alloc::sync::Arc;
 
-use bitcoin_rs_primitives::{Tx, Txid, Wtxid};
+use bitcoin_rs_consensus::primitives::{Tx, Txid, Wtxid};
 
 #[cfg(test)]
-use bitcoin_rs_primitives::{LockTime, Script, Witness};
+use bitcoin_rs_consensus::primitives::{LockTime, Script, Witness};
 
 pub type EntryId = u32;
 
@@ -104,7 +104,7 @@ pub(crate) const fn fee_rate(fee: u64, vsize: u64) -> u64 {
 #[cfg(test)]
 mod is_replaceable_tests {
     use super::*;
-    use bitcoin_rs_primitives::{OutPoint, Sequence, Tx, TxIn};
+    use bitcoin_rs_consensus::primitives::{OutPoint, Sequence, Tx, TxIn};
     use std::sync::Arc;
 
     #[test]
@@ -152,7 +152,7 @@ mod is_replaceable_tests {
 #[cfg(test)]
 mod mining_metadata_tests {
     use super::*;
-    use bitcoin_rs_primitives::Tx;
+    use bitcoin_rs_consensus::primitives::Tx;
     use std::sync::Arc;
 
     fn bare_entry() -> MempoolEntry {
@@ -203,7 +203,7 @@ mod mining_metadata_tests {
 mod wire_metadata_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_primitives::{
+    use bitcoin_rs_consensus::primitives::{
         Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
         Wtxid,
     };

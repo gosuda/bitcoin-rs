@@ -22,26 +22,26 @@ fuzz_target!(|data: &[u8]| {
     };
     let (path, query) = s.split_once('?').unwrap_or((s, ""));
 
-    let context = Arc::new(bitcoin_rs_rpc::context::Context::new());
-    let handler = bitcoin_rs_rpc::Handler::new(Arc::clone(&context));
+    let context = Arc::new(bitcoin_rs_serving::context::Context::new());
+    let handler = bitcoin_rs_serving::Handler::new(Arc::clone(&context));
 
-    let rest_get = bitcoin_rs_rpc::rest::route(&context, path, query, true);
+    let rest_get = bitcoin_rs_serving::rest::route(&context, path, query, true);
     check_status(rest_get.status, path, "REST GET");
 
-    let rest_post = bitcoin_rs_rpc::rest::route_post(&context, path, b"{}", true);
+    let rest_post = bitcoin_rs_serving::rest::route_post(&context, path, b"{}", true);
     check_status(rest_post.status, path, "REST POST");
 
-    let esp_pub = bitcoin_rs_rpc::esplora::route(
+    let esp_pub = bitcoin_rs_serving::esplora::route(
         &handler,
-        bitcoin_rs_rpc::esplora::Surface::Public,
+        bitcoin_rs_serving::esplora::Surface::Public,
         path,
         query,
     );
     check_status(esp_pub.status, path, "Esplora Public");
 
-    let esp_back = bitcoin_rs_rpc::esplora::route(
+    let esp_back = bitcoin_rs_serving::esplora::route(
         &handler,
-        bitcoin_rs_rpc::esplora::Surface::Backend,
+        bitcoin_rs_serving::esplora::Surface::Backend,
         path,
         query,
     );

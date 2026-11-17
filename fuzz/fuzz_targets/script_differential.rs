@@ -1,10 +1,10 @@
 #![no_main]
 
 use bitcoin::hashes::{Hash as _, hash160, sha256};
-use bitcoin_rs_primitives::{
+use bitcoin_rs_consensus::primitives::{
     Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_script::{Interpreter, VerifyFlags};
+use bitcoin_rs_consensus::script::{Interpreter, VerifyFlags};
 use libfuzzer_sys::fuzz_target;
 
 fn push_boundary(size: usize, fill_byte: u8) -> Vec<u8> {

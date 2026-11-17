@@ -8,9 +8,9 @@ use std::time::SystemTime;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::hashes::sha256;
-use bitcoin_rs_p2p::addrman::AddressBook;
-use bitcoin_rs_p2p::subnet::{BannedSubnet, IpSubnet, is_banned};
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_wire::addrman::AddressBook;
+use bitcoin_rs_wire::subnet::{BannedSubnet, IpSubnet, is_banned};
+use bitcoin_rs_consensus::primitives::PeerEndpoint;
 use libfuzzer_sys::arbitrary::Unstructured;
 use libfuzzer_sys::fuzz_target;
 
@@ -57,7 +57,7 @@ fn candidate(record: &Record) -> String {
     let buckets: Vec<String> = record.buckets.iter().map(u16::to_string).collect();
     format!(
         "{{\"addr\":\"{}\",\"services\":{},\"source\":{{\"ip\":\"11.0.0.1\"}},\"last_seen\":{},\"last_success\":{},\"failures\":{},\"tried\":{},\"new_buckets\":[{}]}}",
-        bitcoin_rs_p2p::format_endpoint(endpoint),
+        bitcoin_rs_wire::format_endpoint(endpoint),
         record.services,
         record.last_seen,
         record.last_success,

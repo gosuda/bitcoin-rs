@@ -5,7 +5,7 @@ use super::{
 use crate::fee_diagram::{self, FeeWeight};
 use crate::rbf::RbfError;
 use alloc::vec::Vec;
-use bitcoin_rs_primitives::Txid;
+use bitcoin_rs_consensus::primitives::Txid;
 use hashbrown::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

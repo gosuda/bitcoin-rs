@@ -40,9 +40,8 @@ env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
-  # Full-node production feature set: all three storage backends plus the
-  # bitcoinkernel script-verification engine (built from C++).
-  FULL_NODE_FEATURES: "rocksdb,fjall,redb,kernel"
+  # Full-node production feature set with bitcoinkernel engine.
+  FULL_NODE_FEATURES: "kernel"
 
 jobs:
   full-node:
@@ -50,7 +49,7 @@ jobs:
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # The kernel engine is built from C++ and rocksdb's bindgen needs
@@ -100,7 +99,7 @@ jobs:
             --no-default-features --features "${FULL_NODE_FEATURES}"
       - name: Preserve public process compatibility evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: process-compatibility-full-node-${{ github.run_attempt }}
           path: target/process-harness/**
@@ -112,7 +111,7 @@ jobs:
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -153,7 +152,7 @@ jobs:
             cargo -V
             sha256sum Cargo.lock
           } | tee target/script-kernel-evidence/context.txt
-          cargo test --locked -p bitcoin-rs-script --no-default-features \
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features \
             --features kernel --test suite segwit_v0_sighash_edges:: -- --nocapture \
             2>&1 | tee target/script-kernel-evidence/tests.log
       - name: Core-vectors kernel oracle
@@ -164,7 +163,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/script-kernel-evidence
-          cargo test --locked -p bitcoin-rs-script --no-default-features \
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features \
             --features kernel --test suite core_vectors:: -- --nocapture \
             2>&1 | tee target/script-kernel-evidence/core_vectors.log
       - name: SegWit-v0 kernel Clippy
@@ -175,12 +174,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/script-kernel-evidence
-          cargo clippy --locked -p bitcoin-rs-script --no-default-features \
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features \
             --features kernel --test suite -- -D warnings \
             2>&1 | tee target/script-kernel-evidence/clippy.log
       - name: Preserve kernel script evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: script-kernel-${{ github.run_attempt }}
           path: target/script-kernel-evidence/
@@ -197,7 +196,7 @@ jobs:
     env:
       CARGO_TARGET_DIR: target/script-native
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -218,7 +217,7 @@ jobs:
             cargo -V
             sha256sum Cargo.lock
           } | tee target/script-native-evidence/context.txt
-          cargo test --locked -p bitcoin-rs-script --no-default-features \
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features \
             --no-fail-fast -- --nocapture 2>&1 | tee target/script-native-evidence/tests.log
       - name: Native script Clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
@@ -226,11 +225,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/script-native-evidence
-          cargo clippy --locked -p bitcoin-rs-script --no-default-features \
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features \
             --all-targets -- -D warnings 2>&1 | tee target/script-native-evidence/clippy.log
       - name: Preserve native script evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: script-native-${{ github.run_attempt }}
           path: target/script-native-evidence/
@@ -253,13 +252,13 @@ jobs:
   kernel-oracle:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/native-deps
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: --nocapture
+      - run: 'cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: --nocapture'
 
   # Main-only (issues #174 / #1389 / #1503; CORE-02/CORE-03/CORE-05/CORE-06): a running Bitcoin Core 31.1 node vs
   # bitcoin-rs on regtest. Complements kernel-oracle (in-process C++ engine)
@@ -274,9 +273,10 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/native-deps
       - uses: dtolnay/rust-toolchain@fb523f40495206854c36b250850817ae0f83e3d1 # 1.99.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - uses: ./.github/actions/test-deps
@@ -288,7 +288,7 @@ jobs:
       - name: Build bitcoin-rs (quickstart, portable)
         run: |
           cargo build --locked -p bitcoin-rs --profile quickstart \
-            --no-default-features --features fjall,zmq \
+            --no-default-features --features zmq \
             2>&1 | tee target/core-differential/build.log
       - name: Core vs bitcoin-rs P2P and chain-identity differential
         run: |
@@ -300,7 +300,7 @@ jobs:
             2>&1 | tee target/core-differential/driver.log
       - name: Preserve Core differential evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: core-differential-${{ github.run_attempt }}
           path: |

@@ -14,7 +14,7 @@ services:
         hard: 65536
     environment:
       BITCOIN_RS_NETWORK: "${BITCOIN_RS_NETWORK:-mainnet}"
-      BITCOIN_RS_STORAGE_BACKEND: fjall
+      BITCOIN_RS_STORAGE_BACKEND: rocksdb
       BITCOIN_RS_RPC_USER: "${BITCOIN_RS_RPC_USER:-mempool}"
       BITCOIN_RS_RPC_PASSWORD: "${BITCOIN_RS_RPC_PASSWORD:?Set BITCOIN_RS_RPC_PASSWORD to a unique secret}"
       # The image keeps RPC on loopback; the api service reaches it over the

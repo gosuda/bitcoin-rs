@@ -1,21 +1,31 @@
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
-use bitcoin_rs_script::VerifyFlags;
-use bitcoin_rs_script::sigops::{count_accurate, count_segwit, count_tx_legacy};
-use bitcoin_rs_script::{Instruction, instructions, is_p2sh, is_push_only, is_witness_program};
+use crate::primitives::{OutPoint, Tx, TxOut, TxView};
+use crate::script::VerifyFlags;
+use crate::script::sigops::{count_accurate, count_segwit_last, count_tx_legacy_view};
+use crate::script::{Instruction, instructions, is_p2sh, is_push_only, is_witness_program};
 use hashbrown::HashMap;
 
 #[must_use]
 pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: VerifyFlags) -> u32 {
+    transaction_sigop_cost_view(tx.into(), prevouts, flags)
+}
+
+#[must_use]
+pub fn transaction_sigop_cost_view(
+    tx: TxView<'_>,
+    prevouts: &[(OutPoint, TxOut)],
+    flags: VerifyFlags,
+) -> u32 {
     let flags = flags.filled();
-    let mut cost = count_tx_legacy(tx).saturating_mul(4);
+    let mut cost = count_tx_legacy_view(tx).saturating_mul(4);
     if tx.is_coinbase() {
         return cost;
     }
     let mut cursor = 0;
     let mut indexed = None;
-    for input in &tx.inputs {
+    for input_index in 0..tx.input_count() {
+        let previous_output = tx.input_outpoint(input_index);
         let prevout = if let Some((outpoint, output)) = prevouts.get(cursor)
-            && *outpoint == input.previous_output
+            && *outpoint == previous_output
         {
             cursor += 1;
             output
@@ -27,16 +37,17 @@ pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: Ve
                 }
                 resolved
             });
-            let Some(output) = resolved.get(&input.previous_output) else {
+            let Some(output) = resolved.get(&previous_output) else {
                 continue;
             };
             *output
         };
+        let script_sig = tx.input_script_sig(input_index);
         let redeem = if flags.contains(VerifyFlags::P2SH)
             && is_p2sh(&prevout.script_pubkey)
-            && is_push_only(&input.script_sig)
+            && is_push_only(script_sig)
         {
-            last_push(&input.script_sig)
+            last_push(script_sig)
         } else {
             None
         };
@@ -50,7 +61,13 @@ pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: Ve
                 redeem.filter(|script| is_witness_program(script))
             };
             if let Some(program) = witness_program {
-                cost = cost.saturating_add(count_segwit(program, &input.witness));
+                let w_count = tx.witness_item_count(input_index);
+                let last_item = if w_count > 0 {
+                    Some(tx.witness_item(input_index, w_count - 1))
+                } else {
+                    None
+                };
+                cost = cost.saturating_add(count_segwit_last(program, last_item));
             }
         }
     }
@@ -70,8 +87,8 @@ fn last_push(script: &[u8]) -> Option<&[u8]> {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{Amount, Hash256, LockTime, Script, Sequence, TxIn, Txid, Witness};
-    use bitcoin_rs_script::{opcode, push_data};
+    use crate::primitives::{Amount, Hash256, LockTime, Script, Sequence, TxIn, Txid, Witness};
+    use crate::script::{opcode, push_data};
 
     use super::*;
 
@@ -127,7 +144,7 @@ mod tests {
                 4,
             ),
             (
-                vec![bitcoin_rs_script::opcode::OP_DROP, opcode::OP_PUSHNUM_1],
+                vec![crate::script::opcode::OP_DROP, opcode::OP_PUSHNUM_1],
                 push_data(&p2wpkh),
                 Vec::new(),
                 4,

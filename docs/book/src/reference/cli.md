@@ -22,6 +22,7 @@ Boolean flags come in two forms. Some require an explicit true or false value. O
 | --- | --- | --- | --- |
 | `--network` | `mainnet`, `main`, `bitcoin`, `testnet3`, `test`, `testnet`, `testnet4`, `signet`, `regtest`, `drynet4` | `mainnet` | Selects chain parameters, default ports, and magic. |
 | `--data-dir` | path | `.bitcoin-rs` | Holds chainstate, indexes, cookie, and mempool snapshot. |
+| `--assumeutxo-manifest` | manifest file path | unset | Admits an AssumeUTXO snapshot manifest at startup; relative paths resolve under `--data-dir`, and absolute paths are used as given. |
 | `--persist-mempool` | `true` or `false` | `true` | Saves the pool on clean shutdown and restores it at startup. |
 | `--mempool-snapshot-max-mb` | MiB | `64` | Caps the snapshot file and restore work. |
 | `--mempool-snapshot-restore-timeout-secs` | seconds | `max(60, max-mb)` | Deadline for restoring and revalidating the snapshot. |
@@ -30,7 +31,7 @@ Boolean flags come in two forms. Some require an explicit true or false value. O
 
 | Flag | Value | Default | Purpose |
 | --- | --- | --- | --- |
-| `--storage-backend` | `rocksdb`, `fjall`, `redb` | `fjall` | Selects a backend compiled into the binary. |
+| `--storage-backend` | `rocksdb`, `surrealkv`, `mdbx` | `rocksdb` | Selects the storage backend: `rocksdb` (default, always compiled), `surrealkv` (build with dependency-qualified Cargo feature `bitcoin-rs-node/surrealkv`), and `mdbx` (build with dependency-qualified Cargo feature `bitcoin-rs-node/mdbx`). The binary exposes no bare forwarding features for these optional engines. Reopening a data directory created by a different engine refuses startup with `<namespace> was created by <found>; start with --storage-backend <found> or convert with bitcoin-rs-storage-convert`. `fjall` and `redb` fail with `unsupported storage backend <value>`. |
 | `--dbcache-mb` | MiB | `450` | Splits the storage cache between chainstate and index storage. |
 | `--prune-target-mb` | MiB | `0` | Prunes block history to the target; `0` keeps everything. Indexes refuse pruning. |
 
@@ -127,9 +128,8 @@ Boolean flags come in two forms. Some require an explicit true or false value. O
 
 ## Not on the command line
 
-Two configuration surfaces have no CLI flag:
+One configuration surface has no CLI flag:
 
 - `notifications` is a TOML table holding ZeroMQ endpoints. See [ZeroMQ notifications](../use/zmq.md).
-- `chainstate_journal` is a TOML table (and a set of `BITCOIN_RS_CHAINSTATE_JOURNAL*` environment names) for journal blocks, seconds, rotation, and lag bounds.
 
 The TOML and environment forms of every key are in [Configuration keys](config-keys.md). A script that extracts every flag name from `bitcoin-rs --help` and compares it with the tables above reports zero missing and zero extra flags.

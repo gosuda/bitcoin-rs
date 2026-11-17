@@ -7,7 +7,7 @@ use super::fs::{CheckpointRoot, create_file, remove_known_dir, sync_dir};
 use super::load::read_current;
 use super::{
     CURRENT_FILE, CURRENT_FORMAT, CURRENT_VERSION, CheckpointError, CheckpointManifestV1,
-    CurrentV1, GenerationPaths, HashingWriter, MANIFEST_FILE,
+    CurrentV1, EngineArtifactV1, GenerationPaths, HashingWriter, MANIFEST_FILE,
 };
 use cap_std::fs::Dir;
 use sha2::{Digest, Sha256};
@@ -96,6 +96,25 @@ impl CheckpointStage {
         file.sync_all()
             .map_err(|e| E::from(CheckpointError::from(e)))?;
         Ok((value, ArtifactDigest { bytes, sha256 }))
+    }
+    pub fn checkpoint_store(
+        &self,
+        data_dir: &std::path::Path,
+        root_name: &str,
+        store: &dyn crate::KvStore,
+    ) -> Result<(), CheckpointError> {
+        let dest = data_dir
+            .join(root_name)
+            .join(&self.paths.staging)
+            .join(crate::checkpoint::fs::STAGED_STORE_DIR);
+        store.checkpoint(&dest)?;
+        Ok(())
+    }
+    pub fn staged_engine_digest(&self) -> Result<EngineArtifactV1, CheckpointError> {
+        let dir = self
+            .staging
+            .open_dir(crate::checkpoint::fs::STAGED_STORE_DIR)?;
+        super::digest::digest_engine_dir(&dir)
     }
 }
 pub fn begin_publication(data_dir: &Dir) -> Result<CheckpointStage, CheckpointError> {
@@ -204,9 +223,14 @@ pub fn commit_publication(
         target_vendor = "apple",
         target_os = "linux",
         target_os = "android",
-        target_os = "redox"
+        target_os = "redox",
+        windows
     ))]
-    super::fs::rename_noreplace(root.dir(), &paths.staging, &paths.final_dir)?;
+    {
+        drop(mf);
+        drop(staging);
+        super::fs::rename_noreplace(root.dir(), &paths.staging, &paths.final_dir)?;
+    }
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::GenerationRootSync)?;
     root.sync()?;
@@ -219,7 +243,9 @@ pub fn commit_publication(
         version: CURRENT_VERSION,
         generation,
         directory: paths.directory.clone(),
-        manifest_sha256: bitcoin_rs_primitives::hex::hex_encode(&reference.manifest_sha256),
+        manifest_sha256: bitcoin_rs_consensus::primitives::hex::hex_encode(
+            &reference.manifest_sha256,
+        ),
     };
     let current_bytes = sonic_rs::to_vec(&current)?;
     let mut cf = root.create_file(&paths.current_temp)?;
@@ -275,7 +301,8 @@ fn allocate_generation(
             target_vendor = "apple",
             target_os = "linux",
             target_os = "android",
-            target_os = "redox"
+            target_os = "redox",
+            windows
         ))]
         if root.entry_exists(&paths.final_dir)? || root.entry_exists(&paths.current_temp)? {
             generation = generation.checked_add(1).ok_or_else(|| {
@@ -287,14 +314,16 @@ fn allocate_generation(
             target_vendor = "apple",
             target_os = "linux",
             target_os = "android",
-            target_os = "redox"
+            target_os = "redox",
+            windows
         ))]
         let name = &paths.staging;
         #[cfg(not(any(
             target_vendor = "apple",
             target_os = "linux",
             target_os = "android",
-            target_os = "redox"
+            target_os = "redox",
+            windows
         )))]
         let name = &paths.final_dir;
         match root.create_dir(name) {
@@ -315,7 +344,8 @@ fn generation_paths(generation: u64) -> GenerationPaths {
             target_vendor = "apple",
             target_os = "linux",
             target_os = "android",
-            target_os = "redox"
+            target_os = "redox",
+            windows
         ))]
         staging: format!(".{directory}.tmp"),
         final_dir: directory.clone(),
