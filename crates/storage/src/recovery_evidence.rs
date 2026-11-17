@@ -924,6 +924,7 @@ mod tests {
     #[test]
     fn marker_creation_reports_success_only_when_a_regular_marker_file_stands() {
         type Seed = fn(&Path);
+        #[allow(unused_mut)]
         let mut cases: Vec<(&str, Seed, bool)> = vec![
             ("absent", |_| {}, true),
             (

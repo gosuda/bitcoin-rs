@@ -805,7 +805,9 @@ fn write_full_validation_provenance(
         path: tmp.clone(),
         source,
     })?;
-    File::open(&tmp)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp)
         .map_err(|source| OfflineImportError::ProvenanceOpen {
             path: tmp.clone(),
             source,
@@ -817,7 +819,7 @@ fn write_full_validation_provenance(
         })?;
     std::fs::rename(&tmp, provenance_path(data_dir))
         .map_err(|source| OfflineImportError::ProvenancePublish { source })?;
-    File::open(data_dir)
+    open_dir(data_dir)
         .map_err(|source| OfflineImportError::DataDirOpen {
             path: data_dir.to_path_buf(),
             source,
@@ -828,6 +830,26 @@ fn write_full_validation_provenance(
             source,
         })?;
     Ok(())
+}
+
+/// `File::open` cannot open a directory on Windows and `FlushFileBuffers`
+/// rejects read-only handles; a directory is opened with read-write access
+/// and `FILE_FLAG_BACKUP_SEMANTICS` instead. POSIX accepts a plain `O_RDONLY`
+/// directory handle for `fsync`.
+#[cfg(windows)]
+fn open_dir(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_dir(path: &Path) -> std::io::Result<File> {
+    File::open(path)
 }
 
 fn resolve_offline_validation_mode(
@@ -1056,7 +1078,7 @@ fn write_state(path: &Path, state: &CertifiedState) -> Result<(), OfflineImportE
     drop(file);
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            let dir = File::open(parent).map_err(|source| OfflineImportError::StateDirOpen {
+            let dir = open_dir(parent).map_err(|source| OfflineImportError::StateDirOpen {
                 path: parent.to_path_buf(),
                 source,
             })?;

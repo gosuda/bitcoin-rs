@@ -1417,6 +1417,26 @@ impl Drop for TempCleanup<'_> {
     }
 }
 
+/// `File::open` cannot open a directory on Windows and `FlushFileBuffers`
+/// rejects read-only handles; a directory is opened with read-write access
+/// and `FILE_FLAG_BACKUP_SEMANTICS` instead. POSIX accepts a plain `O_RDONLY`
+/// directory handle for `fsync`.
+#[cfg(all(test, windows))]
+fn open_dir_for_sync(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(all(test, not(windows)))]
+fn open_dir_for_sync(path: &Path) -> io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
 #[cfg(test)]
 pub(crate) fn write_key_file(path: &Path, contents: &str) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -1444,13 +1464,21 @@ pub(crate) fn write_key_file(path: &Path, contents: &str) -> io::Result<()> {
         file.sync_all()?;
     }
 
-    std::fs::hard_link(&temp_path, path)?;
+    if let Err(error) = std::fs::hard_link(&temp_path, path) {
+        #[cfg(windows)]
+        if error.kind() == io::ErrorKind::PermissionDenied && path.try_exists().unwrap_or(false) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "key file already exists",
+            ));
+        }
+        return Err(error);
+    }
 
     let _ = std::fs::remove_file(&temp_path);
     drop(cleanup);
 
-    let dir = std::fs::File::open(parent)?;
-    dir.sync_all()?;
+    open_dir_for_sync(parent)?.sync_all()?;
 
     Ok(())
 }
@@ -1531,7 +1559,9 @@ mod tests {
         listener_handle: Option<std::thread::JoinHandle<io::Result<()>>>,
         workers: std::sync::Arc<parking_lot::Mutex<Vec<std::thread::JoinHandle<io::Result<()>>>>>,
         live: std::sync::Arc<LiveWorkers>,
+        #[allow(dead_code)]
         strangers: mpsc::Receiver<SocketAddr>,
+        #[allow(dead_code)]
         accepted: mpsc::Receiver<SocketAddr>,
     }
 
@@ -4374,11 +4404,14 @@ mod tests {
             return Err("a refused bridge must not establish".into());
         };
         let returned = Instant::now();
+        #[cfg(unix)]
         assert_eq!(
             error.kind(),
             io::ErrorKind::ConnectionRefused,
             "got {error:?}"
         );
+        #[cfg(windows)]
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "got {error:?}");
         assert!(!reached.get(), "a refused connect never reached the bridge");
         assert!(
             returned >= unreachable_after,

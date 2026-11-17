@@ -1186,6 +1186,14 @@ fn cancelled_error() -> io::Error {
 }
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
+/// A `shutdown()` on a duplicated socket handle does not wake a pending
+/// blocking `recv`/`send` on Windows, so cancel latency there is the socket
+/// poll itself; it is clamped to preserve the cancel bound POSIX gets from
+/// the socket wake.
+#[cfg(windows)]
+const SOCKET_POLL: Duration = Duration::from_millis(25);
+#[cfg(not(windows))]
+const SOCKET_POLL: Duration = POLL;
 struct Setup<'a> {
     stream: TcpStream,
     deadline: Instant,
@@ -1201,8 +1209,8 @@ impl<'a> Setup<'a> {
         deadline: Instant,
     ) -> io::Result<Self> {
         let stream = connect(address, cancelled, deadline)?;
-        stream.set_read_timeout(Some(POLL))?;
-        stream.set_write_timeout(Some(POLL))?;
+        stream.set_read_timeout(Some(SOCKET_POLL))?;
+        stream.set_write_timeout(Some(SOCKET_POLL))?;
         Ok(Self {
             stream,
             deadline,

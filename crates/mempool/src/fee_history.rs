@@ -106,7 +106,7 @@ pub fn save(data_dir: &Path, history_bytes: &[u8]) {
         std::io::Write::write_all(&mut file, history_bytes)?;
         file.sync_all()?;
         std::fs::rename(&temp_path, &live_path)?;
-        if let Err(error) = std::fs::File::open(data_dir).and_then(|dir| dir.sync_all()) {
+        if let Err(error) = sync_dir(data_dir) {
             tracing::warn!(
                 path = %live_path.display(),
                 %error,
@@ -128,6 +128,28 @@ pub fn save(data_dir: &Path, history_bytes: &[u8]) {
             "failed to save fee-estimator history; the node still shuts down cleanly"
         ),
     }
+}
+
+#[cfg(windows)]
+pub(crate) fn sync_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)
+        .and_then(|handle| handle.sync_all())
+}
+
+#[cfg(unix)]
+pub(crate) fn sync_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::File::open(dir).and_then(|handle| handle.sync_all())
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn sync_dir(_dir: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

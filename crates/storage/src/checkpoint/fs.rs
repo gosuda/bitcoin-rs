@@ -141,7 +141,8 @@ impl CheckpointRoot {
         target_vendor = "apple",
         target_os = "linux",
         target_os = "android",
-        target_os = "redox"
+        target_os = "redox",
+        windows
     ))]
     pub(crate) fn entry_exists(&self, name: &str) -> io::Result<bool> {
         match self.dir.symlink_metadata(name) {
@@ -168,7 +169,8 @@ pub const HAS_ATOMIC_NOREPLACE_RENAME: bool = cfg!(any(
     target_vendor = "apple",
     target_os = "linux",
     target_os = "android",
-    target_os = "redox"
+    target_os = "redox",
+    windows
 ));
 
 /// Renames `from` to `to` inside `dir` in one filesystem step that fails with
@@ -186,11 +188,96 @@ pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
         .map_err(Into::into)
 }
 
+/// Windows has no `renameat2`; `FILE_RENAME_INFO` renames the `from` handle to
+/// an absolute destination resolved through the `dir` handle, and
+/// `check_confined_endpoint` keeps `to` a single component under it.
+/// `FILE_RENAME_INFO_EX`'s `RootDirectory` field is rejected with
+/// `ERROR_INVALID_PARAMETER` on this kernel, so the target cannot be
+/// handle-relative.
+#[cfg(windows)]
+pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
+    check_confined_endpoint(from)?;
+    check_confined_endpoint(to)?;
+
+    use cap_std::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileRenameInfo, GetFinalPathNameByHandleW, SetFileInformationByHandle,
+    };
+
+    const DELETE_ACCESS: u32 = 0x0001_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let mut options = OpenOptions::new();
+    options
+        .follow(FollowSymlinks::No)
+        .access_mode(DELETE_ACCESS)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    let from_file = dir.open_with(from, &options)?;
+
+    let mut root = vec![0_u16; 512];
+    // SAFETY: `root` is a live, writable buffer of the given length.
+    let root_len = unsafe {
+        GetFinalPathNameByHandleW(
+            dir.as_raw_handle().cast(),
+            root.as_mut_ptr(),
+            u32::try_from(root.len()).unwrap_or(u32::MAX),
+            0,
+        )
+    };
+    if root_len == 0 || usize::try_from(root_len).unwrap_or(usize::MAX) >= root.len() {
+        return Err(io::Error::last_os_error());
+    }
+    let root = &root[..usize::try_from(root_len).unwrap_or(usize::MAX)];
+    let prefix = [
+        u16::from(b'\\'),
+        u16::from(b'\\'),
+        u16::from(b'?'),
+        u16::from(b'\\'),
+    ];
+    let base = if root.starts_with(&prefix) {
+        &root[4..]
+    } else {
+        root
+    };
+    let mut name: Vec<u16> = Vec::with_capacity(base.len() + 1 + to.len() + 1);
+    name.extend_from_slice(base);
+    name.push(u16::from(b'\\'));
+    name.extend(to.encode_utf16());
+    name.push(0);
+
+    let mut info = vec![0_u8; 20 + name.len() * 2];
+    info[16..20].copy_from_slice(
+        &u32::try_from(name.len() * 2)
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+    for (index, unit) in name.iter().enumerate() {
+        info[20 + index * 2..22 + index * 2].copy_from_slice(&unit.to_le_bytes());
+    }
+    // SAFETY: `info` is a correctly laid out `FILE_RENAME_INFO` buffer (u8
+    // replace flag, padding, NULL `RootDirectory`, u32 name length, NUL-
+    // terminated UTF-16 name) and `from_file` is a live handle opened with
+    // `DELETE` access.
+    let renamed = unsafe {
+        SetFileInformationByHandle(
+            from_file.as_raw_handle().cast(),
+            FileRenameInfo,
+            info.as_ptr().cast(),
+            u32::try_from(info.len()).unwrap_or(u32::MAX),
+        )
+    };
+    if renamed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(not(any(
     target_vendor = "apple",
     target_os = "linux",
     target_os = "android",
-    target_os = "redox"
+    target_os = "redox",
+    windows
 )))]
 pub fn rename_noreplace(_dir: &Dir, _from: &str, _to: &str) -> io::Result<()> {
     Err(io::Error::new(
@@ -322,6 +409,7 @@ fn remove_engine_dir_content(dir: &Dir) -> io::Result<()> {
         if file_type.is_dir() {
             let child = dir.open_dir_nofollow(&file_name)?;
             remove_engine_dir_content(&child)?;
+            drop(child);
             dir.remove_dir(&file_name)?;
         } else {
             dir.remove_file(&file_name)?;
@@ -341,6 +429,7 @@ pub(crate) fn remove_known_dir(root: &CheckpointRoot, name: &str) -> io::Result<
             }
             let child = dir.open_dir_nofollow(&file_name)?;
             remove_engine_dir_content(&child)?;
+            drop(child);
             dir.remove_dir(&file_name)?;
         } else {
             dir.remove_file(&file_name)?;
