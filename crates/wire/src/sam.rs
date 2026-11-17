@@ -1939,7 +1939,18 @@ mod tests {
         stop: &AtomicBool,
         strangers: &mpsc::Sender<SocketAddr>,
     ) -> io::Result<()> {
-        stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+        match stream.set_read_timeout(Some(Duration::from_millis(200))) {
+            Ok(()) => {}
+            Err(error)
+                if cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput =>
+            {
+                if !peer.opened_by_a_session() {
+                    let _ = strangers.send(peer.client);
+                }
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
         let client = peer.client;
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut writer = stream;
@@ -2035,10 +2046,12 @@ mod tests {
                     return Ok(None);
                 }
                 if error.kind() == io::ErrorKind::ConnectionReset
-                    && pending.is_empty()
-                    && !ctx.last_command.is_empty()
+                    || (cfg!(target_os = "macos")
+                        && error.kind() == io::ErrorKind::InvalidInput)
                 {
-                    return Ok(None);
+                    if pending.is_empty() && !ctx.last_command.is_empty() {
+                        return Ok(None);
+                    }
                 }
                 if ctx.last_command.is_empty() && !ctx.opened_by_session {
                     let _ = ctx.strangers.send(ctx.client);
