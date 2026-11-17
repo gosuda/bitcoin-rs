@@ -443,6 +443,36 @@ impl CoinCache {
         *resident += shard.backing_bytes();
     }
 
+    fn reindex(&self, shard: &mut ShardState, resident: &mut u64, value_bytes: u64) -> bool {
+        let Some(needed) = shard.entries.len().checked_add(1) else {
+            return false;
+        };
+        let Some(bound) = table_reservation_bound(needed) else {
+            return false;
+        };
+        if u64::try_from(bound).unwrap_or(u64::MAX)
+            > self
+                .budget_bytes
+                .saturating_sub(*resident)
+                .saturating_sub(value_bytes)
+        {
+            return false;
+        }
+        let mut index = HashTable::new();
+        if index.try_reserve(needed, |_| 0).is_err() {
+            return false;
+        }
+        for (slot, entry) in shard.entries.iter().enumerate() {
+            index.insert_unique(self.hasher.hash_one(entry.key.0), slot, |&slot| {
+                self.hasher.hash_one(shard.entries[slot].key.0)
+            });
+        }
+        *resident -= shard.backing_bytes();
+        shard.index = index;
+        *resident += shard.backing_bytes();
+        true
+    }
+
     /// Runs under the resident lock then the shard lock.
     fn admit_locked(
         &self,
@@ -461,11 +491,13 @@ impl CoinCache {
         {
             self.grow(shard, resident, value_bytes);
         }
+        if shard.index.capacity() <= shard.entries.len() {
+            self.reindex(shard, resident, value_bytes);
+        }
         let mut freed = 0_u64;
         while !shard.entries.is_empty()
             && (value_bytes > self.budget_bytes.saturating_sub(*resident)
-                || shard.entries.len() == shard.entries.capacity()
-                || shard.index.capacity() == shard.entries.len())
+                || shard.entries.len() == shard.entries.capacity())
         {
             let evicted = shard.evict(&self.hasher);
             freed += evicted;
@@ -473,7 +505,7 @@ impl CoinCache {
         }
         if value_bytes > self.budget_bytes.saturating_sub(*resident)
             || shard.entries.len() == shard.entries.capacity()
-            || shard.index.capacity() == shard.entries.len()
+            || shard.index.capacity() <= shard.entries.len()
         {
             return (false, freed);
         }
