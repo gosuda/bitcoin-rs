@@ -104,8 +104,10 @@ impl CheckpointPublisher {
         if marker.phase == DisconnectPhase::InFlight {
             return Ok(false);
         }
-        self.publish()?;
-        Ok(true)
+        match self.publish()? {
+            crate::checkpoint::CheckpointWrite::Published { .. } => Ok(true),
+            crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => Ok(false),
+        }
     }
 
     #[expect(dead_code)]

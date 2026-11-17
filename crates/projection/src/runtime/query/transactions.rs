@@ -1,7 +1,7 @@
 use super::{
     Arc, Block, BlockTree, DerivedIndexQueryEngine, Hash256, MAX_SERIALIZED_BLOCK_BYTES, OutPoint,
-    QueryBudget, ReadPrefix, Tx, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError,
-    TxUnavailableCause, Txid, deserialize,
+    QueryBudget, ReadPrefix, Tx, TxIndexScanRow, TxIndexSnapshot, TxPosition, TxPositionValue,
+    TxQueryError, TxUnavailableCause, Txid, deserialize,
 };
 use crate::types::positions_are_valid;
 use bitcoin_rs_consensus::primitives::BlockHash;
@@ -166,28 +166,10 @@ impl DerivedIndexQueryEngine {
                 }
                 continue;
             }
-            let Some(positions) = Self::validated_positions(&row.value)? else {
-                let hash = self.resolve_hash_at_height(height, prefix)?;
-                if let Some(transaction) =
-                    self.transaction_from_full_block(budget, height, hash, txid)?
-                {
-                    return Ok(Some((height, transaction)));
-                }
-                continue;
-            };
-            let position = positions[0];
-            let hash = self.resolve_hash_at_height(height, prefix)?;
-            match self.resolve_positioned_transaction(budget, height, hash, position)? {
-                Some(transaction) if transaction.txid() == *txid => {
-                    return Ok(Some((height, transaction)));
-                }
-                _ => {
-                    if let Some(transaction) =
-                        self.transaction_from_full_block(budget, height, hash, txid)?
-                    {
-                        return Ok(Some((height, transaction)));
-                    }
-                }
+            if let Some(transaction) =
+                self.resolve_transaction_occurrence(prefix, budget, txid, &row)?
+            {
+                return Ok(Some((height, transaction)));
             }
         }
         if below_floor {
@@ -198,6 +180,28 @@ impl DerivedIndexQueryEngine {
             ));
         }
         Self::scoped_absence(prefix, "transaction index")
+    }
+
+    fn resolve_transaction_occurrence(
+        &self,
+        prefix: &ReadPrefix,
+        budget: &mut QueryBudget,
+        txid: &Txid,
+        row: &TxIndexScanRow,
+    ) -> Result<Option<Tx>, TxQueryError> {
+        let height = row.row.height();
+        let positions = Self::validated_positions(&row.value)?;
+        let hash = self.resolve_hash_at_height(height, prefix)?;
+        if let Some(positions) = positions {
+            if let Some(transaction) =
+                self.resolve_positioned_transaction(budget, height, hash, positions[0])?
+            {
+                if transaction.txid() == *txid {
+                    return Ok(Some(transaction));
+                }
+            }
+        }
+        self.transaction_from_full_block(budget, height, hash, txid)
     }
 
     pub(super) fn none_below_floor<T>(

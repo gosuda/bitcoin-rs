@@ -168,8 +168,8 @@ mod tests {
     use crate::segment::import::{ImportedSegment, put_segment};
     use crate::segment::import::{ScriptHistoryImportError, script_history_segment};
     use crate::segment::{
-        Coverage, NoSealedTxOrdinals, RecordPage, SegmentSnapshot, TailWriterState,
-        append_tail_block, seal_tail_generation,
+        Coverage, RecordPage, SegmentSnapshot, TailWriterState, append_tail_block,
+        seal_tail_generation,
     };
     use crate::writer::ScriptHistoryAttachment;
     use crate::{IndexCapabilities, IndexError, IndexWatermark, IndexWriter, index_format_version};
@@ -353,7 +353,7 @@ mod tests {
         let mut state = TailWriterState::new();
         for block in blocks {
             let mut batch = store.new_batch();
-            append_tail_block(&mut batch, block, &mut state, &NoSealedTxOrdinals)?;
+            append_tail_block(&mut batch, block, &mut state)?;
             store.write_durable(batch)?;
         }
         let base = base_of(blocks);
@@ -896,7 +896,6 @@ mod tests {
         let spender = [0xB1_u8; 32];
         let funding = [0xA1_u8; 32];
         let mut spender_ordinal = None;
-        let mut funding_ordinal = None;
         for entry in receiver_store.iter_prefix(ColumnFamily::TxDir, &[])? {
             let (key, value) = entry?;
             let Some((_, txid, height)) = decode_tx_dir_key(&key) else {
@@ -913,24 +912,18 @@ mod tests {
                 assert_eq!(offset, 0, "the spender row carries its block offset");
                 assert_eq!(len, 120, "the spender row carries its block length");
                 spender_ordinal = Some(ordinal);
-            } else if txid == funding {
-                let (_, ordinal, _, _) = decode_tx_dir_value(&value)
-                    .ok_or_else(|| std::io::Error::other("funding directory value"))?;
-                assert_eq!(height, 1, "the funding row carries its confirming height");
-                funding_ordinal = Some(ordinal);
             }
         }
         let spender_ordinal = spender_ordinal
             .ok_or_else(|| std::io::Error::other("the restore names the spender"))?;
-        let funding_ordinal = funding_ordinal
-            .ok_or_else(|| std::io::Error::other("the restore names the funding"))?;
         let mut resolved = 0;
         for entry in receiver_store.iter_prefix(ColumnFamily::SpendDir, &[])? {
             let (key, value) = entry?;
-            let Some((_, creation_ordinal, vout)) = decode_spend_dir_key(&key) else {
+            let Some((_, funding_txid, vout, spending_height)) = decode_spend_dir_key(&key) else {
                 continue;
             };
-            if creation_ordinal == funding_ordinal && (vout == 0 || vout == 1) {
+            if funding_txid == funding && (vout == 0 || vout == 1) {
+                assert_eq!(spending_height, 2, "the event carries its spending height");
                 assert_eq!(
                     decode_spend_dir_value(&value)
                         .ok_or_else(|| std::io::Error::other("spend directory value"))?,
@@ -1125,6 +1118,157 @@ mod tests {
         assert_eq!(positions.len(), 1);
         assert_eq!(positions[0].offset(), 81);
         assert_eq!(positions[0].byte_len(), 120);
+        Ok(())
+    }
+
+    // IDX-12
+    #[test]
+    fn positive_floor_portable_restore_preserves_spend_without_funding_creation() -> TestResult {
+        use crate::TxIndexSnapshot;
+        use crate::portable::artifact::{ScriptFamily, ScriptRecordReader};
+        use crate::types::TxPositionValue;
+        use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
+
+        let floor = 2;
+        let funding_id = [0xA2; 32];
+        let spending = CommittedBlock {
+            height: floor,
+            hash: [0xB2; 32],
+            parent_hash: [0xB1; 32],
+            header: [0; 80],
+            txs: vec![TxFacts {
+                txid: [0xC2; 32],
+                offset: 81,
+                len: 120,
+                inputs: vec![SpentPrevout {
+                    txid: funding_id,
+                    vout: 3,
+                    value: 5_000,
+                    script: FactsScript::copy_from_slice(&[0x51]),
+                    height: floor - 1,
+                    coinbase: false,
+                }],
+                outputs: vec![CreatedOutput {
+                    vout: 0,
+                    value: 4_000,
+                    script: FactsScript::copy_from_slice(&[0x52]),
+                }],
+            }],
+        };
+        let blocks = [spending];
+        let base = base_of(&blocks);
+        let source_dir = tempdir()?;
+        let scratch = tempdir()?;
+        let source = RocksDbStore::open(source_dir.path())?;
+        let builder = BulkSegmentBuilder::new(
+            Arc::new(UnboundedBudget),
+            None,
+            scratch.path().to_path_buf(),
+        );
+        let coverage = builder.build_and_ingest(&source, 1, &blocks)?;
+        let segment = ImportedSegment {
+            coverage,
+            next_ordinal: 1,
+            records: 0,
+            families: Vec::new(),
+        };
+        let mut batch = source.new_batch();
+        put_segment(&mut batch, 1, &segment, IndexCapabilities::ALL);
+        source.write_durable(batch)?;
+        for (key, _) in tx_directory(&source)? {
+            let (_, txid, _) = decode_tx_dir_key(&key).ok_or("source transaction identity")?;
+            assert_ne!(txid, funding_id, "the below-floor creation is not indexed");
+        }
+
+        let snapshot = SegmentSnapshot::open(source.snapshot()?)?;
+        let mut body = Vec::new();
+        let totals = write_records(
+            &snapshot,
+            Cut {
+                base,
+                floor,
+                path: scratch.path(),
+            },
+            &mut body,
+        )?;
+        let header = ArtifactHeader {
+            family: BundleFamily::ScriptHistory,
+            artifact_version: ARTIFACT_VERSION,
+            index_format: index_format_version(),
+            network_magic: Network::Regtest.magic(),
+            base_height: base.height,
+            base_hash: base.hash,
+            records: totals.records,
+            payload_bytes: totals.payload_bytes,
+        };
+        let mut expected_key = funding_id.to_vec();
+        expected_key.extend_from_slice(&3_u32.to_be_bytes());
+        expected_key.extend_from_slice(&floor.to_be_bytes());
+        let mut reader = ScriptRecordReader::new(body.as_slice(), &header, floor);
+        let mut exported_spends = 0;
+        while let Some(record) = reader.next_record().map_err(|_| "portable script record")? {
+            if record.family == ScriptFamily::Spending {
+                assert_eq!(
+                    record.key, expected_key,
+                    "the event names the exact outpoint"
+                );
+                let positions =
+                    TxPositionValue::decode(&record.value).ok_or("exported spender positions")?;
+                assert_eq!(positions.len(), 1);
+                assert_eq!(positions[0].offset(), 81);
+                assert_eq!(positions[0].byte_len(), 120);
+                exported_spends += 1;
+            }
+        }
+        assert_eq!(
+            exported_spends, 1,
+            "the covered spend survives export without its below-floor creation"
+        );
+
+        let mut bytes = header.encode().to_vec();
+        bytes.extend_from_slice(&body);
+        let artifact_path = scratch.path().join("positive-floor.dat");
+        std::fs::write(&artifact_path, &bytes)?;
+        let target = ManifestArtifactTarget {
+            artifact_path,
+            base_height: base.height,
+            base_hash: base.hash,
+            floor,
+            network: Network::Regtest,
+            index_format: index_format_version(),
+            sha256: Sha256::digest(&bytes).into(),
+            size_bytes: u64::try_from(bytes.len())?,
+            chain_tx_count: 2,
+        };
+        let receiver_dir = tempdir()?;
+        let receiver_store = Arc::new(RocksDbStore::open(receiver_dir.path())?);
+        let receiver = RwLock::new(IndexWriter::open(Arc::clone(&receiver_store), 1)?);
+        crate::portable::restore::attach_script_history_artifact(
+            &receiver,
+            &target,
+            &[[0; 32], blocks[0].parent_hash, base.hash],
+            scratch.path(),
+            &SpillBudget::new(u64::MAX),
+        )?;
+        for (key, _) in tx_directory(&*receiver_store)? {
+            let (_, txid, _) = decode_tx_dir_key(&key).ok_or("restored transaction identity")?;
+            assert_ne!(txid, funding_id, "restore must not fabricate the creation");
+        }
+        let restored = SegmentSnapshot::open(receiver_store.snapshot()?)?;
+        let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&funding_id)), 3);
+        let rows = restored.spending_rows(&outpoint, whole_page_limit())?;
+        assert!(rows.complete);
+        assert_eq!(rows.rows.len(), 1, "restore retains the covered spender");
+        assert_eq!(rows.rows[0].row.height(), floor);
+        let positions =
+            TxPositionValue::decode(&rows.rows[0].value).ok_or("restored spender positions")?;
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].offset(), 81);
+        assert_eq!(positions[0].byte_len(), 120);
+        let unrelated = OutPoint::new(outpoint.txid, 4);
+        let absent = restored.spending_rows(&unrelated, whole_page_limit())?;
+        assert!(absent.complete);
+        assert!(absent.rows.is_empty(), "another vout has no spender");
         Ok(())
     }
 }

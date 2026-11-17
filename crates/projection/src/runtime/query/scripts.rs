@@ -124,6 +124,38 @@ impl DerivedIndexQueryEngine {
         Ok(outputs.len() != before)
     }
 
+    fn latest_funding_height(
+        &self,
+        snapshot: &dyn TxIndexSnapshot,
+        prefix: &ReadPrefix,
+        budget: &mut QueryBudget,
+        txid: &Txid,
+    ) -> Result<Option<u32>, TxQueryError> {
+        let limit = budget.next_scan_limit()?;
+        let scan = snapshot
+            .funding_transaction_rows(txid, limit)
+            .map_err(storage_error)?;
+        budget.accept_completed_scan(
+            scan.complete,
+            TxUnavailableCause::PrefixScanTruncated,
+            scan.examined_rows,
+            scan.encoded_bytes,
+        )?;
+        let mut latest = None;
+        for transaction in scan.rows {
+            if transaction.txid != *txid
+                || !prefix.covers(transaction.height)
+                || latest.is_some_and(|height| transaction.height <= height)
+            {
+                continue;
+            }
+            if self.resolve_hash_at_height(transaction.height, prefix)? == transaction.block_hash {
+                latest = Some(transaction.height);
+            }
+        }
+        Ok(latest)
+    }
+
     pub(super) fn spender_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
@@ -132,6 +164,11 @@ impl DerivedIndexQueryEngine {
         outpoint: &OutPoint,
     ) -> Result<Option<SpendingRecord>, TxQueryError> {
         let rows = Self::scan_spending_rows(snapshot, budget, outpoint)?;
+        if rows.is_empty() {
+            return Self::scoped_absence(prefix, "script history");
+        }
+        let funding_height =
+            self.latest_funding_height(snapshot, prefix, budget, &outpoint.txid)?;
         let mut last_height = None;
         let mut below_floor = false;
         for row in rows {
@@ -140,14 +177,26 @@ impl DerivedIndexQueryEngine {
                 continue;
             }
             last_height = Some(height);
+            if funding_height.is_some_and(|funding_height| height < funding_height) {
+                continue;
+            }
             if !prefix.covers(height) {
                 if height < prefix.floor {
                     below_floor = true;
                 }
                 continue;
             }
+            let positions = Self::validated_positions(&row.value)?;
             let hash = self.resolve_hash_at_height(height, prefix)?;
-            if let Some(positions) = Self::validated_positions(&row.value)? {
+            if funding_height == Some(height) {
+                if let Some(record) =
+                    self.spender_after_funding_in_block(budget, height, hash, outpoint)?
+                {
+                    return Ok(Some(record));
+                }
+                continue;
+            }
+            if let Some(positions) = positions {
                 for &position in positions {
                     let Some(transaction) =
                         self.resolve_positioned_transaction(budget, height, hash, position)?
@@ -174,6 +223,29 @@ impl DerivedIndexQueryEngine {
             ));
         }
         Self::scoped_absence(prefix, "script history")
+    }
+
+    fn spender_after_funding_in_block(
+        &self,
+        budget: &mut QueryBudget,
+        height: u32,
+        hash: super::Hash256,
+        outpoint: &OutPoint,
+    ) -> Result<Option<SpendingRecord>, TxQueryError> {
+        let block = self.resolve_block(budget, height, hash)?;
+        let funding_index = block
+            .txs
+            .iter()
+            .rposition(|transaction| transaction.txid() == outpoint.txid)
+            .ok_or_else(|| {
+                TxQueryError::Storage("funding transaction missing from canonical block".into())
+            })?;
+        for transaction in &block.txs[funding_index + 1..] {
+            if let Some(record) = Self::spending_input(transaction, height, outpoint)? {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
     }
 
     fn spending_input(
@@ -545,6 +617,203 @@ mod tests {
     use bitcoin_rs_storage::PrefixScanLimit;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    // IDX-02, IDX-12
+    #[test]
+    fn spender_uses_indexed_creation_when_funding_body_is_pruned()
+    -> Result<(), crate::portable::TestError> {
+        use crate::query_api::ScriptIndexQuery;
+        use crate::runtime::{DerivedIndexRuntime, Generation, QueryEngineLive};
+        use crate::{IndexCapabilities, IndexReader, IndexWriter, Indexer};
+        use bitcoin_rs_consensus::primitives::{
+            Amount, Block, BlockHash, LockTime, Network, Script, Sequence, TxIn, TxOut, Witness,
+            consensus_bytes,
+        };
+        use bitcoin_rs_execution::chain::{
+            BlockTree, BlockTreeReader, NodeStatus, TipReader, TipSnapshot, regtest_fixture,
+        };
+        use bitcoin_rs_storage::block_body::{BlockBodyReadError, BlockBodySource};
+        use bitcoin_rs_storage::{ColumnFamily, KvStore};
+        use std::sync::Arc;
+
+        struct FundingCoin<'a>(&'a Tx);
+
+        impl crate::SpentCoins for FundingCoin<'_> {
+            fn spent_coin(&self, txid: &[u8; 32], vout: u32) -> Option<crate::SpentCoin<'_>> {
+                if txid != self.0.txid().as_bytes() {
+                    return None;
+                }
+                let output = self.0.outputs.get(usize::try_from(vout).ok()?)?;
+                Some(crate::SpentCoin {
+                    script: output.script_pubkey.as_bytes(),
+                    value: output.value.to_sat(),
+                    height: 1,
+                    coinbase: true,
+                })
+            }
+        }
+
+        struct RetainedSpendingBody {
+            block: Block,
+            funding_reads: AtomicUsize,
+        }
+
+        impl BlockBodySource for RetainedSpendingBody {
+            fn block_body(
+                &self,
+                height: u32,
+                hash: BlockHash,
+            ) -> Result<Option<Vec<u8>>, BlockBodyReadError> {
+                if height == 1 {
+                    self.funding_reads.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok((height == 2 && hash == self.block.block_hash())
+                    .then(|| consensus_bytes(&self.block)))
+            }
+        }
+
+        let genesis = Network::Regtest.genesis_block();
+        let creation = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
+        let outpoint = OutPoint::new(creation.txs[0].txid(), 0);
+        let spending = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::new(),
+            }],
+        };
+        let mut spent = regtest_fixture::mined_regtest_child_at(creation.block_hash(), 2)?;
+        spent.txs.push(spending.clone());
+        spent.header.merkle_root = regtest_fixture::merkle_root(&spent.txs)
+            .ok_or("the spending block has transactions")?;
+        regtest_fixture::mine_block_to_declared_target(&mut spent)?;
+        let directory = tempfile::tempdir()?;
+        let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(directory.path())?);
+        let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+        writer.anchor_watermark(
+            IndexCapabilities::SCRIPT_HISTORY,
+            IndexWatermark {
+                height: 0,
+                hash: *genesis.block_hash().as_bytes(),
+            },
+            1,
+        )?;
+        for (height, block) in [(1, &creation), (2, &spent)] {
+            let prepared = writer.prepare_block_with_spent_scripts(
+                IndexCapabilities::SCRIPT_HISTORY,
+                height,
+                *block.block_hash().as_bytes(),
+                &consensus_bytes(block),
+                &FundingCoin(&creation.txs[0]),
+            )?;
+            let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+                max_rows: usize::MAX,
+                max_bytes: usize::MAX,
+            });
+            assert!(batch.try_push(prepared).is_ok());
+            writer.commit_forward(batch)?;
+        }
+        let indexer = Arc::new(Indexer::new(Arc::clone(&store)));
+        assert_eq!(
+            indexer
+                .snapshot()?
+                .funding_transaction_rows(
+                    &outpoint.txid,
+                    PrefixScanLimit {
+                        max_rows: 10,
+                        max_bytes: 1_000,
+                    },
+                )?
+                .rows
+                .len(),
+            1,
+            "the creation remains indexed after its body is pruned",
+        );
+        let mut tree = BlockTree::new();
+        tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+        tree.insert_header(creation.header, NodeStatus::HeaderValid)?;
+        let tip_id = tree.insert_header(spent.header, NodeStatus::HeaderValid)?;
+        let node = tree.node(tip_id)?;
+        let tip = TipSnapshot {
+            tip_id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+            chain_tx_count: node.chain_tx_count,
+        };
+        let body = Arc::new(RetainedSpendingBody {
+            block: spent,
+            funding_reads: AtomicUsize::new(0),
+        });
+        let (wake_tx, _wake_rx) = crossbeam_channel::bounded(1);
+        let engine = DerivedIndexQueryEngine::new(
+            DerivedIndexRuntime::new(wake_tx),
+            indexer,
+            BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(tree))),
+            TipReader::new(Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(tip))))),
+            Some(body.clone()),
+            QueryEngineLive {
+                enabled: IndexCapabilities::SCRIPT_HISTORY,
+                generation: Arc::new(Generation::new(1)),
+                historical_verified: None,
+                chain_transition: None,
+            },
+        );
+        let expected = Some(SpendingRecord {
+            txid: spending.txid(),
+            height: 2,
+            vin: 0,
+        });
+        assert_eq!(engine.spender(outpoint)?, expected);
+        let answer = engine.spender_at_answer(outpoint)?;
+        assert_eq!(answer.coverage.floor, 1);
+        assert_eq!(answer.coverage.height, 2);
+        assert_eq!(answer.value, expected);
+        let mut collision = *outpoint.txid.as_bytes();
+        collision[31] ^= 1;
+        let position = store
+            .get(
+                ColumnFamily::TxDir,
+                &crate::segment::format::encode_tx_dir_key(0, spending.txid().as_bytes(), 2),
+            )?
+            .ok_or("the spending transaction has a directory row")?;
+        let (_, ordinal, offset, len) = crate::segment::format::decode_tx_dir_value(&position)
+            .ok_or("the spending directory row is valid")?;
+        let mut batch = store.new_batch();
+        for (txid, hash) in [
+            (collision, *body.block.block_hash().as_bytes()),
+            (*outpoint.txid.as_bytes(), *genesis.block_hash().as_bytes()),
+        ] {
+            batch.put(
+                ColumnFamily::TxDir,
+                &crate::segment::format::encode_tx_dir_key(0, &txid, 2),
+                &crate::segment::format::encode_tx_dir_value(&hash, ordinal, offset, len),
+            );
+        }
+        batch.put(
+            ColumnFamily::SpendDir,
+            &crate::segment::format::encode_spend_dir_key(0, outpoint.txid.as_bytes(), 1, 2),
+            &crate::segment::format::encode_spend_dir_value(ordinal),
+        );
+        store.write(batch)?;
+        assert_eq!(engine.spender(outpoint)?, expected);
+        assert_eq!(engine.spender_at_answer(outpoint)?.value, expected);
+        assert_eq!(
+            engine
+                .spender_at_answer(OutPoint::new(outpoint.txid, 1))?
+                .value,
+            None,
+        );
+        assert_eq!(body.funding_reads.load(Ordering::Relaxed), 0);
+        Ok(())
+    }
+
     struct HistorySnapshot {
         script: ScriptHash,
         rows: Vec<(u32, Vec<ScriptHistoryOccurrence>)>,
@@ -632,6 +901,19 @@ mod tests {
                 .collect();
             Ok(TxIndexScan {
                 rows,
+                encoded_bytes: 0,
+                complete: true,
+            })
+        }
+
+        fn funding_transaction_rows(
+            &self,
+            _txid: &Txid,
+            _limit: PrefixScanLimit,
+        ) -> Result<crate::FundingTransactionScan, IndexError> {
+            Ok(crate::FundingTransactionScan {
+                rows: Vec::new(),
+                examined_rows: 0,
                 encoded_bytes: 0,
                 complete: true,
             })

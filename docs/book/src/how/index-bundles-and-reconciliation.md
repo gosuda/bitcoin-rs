@@ -19,7 +19,7 @@ A watermark is 36 bytes: the height little-endian, then the 32-byte block hash (
 
 Compact filter rows live in the segment tail: `encode_filter_key` keys each row by segment generation and height, and `encode_filter_value` stores `block_hash || filter_hash || header || gcs` (`crates/projection/src/segment/format.rs`). `build_filter` adds every non-empty output script except `OP_RETURN` and every spent script, and derives the BIP158 hash keys from the first 16 bytes of the block hash (`crates/projection/src/segment/tail.rs`). `append_filter` hashes `filter_hash || previous_header` to extend the BIP157 header chain.
 
-The row format is version 9, written under key `[0x00, b'V']` with value `09 00 00 00` (`INDEX_FORMAT_VERSION_VALUE` in `crates/projection/src/types.rs`). `IndexWriter::open` accepts that value only. Any other stored value returns `UnsupportedTxIndexFormatVersion`; rows with no version marker at all return `LegacyCursorlessIndex` (`crates/projection/src/index/write.rs`). The runtime treats both as a rebuild request: it logs `resetting incompatible derived transaction index for rebuild` and calls `IndexWriter::reset_index` (`crates/projection/src/runtime/startup.rs`). There is no in-place migration.
+The row format is version 10, written under key `[0x00, b'V']` with value `0a 00 00 00` (`INDEX_FORMAT_VERSION_VALUE` in `crates/projection/src/types.rs`). `IndexWriter::open` accepts that value only. Any other stored value returns `UnsupportedTxIndexFormatVersion`; rows with no version marker at all return `LegacyCursorlessIndex` (`crates/projection/src/index/write.rs`). The runtime treats both as a rebuild request: it logs `resetting incompatible derived transaction index for rebuild` and calls `IndexWriter::reset_index` (`crates/projection/src/runtime/startup.rs`). There is no in-place migration.
 
 ## The write path is one conditioned batch
 
@@ -154,7 +154,7 @@ Real header from a 20-block regtest export:
 00000010: 00fa bfb5 da00 0000 14d7 a239 1f09 0131  ...........9...1
 ```
 
-`01` is the family, `01 00 00 00` the artifact version, `09 00 00 00` the index format, `fa bf b5 da` the regtest magic, and `00 00 00 14` the base height 20.
+`01` is the family, `01 00 00 00` the artifact version, `0a 00 00 00` the index format, `fa bf b5 da` the regtest magic, and `00 00 00 14` the base height 20.
 
 ### What import checks, and in what order
 

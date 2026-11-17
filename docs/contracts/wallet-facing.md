@@ -48,8 +48,13 @@ Wallet keys, coin selection, and signing stay in the external process.
   - `rpc::server::tests::listeners::public_saturation_preserves_management_and_recovers`
   - `split_rpc_listeners_start_and_join_through_node_services`
   - `public_bind_failure_rolls_back_management_binding_and_node_state`
-- Every read captures the applied-tip publication and answers from one coherent view.
-- A moved chain generation MUST return the declared unavailable response, never a mixed-tip page.
+- Every read answers from one coherent view.
+- Composed HTTP reads capture the applied-tip publication when they combine index state with mempool data.
+- Public address and scripthash `txs/mempool` reads include confirmed prevout or unspent index state. They are not pure mempool reads.
+- If that publication changes during the read, the response MUST return `503 Service Unavailable`, never a mixed-tip page.
+- This rule includes extension, replacement, and ABA republication.
+- Ordinary extension must not invalidate immutable historical owner reads. Confirmed-only answers retain their captured occurrence identity. Public `/api` mempool-only reads remain unfenced.
+- Proof: `crates/serving/src/esplora.rs` (`composed_history_and_mempool_routes_refuse_reorg_and_aba_publications`) checks the composed fence on extension, replacement, and ABA republication.
 - Transaction rendering resolves a distinct parent at most once per response or bounded backend batch.
 - It retains only referenced outputs until that batch finishes.
 - Backend mempool GETs render at most 25 selected transactions at a time without limiting the response count.
@@ -69,7 +74,7 @@ Wallet keys, coin selection, and signing stay in the external process.
 - Ordinary parent queries enforce their own readiness checks.
 - Losing branch bodies MUST never substitute for authoritative parent history.
 - Missing, pruned, unavailable, and corrupt required data keep their explicit errors.
-- Read-only backend POST batches use the same applied-tip publication fence as GET responses.
+- Read-only backend POST batches use the same applied-tip publication fence as composed GET responses.
 - Proof:
   - `esplora::tests::backend_mempool_get_bounds_prevouts_without_limiting_rows`
   - `backend_mempool_get_keeps_captured_parents_across_batches`
