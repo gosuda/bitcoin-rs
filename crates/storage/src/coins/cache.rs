@@ -450,12 +450,12 @@ impl CoinCache {
         let Some(bound) = table_reservation_bound(needed) else {
             return false;
         };
-        if u64::try_from(bound).unwrap_or(u64::MAX)
-            > self
-                .budget_bytes
-                .saturating_sub(*resident)
-                .saturating_sub(value_bytes)
-        {
+        let old_index_bytes = u64::try_from(shard.index.allocation_size()).unwrap_or(u64::MAX);
+        let available = self
+            .budget_bytes
+            .saturating_sub(resident.saturating_sub(old_index_bytes))
+            .saturating_sub(value_bytes);
+        if u64::try_from(bound).unwrap_or(u64::MAX) > available {
             return false;
         }
         let mut index = HashTable::new();
@@ -491,9 +491,6 @@ impl CoinCache {
         {
             self.grow(shard, resident, value_bytes);
         }
-        if shard.index.capacity() <= shard.entries.len() {
-            self.reindex(shard, resident, value_bytes);
-        }
         let mut freed = 0_u64;
         while !shard.entries.is_empty()
             && (value_bytes > self.budget_bytes.saturating_sub(*resident)
@@ -502,6 +499,12 @@ impl CoinCache {
             let evicted = shard.evict(&self.hasher);
             freed += evicted;
             *resident -= evicted;
+        }
+        if value_bytes <= self.budget_bytes.saturating_sub(*resident)
+            && shard.entries.len() < shard.entries.capacity()
+            && shard.index.capacity() <= shard.entries.len()
+        {
+            self.reindex(shard, resident, value_bytes);
         }
         if value_bytes > self.budget_bytes.saturating_sub(*resident)
             || shard.entries.len() == shard.entries.capacity()
