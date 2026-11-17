@@ -30,6 +30,11 @@ const MAX_DRAIN_BYTES: usize = 64 * 1_024;
 
 const DRAIN_BUDGET: Duration = Duration::from_secs(1);
 
+/// `TcpStream::shutdown` on a duplicated socket does not interrupt a pending
+/// blocking `recv` on Windows, so connection workers poll the stop latch on a
+/// short read tick instead of relying on the socket shutdown to wake them.
+const READ_WAKE_TICK: Duration = Duration::from_millis(250);
+
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 const CONNECTION_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 const LISTENER_TOKEN: mio::Token = mio::Token(0);
@@ -530,6 +535,7 @@ struct RequestDeadlineStream {
     idle_timeout: Duration,
     deadline: Instant,
     applied_timeout: Option<Duration>,
+    shutdown: Option<bitcoin_rs_chain::LatchReader>,
 }
 
 impl RequestDeadlineStream {
@@ -539,7 +545,13 @@ impl RequestDeadlineStream {
             idle_timeout,
             deadline: Instant::now() + idle_timeout,
             applied_timeout: None,
+            shutdown: None,
         }
+    }
+
+    fn with_shutdown(mut self, shutdown: bitcoin_rs_chain::LatchReader) -> Self {
+        self.shutdown = Some(shutdown);
+        self
     }
 
     fn reset_deadline(&mut self, budget: Duration) {
@@ -556,19 +568,37 @@ impl Read for RequestDeadlineStream {
         if buffer.is_empty() {
             return Ok(0);
         }
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "HTTP request deadline exceeded",
-            ));
+        loop {
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "HTTP request deadline exceeded",
+                ));
+            }
+            let timeout = self.idle_timeout.min(remaining).min(READ_WAKE_TICK);
+            if self.applied_timeout != Some(timeout) {
+                self.stream.set_read_timeout(Some(timeout))?;
+                self.applied_timeout = Some(timeout);
+            }
+            match self.stream.read(buffer) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if self
+                        .shutdown
+                        .as_ref()
+                        .is_some_and(bitcoin_rs_chain::LatchReader::is_triggered)
+                    {
+                        return Ok(0);
+                    }
+                }
+                result => return result,
+            }
         }
-        let timeout = self.idle_timeout.min(remaining);
-        if self.applied_timeout != Some(timeout) {
-            self.stream.set_read_timeout(Some(timeout))?;
-            self.applied_timeout = Some(timeout);
-        }
-        self.stream.read(buffer)
     }
 }
 
@@ -581,7 +611,9 @@ fn serve_connection(
     surface: RpcSurface,
 ) -> io::Result<()> {
     stream.set_write_timeout(Some(idle_timeout))?;
-    let mut reader = BufReader::new(RequestDeadlineStream::new(stream, idle_timeout));
+    let mut reader = BufReader::new(
+        RequestDeadlineStream::new(stream, idle_timeout).with_shutdown(handler.cancellation()),
+    );
     loop {
         reader.get_mut().reset_deadline(idle_timeout);
         if reader.fill_buf()?.is_empty() {

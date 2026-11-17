@@ -66,6 +66,10 @@ impl Handler {
         self.stop.reader().is_triggered()
     }
 
+    pub(crate) fn cancellation(&self) -> bitcoin_rs_chain::LatchReader {
+        self.stop.reader()
+    }
+
     pub(crate) fn stop(&self) {
         self.stop.trigger();
         if let Some(owner) = &self.ctx.chain.active_tip_wait {
