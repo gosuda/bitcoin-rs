@@ -458,8 +458,17 @@ impl CoinCache {
         if u64::try_from(bound).unwrap_or(u64::MAX) > available {
             return false;
         }
+        let old_index = std::mem::replace(&mut shard.index, HashTable::new());
+        *resident = resident.saturating_sub(old_index_bytes);
+        drop(old_index);
         let mut index = HashTable::new();
         if index.try_reserve(needed, |_| 0).is_err() {
+            for entry in shard.entries.drain(..) {
+                *resident = resident.saturating_sub(
+                    u64::try_from(entry.value.len()).unwrap_or(u64::MAX),
+                );
+            }
+            shard.hand = 0;
             return false;
         }
         for (slot, entry) in shard.entries.iter().enumerate() {
@@ -467,9 +476,8 @@ impl CoinCache {
                 self.hasher.hash_one(shard.entries[slot].key.0)
             });
         }
-        *resident -= shard.backing_bytes();
+        *resident += u64::try_from(index.allocation_size()).unwrap_or(u64::MAX);
         shard.index = index;
-        *resident += shard.backing_bytes();
         true
     }
 
@@ -500,8 +508,7 @@ impl CoinCache {
             freed += evicted;
             *resident -= evicted;
         }
-        if value_bytes <= self.budget_bytes.saturating_sub(*resident)
-            && shard.entries.len() < shard.entries.capacity()
+        if shard.entries.len() < shard.entries.capacity()
             && shard.index.capacity() <= shard.entries.len()
         {
             self.reindex(shard, resident, value_bytes);
