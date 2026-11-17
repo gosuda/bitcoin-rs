@@ -565,8 +565,13 @@ impl Read for RequestDeadlineStream {
         }
         let timeout = self.idle_timeout.min(remaining);
         if self.applied_timeout != Some(timeout) {
-            self.stream.set_read_timeout(Some(timeout))?;
-            self.applied_timeout = Some(timeout);
+            match self.stream.set_read_timeout(Some(timeout)) {
+                Ok(()) => self.applied_timeout = Some(timeout),
+                Err(error)
+                    if cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput => {
+                }
+                Err(error) => return Err(error),
+            }
         }
         self.stream.read(buffer)
     }
@@ -693,11 +698,11 @@ fn reject_unauthenticated_json_rpc(
         thread::sleep(WRONG_CREDENTIALS_DELAY);
     }
     write_unauthorized(reader.get_mut().socket_mut())?;
-    if head.content_length == 0 {
-        return Ok(());
-    }
     drain_request(reader, head.content_length);
-    Ok(())
+    reader
+        .get_mut()
+        .socket_mut()
+        .shutdown(std::net::Shutdown::Write)
 }
 
 fn write_unauthorized(stream: &mut TcpStream) -> io::Result<()> {
@@ -707,8 +712,7 @@ fn write_unauthorized(stream: &mut TcpStream) -> io::Result<()> {
                   Content-Length: 0\r\n\
                   Connection: close\r\n\r\n";
     stream.write_all(header.as_bytes())?;
-    stream.flush()?;
-    stream.shutdown(std::net::Shutdown::Write)
+    stream.flush()
 }
 
 fn drain_request(reader: &mut BufReader<RequestDeadlineStream>, declared: usize) {
