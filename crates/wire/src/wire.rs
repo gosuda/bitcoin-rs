@@ -1399,6 +1399,13 @@ mod tests {
             largest_body_read <= APPROVED_RECEIVE_READ_STEP,
             "legacy body read requested {largest_body_read} bytes"
         );
+        assert!(
+            receiver
+                .body
+                .as_ref()
+                .is_none_or(|body| body.payload.capacity() <= 2 * 100),
+            "a cancelled frame must not retain an allocation sized by the declared payload"
+        );
         Ok(())
     }
 
