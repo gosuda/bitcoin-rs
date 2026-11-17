@@ -38,3 +38,4 @@ __pycache__/
 # write here and must stay untracked.
 fuzz/corpus/
 docs/lean/.lake/
+.outline/

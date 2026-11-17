@@ -169,8 +169,10 @@ pub(crate) enum TestError {
     #[error("exhausted: {0}")]
     Exhausted(&'static str),
     #[error("worker panicked: {0}")]
+    #[cfg_attr(not(unix), allow(dead_code))]
     WorkerPanicked(&'static str),
     #[error("blocked past the deadline: {0}")]
+    #[cfg_attr(not(unix), allow(dead_code))]
     Blocked(&'static str),
     #[error("unexpected success: {0}")]
     UnexpectedSuccess(&'static str),

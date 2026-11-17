@@ -426,7 +426,9 @@ pub(super) fn load_verified(
 mod tests {
     use super::*;
 
-    use crate::test_fixtures::{TestError, TestResult};
+    #[cfg(unix)]
+    use crate::test_fixtures::TestError;
+    use crate::test_fixtures::TestResult;
 
     fn native_fixture() -> TestResult<(Vec<u8>, &'static AssumeUtxoData)> {
         let core = include_bytes!("../../utxo/tests/fixtures/core-v2/core200.dat");

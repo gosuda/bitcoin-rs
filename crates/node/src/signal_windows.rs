@@ -25,7 +25,7 @@ impl ShutdownHandler {
                     for id in registrations {
                         signal_hook::low_level::unregister(id);
                     }
-                    return Err(error.into());
+                    return Err(error);
                 }
             }
         }
