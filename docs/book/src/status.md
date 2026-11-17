@@ -22,7 +22,7 @@ This page maps each surface to its honest state and to the file that owns the ev
 | Silent Payments | experimental, default-off `silent-payments` feature | [`ecosystem-compat.toml`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/api/ecosystem-compat.toml), [Silent Payments limits](https://github.com/gosuda/bitcoin-rs/blob/main/docs/silent-payments.md) |
 | Compressed transactions | experimental, default-off `--compressed-transactions` extension | [BIP support matrix](https://github.com/gosuda/bitcoin-rs/blob/main/docs/bip-support.md) |
 | Stratum V2 template adapter | experimental regtest example, not a compatibility commitment | [`ecosystem-compat.toml`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/api/ecosystem-compat.toml) |
-| USDT tracepoints | implemented ABI, asserted against built probe notes; live tracing run planned | [`ecosystem-compat.toml`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/api/ecosystem-compat.toml), [tracing](https://github.com/gosuda/bitcoin-rs/blob/main/docs/tracing.md) |
+| USDT tracepoints | implemented ABI, asserted against built probe notes; live tracing run recorded on 2026-09-29 | [`ecosystem-compat.toml`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/api/ecosystem-compat.toml), [tracing](https://github.com/gosuda/bitcoin-rs/blob/main/docs/tracing.md) |
 | Bitcoin Core IPC interfaces | intentionally unsupported | [`ecosystem-compat.toml`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/api/ecosystem-compat.toml) |
 | BIP330 Erlay | unsupported; recorded as deferred | [BIP adoption policy, applied decisions](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/bip-adoption.md) |
 

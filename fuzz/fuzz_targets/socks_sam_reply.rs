@@ -2,11 +2,11 @@
 
 use std::io::Cursor;
 
-use bitcoin_rs_p2p::DialFailure;
-use bitcoin_rs_p2p::sam::{
+use bitcoin_rs_wire::DialFailure;
+use bitcoin_rs_wire::sam::{
     check_hello, destination_identity_len, i2p_base64_decode, parse_fields, require_ok,
 };
-use bitcoin_rs_p2p::socks::{
+use bitcoin_rs_wire::socks::{
     parse_auth_reply, parse_connect_reply, parse_isolated_greeting, parse_no_auth_greeting,
 };
 use libfuzzer_sys::fuzz_target;

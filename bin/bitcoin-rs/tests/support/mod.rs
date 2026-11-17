@@ -16,7 +16,7 @@ pub(crate) enum TestError {
     #[error(transparent)]
     ConsensusHex(#[from] bitcoin::consensus::encode::FromHexError),
     #[error(transparent)]
-    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]
     Sonic(#[from] sonic_rs::Error),
     #[error(transparent)]

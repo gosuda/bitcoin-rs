@@ -1,5 +1,5 @@
 /-
-Block decoding admission accounting for `crates/p2p/src/inbound/block_memory.rs`.
+Block decoding admission accounting for `crates/wire/src/inbound/block_memory.rs`.
 -/
 
 namespace P2p.BlockMemory

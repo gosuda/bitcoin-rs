@@ -35,7 +35,7 @@ jobs:
     outputs:
       targets: ${{ steps.targets.outputs.targets }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Read targets from the fuzz manifest
@@ -65,15 +65,16 @@ jobs:
       matrix:
         target: ${{ fromJSON(needs.fuzz-matrix.outputs.targets) }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Check out evolving corpus
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: gosuda/bitcoin-rs-fuzz-corpus
           path: .fuzz-corpus
           persist-credentials: false
+      - uses: ./.github/actions/native-deps
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
         with:
           components: llvm-tools-preview
@@ -96,7 +97,7 @@ jobs:
             "campaign-output"
       - name: Upload corpus and campaign evidence
         if: ${{ always() && !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: daily-fuzz-${{ matrix.target }}
           retention-days: 14
@@ -121,13 +122,13 @@ jobs:
           path: campaign-output
           merge-multiple: true
       - name: Check out policy owner
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: policy-owner
           fetch-depth: 1
           persist-credentials: false
       - name: Check out corpus repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: gosuda/bitcoin-rs-fuzz-corpus
           path: corpus-repository
@@ -216,7 +217,7 @@ jobs:
           CORPUS_VERDICTS_WRITE: "1"
         run: |
           set -euo pipefail
-          cargo test -p bitcoin-rs-primitives --test suite differential::
+          cargo test -p bitcoin-rs-consensus --test suite differential::
           git -C ../corpus-repository add corpus/verdicts.json
       - name: Commit and push corpus
         if: steps.apply.outputs.changed == 'true'

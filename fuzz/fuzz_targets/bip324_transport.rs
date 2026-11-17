@@ -6,7 +6,7 @@ use bitcoin::p2p::Magic;
 use bitcoin::hashes::Hash as _;
 use bitcoin::secp256k1::rand::SeedableRng as _;
 use bitcoin::secp256k1::rand::rngs::StdRng;
-use bitcoin_rs_p2p::bip324::{
+use bitcoin_rs_wire::bip324::{
     Established, Handshake, PacketReader, RecvCipher, SendCipher, Step, TransportError,
     is_poll_timeout,
 };

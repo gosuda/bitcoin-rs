@@ -1,0 +1,14 @@
+{
+  "canonical_coinbase_txid": "dbc31ec2aa4769a1a9822c6df6c871fc0b4cf0779e90eb3c224d8a6d29c04211",
+  "checkpoint_height": 101,
+  "funding_txid": "c03ee97f6ba41e611a48c9197e25a5b2825e03e759bc5c4d83ea5a708261d363",
+  "funding_vout": 0,
+  "hash_serialized_3": "3acf1563fbb6efb42b6768518d9f3474a42500d6e57799ec90561371af9acfb6",
+  "height": 104,
+  "spend_txid": "0c3bc9f6e61c9d26d17e13bdbe49bfa17c726081a90b1befe0b84b98dd8e96d7",
+  "stale_coinbase_txid": "61d4dfa104e6fdd3f8f5646ff8c41b238d2a48731058649cbe13e74b723b3175",
+  "tip_hash": "43b409b4f84dcc3df97a68ee7df013f9954d4fd85f4125b2ced214408ec30257",
+  "total_amount": 5199.99999,
+  "txouts": 104,
+  "untouched_txid": "594163ce4b841144204a6a28a5b2eee459b3c9e2e2b8e9f69d14701c4b83f6a0"
+}

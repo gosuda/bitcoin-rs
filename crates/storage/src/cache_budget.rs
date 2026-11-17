@@ -9,6 +9,31 @@ pub struct CacheBudgetShare {
     pub bytes: u64,
 }
 
+/// Allocation of the chainstate cache allowance between the backend engine
+/// and the coin cache.
+///
+/// The shares sum to `chainstate_bytes` exactly: the engine share floors and
+/// the coin share takes the remainder.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChainstateCacheBudget {
+    pub engine_bytes: u64,
+    pub coin_bytes: u64,
+}
+
+/// Splits a chainstate cache allowance in half between engine and coins.
+///
+/// The engine share floors to whole bytes and the coin share takes the
+/// remainder, so `engine_bytes + coin_bytes` always equals
+/// `chainstate_bytes`.
+#[must_use]
+pub fn split_chainstate_cache_budget(chainstate_bytes: u64) -> ChainstateCacheBudget {
+    let engine_bytes = chainstate_bytes / 2;
+    ChainstateCacheBudget {
+        engine_bytes,
+        coin_bytes: chainstate_bytes - engine_bytes,
+    }
+}
+
 /// Clamps a requested cache budget to the documented bounds.
 ///
 /// A zero, a minimum, or an overflow input all produce a usable budget.
@@ -50,7 +75,10 @@ fn cache_shares(total_bytes: u64, txindex_bytes: u64) -> Vec<CacheBudgetShare> {
 
 #[cfg(test)]
 mod tests {
-    use super::{split_cache_budget_with_txindex, split_cache_budget_without_txindex};
+    use super::{
+        split_cache_budget_with_txindex, split_cache_budget_without_txindex,
+        split_chainstate_cache_budget,
+    };
 
     #[test]
     fn a_maximal_budget_keeps_the_floored_txindex_share() {
@@ -66,5 +94,13 @@ mod tests {
         assert_eq!(shares[0].namespace, "chainstate");
         assert_eq!(shares[0].bytes, 7_654_321);
         assert_eq!(shares[1].bytes, 0);
+    }
+
+    #[test]
+    fn an_odd_chainstate_allowance_gives_the_remainder_to_coins() {
+        let budget = split_chainstate_cache_budget(7_654_321);
+        assert_eq!(budget.engine_bytes, 3_827_160);
+        assert_eq!(budget.coin_bytes, 3_827_161);
+        assert_eq!(budget.engine_bytes + budget.coin_bytes, 7_654_321);
     }
 }
