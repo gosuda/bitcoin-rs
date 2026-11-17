@@ -111,9 +111,9 @@ The mutation side is owned by [docs/contracts/mempool-mutations.md](https://gith
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| A confirmed parent leaves an unmined child and publishes only the parent | `remove_for_block_leaves_unmined_child_and_publishes_only_the_parent` | [`crates/mempool/src/gateway/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/mempool/src/gateway/tests.rs) |
-| A native package aggregates CPFP atomically and ignores input order | `native_package_aggregates_cpfp_atomically_and_ignores_input_order` | [`crates/mempool/src/package/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/mempool/src/package/tests.rs) |
-| Reorg re-admission admits parent then child under the fence | `reconsider_disconnected_admits_parent_then_child_under_the_guard` | [`crates/mempool/src/admission/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/mempool/src/admission/tests.rs) |
-| A shared parent forms one joint chunk | `shared_parent_requires_a_joint_chunk` | [`crates/mempool/src/fee_diagram/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/mempool/src/fee_diagram/tests.rs) |
+| A confirmed parent leaves an unmined child and publishes only the parent | `remove_for_block_leaves_unmined_child_and_publishes_only_the_parent` | [`crates/mempool/src/gateway.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/mempool/src/gateway.rs) |
+| A native package aggregates CPFP atomically and ignores input order | `native_package_aggregates_cpfp_atomically_and_ignores_input_order` | [`crates/mempool/src/package.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/mempool/src/package.rs) |
+| Reorg re-admission admits parent then child under the fence | `reconsider_disconnected_admits_parent_then_child_under_the_guard` | [`crates/mempool/src/admission.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/mempool/src/admission.rs) |
+| A shared parent forms one joint chunk | `shared_parent_requires_a_joint_chunk` | [`crates/mempool/src/fee_diagram.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/mempool/src/fee_diagram.rs) |
 
 The operator-facing policy differences are in [docs/policies/mempool-policy.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/mempool-policy.md). The [architecture](architecture.md) chapter shows when block effects reach the pool, the [p2p](p2p.md) chapter covers relay after admission, and the [indexes](index.md) chapter covers the confirmed rows that replace evicted entries.

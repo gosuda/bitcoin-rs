@@ -40,7 +40,7 @@ fn coinbase_input_sigop_growth_agrees_with_core() -> Result<()> {
             block.header.nonce += 1;
         }
         let bytes = bitcoin::consensus::serialize(&block);
-        let native = bitcoin_rs_primitives::deserialize(&bytes)?;
+        let native = bitcoin_rs_consensus::primitives::deserialize(&bytes)?;
         let result = core.rpc(
             "submitblock",
             &json!([bitcoin::consensus::encode::serialize_hex(&block)]),
@@ -94,7 +94,8 @@ fn level_one_body_rules_agree_with_pinned_core_block_rejections() {
         bitcoin::consensus::encode::deserialize_hex(raw.as_str().expect("hex block"))
             .expect("decode reference block");
     let original_bytes = bitcoin::consensus::serialize(&original);
-    let native = bitcoin_rs_primitives::deserialize(&original_bytes).expect("native block decode");
+    let native = bitcoin_rs_consensus::primitives::deserialize(&original_bytes)
+        .expect("native block decode");
     assert!(verify_block_non_contextual(&native).is_ok());
 
     for (fault, reason) in [
@@ -138,8 +139,8 @@ fn level_one_body_rules_agree_with_pinned_core_block_rejections() {
             block.header.nonce = block.header.nonce.checked_add(1).expect("regtest PoW");
         }
         let bytes = bitcoin::consensus::serialize(&block);
-        let native =
-            bitcoin_rs_primitives::deserialize(&bytes).expect("native damaged block decode");
+        let native = bitcoin_rs_consensus::primitives::deserialize(&bytes)
+            .expect("native damaged block decode");
         assert!(verify_block_non_contextual(&native).is_err(), "{fault}");
         assert_eq!(
             core.rpc(

@@ -68,10 +68,6 @@ else
   url="https://github.com/apalache-mc/apalache/releases/download/v$version/$archive"
   install="target/tools/apalache-$version"
   binary="$install/bin/apalache-mc"
-  # Hosted runners expose the pinned Java major here; local runs may use an
-  # explicitly selected JAVA_HOME instead. Never require Java for Core tests.
-  # WHY JAVA_HOME_25_X64: legacy variable name; whatever JDK it selects must
-  # still match the formal contract's observed-Java row below.
   export JAVA_HOME="${JAVA_HOME_25_X64:-${JAVA_HOME:?set JAVA_HOME for the formal lane}}"
   [[ -x "$JAVA_HOME/bin/java" ]] || { echo "Java executable missing" >&2; exit 1; }
   # The formal contract records what java -version actually printed

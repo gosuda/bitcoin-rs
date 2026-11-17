@@ -1,5 +1,7 @@
 /target
 **/target
+/build_dir
+**/build_dir
 Cargo.lock.bak
 *.swp
 *.tmp

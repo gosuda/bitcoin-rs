@@ -2,7 +2,7 @@
 
 Indexes are optional derived state. Every index is off by default, and when one is enabled a single worker thread maintains all of them from committed chain events. The node's applied tip never waits for index writes.
 
-The index lives in [`crates/index`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/index). Its contract is [docs/contracts/indexing.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/indexing.md).
+The index lives in [`crates/projection`](https://github.com/gosuda/bitcoin-rs/tree/main/crates/projection). Its contract is [docs/contracts/indexing.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/indexing.md).
 
 | Index | Enabled by | What it answers |
 | --- | --- | --- |
@@ -44,16 +44,16 @@ Each capability stores its rows plus a watermark that pins them to an active-cha
 
 A coverage floor is a per-capability row that states the lowest height from which that capability's history is provable. `TxLookup` stores its floor under one key and `ScriptHistory` under another. A floor of zero means genesis; a positive floor means the history starts above genesis, from pruning or a seeded import. Historical prefix queries use these floors to refuse claims they cannot support.
 
-Row format has a version marker, currently row-format 6. `ScriptLive` rows are 43 bytes: an 8-byte script-hash prefix followed by the outpoint, with an empty value. Readers exact-check the script, so a prefix collision cannot return another script's output.
+Row format has a version marker, currently row-format 10. `ScriptLive` rows have 43-byte keys: an 8-byte script-hash prefix followed by the outpoint. Each row value carries the full script hash and the coin's value, height, and coinbase flag in compact varint form, so readers exact-check the script without another store read: a prefix collision cannot return another script's output.
 
 ## Strict reads and prefix reads
 
 Two read shapes exist and they do not mix:
 
-- Strict `ScriptLive` reads take a chain-transition lock, resolve each locator against the authoritative UTXO set, and return unspent outputs. They have no floor and no scoped absence.
-- Historical prefix reads are the three synchronous `Node` calls `transaction_at_prefix`, `script_history_at_prefix`, and `spender_at_prefix`. They take no live-UTXO or transition lock and return `AtPrefix<T>` with a server-selected `CoveredPrefix { floor, height, hash }`.
+- `ScriptLive` reads are self-contained and lock-free (format 10, PRJ-11); they read stored coin payloads directly without acquiring a chain-transition lock or consulting the authoritative UTXO set.
+- Historical prefix reads are the three synchronous `Node` calls `transaction_at_prefix`, `script_history_at_prefix`, and `spender_at_prefix`. They take no live-UTXO or transition lock and return `Answer<T>` with a server-selected `CoveredPrefix { floor, height, hash }`.
 
-A historical query picks the bounded common ancestor of its capability watermarks and the published tip, reads only heights inside the covered range, then rechecks that the anchor is still on the active chain. If the chain moved, the answer is `Retry`. If the anchor fell below the maximum required floor, the answer is `Unavailable(PrefixBelowFloor)`. A positive floor refuses full-history claims with `HistoryUnproven { floor }`; a standalone spend lookup may still return a scoped `None` (`IDX-12`).
+A historical query pins its serving view epoch and declared capability coverage once. Queries inside coverage return immutable answers regardless of concurrent chain extension or reorg (QRY-03). Queries outside declared coverage return `Unavailable(OutsideCoverage)` (QRY-05). Full history requires floor 0; a standalone spend lookup may return a scoped `None` (`IDX-12`).
 
 Absence means absent in the returned range on the returned chain. It never means globally absent, unspent, or nonexistent, and no mempool data is merged in.
 
@@ -77,7 +77,7 @@ A regtest node started with `--txindex true --scriptindex=full` logs index store
 $ bitcoin-rs --network regtest --data-dir $DATA \
     --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 \
     --txindex true --scriptindex=full
-{"timestamp":"2026-11-01T17:01:17.243411Z","level":"INFO","fields":{"message":"index store recovery in progress","capability":"txindex","namespace":"txindex","backend":"fjall","elapsed_secs":0},"target":"bitcoin_rs_index::runtime::startup"}
+{"timestamp":"2026-11-01T17:01:17.243411Z","level":"INFO","fields":{"message":"index store recovery in progress","capability":"txindex","namespace":"txindex","backend":"rocksdb","elapsed_secs":0},"target":"bitcoin_rs_projection::runtime::startup"}
 ```
 
 The `txindex` namespace exists only because the index was enabled. With all indexes off, the node starts no worker and creates no index namespace (`IDX-01`).
@@ -105,10 +105,10 @@ The worker's catch-up and row writes do not log at `info` in this build, so the 
 
 | Invariant | Test | File |
 | --- | --- | --- |
-| A positive floor scopes absence and refuses a low anchor | `historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor` | [`crates/index/src/runtime/query_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/index/src/runtime/query_tests.rs) |
-| Full history above a positive floor is unproven | `historical_full_history_positive_floor_is_unproven` | [`crates/index/src/runtime/query_tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/index/src/runtime/query_tests.rs) |
-| A coverage floor is stamped and cleared on reset | `anchor_watermark_stamps_a_coverage_floor_that_reset_clears` | [`crates/index/src/index/tests.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/index/src/index/tests.rs) |
-| Cursor paging neither skips nor repeats | `cursor_page_continues_without_skipping_or_repeating` | [`crates/index/src/runtime/query/scripts.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/index/src/runtime/query/scripts.rs) |
-| Starting workers twice is idempotent | `start_index_workers_twice_is_idempotent` | [`crates/node/src/state/tests/index.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state/tests/index.rs) |
+| A positive floor scopes absence and refuses a low anchor | `historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor` | [`crates/projection/src/runtime.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/runtime.rs) |
+| Full history above a positive floor is unproven | `historical_full_history_positive_floor_is_unproven` | [`crates/projection/src/runtime.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/runtime.rs) |
+| A coverage floor is stamped and cleared on reset | `anchor_watermark_stamps_a_coverage_floor_that_reset_clears` | [`crates/projection/src/index.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/index.rs) |
+| Cursor paging neither skips nor repeats | `cursor_page_continues_without_skipping_or_repeating` | [`crates/projection/src/runtime/query/scripts.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/projection/src/runtime/query/scripts.rs) |
+| Starting workers twice is idempotent | `start_index_workers_twice_is_idempotent` | [`crates/node/src/state.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/node/src/state.rs) |
 
 The [state and storage](state-and-storage.md) chapter covers the durable records the worker reads, and the [architecture](architecture.md) chapter covers the wake call site.

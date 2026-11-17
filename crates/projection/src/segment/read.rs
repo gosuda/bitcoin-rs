@@ -1,0 +1,2285 @@
+#[cfg(test)]
+type HistoryAnswer = Vec<(Vec<u8>, Vec<u8>)>;
+
+use super::format;
+use super::{Coverage, IndexGeneration, meta_gen_key};
+use crate::types::{
+    HashPrefixRow, SPENDING_RECORD_KEY_LEN, ScriptHash, ScriptHashRow, ScriptHistoryOccurrence,
+    SpendingPrefixRow, TxPosition, TxPositionValue, TxidRow,
+};
+use crate::{
+    BasicFilter, FundingTransaction, FundingTransactionScan, IndexCapability, IndexError,
+    IndexWatermark, ScriptLiveRow, ScriptLiveScan, TxIndexPage, TxIndexScan, TxIndexScanRow,
+    TxIndexSnapshot,
+};
+use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
+use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, PrefixScan, PrefixScanLimit, StorageError};
+use std::collections::{BTreeMap, BinaryHeap, VecDeque};
+use zerocopy::IntoBytes as _;
+
+const RECORD_ROW_LIMIT: usize = 4_000_000;
+
+const TX_DIR_CHUNK_ROWS: usize = 1_024;
+
+struct TxidRowStream {
+    scope: Scope,
+    from: Vec<u8>,
+    rows: VecDeque<(Vec<u8>, Vec<u8>)>,
+    exhausted: bool,
+}
+
+impl TxidRowStream {
+    fn new(scope: Scope, start: &[u8]) -> Self {
+        let mut from = scope.txid_prefix().to_vec();
+        from.extend_from_slice(start);
+        Self {
+            scope,
+            from,
+            rows: VecDeque::new(),
+            exhausted: false,
+        }
+    }
+
+    fn head_txid(&self) -> Option<[u8; 32]> {
+        let (key, _) = self.rows.front()?;
+        format::decode_tx_dir_key(key).map(|(_, txid, _)| txid)
+    }
+
+    fn head_prefix(&self) -> Option<[u8; 8]> {
+        self.head_txid()?.get(..8)?.try_into().ok()
+    }
+}
+
+fn refill_txid_rows(kv: &dyn KvSnapshot, stream: &mut TxidRowStream) -> Result<(), IndexError> {
+    while stream.rows.is_empty() && !stream.exhausted {
+        let scan = kv.scan_prefix_from_bounded(
+            ColumnFamily::TxDir,
+            &stream.scope.txid_prefix(),
+            &stream.from,
+            PrefixScanLimit {
+                max_rows: TX_DIR_CHUNK_ROWS,
+                max_bytes: usize::MAX,
+            },
+        )?;
+        stream.exhausted = scan.complete;
+        let Some((last, _)) = scan.rows.last() else {
+            break;
+        };
+        stream.from = last.clone();
+        stream.from.push(0);
+        for (key, value) in scan.rows {
+            format::decode_tx_dir_key(&key).ok_or_else(|| malformed("tx_dir key"))?;
+            stream.rows.push_back((key, value));
+        }
+    }
+    Ok(())
+}
+
+struct SpendRowStream {
+    scope: Scope,
+    from: Vec<u8>,
+    rows: VecDeque<(Vec<u8>, Vec<u8>)>,
+    exhausted: bool,
+}
+
+impl SpendRowStream {
+    fn new(scope: Scope, after: Option<&[u8]>) -> Self {
+        let mut from = scope.prefix().to_vec();
+        if let Some(after) = after {
+            from.extend_from_slice(after);
+            from.push(0);
+        }
+        Self {
+            scope,
+            from,
+            rows: VecDeque::new(),
+            exhausted: false,
+        }
+    }
+
+    fn refill(&mut self, kv: &dyn KvSnapshot) -> Result<(), IndexError> {
+        while self.rows.is_empty() && !self.exhausted {
+            let scan = kv.scan_prefix_from_bounded(
+                ColumnFamily::SpendDir,
+                &self.scope.prefix(),
+                &self.from,
+                PrefixScanLimit {
+                    max_rows: TX_DIR_CHUNK_ROWS,
+                    max_bytes: 64 * 1024,
+                },
+            )?;
+            self.exhausted = scan.complete;
+            let Some((last, _)) = scan.rows.last() else {
+                if !scan.complete {
+                    return Err(malformed("spend_dir scan made no progress"));
+                }
+                break;
+            };
+            self.from = last.clone();
+            self.from.push(0);
+            for (key, value) in scan.rows {
+                spend_identity(&key)?;
+                self.rows.push_back((key, value));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn spend_identity(key: &[u8]) -> Result<[u8; SPENDING_RECORD_KEY_LEN], IndexError> {
+    format::decode_spend_dir_key(key).ok_or_else(|| malformed("spend_dir key"))?;
+    key.get(8..)
+        .and_then(|identity| identity.try_into().ok())
+        .ok_or_else(|| malformed("spend_dir identity"))
+}
+
+/// Newest-ordinal-first walk of one script's postings inside one scope.
+struct PostingsCursor {
+    scope: Scope,
+    script_id: u32,
+    postings: VecDeque<(u32, u8)>,
+    seek: Vec<u8>,
+    entries_done: bool,
+}
+
+impl PostingsCursor {
+    fn new(scope: Scope, script_id: u32, bound: Option<u32>) -> Self {
+        let mut seek = scope.prefix().to_vec();
+        seek.extend_from_slice(&script_id.to_be_bytes());
+        if let Some(bound) = bound {
+            seek =
+                format::encode_script_post_chunk_key(scope.segment_id(), script_id, bound).to_vec();
+        }
+        Self {
+            scope,
+            script_id,
+            postings: VecDeque::new(),
+            seek,
+            entries_done: false,
+        }
+    }
+
+    fn step(&mut self, kv: &dyn KvSnapshot) -> Result<Option<(u32, u8)>, IndexError> {
+        while self.postings.is_empty() {
+            if self.entries_done {
+                break;
+            }
+            match self.scope {
+                Scope::Tail { .. } => self.step_tail(kv)?,
+                Scope::Sealed { .. } => self.step_sealed(kv)?,
+            }
+        }
+        Ok(self.postings.pop_front())
+    }
+
+    fn step_tail(&mut self, kv: &dyn KvSnapshot) -> Result<(), IndexError> {
+        if self.entries_done {
+            return Ok(());
+        }
+        let mut prefix = self.scope.prefix().to_vec();
+        prefix.extend_from_slice(&self.script_id.to_be_bytes());
+        let mut all = Vec::new();
+        for entry in kv.iter_prefix(ColumnFamily::ScriptPost, &prefix)? {
+            let (_key, value) = entry?;
+            let items = format::decode_posting_items(&value)
+                .ok_or_else(|| malformed("script_post value"))?;
+            for item in items {
+                all.push((item.delta_ordinal, item.flags));
+            }
+        }
+        all.reverse();
+        self.postings.extend(all);
+        self.entries_done = true;
+        Ok(())
+    }
+
+    fn step_sealed(&mut self, kv: &dyn KvSnapshot) -> Result<(), IndexError> {
+        let scan = kv.scan_prefix_from_bounded(
+            ColumnFamily::ScriptPost,
+            &self.seek[..12],
+            &self.seek,
+            PrefixScanLimit {
+                max_rows: 1,
+                max_bytes: usize::MAX,
+            },
+        )?;
+        let Some((key, value)) = scan.rows.into_iter().next() else {
+            self.entries_done = true;
+            return Ok(());
+        };
+        let (_gen, _script, base) = format::decode_script_post_chunk_key(&key)
+            .ok_or_else(|| malformed("script_post key"))?;
+        let postings = format::decode_chunk_postings(base, &value)
+            .ok_or_else(|| malformed("script_post value"))?;
+        self.postings.extend(postings.into_iter().rev());
+        self.seek = key;
+        self.seek.push(0);
+        Ok(())
+    }
+}
+
+/// One (script, scope) pair's occurrences, newest height first; a page holds at most one height group per stream.
+struct OccurrenceStream<'a> {
+    snapshot: &'a SegmentSnapshot<'a>,
+    query: ScriptQuery,
+    postings: PostingsCursor,
+    peeked: Option<(u32, ScriptHistoryOccurrence)>,
+}
+
+impl<'a> OccurrenceStream<'a> {
+    fn new(
+        snapshot: &'a SegmentSnapshot<'a>,
+        scripthash: ScriptHash,
+        scope: Scope,
+        start: u32,
+    ) -> Result<Option<Self>, IndexError> {
+        let dict_key =
+            format::encode_script_dict_key(scope.segment_id(), &scripthash.to_byte_array());
+        let Some(value) = snapshot.kv.get(ColumnFamily::ScriptDict, &dict_key)? else {
+            return Ok(None);
+        };
+        let script_id = format::decode_script_dict_value(&value)
+            .ok_or_else(|| malformed("script_dict value"))?;
+        let bound = match scope {
+            Scope::Sealed { .. } => {
+                let Some(bound) = snapshot.last_ordinal_at_or_below(scope, start)? else {
+                    return Ok(None);
+                };
+                Some(bound)
+            }
+            Scope::Tail { .. } => None,
+        };
+        Ok(Some(Self {
+            snapshot,
+            query: ScriptQuery {
+                scope,
+                scripthash,
+                script_id,
+                start,
+            },
+            postings: PostingsCursor::new(scope, script_id, bound),
+            peeked: None,
+        }))
+    }
+
+    fn peek(&mut self) -> Result<Option<(u32, ScriptHistoryOccurrence)>, IndexError> {
+        if self.peeked.is_none() {
+            self.peeked = self.next_occurrence()?;
+        }
+        Ok(self.peeked)
+    }
+
+    fn pop(&mut self) -> Result<Option<(u32, ScriptHistoryOccurrence)>, IndexError> {
+        let next = self.peek()?;
+        self.peeked = None;
+        Ok(next)
+    }
+
+    fn next_occurrence(&mut self) -> Result<Option<(u32, ScriptHistoryOccurrence)>, IndexError> {
+        while let Some((ordinal, flags)) = self.postings.step(self.snapshot.kv.as_ref())? {
+            let Some(tx) = self.snapshot.resolve_ordinal(self.query.scope, ordinal)? else {
+                return Err(malformed("script posting ordinal absent from tx directory"));
+            };
+            if !self.query.scope.covers(tx.height) || tx.height > self.query.start {
+                continue;
+            }
+            return Ok(Some((
+                tx.height,
+                ScriptHistoryOccurrence {
+                    scripthash: self.query.scripthash,
+                    txid: tx.txid,
+                    position: tx.position,
+                    flags,
+                },
+            )));
+        }
+        Ok(None)
+    }
+}
+
+/// Newest-first merge of one prefix's (script, scope) occurrence streams.
+struct FundingPrefix<'a> {
+    streams: Vec<OccurrenceStream<'a>>,
+    heap: BinaryHeap<(u32, usize)>,
+}
+
+impl<'a> FundingPrefix<'a> {
+    fn new(
+        snapshot: &'a SegmentSnapshot<'a>,
+        scopes: &[Scope],
+        prefix: [u8; 8],
+        stream_start: u32,
+    ) -> Result<Self, IndexError> {
+        let mut streams = Vec::new();
+        for scripthash in snapshot.scripts_with_prefix(scopes, prefix)? {
+            for &scope in scopes {
+                if let Some(stream) =
+                    OccurrenceStream::new(snapshot, scripthash, scope, stream_start)?
+                {
+                    streams.push(stream);
+                }
+            }
+        }
+        let mut heap = BinaryHeap::new();
+        for (index, stream) in streams.iter_mut().enumerate() {
+            if let Some((height, _)) = stream.peek()? {
+                heap.push((height, index));
+            }
+        }
+        Ok(Self { streams, heap })
+    }
+
+    fn next_height(&mut self) -> Result<Option<(u32, Vec<ScriptHistoryOccurrence>)>, IndexError> {
+        let Some((height, first)) = self.heap.pop() else {
+            return Ok(None);
+        };
+        let mut parked = vec![first];
+        while self.heap.peek().is_some_and(|top| top.0 == height) {
+            let Some((_, index)) = self.heap.pop() else {
+                break;
+            };
+            parked.push(index);
+        }
+        let mut occurrences = Vec::with_capacity(parked.len());
+        for index in parked {
+            while self.streams[index]
+                .peek()?
+                .is_some_and(|(stream_height, _)| stream_height == height)
+            {
+                if let Some((_, occurrence)) = self.streams[index].pop()? {
+                    occurrences.push(occurrence);
+                }
+            }
+            if let Some((next_height, _)) = self.streams[index].peek()? {
+                self.heap.push((next_height, index));
+            }
+        }
+        normalize_history_occurrences(&mut occurrences);
+        occurrences.sort_unstable_by(|left, right| {
+            left.position
+                .cmp(&right.position)
+                .then_with(|| left.txid.cmp(&right.txid))
+                .then_with(|| {
+                    left.scripthash
+                        .to_byte_array()
+                        .cmp(&right.scripthash.to_byte_array())
+                })
+                .then_with(|| left.flags.cmp(&right.flags))
+        });
+        Ok(Some((height, occurrences)))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Scope {
+    Tail { lo: u32, hi: u32 },
+    Sealed { segment_id: u64, coverage: Coverage },
+}
+
+impl Scope {
+    const fn segment_id(self) -> u64 {
+        match self {
+            Self::Tail { .. } => 0,
+            Self::Sealed { segment_id, .. } => segment_id,
+        }
+    }
+
+    fn prefix(self) -> [u8; 8] {
+        self.segment_id().to_be_bytes()
+    }
+
+    fn txid_prefix(self) -> [u8; 9] {
+        format::tx_dir_kind_prefix(self.segment_id(), format::TX_KIND_TXID)
+    }
+
+    const fn covers(self, height: u32) -> bool {
+        match self {
+            Self::Tail { lo, hi } => lo <= height && height <= hi,
+            Self::Sealed { coverage, .. } => {
+                coverage.first_height <= height && height <= coverage.last_height
+            }
+        }
+    }
+
+    const fn first_height(self) -> u32 {
+        match self {
+            Self::Tail { lo, .. } => lo,
+            Self::Sealed { coverage, .. } => coverage.first_height,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TxRef {
+    txid: [u8; 32],
+    height: u32,
+    position: TxPosition,
+}
+
+fn decode_tx_dir_row(
+    scope: Scope,
+    key: &[u8],
+    value: &[u8],
+) -> Result<Option<(FundingTransaction, TxPosition)>, IndexError> {
+    let Some((generation, txid, height)) = format::decode_tx_dir_key(key) else {
+        return Err(malformed("tx_dir key"));
+    };
+    if generation != scope.segment_id() {
+        return Err(malformed("tx_dir generation"));
+    }
+    if !scope.covers(height) {
+        return Ok(None);
+    }
+    let Some((hash, _, offset, len)) = format::decode_tx_dir_value(value) else {
+        return Err(malformed("tx_dir value"));
+    };
+    Ok(Some((
+        FundingTransaction {
+            txid: Txid(Hash256::from_le_bytes(&txid)),
+            block_hash: Hash256::from_le_bytes(&hash),
+            height,
+        },
+        TxPosition::new(offset, len),
+    )))
+}
+
+fn collect_prefix_rows(
+    kv: &dyn KvSnapshot,
+    stream: &mut TxidRowStream,
+    prefix: [u8; 8],
+    by_height: &mut BTreeMap<u32, Vec<TxPosition>>,
+) -> Result<(), IndexError> {
+    loop {
+        refill_txid_rows(kv, stream)?;
+        if stream.head_prefix() != Some(prefix) {
+            return Ok(());
+        }
+        let Some((key, value)) = stream.rows.pop_front() else {
+            return Ok(());
+        };
+        let Some((transaction, position)) = decode_tx_dir_row(stream.scope, &key, &value)? else {
+            continue;
+        };
+        by_height
+            .entry(transaction.height)
+            .or_default()
+            .push(position);
+    }
+}
+
+/// Read view over one pinned engine snapshot (`PRJ-05`, `PRJ-06`, `PRJ-07`).
+///
+/// Each segment-backed capability reads its mutable tail first, then every
+/// sealed generation listed under its descriptor, each limited to that
+/// generation's declared coverage. Capabilities without a published
+/// descriptor have no scopes and refuse reads.
+pub(crate) struct SegmentSnapshot<'a> {
+    kv: Box<dyn KvSnapshot + 'a>,
+    published: [Option<Vec<Scope>>; 4],
+}
+
+impl<'a> SegmentSnapshot<'a> {
+    pub(crate) fn open(kv: Box<dyn KvSnapshot + 'a>) -> Result<Self, IndexError> {
+        let mut published: [Option<Vec<Scope>>; 4] = std::array::from_fn(|_| None);
+        for capability in IndexCapability::ALL {
+            published[capability.index()] = read_scopes(kv.as_ref(), capability)?;
+        }
+        Ok(Self { kv, published })
+    }
+
+    fn scopes(&self, capability: IndexCapability) -> &[Scope] {
+        self.published[capability.index()].as_deref().unwrap_or(&[])
+    }
+
+    fn scan(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, IndexError> {
+        self.kv
+            .scan_prefix_bounded(cf, prefix, limit)
+            .map_err(IndexError::from)
+    }
+
+    fn resolve_ordinal(&self, scope: Scope, ordinal: u32) -> Result<Option<TxRef>, IndexError> {
+        let key = format::encode_tx_ordinal_key(scope.segment_id(), ordinal);
+        let Some(value) = self.kv.get(ColumnFamily::TxDir, &key)? else {
+            return Ok(None);
+        };
+        let (txid, height, offset, len) =
+            format::decode_tx_ordinal_value(&value).ok_or_else(|| malformed("tx ordinal value"))?;
+        Ok(Some(TxRef {
+            txid,
+            height,
+            position: TxPosition::new(offset, len),
+        }))
+    }
+
+    fn transaction_entries(
+        &self,
+        capability: IndexCapability,
+        txid: &Txid,
+        limit: PrefixScanLimit,
+    ) -> Result<(Vec<(u32, TxPosition)>, bool), IndexError> {
+        let mut rows = BTreeMap::new();
+        let mut complete = true;
+        for &scope in self.scopes(capability) {
+            let mut prefix = scope.txid_prefix().to_vec();
+            prefix.extend_from_slice(txid.as_bytes());
+            let scan = self.scan(ColumnFamily::TxDir, &prefix, limit)?;
+            complete &= scan.complete;
+            for (key, value) in scan.rows {
+                let Some((transaction, position)) = decode_tx_dir_row(scope, &key, &value)? else {
+                    continue;
+                };
+                if transaction.txid != *txid {
+                    return Err(malformed("tx_dir transaction prefix"));
+                }
+                rows.entry(transaction.height).or_insert(position);
+            }
+        }
+        Ok((rows.into_iter().collect(), complete))
+    }
+
+    fn transaction_rows_for(
+        &self,
+        capability: IndexCapability,
+        txid: &Txid,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        let (entries, complete) = self.transaction_entries(capability, txid, limit)?;
+        let mut rows = Vec::with_capacity(entries.len());
+        let mut bytes = 0_usize;
+        for (height, position) in entries {
+            let row = HashPrefixRow {
+                prefix: TxidRow::scan_prefix(txid),
+                height: crate::types::encode_height(height),
+            };
+            let value = TxPositionValue::encode(&[position]);
+            bytes = bytes
+                .saturating_add(row.as_bytes().len())
+                .saturating_add(value.len());
+            rows.push(TxIndexScanRow { row, value });
+        }
+        Ok(TxIndexScan {
+            rows,
+            encoded_bytes: bytes,
+            complete,
+        })
+    }
+
+    fn stream_script_occurrences(
+        &self,
+        scope: Scope,
+        scripthash: ScriptHash,
+        start: u32,
+        window: &mut HistoryWindow,
+    ) -> Result<(), IndexError> {
+        if scope.first_height() > start {
+            return Ok(());
+        }
+        let dict_key =
+            format::encode_script_dict_key(scope.segment_id(), &scripthash.to_byte_array());
+        let Some(value) = self.kv.get(ColumnFamily::ScriptDict, &dict_key)? else {
+            return Ok(());
+        };
+        let script_id = format::decode_script_dict_value(&value)
+            .ok_or_else(|| malformed("script_dict value"))?;
+        let query = ScriptQuery {
+            scope,
+            scripthash,
+            script_id,
+            start,
+        };
+        match scope {
+            Scope::Tail { .. } => self.stream_tail_postings(query, window),
+            Scope::Sealed { .. } => self.stream_sealed_postings(query, window),
+        }
+    }
+
+    fn stream_tail_postings(
+        &self,
+        query: ScriptQuery,
+        window: &mut HistoryWindow,
+    ) -> Result<(), IndexError> {
+        let mut prefix = query.scope.prefix().to_vec();
+        prefix.extend_from_slice(&query.script_id.to_be_bytes());
+        let mut postings = Vec::new();
+        for entry in self.kv.iter_prefix(ColumnFamily::ScriptPost, &prefix)? {
+            let (_key, value) = entry?;
+            let items = format::decode_posting_items(&value)
+                .ok_or_else(|| malformed("script_post value"))?;
+            postings.extend(
+                items
+                    .into_iter()
+                    .map(|item| (item.delta_ordinal, item.flags)),
+            );
+        }
+        for (ordinal, flags) in postings.into_iter().rev() {
+            self.push_posting(query, ordinal, flags, window)?;
+            if window.is_closed() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn stream_sealed_postings(
+        &self,
+        query: ScriptQuery,
+        window: &mut HistoryWindow,
+    ) -> Result<(), IndexError> {
+        let segment = query.scope.segment_id();
+        let Some(bound) = self.last_ordinal_at_or_below(query.scope, query.start)? else {
+            return Ok(());
+        };
+        let mut prefix = query.scope.prefix().to_vec();
+        prefix.extend_from_slice(&query.script_id.to_be_bytes());
+        let limit = PrefixScanLimit {
+            max_rows: 1,
+            max_bytes: usize::MAX,
+        };
+        let mut seek =
+            format::encode_script_post_chunk_key(segment, query.script_id, bound).to_vec();
+        loop {
+            let scan = self.kv.scan_prefix_from_bounded(
+                ColumnFamily::ScriptPost,
+                &prefix,
+                &seek,
+                limit,
+            )?;
+            let Some((key, value)) = scan.rows.into_iter().next() else {
+                return Ok(());
+            };
+            let (_gen, _script, base) = format::decode_script_post_chunk_key(&key)
+                .ok_or_else(|| malformed("script_post key"))?;
+            let postings = format::decode_chunk_postings(base, &value)
+                .ok_or_else(|| malformed("script_post value"))?;
+            for (ordinal, flags) in postings.into_iter().rev() {
+                self.push_posting(query, ordinal, flags, window)?;
+                if window.is_closed() {
+                    return Ok(());
+                }
+            }
+            seek = key;
+            seek.push(0);
+        }
+    }
+
+    fn push_posting(
+        &self,
+        query: ScriptQuery,
+        ordinal: u32,
+        flags: u8,
+        window: &mut HistoryWindow,
+    ) -> Result<(), IndexError> {
+        let tx = self
+            .resolve_ordinal(query.scope, ordinal)?
+            .ok_or_else(|| malformed("script posting ordinal absent from tx directory"))?;
+        if !query.scope.covers(tx.height) || tx.height > query.start {
+            return Ok(());
+        }
+        window.push(
+            tx.height,
+            ScriptHistoryOccurrence {
+                scripthash: query.scripthash,
+                txid: tx.txid,
+                position: tx.position,
+                flags,
+            },
+        );
+        Ok(())
+    }
+
+    fn last_ordinal_at_or_below(
+        &self,
+        scope: Scope,
+        start: u32,
+    ) -> Result<Option<u32>, IndexError> {
+        let within = |ordinal: u32| -> Result<bool, IndexError> {
+            Ok(self
+                .resolve_ordinal(scope, ordinal)?
+                .is_some_and(|tx| tx.height <= start))
+        };
+        let Some(first) = self.first_stored_ordinal(scope)? else {
+            return Ok(None);
+        };
+        if !within(first)? {
+            return Ok(None);
+        }
+        let (mut low, mut high) = (first, u32::MAX);
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if within(middle)? {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        Ok(Some(low))
+    }
+
+    fn first_stored_ordinal(&self, scope: Scope) -> Result<Option<u32>, IndexError> {
+        let prefix = format::tx_dir_kind_prefix(scope.segment_id(), format::TX_KIND_ORDINAL);
+        let scan = self.scan(
+            ColumnFamily::TxDir,
+            &prefix,
+            PrefixScanLimit {
+                max_rows: 1,
+                max_bytes: usize::MAX,
+            },
+        )?;
+        let Some((key, _)) = scan.rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let ordinal: [u8; 4] = key
+            .get(format::TX_ORDINAL_KEY_LEN - 4..)
+            .and_then(|slice| slice.try_into().ok())
+            .ok_or_else(|| malformed("tx ordinal key"))?;
+        Ok(Some(u32::from_be_bytes(ordinal)))
+    }
+
+    fn history_rows(
+        &self,
+        scripthash: ScriptHash,
+        start_height: Option<u32>,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        let start = start_height.unwrap_or(u32::MAX);
+        let mut window = HistoryWindow::new(limit);
+        for &scope in self.scopes(IndexCapability::ScriptHistory).iter().rev() {
+            if window.is_closed() {
+                break;
+            }
+            self.stream_script_occurrences(scope, scripthash, start, &mut window)?;
+        }
+        Ok(window.finish(scripthash))
+    }
+
+    fn spending_rows_for(
+        &self,
+        outpoint: &OutPoint,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        let mut spends: BTreeMap<u32, Vec<TxPosition>> = BTreeMap::new();
+        let mut complete = true;
+        for &scope in self.scopes(IndexCapability::ScriptHistory) {
+            let prefix = format::spend_dir_outpoint_prefix(
+                scope.segment_id(),
+                outpoint.txid.as_bytes(),
+                outpoint.vout,
+            );
+            let scan = self.scan(ColumnFamily::SpendDir, &prefix, limit)?;
+            complete &= scan.complete;
+            for (key, value) in scan.rows {
+                let (_, txid, vout, height) =
+                    format::decode_spend_dir_key(&key).ok_or_else(|| malformed("spend_dir key"))?;
+                if txid != *outpoint.txid.as_bytes() || vout != outpoint.vout {
+                    return Err(malformed("spend_dir outpoint prefix"));
+                }
+                if let Some(position) = self.spend_position(scope, &key, &value)? {
+                    spends.entry(height).or_default().push(position);
+                }
+            }
+        }
+
+        let mut rows: Vec<TxIndexScanRow> = Vec::new();
+        let mut bytes = 0_usize;
+        for (height, mut positions) in spends {
+            positions.sort_unstable();
+            positions.dedup();
+            let row = HashPrefixRow {
+                prefix: SpendingPrefixRow::scan_prefix(outpoint),
+                height: crate::types::encode_height(height),
+            };
+            let value = TxPositionValue::encode(&positions);
+            let row_bytes = row.as_bytes().len().saturating_add(value.len());
+            if rows.len() >= limit.max_rows
+                || (!rows.is_empty() && bytes.saturating_add(row_bytes) > limit.max_bytes)
+            {
+                complete = false;
+                break;
+            }
+            bytes = bytes.saturating_add(row_bytes);
+            rows.push(TxIndexScanRow { row, value });
+        }
+        Ok(TxIndexScan {
+            rows,
+            encoded_bytes: bytes,
+            complete,
+        })
+    }
+}
+
+fn malformed(what: &'static str) -> IndexError {
+    IndexError::Storage(StorageError::IncompatibleData(format!("malformed {what}")))
+}
+
+fn read_scopes(
+    kv: &dyn KvSnapshot,
+    capability: IndexCapability,
+) -> Result<Option<Vec<Scope>>, IndexError> {
+    let key = meta_gen_key(capability);
+    let Some(bytes) = kv.get(ColumnFamily::IdxMeta, &key)? else {
+        return Ok(None);
+    };
+    let head = IndexGeneration::decode_meta_value(&bytes).ok_or(IndexError::InvalidSealMarker)?;
+    let mut scopes = Vec::new();
+    let mut record_prefix = key;
+    record_prefix.push(b'/');
+    for item in kv.iter_prefix(ColumnFamily::IdxMeta, &record_prefix)? {
+        let (record_key, value) = item?;
+        let gen_bytes = record_key
+            .strip_prefix(record_prefix.as_slice())
+            .ok_or_else(|| malformed("generation record key"))?;
+        let segment_id = u64::from_be_bytes(
+            gen_bytes
+                .try_into()
+                .map_err(|_| malformed("generation record key"))?,
+        );
+        let coverage =
+            Coverage::from_bytes(&value).ok_or_else(|| malformed("generation record"))?;
+        scopes.push(Scope::Sealed {
+            segment_id,
+            coverage,
+        });
+    }
+    let tail = head.tail;
+    if tail.tail_lo <= tail.tail_hi {
+        scopes.push(Scope::Tail {
+            lo: tail.tail_lo,
+            hi: tail.tail_hi,
+        });
+    }
+    Ok(Some(scopes))
+}
+
+#[derive(Clone, Copy)]
+struct ScriptQuery {
+    scope: Scope,
+    scripthash: ScriptHash,
+    script_id: u32,
+    start: u32,
+}
+
+fn normalize_history_occurrences(occurrences: &mut Vec<ScriptHistoryOccurrence>) {
+    occurrences.sort_by(|left, right| {
+        right
+            .position
+            .cmp(&left.position)
+            .then_with(|| right.txid.cmp(&left.txid))
+            .then_with(|| right.scripthash.cmp(&left.scripthash))
+    });
+    occurrences.dedup_by(|duplicate, retained| {
+        if duplicate.scripthash == retained.scripthash
+            && duplicate.txid == retained.txid
+            && duplicate.position == retained.position
+        {
+            retained.flags |= duplicate.flags;
+            true
+        } else {
+            false
+        }
+    });
+}
+
+/// Keeps the newest height groups that fit the page limit. Occurrences arrive
+/// newest first; the first group that does not fit closes the window, and every
+/// older group is then outside the page (`complete` is false).
+struct HistoryWindow {
+    max_groups: usize,
+    max_bytes: usize,
+    groups: Vec<(u32, Vec<ScriptHistoryOccurrence>)>,
+    current: Option<(u32, Vec<ScriptHistoryOccurrence>)>,
+    bytes: usize,
+    dropped: bool,
+}
+
+impl HistoryWindow {
+    fn new(limit: PrefixScanLimit) -> Self {
+        Self {
+            max_groups: limit.max_rows,
+            max_bytes: limit.max_bytes,
+            groups: Vec::new(),
+            current: None,
+            bytes: 0,
+            dropped: false,
+        }
+    }
+
+    const fn is_closed(&self) -> bool {
+        self.dropped
+    }
+
+    fn push(&mut self, height: u32, occurrence: ScriptHistoryOccurrence) {
+        if self.dropped {
+            return;
+        }
+        if let Some((current, group)) = self.current.as_mut() {
+            if *current == height {
+                group.push(occurrence);
+                return;
+            }
+        }
+        self.close_current();
+        self.current = Some((height, vec![occurrence]));
+    }
+
+    fn close_current(&mut self) {
+        let Some((height, mut group)) = self.current.take() else {
+            return;
+        };
+        normalize_history_occurrences(&mut group);
+        let row_bytes = crate::HASH_PREFIX_ROW_SIZE
+            .saturating_add(ScriptHistoryOccurrence::encode_all(&group).len());
+        let kept = self.groups.len();
+        let fits = kept < self.max_groups
+            && (kept == 0 || self.bytes.saturating_add(row_bytes) <= self.max_bytes);
+        if fits {
+            self.bytes = self.bytes.saturating_add(row_bytes);
+            self.groups.push((height, group));
+        } else {
+            self.dropped = true;
+        }
+    }
+
+    fn finish(mut self, scripthash: ScriptHash) -> TxIndexScan {
+        self.close_current();
+        let rows = self
+            .groups
+            .into_iter()
+            .map(|(height, group)| TxIndexScanRow {
+                row: HashPrefixRow {
+                    prefix: ScriptHashRow::scan_prefix(scripthash),
+                    height: crate::types::encode_height(height),
+                },
+                value: ScriptHistoryOccurrence::encode_all(&group),
+            })
+            .collect();
+        TxIndexScan {
+            rows,
+            encoded_bytes: self.bytes,
+            complete: !self.dropped,
+        }
+    }
+}
+
+impl TxIndexSnapshot for SegmentSnapshot<'_> {
+    fn compact_filter(
+        &self,
+        height: u32,
+        hash: &[u8; 32],
+    ) -> Result<Option<BasicFilter>, IndexError> {
+        for &scope in self.scopes(IndexCapability::CompactFilters) {
+            if !scope.covers(height) {
+                continue;
+            }
+            let key = format::encode_filter_key(scope.segment_id(), height);
+            let Some(value) = self.kv.get(ColumnFamily::Filters, &key)? else {
+                continue;
+            };
+            let (block_hash, filter_hash, header, gcs) =
+                format::decode_filter_value(&value).ok_or_else(|| malformed("filters value"))?;
+            if &block_hash == hash {
+                return Ok(Some(BasicFilter {
+                    filter: gcs.to_vec(),
+                    hash: filter_hash,
+                    header,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn capability_published(&self, capability: IndexCapability) -> Result<bool, IndexError> {
+        Ok(capability == IndexCapability::ScriptLive
+            || self.published[capability.index()].is_some())
+    }
+
+    fn capability_watermark(
+        &self,
+        capability: IndexCapability,
+    ) -> Result<Option<IndexWatermark>, IndexError> {
+        IndexWatermark::read_from_snapshot(self.kv.as_ref(), capability)
+    }
+
+    fn tx_lookup_page(
+        &self,
+        start_after: Option<&[u8]>,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexPage, IndexError> {
+        let scopes = self.scopes(IndexCapability::TxLookup);
+        let start: &[u8] = match start_after {
+            Some(cursor) => cursor
+                .get(..8)
+                .ok_or_else(|| malformed("tx lookup cursor"))?,
+            None => &[],
+        };
+        let mut streams: Vec<TxidRowStream> = scopes
+            .iter()
+            .map(|&scope| TxidRowStream::new(scope, start))
+            .collect();
+        let kv = self.kv.as_ref();
+        let mut page = TxIndexPage {
+            rows: Vec::new(),
+            complete: false,
+        };
+        let mut bytes = 0_usize;
+        loop {
+            for stream in &mut streams {
+                refill_txid_rows(kv, stream)?;
+            }
+            let Some(prefix) = streams.iter().filter_map(TxidRowStream::head_prefix).min() else {
+                page.complete = true;
+                return Ok(page);
+            };
+            let mut by_height: BTreeMap<u32, Vec<TxPosition>> = BTreeMap::new();
+            for stream in &mut streams {
+                collect_prefix_rows(kv, stream, prefix, &mut by_height)?;
+            }
+            for positions in by_height.values_mut() {
+                positions.sort_unstable();
+                positions.dedup();
+            }
+            for (height, positions) in by_height {
+                let height = crate::types::encode_height(height);
+                let mut key = prefix.to_vec();
+                key.extend_from_slice(&height);
+                if start_after.is_some_and(|cursor| key.as_slice() <= cursor) {
+                    continue;
+                }
+                let value = TxPositionValue::encode(&positions);
+                bytes = bytes.saturating_add(key.len().saturating_add(value.len()));
+                page.rows.push(TxIndexScanRow {
+                    row: HashPrefixRow { prefix, height },
+                    value,
+                });
+            }
+            if !page.rows.is_empty()
+                && (page.rows.len() >= limit.max_rows || bytes >= limit.max_bytes)
+            {
+                return Ok(page);
+            }
+        }
+    }
+
+    fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
+        crate::index::read_coverage_floor(self.kv.as_ref(), capability)
+    }
+
+    fn transaction_rows(
+        &self,
+        txid: &Txid,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        self.transaction_rows_for(IndexCapability::TxLookup, txid, limit)
+    }
+
+    fn funding_transaction_rows(
+        &self,
+        txid: &Txid,
+        limit: PrefixScanLimit,
+    ) -> Result<FundingTransactionScan, IndexError> {
+        let mut result = FundingTransactionScan {
+            rows: Vec::new(),
+            examined_rows: 0,
+            encoded_bytes: 0,
+            complete: true,
+        };
+        for &scope in self.scopes(IndexCapability::ScriptHistory) {
+            let remaining = PrefixScanLimit {
+                max_rows: limit.max_rows.saturating_sub(result.examined_rows),
+                max_bytes: limit.max_bytes.saturating_sub(result.encoded_bytes),
+            };
+            if remaining.max_rows == 0 || remaining.max_bytes == 0 {
+                result.complete = false;
+                break;
+            }
+            let mut prefix = [0; format::TX_DIR_KEY_LEN - size_of::<u32>()];
+            prefix[..9].copy_from_slice(&scope.txid_prefix());
+            prefix[9..].copy_from_slice(txid.as_bytes());
+            let scan = self.scan(ColumnFamily::TxDir, &prefix, remaining)?;
+            result.complete &= scan.complete;
+            for (key, value) in scan.rows {
+                result.examined_rows = result.examined_rows.saturating_add(1);
+                result.encoded_bytes = result
+                    .encoded_bytes
+                    .saturating_add(key.len())
+                    .saturating_add(value.len());
+                if let Some((transaction, _)) = decode_tx_dir_row(scope, &key, &value)? {
+                    if transaction.txid != *txid {
+                        return Err(malformed("tx_dir transaction prefix"));
+                    }
+                    result.rows.push(transaction);
+                }
+            }
+            if !result.complete {
+                break;
+            }
+        }
+        Ok(result)
+    }
+
+    fn funding_rows(
+        &self,
+        scripthash: ScriptHash,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        self.history_rows(scripthash, None, limit)
+    }
+
+    fn funding_rows_from(
+        &self,
+        scripthash: ScriptHash,
+        start_height: u32,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        self.history_rows(scripthash, Some(start_height), limit)
+    }
+
+    fn spending_rows(
+        &self,
+        outpoint: &OutPoint,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        self.spending_rows_for(outpoint, limit)
+    }
+
+    fn live_rows(
+        &self,
+        scripthash: ScriptHash,
+        limit: PrefixScanLimit,
+    ) -> Result<ScriptLiveScan, IndexError> {
+        let scan = self.kv.scan_prefix_bounded(
+            ColumnFamily::ScriptLive,
+            &ScriptHashRow::scan_prefix(scripthash),
+            limit,
+        )?;
+        let encoded_bytes = encoded_bytes(&scan);
+        let mut rows = Vec::with_capacity(scan.rows.len());
+        let mut coins = Vec::with_capacity(scan.rows.len());
+        for (key, value) in scan.rows {
+            rows.push(
+                ScriptLiveRow::from_db_row(&key)
+                    .ok_or(IndexError::InvalidPrefixRowLength { len: key.len() })?,
+            );
+            coins.push(
+                crate::ScriptLiveCoin::decode_value(&value)
+                    .map_err(|_| IndexError::InvalidLiveRowValue { len: value.len() })?,
+            );
+        }
+        Ok(ScriptLiveScan {
+            rows,
+            coins,
+            encoded_bytes,
+            complete: scan.complete,
+        })
+    }
+}
+
+fn encoded_bytes(scan: &PrefixScan) -> usize {
+    scan.rows.iter().fold(0_usize, |total, (key, value)| {
+        total.saturating_add(key.len()).saturating_add(value.len())
+    })
+}
+
+// PRJ-07
+#[derive(Debug, Default)]
+pub(crate) struct RecordPage {
+    pub(crate) rows: Vec<(Vec<u8>, Vec<u8>)>,
+    pub(crate) complete: bool,
+}
+
+fn record_limit() -> PrefixScanLimit {
+    PrefixScanLimit {
+        max_rows: RECORD_ROW_LIMIT,
+        max_bytes: usize::MAX,
+    }
+}
+
+fn increment_be(bytes: &mut [u8]) -> bool {
+    for byte in bytes.iter_mut().rev() {
+        let (next, carry) = byte.overflowing_add(1);
+        *byte = next;
+        if !carry {
+            return true;
+        }
+    }
+    false
+}
+
+enum FundingResume {
+    Fresh,
+    SamePrefix(u32),
+    NextPrefix,
+}
+
+fn funding_resume_bound(resume: Option<([u8; 8], u32)>, prefix: [u8; 8]) -> FundingResume {
+    let Some((cursor_prefix, cursor_height)) = resume else {
+        return FundingResume::Fresh;
+    };
+    if prefix != cursor_prefix {
+        return FundingResume::Fresh;
+    }
+    match cursor_height.checked_sub(1) {
+        Some(bound) => FundingResume::SamePrefix(bound),
+        None => FundingResume::NextPrefix,
+    }
+}
+
+impl SegmentSnapshot<'_> {
+    // PRJ-07
+    pub(crate) fn funding_record_page(
+        &self,
+        after: Option<&[u8]>,
+        limit: PrefixScanLimit,
+    ) -> Result<RecordPage, IndexError> {
+        let scopes = self.scopes(IndexCapability::ScriptHistory);
+        let resume: Option<([u8; 8], u32)> = after.and_then(|after| {
+            let prefix: [u8; 8] = after.get(..8)?.try_into().ok()?;
+            let height: [u8; 4] = after.get(8..)?.try_into().ok()?;
+            Some((prefix, crate::types::decode_history_height(height)))
+        });
+        let mut start = [0_u8; 32];
+        if let Some(after) = after {
+            start[..8].copy_from_slice(&after[..8]);
+        }
+        let mut page = RecordPage::default();
+        let mut bytes = 0_usize;
+        loop {
+            let Some(first) = self.next_script_hash(scopes, start)? else {
+                page.complete = true;
+                return Ok(page);
+            };
+            let mut prefix = [0_u8; 8];
+            prefix.copy_from_slice(&first[..8]);
+            let (stream_start, seeking) = match funding_resume_bound(resume, prefix) {
+                FundingResume::Fresh => (u32::MAX, false),
+                FundingResume::SamePrefix(bound) => (bound, true),
+                FundingResume::NextPrefix => {
+                    if !increment_be(&mut prefix) {
+                        page.complete = true;
+                        return Ok(page);
+                    }
+                    start = [0_u8; 32];
+                    start[..8].copy_from_slice(&prefix);
+                    continue;
+                }
+            };
+            let mut merger = FundingPrefix::new(self, scopes, prefix, stream_start)?;
+            let skip_before = if seeking { None } else { after };
+            while let Some((height, occurrences)) = merger.next_height()? {
+                let mut key = prefix.to_vec();
+                key.extend_from_slice(&crate::types::encode_history_height(height));
+                if skip_before.is_some_and(|after| key.as_slice() <= after) {
+                    continue;
+                }
+                let value = ScriptHistoryOccurrence::encode_all(&occurrences);
+                let row_bytes = key.len().saturating_add(value.len());
+                if !page.rows.is_empty()
+                    && (page.rows.len() >= limit.max_rows
+                        || bytes.saturating_add(row_bytes) > limit.max_bytes)
+                {
+                    return Ok(page);
+                }
+                bytes = bytes.saturating_add(row_bytes);
+                page.rows.push((key, value));
+            }
+            if !increment_be(&mut prefix) {
+                page.complete = true;
+                return Ok(page);
+            }
+            start = [0_u8; 32];
+            start[..8].copy_from_slice(&prefix);
+        }
+    }
+
+    // PRJ-07
+    pub(crate) fn spending_record_page(
+        &self,
+        after: Option<&[u8]>,
+        limit: PrefixScanLimit,
+    ) -> Result<RecordPage, IndexError> {
+        let scopes = self.scopes(IndexCapability::ScriptHistory);
+        if after.is_some_and(|cursor| cursor.len() != SPENDING_RECORD_KEY_LEN) {
+            return Err(malformed("spending record cursor"));
+        }
+        let mut streams: Vec<SpendRowStream> = scopes
+            .iter()
+            .map(|&scope| SpendRowStream::new(scope, after))
+            .collect();
+        let mut page = RecordPage::default();
+        let mut bytes = 0_usize;
+        loop {
+            for stream in &mut streams {
+                stream.refill(self.kv.as_ref())?;
+            }
+            let mut next: Option<[u8; SPENDING_RECORD_KEY_LEN]> = None;
+            for stream in &streams {
+                if let Some((key, _)) = stream.rows.front() {
+                    let identity = spend_identity(key)?;
+                    next = Some(next.map_or(identity, |current| current.min(identity)));
+                }
+            }
+            let Some(identity) = next else {
+                page.complete = true;
+                return Ok(page);
+            };
+            let mut positions = Vec::new();
+            for stream in &mut streams {
+                if !stream
+                    .rows
+                    .front()
+                    .is_some_and(|(key, _)| key.get(8..) == Some(identity.as_slice()))
+                {
+                    continue;
+                }
+                let Some((key, value)) = stream.rows.pop_front() else {
+                    continue;
+                };
+                if let Some(position) = self.spend_position(stream.scope, &key, &value)? {
+                    positions.push(position);
+                }
+            }
+            if positions.is_empty() || after.is_some_and(|cursor| identity.as_slice() <= cursor) {
+                continue;
+            }
+            positions.sort_unstable();
+            positions.dedup();
+            let value = TxPositionValue::encode(&positions);
+            bytes = bytes.saturating_add(identity.len().saturating_add(value.len()));
+            page.rows.push((identity.to_vec(), value));
+            if page.rows.len() >= limit.max_rows || bytes >= limit.max_bytes {
+                return Ok(page);
+            }
+        }
+    }
+
+    fn next_script_hash(
+        &self,
+        scopes: &[Scope],
+        start: [u8; 32],
+    ) -> Result<Option<[u8; 32]>, IndexError> {
+        let mut least: Option<[u8; 32]> = None;
+        for &scope in scopes {
+            let mut from = scope.prefix().to_vec();
+            from.extend_from_slice(&start);
+            let scan = self.kv.scan_prefix_from_bounded(
+                ColumnFamily::ScriptDict,
+                &scope.prefix(),
+                &from,
+                PrefixScanLimit {
+                    max_rows: 1,
+                    max_bytes: usize::MAX,
+                },
+            )?;
+            for (key, _) in scan.rows {
+                let (_, hash) = format::decode_script_dict_key(&key)
+                    .ok_or_else(|| malformed("script_dict key"))?;
+                least = Some(least.map_or(hash, |current| current.min(hash)));
+            }
+        }
+        Ok(least)
+    }
+
+    fn scripts_with_prefix(
+        &self,
+        scopes: &[Scope],
+        prefix: [u8; 8],
+    ) -> Result<Vec<ScriptHash>, IndexError> {
+        let mut hashes = Vec::new();
+        for &scope in scopes {
+            let mut scoped = scope.prefix().to_vec();
+            scoped.extend_from_slice(&prefix);
+            let scan = self.scan(ColumnFamily::ScriptDict, &scoped, record_limit())?;
+            if !scan.complete {
+                return Err(malformed(
+                    "script dictionary prefix exceeds the reader bound",
+                ));
+            }
+            for (key, _) in scan.rows {
+                let (_, hash) = format::decode_script_dict_key(&key)
+                    .ok_or_else(|| malformed("script_dict key"))?;
+                hashes.push(ScriptHash::from_byte_array(hash));
+            }
+        }
+        hashes.sort_unstable();
+        hashes.dedup();
+        Ok(hashes)
+    }
+
+    fn spend_position(
+        &self,
+        scope: Scope,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<Option<TxPosition>, IndexError> {
+        let (segment, _, _, height) =
+            format::decode_spend_dir_key(key).ok_or_else(|| malformed("spend_dir key"))?;
+        if segment != scope.segment_id() {
+            return Err(malformed("spend_dir segment"));
+        }
+        let ordinal =
+            format::decode_spend_dir_value(value).ok_or_else(|| malformed("spend_dir value"))?;
+        let tx = self
+            .resolve_ordinal(scope, ordinal)?
+            .ok_or_else(|| malformed("spend names an ordinal absent from tx directory"))?;
+        if tx.height != height {
+            return Err(malformed(
+                "spend_dir height disagrees with spending ordinal",
+            ));
+        }
+        Ok(scope.covers(height).then_some(tx.position))
+    }
+}
+
+#[cfg(test)]
+impl SegmentSnapshot<'_> {
+    pub(crate) fn tx_answer_for_test(
+        &self,
+        txid: &Txid,
+    ) -> Result<Vec<(u32, TxPosition)>, IndexError> {
+        Ok(self
+            .transaction_entries(IndexCapability::TxLookup, txid, unlimited_scan())?
+            .0)
+    }
+
+    pub(crate) fn history_answer_for_test(
+        &self,
+        scripthash: ScriptHash,
+    ) -> Result<HistoryAnswer, IndexError> {
+        let scan = self.history_rows(scripthash, None, unlimited_scan())?;
+        Ok(scan
+            .rows
+            .into_iter()
+            .map(|row| (row.row.to_db_row().to_vec(), row.value))
+            .collect())
+    }
+}
+
+#[cfg(test)]
+fn unlimited_scan() -> PrefixScanLimit {
+    PrefixScanLimit {
+        max_rows: usize::MAX,
+        max_bytes: usize::MAX,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use bitcoin_rs_storage::KvIter;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const TXS: [u32; 2] = [3_000, 12_000];
+    const SCOPES: u32 = 2;
+    const PAGE_ROWS: usize = 64;
+    const PAGE_READ_SLACK: usize = 1;
+    type Row = (Vec<u8>, Vec<u8>);
+    type FixtureRows = (BTreeMap<usize, BTreeMap<Vec<u8>, Vec<u8>>>, Vec<Row>);
+    type CapturedReads = Arc<std::sync::Mutex<Vec<(usize, Vec<u8>)>>>;
+
+    struct CountingSnapshot {
+        rows: BTreeMap<usize, BTreeMap<Vec<u8>, Vec<u8>>>,
+        scans: Arc<AtomicUsize>,
+        reads: CapturedReads,
+    }
+
+    impl KvSnapshot for CountingSnapshot {
+        fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            Ok(self
+                .rows
+                .get(&cf.index())
+                .and_then(|rows| rows.get(key).cloned()))
+        }
+
+        fn iter_prefix<'a>(
+            &'a self,
+            cf: ColumnFamily,
+            prefix: &[u8],
+        ) -> Result<KvIter<'a>, StorageError> {
+            let rows: Vec<_> = self
+                .rows
+                .get(&cf.index())
+                .into_iter()
+                .flat_map(|rows| rows.range(prefix.to_vec()..))
+                .take_while(|(key, _)| key.starts_with(prefix))
+                .map(|(key, value)| Ok((key.clone(), value.clone())))
+                .collect();
+            Ok(Box::new(rows.into_iter()))
+        }
+
+        fn scan_prefix_from_bounded(
+            &self,
+            cf: ColumnFamily,
+            prefix: &[u8],
+            start: &[u8],
+            limit: PrefixScanLimit,
+        ) -> Result<PrefixScan, StorageError> {
+            self.scans.fetch_add(1, Ordering::Relaxed);
+            self.reads
+                .lock()
+                .expect("read log")
+                .push((cf.index(), prefix.to_vec()));
+            let mut rows = Vec::new();
+            for (key, value) in self
+                .rows
+                .get(&cf.index())
+                .into_iter()
+                .flat_map(|rows| rows.range(start.max(prefix).to_vec()..))
+            {
+                if !key.starts_with(prefix) {
+                    return Ok(PrefixScan {
+                        rows,
+                        complete: true,
+                    });
+                }
+                if rows.len() == limit.max_rows {
+                    return Ok(PrefixScan {
+                        rows,
+                        complete: false,
+                    });
+                }
+                rows.push((key.clone(), value.clone()));
+            }
+            Ok(PrefixScan {
+                rows,
+                complete: true,
+            })
+        }
+    }
+
+    fn txid(index: u32) -> [u8; 32] {
+        let mut txid = [0_u8; 32];
+        let mixed = u64::from(index).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        txid[..8].copy_from_slice(&mixed.to_be_bytes());
+        txid[8..12].copy_from_slice(&index.to_be_bytes());
+        txid
+    }
+
+    fn scopes() -> Vec<Scope> {
+        (0..SCOPES)
+            .map(|segment| {
+                if segment == 0 {
+                    Scope::Tail {
+                        lo: 0,
+                        hi: u32::MAX,
+                    }
+                } else {
+                    Scope::Sealed {
+                        segment_id: u64::from(segment),
+                        coverage: Coverage {
+                            first_height: 0,
+                            last_height: u32::MAX,
+                            last_hash: [0; 32],
+                        },
+                    }
+                }
+            })
+            .collect()
+    }
+
+    fn fixture(txs: u32) -> FixtureRows {
+        let mut tx_dir: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut expected = Vec::new();
+        for index in 0..txs {
+            let txid = txid(index);
+            let segment = index % SCOPES;
+            let ordinal = index / SCOPES;
+            let height = 1 + index / 100;
+            let offset = index * 10;
+            let len = 100;
+            tx_dir.insert(
+                format::encode_tx_dir_key(u64::from(segment), &txid, height).to_vec(),
+                format::encode_tx_dir_value(&[0x11; 32], ordinal, offset, len).to_vec(),
+            );
+            tx_dir.insert(
+                format::encode_tx_ordinal_key(u64::from(segment), ordinal).to_vec(),
+                format::encode_tx_ordinal_value(&txid, height, offset, len).to_vec(),
+            );
+            let mut key = txid[..8].to_vec();
+            key.extend_from_slice(&crate::types::encode_height(height));
+            expected.push((
+                key,
+                TxPositionValue::encode(&[TxPosition::new(offset, len)]),
+            ));
+        }
+        expected.sort();
+        let mut rows = BTreeMap::new();
+        rows.insert(ColumnFamily::TxDir.index(), tx_dir);
+        (rows, expected)
+    }
+
+    fn page_all(
+        snapshot: &SegmentSnapshot<'_>,
+        scans: &AtomicUsize,
+        max_rows: usize,
+    ) -> (Vec<Row>, Vec<usize>) {
+        let mut rows = Vec::new();
+        let mut cursor: Option<Vec<u8>> = None;
+        let mut reads_per_page = Vec::new();
+        loop {
+            let before = scans.load(Ordering::Relaxed);
+            let page = snapshot
+                .tx_lookup_page(
+                    cursor.as_deref(),
+                    PrefixScanLimit {
+                        max_rows,
+                        max_bytes: usize::MAX,
+                    },
+                )
+                .expect("tx lookup page");
+            reads_per_page.push(scans.load(Ordering::Relaxed) - before);
+            rows.extend(
+                page.rows
+                    .iter()
+                    .map(|row| (row.row.to_db_row().to_vec(), row.value.clone())),
+            );
+            if page.complete {
+                return (rows, reads_per_page);
+            }
+            let last = page.rows.last().expect("an incomplete page carries rows");
+            let mut next = last.row.to_db_row().to_vec();
+            next.push(0);
+            cursor = Some(next);
+        }
+    }
+
+    // IDX-02, IDX-12
+    #[test]
+    fn funding_transaction_rows_preserve_full_identity_and_bound_all_scopes() {
+        let requested = txid(7);
+        let mut collision = requested;
+        collision[31] ^= 1;
+        let mut directory = BTreeMap::new();
+        for (generation, txid, height, hash) in [
+            (0, requested, 3, [3; 32]),
+            (0, requested, 4, [4; 32]),
+            (1, requested, 1, [1; 32]),
+            (0, collision, 3, [5; 32]),
+        ] {
+            directory.insert(
+                format::encode_tx_dir_key(generation, &txid, height).to_vec(),
+                format::encode_tx_dir_value(&hash, 0, 81, 100).to_vec(),
+            );
+        }
+        let mut published = std::array::from_fn(|_| None);
+        published[IndexCapability::ScriptHistory.index()] = Some(vec![
+            Scope::Tail { lo: 3, hi: 3 },
+            Scope::Sealed {
+                segment_id: 1,
+                coverage: Coverage {
+                    first_height: 1,
+                    last_height: 1,
+                    last_hash: [1; 32],
+                },
+            },
+        ]);
+        let snapshot = SegmentSnapshot {
+            kv: Box::new(CountingSnapshot {
+                rows: BTreeMap::from([(ColumnFamily::TxDir.index(), directory)]),
+                scans: Arc::new(AtomicUsize::new(0)),
+                reads: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }),
+            published,
+        };
+        let txid = Txid(Hash256::from_le_bytes(&requested));
+        let scan = snapshot
+            .funding_transaction_rows(&txid, unlimited_scan())
+            .expect("funding identities");
+        assert!(scan.complete);
+        assert_eq!(scan.examined_rows, 3);
+        assert_eq!(
+            scan.encoded_bytes,
+            3 * (format::TX_DIR_KEY_LEN + format::TX_DIR_VALUE_LEN),
+        );
+        assert_eq!(
+            scan.rows,
+            [
+                FundingTransaction {
+                    txid,
+                    block_hash: Hash256::from_le_bytes(&[3; 32]),
+                    height: 3,
+                },
+                FundingTransaction {
+                    txid,
+                    block_hash: Hash256::from_le_bytes(&[1; 32]),
+                    height: 1,
+                },
+            ],
+        );
+        let limited = snapshot
+            .funding_transaction_rows(
+                &txid,
+                PrefixScanLimit {
+                    max_rows: 2,
+                    max_bytes: usize::MAX,
+                },
+            )
+            .expect("bounded funding identities");
+        assert!(!limited.complete);
+        assert_eq!(limited.examined_rows, 2);
+        assert_eq!(limited.rows.len(), 1);
+    }
+
+    // PRJ-08
+    #[test]
+    fn history_rows_merge_same_transaction_inputs_and_outputs() {
+        let scripthash = ScriptHash::from_byte_array([0x51; 32]);
+        let position = TxPosition::new(80, 120);
+        let transaction = txid(7);
+        let mut script_dict = BTreeMap::new();
+        script_dict.insert(
+            format::encode_script_dict_key(0, &scripthash.to_byte_array()).to_vec(),
+            format::encode_script_dict_value(0).to_vec(),
+        );
+        let mut tx_dir = BTreeMap::new();
+        tx_dir.insert(
+            format::encode_tx_ordinal_key(0, 7).to_vec(),
+            format::encode_tx_ordinal_value(&transaction, 42, 80, 120).to_vec(),
+        );
+        let items = [
+            ScriptHistoryOccurrence::FUNDING,
+            ScriptHistoryOccurrence::FUNDING,
+            ScriptHistoryOccurrence::SPENDING,
+            ScriptHistoryOccurrence::SPENDING,
+        ]
+        .map(|flags| format::PostingItem {
+            delta_ordinal: 7,
+            flags,
+        });
+        let mut script_post = BTreeMap::new();
+        script_post.insert(
+            format::encode_script_post_key(0, 0, 0).to_vec(),
+            format::encode_posting_items(&items),
+        );
+        let mut rows = BTreeMap::new();
+        rows.insert(ColumnFamily::ScriptDict.index(), script_dict);
+        rows.insert(ColumnFamily::TxDir.index(), tx_dir);
+        rows.insert(ColumnFamily::ScriptPost.index(), script_post);
+        let mut published = std::array::from_fn(|_| None);
+        published[IndexCapability::ScriptHistory.index()] =
+            Some(vec![Scope::Tail { lo: 42, hi: 42 }]);
+        let snapshot = SegmentSnapshot {
+            kv: Box::new(CountingSnapshot {
+                rows,
+                scans: Arc::new(AtomicUsize::new(0)),
+                reads: Arc::default(),
+            }),
+            published,
+        };
+        let scan = snapshot
+            .funding_rows(scripthash, unlimited_scan())
+            .expect("history rows");
+        assert!(scan.complete);
+        assert_eq!(scan.rows.len(), 1);
+        assert_eq!(
+            ScriptHistoryOccurrence::decode_all(&scan.rows[0].value),
+            Some(vec![ScriptHistoryOccurrence {
+                scripthash,
+                txid: transaction,
+                position,
+                flags: ScriptHistoryOccurrence::FUNDING | ScriptHistoryOccurrence::SPENDING,
+            }])
+        );
+        assert_eq!(
+            scan.encoded_bytes,
+            crate::HASH_PREFIX_ROW_SIZE + ScriptHistoryOccurrence::SIZE
+        );
+    }
+
+    // PRJ-08
+    #[test]
+    fn history_window_merges_duplicates_before_charging_older_height() {
+        let scripthash = ScriptHash::from_byte_array([0x52; 32]);
+        let occurrence = ScriptHistoryOccurrence {
+            scripthash,
+            txid: txid(1),
+            position: TxPosition::new(10, 90),
+            flags: ScriptHistoryOccurrence::FUNDING,
+        };
+        let row_bytes = crate::HASH_PREFIX_ROW_SIZE + ScriptHistoryOccurrence::SIZE;
+        let mut window = HistoryWindow::new(PrefixScanLimit {
+            max_rows: 2,
+            max_bytes: 2 * row_bytes,
+        });
+        window.push(43, occurrence);
+        window.push(42, occurrence);
+        window.push(
+            42,
+            ScriptHistoryOccurrence {
+                flags: ScriptHistoryOccurrence::SPENDING,
+                ..occurrence
+            },
+        );
+        let scan = window.finish(scripthash);
+        assert!(
+            scan.complete,
+            "duplicate flags must not evict an older height"
+        );
+        assert_eq!(scan.rows.len(), 2);
+        assert_eq!(scan.encoded_bytes, 2 * row_bytes);
+        assert_eq!(
+            ScriptHistoryOccurrence::decode_all(&scan.rows[1].value),
+            Some(vec![ScriptHistoryOccurrence {
+                flags: ScriptHistoryOccurrence::FUNDING | ScriptHistoryOccurrence::SPENDING,
+                ..occurrence
+            }])
+        );
+    }
+
+    #[test]
+    fn tx_lookup_pages_match_the_full_listing_and_bound_engine_reads() {
+        let scope_count = usize::try_from(SCOPES).expect("scope count fits usize");
+        let bound = scope_count + PAGE_READ_SLACK;
+        for txs in TXS {
+            let (rows, expected) = fixture(txs);
+            let scans = Arc::new(AtomicUsize::new(0));
+            let mut published: [Option<Vec<Scope>>; 4] = std::array::from_fn(|_| None);
+            published[IndexCapability::TxLookup.index()] = Some(scopes());
+            let snapshot = SegmentSnapshot {
+                kv: Box::new(CountingSnapshot {
+                    rows,
+                    scans: Arc::clone(&scans),
+                    reads: Arc::default(),
+                }),
+                published,
+            };
+
+            let (paged, reads_per_page) = page_all(&snapshot, &scans, PAGE_ROWS);
+            assert_eq!(
+                paged, expected,
+                "paged listing differs from the full listing at {txs} txs"
+            );
+            assert!(reads_per_page.len() > 1, "fixture must span several pages");
+            for (page, &reads) in reads_per_page.iter().enumerate() {
+                assert!(
+                    reads <= bound,
+                    "{txs} txs: page {page} made {reads} engine reads, bound {bound}"
+                );
+            }
+        }
+    }
+
+    // PRJ-07
+    #[test]
+    fn funding_record_page_respects_small_bound_and_merges_colliding_prefixes() {
+        let prefix = [0x07u8; 8];
+        let script_a = ScriptHash::from_byte_array([0x07u8; 32]);
+        let mut b_bytes = [0x08u8; 32];
+        b_bytes[..8].copy_from_slice(&prefix);
+        let script_b = ScriptHash::from_byte_array(b_bytes);
+        assert_eq!(
+            script_a.prefix(),
+            script_b.prefix(),
+            "the fixture must collide on the history prefix"
+        );
+        let mut script_dict = BTreeMap::new();
+        script_dict.insert(
+            format::encode_script_dict_key(0, &script_a.to_byte_array()).to_vec(),
+            format::encode_script_dict_value(0).to_vec(),
+        );
+        script_dict.insert(
+            format::encode_script_dict_key(0, &script_b.to_byte_array()).to_vec(),
+            format::encode_script_dict_value(1).to_vec(),
+        );
+        let mut tx_dir = BTreeMap::new();
+        let mut ordinal = 0u32;
+        let mut postings_a = Vec::new();
+        let mut postings_b = Vec::new();
+        let mut groups = Vec::new();
+        for height in 1u32..=6 {
+            let mut occurrences = Vec::new();
+            let tx_a = txid(ordinal);
+            tx_dir.insert(
+                format::encode_tx_ordinal_key(0, ordinal).to_vec(),
+                format::encode_tx_ordinal_value(&tx_a, height, 10 * height, 90).to_vec(),
+            );
+            postings_a.push(format::PostingItem {
+                delta_ordinal: ordinal,
+                flags: ScriptHistoryOccurrence::FUNDING,
+            });
+            occurrences.push(ScriptHistoryOccurrence {
+                scripthash: script_a,
+                txid: tx_a,
+                position: TxPosition::new(10 * height, 90),
+                flags: ScriptHistoryOccurrence::FUNDING,
+            });
+            ordinal += 1;
+            if height >= 5 {
+                let tx_b = txid(50 + ordinal);
+                tx_dir.insert(
+                    format::encode_tx_ordinal_key(0, ordinal).to_vec(),
+                    format::encode_tx_ordinal_value(&tx_b, height, 500 + 10 * height, 90).to_vec(),
+                );
+                postings_b.push(format::PostingItem {
+                    delta_ordinal: ordinal,
+                    flags: ScriptHistoryOccurrence::FUNDING,
+                });
+                occurrences.push(ScriptHistoryOccurrence {
+                    scripthash: script_b,
+                    txid: tx_b,
+                    position: TxPosition::new(500 + 10 * height, 90),
+                    flags: ScriptHistoryOccurrence::FUNDING,
+                });
+                ordinal += 1;
+            }
+            groups.push((height, occurrences));
+        }
+        let mut expected = Vec::new();
+        for (height, occurrences) in groups.iter().rev() {
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(&crate::types::encode_history_height(*height));
+            expected.push((key, ScriptHistoryOccurrence::encode_all(occurrences)));
+        }
+        let mut script_post = BTreeMap::new();
+        script_post.insert(
+            format::encode_script_post_key(0, 0, 0).to_vec(),
+            format::encode_posting_items(&postings_a),
+        );
+        script_post.insert(
+            format::encode_script_post_key(0, 1, 0).to_vec(),
+            format::encode_posting_items(&postings_b),
+        );
+        let mut rows = BTreeMap::new();
+        rows.insert(ColumnFamily::ScriptDict.index(), script_dict);
+        rows.insert(ColumnFamily::TxDir.index(), tx_dir);
+        rows.insert(ColumnFamily::ScriptPost.index(), script_post);
+        let mut published: [Option<Vec<Scope>>; 4] = std::array::from_fn(|_| None);
+        published[IndexCapability::ScriptHistory.index()] =
+            Some(vec![Scope::Tail { lo: 1, hi: 6 }]);
+        let snapshot = SegmentSnapshot {
+            kv: Box::new(CountingSnapshot {
+                rows,
+                scans: Arc::new(AtomicUsize::new(0)),
+                reads: Arc::default(),
+            }),
+            published,
+        };
+        let whole = snapshot
+            .funding_record_page(None, unlimited_scan())
+            .expect("whole funding page")
+            .rows;
+        assert_eq!(
+            whole, expected,
+            "unbounded read must carry every height once"
+        );
+        let collect = |limit: PrefixScanLimit, check: &dyn Fn(&[Row])| -> Vec<Row> {
+            let mut out = Vec::new();
+            let mut cursor: Option<Vec<u8>> = None;
+            loop {
+                let page = snapshot
+                    .funding_record_page(cursor.as_deref(), limit)
+                    .expect("funding page");
+                assert!(
+                    !page.rows.is_empty() || page.complete,
+                    "an incomplete page must carry rows"
+                );
+                check(&page.rows);
+                cursor = page.rows.last().map(|(key, _)| key.clone());
+                out.extend(page.rows);
+                if page.complete {
+                    return out;
+                }
+            }
+        };
+        let paged = collect(
+            PrefixScanLimit {
+                max_rows: 2,
+                max_bytes: usize::MAX,
+            },
+            &|rows| {
+                assert!(
+                    rows.len() <= 2,
+                    "a page carries {} rows past the bound",
+                    rows.len()
+                );
+            },
+        );
+        assert_eq!(
+            paged, expected,
+            "resumed pages must rebuild the full sequence"
+        );
+        let row_len = |row: &Row| row.0.len() + row.1.len();
+        let byte_limit = row_len(&expected[0]) + row_len(&expected[1]);
+        let byte_paged = collect(
+            PrefixScanLimit {
+                max_rows: usize::MAX,
+                max_bytes: byte_limit,
+            },
+            &|rows| {
+                let bytes: usize = rows.iter().map(|row| row.0.len() + row.1.len()).sum();
+                assert!(
+                    bytes <= byte_limit || rows.len() == 1,
+                    "a page carries {bytes} bytes past the bound"
+                );
+            },
+        );
+        assert_eq!(
+            byte_paged, expected,
+            "byte-budget pages must rebuild the full sequence"
+        );
+    }
+
+    // PRJ-07
+    #[test]
+    fn funding_record_page_bounds_sealed_reads_by_chunk() {
+        const HEIGHTS: u32 = 12_300;
+        let script = ScriptHash::from_byte_array([0x09u8; 32]);
+        let mut script_dict = BTreeMap::new();
+        script_dict.insert(
+            format::encode_script_dict_key(1, &script.to_byte_array()).to_vec(),
+            format::encode_script_dict_value(5).to_vec(),
+        );
+        let mut tx_dir = BTreeMap::new();
+        let mut items = Vec::new();
+        let mut previous = 0u32;
+        let mut expected = Vec::new();
+        for height in 1u32..=HEIGHTS {
+            let ordinal = height - 1;
+            let transaction = txid(ordinal);
+            tx_dir.insert(
+                format::encode_tx_ordinal_key(1, ordinal).to_vec(),
+                format::encode_tx_ordinal_value(&transaction, height, ordinal, 90).to_vec(),
+            );
+            items.push(format::PostingItem {
+                delta_ordinal: ordinal - previous,
+                flags: ScriptHistoryOccurrence::FUNDING,
+            });
+            previous = ordinal;
+            let mut key = script.prefix().to_vec();
+            key.extend_from_slice(&crate::types::encode_history_height(height));
+            expected.push((
+                key,
+                ScriptHistoryOccurrence::encode_all(&[ScriptHistoryOccurrence {
+                    scripthash: script,
+                    txid: transaction,
+                    position: TxPosition::new(ordinal, 90),
+                    flags: ScriptHistoryOccurrence::FUNDING,
+                }]),
+            ));
+        }
+        expected.reverse();
+        let chunks = format::chunk_postings(1, 5, items);
+        assert!(
+            chunks.len() >= 6,
+            "the history must span several posting chunks"
+        );
+        let mut script_post = BTreeMap::new();
+        for (key, value) in chunks {
+            script_post.insert(key, value);
+        }
+        let mut rows = BTreeMap::new();
+        rows.insert(ColumnFamily::ScriptDict.index(), script_dict);
+        rows.insert(ColumnFamily::TxDir.index(), tx_dir);
+        rows.insert(ColumnFamily::ScriptPost.index(), script_post);
+        let scans = Arc::new(AtomicUsize::new(0));
+        let mut published: [Option<Vec<Scope>>; 4] = std::array::from_fn(|_| None);
+        published[IndexCapability::ScriptHistory.index()] = Some(vec![Scope::Sealed {
+            segment_id: 1,
+            coverage: Coverage {
+                first_height: 0,
+                last_height: u32::MAX,
+                last_hash: [0; 32],
+            },
+        }]);
+        let snapshot = SegmentSnapshot {
+            kv: Box::new(CountingSnapshot {
+                rows,
+                scans: Arc::clone(&scans),
+                reads: Arc::default(),
+            }),
+            published,
+        };
+        let before = scans.load(Ordering::Relaxed);
+        let first = snapshot
+            .funding_record_page(
+                None,
+                PrefixScanLimit {
+                    max_rows: 1,
+                    max_bytes: usize::MAX,
+                },
+            )
+            .expect("first funding page");
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(first.rows[0], expected[0]);
+        assert!(
+            scans.load(Ordering::Relaxed) - before <= 3,
+            "one height group must close within a posting chunk, not the full history"
+        );
+        let quarter = expected.len() * 3 / 4;
+        let resume_before = scans.load(Ordering::Relaxed);
+        let resumed = snapshot
+            .funding_record_page(
+                Some(expected[quarter].0.as_slice()),
+                PrefixScanLimit {
+                    max_rows: 1,
+                    max_bytes: usize::MAX,
+                },
+            )
+            .expect("resumed funding page");
+        assert_eq!(resumed.rows.len(), 1);
+        assert_eq!(resumed.rows[0], expected[quarter + 1]);
+        assert!(
+            scans.load(Ordering::Relaxed) - resume_before <= 3,
+            "a resumed page must seek its chunk, not rescan newer history"
+        );
+        let walk_before = scans.load(Ordering::Relaxed);
+        let mut pages = 0usize;
+        let mut paged = first.rows;
+        let mut cursor = paged.last().map(|(key, _)| key.clone());
+        loop {
+            let page = snapshot
+                .funding_record_page(
+                    cursor.as_deref(),
+                    PrefixScanLimit {
+                        max_rows: 128,
+                        max_bytes: usize::MAX,
+                    },
+                )
+                .expect("funding page");
+            assert!(page.rows.len() <= 128);
+            pages += 1;
+            cursor = page.rows.last().map(|(key, _)| key.clone());
+            paged.extend(page.rows);
+            if page.complete {
+                break;
+            }
+        }
+        assert_eq!(paged, expected);
+        assert!(
+            scans.load(Ordering::Relaxed) - walk_before <= 4 * pages,
+            "the full walk must stay linear in pages, not quadratic in history"
+        );
+    }
+
+    // PRJ-07
+    #[test]
+    fn funding_record_page_skips_sealed_generations_newer_than_the_cursor() {
+        let script = ScriptHash::from_byte_array([0x09u8; 32]);
+        let mut script_dict = BTreeMap::new();
+        script_dict.insert(
+            format::encode_script_dict_key(1, &script.to_byte_array()).to_vec(),
+            format::encode_script_dict_value(5).to_vec(),
+        );
+        script_dict.insert(
+            format::encode_script_dict_key(2, &script.to_byte_array()).to_vec(),
+            format::encode_script_dict_value(9).to_vec(),
+        );
+        let mut tx_dir = BTreeMap::new();
+        let mut script_post = BTreeMap::new();
+        for (segment, script_id, base_height) in [(1_u64, 5_u32, 1_u32), (2_u64, 9_u32, 11_u32)] {
+            let mut items = Vec::new();
+            let mut previous = 0_u32;
+            for ordinal in 0_u32..4 {
+                let height = base_height + ordinal;
+                let transaction =
+                    txid(u32::try_from(segment).expect("segment id fits u32") * 100 + ordinal);
+                tx_dir.insert(
+                    format::encode_tx_ordinal_key(segment, ordinal).to_vec(),
+                    format::encode_tx_ordinal_value(&transaction, height, ordinal, 90).to_vec(),
+                );
+                items.push(format::PostingItem {
+                    delta_ordinal: ordinal - previous,
+                    flags: ScriptHistoryOccurrence::FUNDING,
+                });
+                previous = ordinal;
+            }
+            for (key, value) in format::chunk_postings(segment, script_id, items) {
+                script_post.insert(key, value);
+            }
+        }
+        let mut rows = BTreeMap::new();
+        rows.insert(ColumnFamily::ScriptDict.index(), script_dict);
+        rows.insert(ColumnFamily::TxDir.index(), tx_dir);
+        rows.insert(ColumnFamily::ScriptPost.index(), script_post);
+        let scans = Arc::new(AtomicUsize::new(0));
+        let reads: CapturedReads = Arc::default();
+        let mut published: [Option<Vec<Scope>>; 4] = std::array::from_fn(|_| None);
+        published[IndexCapability::ScriptHistory.index()] = Some(vec![
+            Scope::Sealed {
+                segment_id: 1,
+                coverage: Coverage {
+                    first_height: 0,
+                    last_height: u32::MAX,
+                    last_hash: [0; 32],
+                },
+            },
+            Scope::Sealed {
+                segment_id: 2,
+                coverage: Coverage {
+                    first_height: 0,
+                    last_height: u32::MAX,
+                    last_hash: [0; 32],
+                },
+            },
+        ]);
+        let snapshot = SegmentSnapshot {
+            kv: Box::new(CountingSnapshot {
+                rows,
+                scans: Arc::clone(&scans),
+                reads: Arc::clone(&reads),
+            }),
+            published,
+        };
+        let first = snapshot
+            .funding_record_page(
+                None,
+                PrefixScanLimit {
+                    max_rows: 5,
+                    max_bytes: usize::MAX,
+                },
+            )
+            .expect("first funding page");
+        assert_eq!(
+            first.rows.len(),
+            5,
+            "the first page covers the newer generation"
+        );
+        let after = first.rows.last().expect("a full first page").0.clone();
+        reads.lock().expect("read log").clear();
+        let second = snapshot
+            .funding_record_page(
+                Some(&after),
+                PrefixScanLimit {
+                    max_rows: 64,
+                    max_bytes: usize::MAX,
+                },
+            )
+            .expect("second funding page");
+        assert!(second.complete, "the remaining history fits in one page");
+        let heights: Vec<u32> = second
+            .rows
+            .iter()
+            .map(|(key, _)| {
+                crate::types::decode_history_height(key[8..].try_into().expect("height"))
+            })
+            .collect();
+        assert_eq!(
+            heights,
+            vec![3, 2, 1],
+            "older pages keep reading the sealed history"
+        );
+        let newer = Scope::Sealed {
+            segment_id: 2,
+            coverage: Coverage {
+                first_height: 0,
+                last_height: u32::MAX,
+                last_hash: [0; 32],
+            },
+        }
+        .prefix();
+        assert!(
+            !reads
+                .lock()
+                .expect("read log")
+                .iter()
+                .any(|(cf, prefix)| *cf == ColumnFamily::ScriptPost.index()
+                    && prefix.starts_with(&newer)),
+            "the newer sealed generation must not be rescanned below the cursor"
+        );
+    }
+}

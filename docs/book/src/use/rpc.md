@@ -155,15 +155,15 @@ The registry row for a method owns its notes. These codes are the recurring diff
 
 ## What owns compatibility
 
-`REGISTRY` in `crates/rpc/src/registry.rs` is the single inventory for JSON-RPC, REST, and ZMQ. Each row binds one name to one status: `Supported`, `Deviation`, `Implemented (unverified)`, `Extension`, `Disabled`, or `Unimplemented`. The dispatcher and the manifest are generated from the same rows, and a test checks them in both directions.
+`REGISTRY` in `crates/serving/src/registry.rs` is the single inventory for JSON-RPC, REST, and ZMQ. Each row binds one name to one status: `Supported`, `Deviation`, `Implemented (unverified)`, `Extension`, `Disabled`, or `Unimplemented`. The dispatcher and the manifest are generated from the same rows, and a test checks them in both directions.
 
 The generated reference is [docs/rpc-reference.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/rpc-reference.md). Do not edit it by hand. Regenerate it with:
 
 ```
-REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test suite manifest_coverage::regenerate_reference -- --ignored
+REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-serving --test suite manifest_coverage::regenerate_reference -- --ignored
 ```
 
-`crates/rpc/core-compat.toml` pins the reference identities: the released Bitcoin Core 31.1 artifacts, the development kernel tree used by the oracle lane, and two replay corpora. Its `differential_harness` flag is currently `false`, so no row can claim `Supported`.
+`crates/serving/core-compat.toml` pins the reference identities: the released Bitcoin Core 31.1 artifacts, the development kernel tree used by the oracle lane, and two replay corpora. Its `differential_harness` flag is currently `false`, so no row can claim `Supported`.
 
 The generated reference reports 0 Supported, 37 Deviation, 55 Implemented (unverified), 14 Extension, and 82 Unimplemented rows. "Implemented (unverified)" means the method ships. It does not mean its values were compared with Core.
 

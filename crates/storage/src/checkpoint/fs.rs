@@ -10,7 +10,7 @@ use cap_std::fs::{Dir, File, OpenOptions};
 pub const CURRENT_SCHEMA_FILE: &str = "CURRENT_SCHEMA";
 pub const DATA_DIR_LOCK_FILE: &str = ".lock";
 const CURRENT_SCHEMA_TEMP_FILE: &str = ".CURRENT_SCHEMA.tmp";
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 pub fn open_data_dir(path: &Path) -> io::Result<Dir> {
     Dir::open_ambient_dir(path, ambient_authority())
@@ -58,7 +58,7 @@ pub fn ensure_current_schema(data: &Dir) -> io::Result<()> {
     }
 }
 
-fn validate_current_schema(bytes: &[u8]) -> io::Result<()> {
+fn validate_current_schema(bytes: &[u8]) -> Result<(), io::Error> {
     if bytes == current_schema_bytes().as_slice() {
         return Ok(());
     }
@@ -77,7 +77,7 @@ fn incompatible_schema(reason: impl Into<String>) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "{}; remove or replace the datadir and restart to perform a full resync",
+            "{}; convert it with bitcoin-rs-storage-convert --from <old> --to <new>, or resync into a new datadir",
             reason.into()
         ),
     )
@@ -188,14 +188,84 @@ pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
         .map_err(Into::into)
 }
 
-/// `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` is an atomic same-volume
-/// rename that fails when `to` exists.
+/// `FILE_RENAME_INFO` requires an absolute destination, resolved here through
+/// the `dir` handle; `FILE_RENAME_INFO_EX`'s `RootDirectory` field would make
+/// it handle-relative but is rejected with `ERROR_INVALID_PARAMETER` on this
+/// kernel.
 #[cfg(windows)]
 pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
     check_confined_endpoint(from)?;
     check_confined_endpoint(to)?;
-    let base = dir_path(dir)?;
-    rename_noreplace_at(&base.join(from), &base.join(to))
+
+    use cap_std::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileRenameInfo, GetFinalPathNameByHandleW, SetFileInformationByHandle,
+    };
+
+    const DELETE_ACCESS: u32 = 0x0001_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let mut options = OpenOptions::new();
+    options
+        .follow(FollowSymlinks::No)
+        .access_mode(DELETE_ACCESS)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    let from_file = dir.open_with(from, &options)?;
+
+    let mut root = vec![0_u16; 512];
+    let root_len = loop {
+        // SAFETY: `root` is a live, writable buffer of the given length.
+        let written = unsafe {
+            GetFinalPathNameByHandleW(
+                dir.as_raw_handle().cast(),
+                root.as_mut_ptr(),
+                u32::try_from(root.len()).unwrap_or(u32::MAX),
+                0,
+            )
+        };
+        if written == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let written = usize::try_from(written).unwrap_or(usize::MAX);
+        if written < root.len() {
+            break written;
+        }
+        root.resize(written + 1, 0);
+    };
+    let root = &root[..root_len];
+    let mut name: Vec<u16> = Vec::with_capacity(root.len() + to.len() + 2);
+    name.extend_from_slice(root);
+    name.push(u16::from(b'\\'));
+    name.extend(to.encode_utf16());
+    name.push(0);
+
+    let name_offset = 2 * core::mem::size_of::<usize>() + 4;
+    let mut info = vec![0_u8; name_offset + name.len() * 2];
+    info[name_offset - 4..name_offset].copy_from_slice(
+        &u32::try_from(name.len() * 2)
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+    for (index, unit) in name.iter().enumerate() {
+        info[name_offset + index * 2..name_offset + 2 + index * 2]
+            .copy_from_slice(&unit.to_le_bytes());
+    }
+    // SAFETY: `info` is a correctly laid out `FILE_RENAME_INFO` buffer (u8
+    // replace flag, padding, NULL `RootDirectory`, u32 name length, NUL-
+    // terminated UTF-16 name) and `from_file` is a live handle opened with
+    // `DELETE` access.
+    let renamed = unsafe {
+        SetFileInformationByHandle(
+            from_file.as_raw_handle().cast(),
+            FileRenameInfo,
+            info.as_ptr().cast(),
+            u32::try_from(info.len()).unwrap_or(u32::MAX),
+        )
+    };
+    if renamed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(not(any(
@@ -210,63 +280,6 @@ pub fn rename_noreplace(_dir: &Dir, _from: &str, _to: &str) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "this platform has no atomic no-replace rename",
     ))
-}
-
-#[cfg(windows)]
-fn dir_path(dir: &Dir) -> io::Result<std::path::PathBuf> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
-    use std::os::windows::io::AsRawHandle;
-
-    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
-
-    let mut buffer = vec![0u16; 260];
-    loop {
-        // SAFETY: `dir` is an open handle and `buffer` is valid for `buffer.len()` writes.
-        let length = unsafe {
-            GetFinalPathNameByHandleW(
-                dir.as_raw_handle(),
-                buffer.as_mut_ptr(),
-                u32::try_from(buffer.len()).unwrap_or(u32::MAX),
-                0,
-            )
-        };
-        if length == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let needed = usize::try_from(length).unwrap_or(usize::MAX);
-        if needed > buffer.len() {
-            buffer.resize(needed.saturating_add(1), 0);
-            continue;
-        }
-        buffer.truncate(needed);
-        return Ok(std::path::PathBuf::from(OsString::from_wide(&buffer)));
-    }
-}
-
-#[cfg(windows)]
-fn rename_noreplace_at(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
-    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
-
-    let mut source: Vec<u16> = source.as_os_str().encode_wide().collect();
-    source.push(0);
-    let mut destination: Vec<u16> = destination.as_os_str().encode_wide().collect();
-    destination.push(0);
-    // SAFETY: both vectors are NUL-terminated UTF-16 buffers that outlive the call.
-    let moved = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) };
-    if moved != 0 {
-        return Ok(());
-    }
-    // SAFETY: reads the calling thread's last-error code; no invariants.
-    let code = unsafe { GetLastError() };
-    let error = io::Error::from_raw_os_error(i32::try_from(code).unwrap_or(i32::MAX));
-    if code == ERROR_ALREADY_EXISTS {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, error));
-    }
-    Err(error)
 }
 
 pub fn create_file(dir: &Dir, name: &str) -> io::Result<File> {
@@ -353,13 +366,6 @@ pub fn sync_dir(_dir: &Dir) -> io::Result<()> {
 }
 
 /// Rejects any rename endpoint that could resolve outside the checkpoint root.
-#[cfg(any(
-    target_vendor = "apple",
-    target_os = "linux",
-    target_os = "android",
-    target_os = "redox",
-    windows
-))]
 fn check_confined_endpoint(name: &str) -> io::Result<()> {
     fn invalid(name: &str, reason: &str) -> io::Error {
         io::Error::new(
@@ -387,17 +393,42 @@ fn check_confined_endpoint(name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Name of the nested engine-image directory a staged checkpoint generation
+/// writes under itself (`CheckpointStage::checkpoint_store`).
+pub(crate) const STAGED_STORE_DIR: &str = "chainstate";
+
+fn remove_engine_dir_content(dir: &Dir) -> io::Result<()> {
+    for entry in dir.entries()? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            let child = dir.open_dir_nofollow(&file_name)?;
+            remove_engine_dir_content(&child)?;
+            drop(child);
+            dir.remove_dir(&file_name)?;
+        } else {
+            dir.remove_file(&file_name)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn remove_known_dir(root: &CheckpointRoot, name: &str) -> io::Result<()> {
     let dir = root.open_dir(name)?;
     for entry in dir.entries()? {
         let entry = entry?;
         let file_name = entry.file_name();
-        let Some(file_name) = file_name.to_str() else {
-            continue;
-        };
-        let file_type = entry.file_type()?;
-        if file_type.is_file() {
-            dir.remove_file(file_name)?;
+        if entry.file_type()?.is_dir() {
+            if file_name != std::ffi::OsStr::new(STAGED_STORE_DIR) {
+                continue;
+            }
+            let child = dir.open_dir_nofollow(&file_name)?;
+            remove_engine_dir_content(&child)?;
+            drop(child);
+            dir.remove_dir(&file_name)?;
+        } else {
+            dir.remove_file(&file_name)?;
         }
     }
     drop(dir);

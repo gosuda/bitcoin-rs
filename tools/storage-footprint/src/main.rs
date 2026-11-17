@@ -17,7 +17,7 @@ fn main() -> std::process::ExitCode {
 
 #[derive(Debug)]
 enum FootprintError {
-    #[cfg(target_os = "linux")]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Usage,
     Io(std::io::Error),
     Json(sonic_rs::Error),
@@ -28,7 +28,6 @@ enum FootprintError {
 impl std::fmt::Display for FootprintError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            #[cfg(target_os = "linux")]
             Self::Usage => write!(f, "usage: storage-footprint <offline-data-directory>"),
             Self::Io(err) => write!(f, "{err}"),
             Self::Json(err) => write!(f, "{err}"),
@@ -45,7 +44,6 @@ impl std::error::Error for FootprintError {
         match self {
             Self::Io(err) => Some(err),
             Self::Json(err) => Some(err),
-            #[cfg(target_os = "linux")]
             Self::Usage => None,
             #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform => None,

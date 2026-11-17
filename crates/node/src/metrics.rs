@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use bitcoin_rs_index::{CapabilityState, DerivedIndexCapabilitySource};
+use bitcoin_rs_projection::{CapabilityState, DerivedIndexCapabilitySource};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use parking_lot::Mutex;
 
@@ -108,12 +108,7 @@ impl EvidenceIdentity {
     pub fn of_process(config: &crate::config::NodeConfig) -> std::io::Result<Self> {
         let executable = std::env::current_exe()?;
         let binary_sha256 = Sha256Hex::digest(&std::fs::read(&executable)?);
-        let journal = config.chainstate_journal;
-        let durability = if journal.enabled {
-            format!("journal:{}b/{}s", journal.blocks, journal.seconds)
-        } else {
-            "checkpoint-only".into()
-        };
+        let durability = "atomic-batch".to_owned();
         Ok(Self {
             binary_sha256,
             version: env!("CARGO_PKG_VERSION").into(),
@@ -263,14 +258,14 @@ fn prometheus_handle(identity: &EvidenceIdentity) -> Result<PrometheusHandle, Ru
 pub(crate) struct MetricsServer {
     #[cfg(test)]
     local_addr: SocketAddr,
-    cancel: bitcoin_rs_chain::LatchWriter,
+    cancel: bitcoin_rs_consensus::latch::LatchWriter,
     thread: Option<JoinHandle<()>>,
 }
 
 impl MetricsServer {
     pub(crate) fn bind(
         addr: SocketAddr,
-        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+        shutdown: impl Into<bitcoin_rs_consensus::latch::LatchReader>,
         identity: &EvidenceIdentity,
     ) -> Result<Self, RunError> {
         let shutdown = shutdown.into();
@@ -321,7 +316,7 @@ impl Drop for MetricsServer {
 
 pub(crate) fn start_metrics(
     bind: Option<SocketAddr>,
-    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+    shutdown: impl Into<bitcoin_rs_consensus::latch::LatchReader>,
     identity: &EvidenceIdentity,
 ) -> Result<Option<MetricsServer>, RunError> {
     let shutdown = shutdown.into();
@@ -332,7 +327,7 @@ pub(crate) fn start_metrics(
 fn serve_metrics(
     listener: &TcpListener,
     handle: &PrometheusHandle,
-    cancel: &bitcoin_rs_chain::LatchReader,
+    cancel: &bitcoin_rs_consensus::latch::LatchReader,
 ) {
     let Ok(local_addr) = listener.local_addr() else {
         return;
@@ -385,7 +380,15 @@ pub(crate) fn publish_txindex_readiness(source: &dyn DerivedIndexCapabilitySourc
 
 pub(crate) fn spawn_readiness_sampler(
     source: Arc<dyn DerivedIndexCapabilitySource>,
-    shutdown: bitcoin_rs_chain::LatchReader,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
+) -> Result<JoinHandle<()>, RunError> {
+    spawn_readiness_sampler_polling(source, shutdown, READINESS_SAMPLE_INTERVAL)
+}
+
+fn spawn_readiness_sampler_polling(
+    source: Arc<dyn DerivedIndexCapabilitySource>,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
+    interval: Duration,
 ) -> Result<JoinHandle<()>, RunError> {
     std::thread::Builder::new()
         .name("bitcoin-rs-metrics-readiness".into())
@@ -394,7 +397,7 @@ pub(crate) fn spawn_readiness_sampler(
                 publish_txindex_readiness(source.as_ref());
                 crossbeam_channel::select! {
                     recv(shutdown.closed()) -> _ => break,
-                    recv(crossbeam_channel::after(READINESS_SAMPLE_INTERVAL)) -> _ => {}
+                    recv(crossbeam_channel::after(interval)) -> _ => {}
                 }
             }
         })
@@ -402,4 +405,365 @@ pub(crate) fn spawn_readiness_sampler(
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use bitcoin_rs_projection::{
+        CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
+    };
+    use parking_lot::Mutex;
+
+    use super::{
+        CorpusIdentity, EvidenceIdentity, MetricsServer, PROMETHEUS_HANDLE, Sha256Hex,
+        TXINDEX_READINESS_GAUGE, publish_txindex_readiness, spawn_readiness_sampler_polling,
+        start_metrics,
+    };
+
+    pub(super) static SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    impl MetricsServer {
+        pub(crate) fn with_worker_for_test(worker: thread::JoinHandle<()>) -> Self {
+            Self {
+                local_addr: unused_ephemeral(),
+                cancel: bitcoin_rs_consensus::latch::LatchWriter::new(),
+                thread: Some(worker),
+            }
+        }
+    }
+
+    fn unused_ephemeral() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+    }
+
+    pub(super) fn identity() -> EvidenceIdentity {
+        EvidenceIdentity {
+            binary_sha256: Sha256Hex([1; 32]),
+            version: "test".into(),
+            config_sha256: Sha256Hex([2; 32]),
+            corpus: Some(CorpusIdentity {
+                id: "probe".into(),
+                manifest_sha256: Sha256Hex([3; 32]),
+            }),
+            backend: "memory".into(),
+            durability: "checkpoint-only".into(),
+            hardware: "test x1".into(),
+        }
+    }
+
+    fn scrape(addr: SocketAddr) -> (u16, String) {
+        let mut last = None;
+        for _ in 0..50 {
+            match TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
+                Ok(mut stream) => {
+                    stream
+                    .write_all(
+                        b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap_or_else(|error| panic!("write scrape request: {error}"));
+                    stream
+                        .flush()
+                        .unwrap_or_else(|error| panic!("flush scrape request: {error}"));
+                    let mut body = String::new();
+                    stream
+                        .read_to_string(&mut body)
+                        .unwrap_or_else(|error| panic!("read scrape response: {error}"));
+                    let status = body
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|token| token.parse().ok())
+                        .unwrap_or(0);
+                    return (status, body);
+                }
+                Err(error) => last = Some(error),
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("scrape connect failed: {last:?}");
+    }
+
+    #[test]
+    fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
+        let _guard = SERVER_TEST_LOCK.lock();
+        let shutdown = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
+        let occupied = TcpListener::bind(unused_ephemeral())
+            .unwrap_or_else(|error| panic!("occupy port: {error}"));
+        let addr = occupied
+            .local_addr()
+            .unwrap_or_else(|error| panic!("occupied local addr: {error}"));
+        let installed_before = PROMETHEUS_HANDLE.lock().is_some();
+
+        let first = start_metrics(Some(addr), shutdown.clone(), &identity());
+        assert!(first.is_err(), "occupied bind must fail");
+        assert_eq!(
+            PROMETHEUS_HANDLE.lock().is_some(),
+            installed_before,
+            "failed bind must not install the process recorder"
+        );
+
+        drop(occupied);
+        let mut server = start_metrics(Some(unused_ephemeral()), shutdown, &identity())
+            .unwrap_or_else(|error| panic!("retry after occupied bind: {error}"))
+            .unwrap_or_else(|| panic!("metrics server"));
+        metrics::counter!("node_metrics_retry_probe").increment(1);
+        let (status, body) = scrape(server.local_addr());
+        assert_eq!(status, 200);
+        assert!(
+            body.contains("node_metrics_retry_probe"),
+            "retry scrape missing recorded metric: {body}"
+        );
+        server
+            .stop_and_join()
+            .unwrap_or_else(|error| panic!("join metrics scrape worker: {error}"));
+    }
+
+    #[test]
+    fn scrape_returns_operator_metrics_without_evidence_identity_labels() {
+        let _guard = SERVER_TEST_LOCK.lock();
+        let shutdown = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
+        let mut server = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
+            .unwrap_or_else(|error| panic!("bind metrics: {error}"));
+        metrics::counter!("node_metrics_scrape_probe").increment(1);
+        publish_txindex_readiness(&FixedSource::enabled(CapabilityState::Ready));
+        let (status, body) = scrape(server.local_addr());
+        assert_eq!(status, 200);
+        assert!(
+            body.contains("text/plain"),
+            "content-type must be prometheus text: {body}"
+        );
+        let (_, exposition) = body
+            .split_once("\r\n\r\n")
+            .unwrap_or_else(|| panic!("HTTP response missing header boundary: {body}"));
+        let samples = exposition
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'));
+        assert!(
+            samples
+                .clone()
+                .any(|line| line.starts_with("node_metrics_scrape_probe")),
+            "probe sample missing from scrape: {body}"
+        );
+        assert_one_active(&readiness_samples(exposition), "Ready");
+        for sample in samples {
+            for retired_label in [
+                "binary_sha256=",
+                "version=",
+                "config_sha256=",
+                "corpus_id=",
+                "corpus_manifest_sha256=",
+                "hardware=",
+            ] {
+                assert!(
+                    !sample.contains(retired_label),
+                    "operator metrics must not carry evidence label {retired_label}: {sample}"
+                );
+            }
+            if !sample.starts_with("storage_") {
+                for identity_label in ["backend=", "durability="] {
+                    assert!(
+                        !sample.contains(identity_label),
+                        "non-storage metrics must not inherit global identity {identity_label}: {sample}"
+                    );
+                }
+            }
+        }
+        server
+            .stop_and_join()
+            .unwrap_or_else(|error| panic!("join metrics scrape worker: {error}"));
+    }
+
+    #[test]
+    fn two_sequential_servers_in_one_process_both_serve() {
+        let _guard = SERVER_TEST_LOCK.lock();
+        let shutdown = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
+        let mut first = MetricsServer::bind(unused_ephemeral(), shutdown.clone(), &identity())
+            .unwrap_or_else(|error| panic!("first: {error}"));
+        metrics::counter!("node_metrics_sequential_probe").increment(1);
+        let (status, body) = scrape(first.local_addr());
+        assert_eq!(status, 200);
+        assert!(body.contains("node_metrics_sequential_probe"));
+        first
+            .stop_and_join()
+            .unwrap_or_else(|error| panic!("join first metrics scrape worker: {error}"));
+
+        let mut second = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
+            .unwrap_or_else(|error| panic!("second: {error}"));
+        metrics::counter!("node_metrics_sequential_probe").increment(1);
+        let (status, body) = scrape(second.local_addr());
+        assert_eq!(status, 200);
+        assert!(body.contains("node_metrics_sequential_probe"));
+        second
+            .stop_and_join()
+            .unwrap_or_else(|error| panic!("join second metrics scrape worker: {error}"));
+    }
+
+    #[test]
+    fn shutdown_exits_the_listener_thread() {
+        let _guard = SERVER_TEST_LOCK.lock();
+        let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
+        let mut server = MetricsServer::bind(unused_ephemeral(), shutdown.reader(), &identity())
+            .unwrap_or_else(|error| panic!("bind metrics: {error}"));
+        let addr = server.local_addr();
+        shutdown.trigger();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while TcpListener::bind(addr).is_err() {
+            if Instant::now() >= deadline {
+                drop(server.thread.take());
+                panic!("listener never exited on the shutdown flag");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        server
+            .stop_and_join()
+            .unwrap_or_else(|error| panic!("join metrics scrape worker: {error}"));
+    }
+
+    type RenderedSample = (String, f64);
+
+    fn is_one(value: f64) -> bool {
+        value.to_bits() == 1.0f64.to_bits()
+    }
+
+    fn is_zero(value: f64) -> bool {
+        value.to_bits() == 0.0f64.to_bits()
+    }
+
+    struct FixedSource {
+        enabled: bool,
+        state: CapabilityState,
+    }
+
+    impl FixedSource {
+        fn enabled(state: CapabilityState) -> Self {
+            Self {
+                enabled: true,
+                state,
+            }
+        }
+    }
+
+    impl DerivedIndexCapabilitySource for FixedSource {
+        fn capability(&self) -> CapabilityStatus {
+            derived_index_status(self.enabled, self.state.clone())
+        }
+    }
+
+    fn scrape_body(addr: SocketAddr) -> String {
+        scrape(addr).1
+    }
+
+    fn readiness_samples(body: &str) -> Vec<RenderedSample> {
+        let metric = TXINDEX_READINESS_GAUGE.replace('.', "_");
+        let prefix = format!("{metric}{{");
+        body.lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix(&prefix)?;
+                let (labels, value) = rest.split_once('}')?;
+                let state = labels.split(',').find_map(|label| {
+                    label
+                        .trim()
+                        .strip_prefix("state=\"")
+                        .and_then(|spelled| spelled.strip_suffix('"'))
+                })?;
+                let value = value.trim().parse::<f64>().ok()?;
+                Some((state.to_owned(), value))
+            })
+            .collect()
+    }
+
+    fn assert_one_active(samples: &[RenderedSample], expected: &str) {
+        let active: Vec<_> = samples.iter().filter(|(_, value)| is_one(*value)).collect();
+        assert_eq!(
+            active.len(),
+            1,
+            "exactly one outcome must be active: {samples:?}"
+        );
+        assert_eq!(
+            active.first().map(|(state, _)| state.as_str()),
+            Some(expected),
+            "the active label must be the getcapabilities spelling"
+        );
+    }
+
+    #[test]
+    fn published_gauge_flips_its_active_label_with_the_rpc_source() {
+        let _guard = SERVER_TEST_LOCK.lock();
+        let shutdown = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
+        let mut server = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
+            .unwrap_or_else(|error| panic!("bind metrics: {error}"));
+
+        publish_txindex_readiness(&FixedSource::enabled(CapabilityState::Ready));
+        let samples = readiness_samples(&scrape_body(server.local_addr()));
+        assert_one_active(&samples, "Ready");
+
+        publish_txindex_readiness(&FixedSource::enabled(CapabilityState::Rebuilding {
+            processed_height: 40,
+            target_height: 101,
+        }));
+        let samples = readiness_samples(&scrape_body(server.local_addr()));
+        assert_one_active(&samples, "Rebuilding");
+        assert!(
+            samples
+                .iter()
+                .all(|(state, value)| state != "Ready" || is_zero(*value)),
+            "the retired Ready label must read 0 after the transition: {samples:?}"
+        );
+
+        publish_txindex_readiness(&FixedSource {
+            enabled: false,
+            state: CapabilityState::Disabled,
+        });
+        let samples = readiness_samples(&scrape_body(server.local_addr()));
+        assert_one_active(&samples, "Disabled");
+
+        server
+            .stop_and_join()
+            .unwrap_or_else(|error| panic!("join metrics scrape worker: {error}"));
+    }
+
+    #[test]
+    fn readiness_sampler_stops_promptly_on_cancellation() {
+        let writer = bitcoin_rs_consensus::latch::LatchWriter::new();
+        let reader = writer.reader();
+        let source = Arc::new(FixedSource::enabled(CapabilityState::Ready));
+        let worker = spawn_readiness_sampler_polling(source, reader, Duration::from_secs(3600))
+            .unwrap_or_else(|error| panic!("spawn readiness sampler: {error}"));
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let handle = std::thread::spawn(move || {
+            let _ = worker.join();
+            let _ = tx.send(());
+        });
+        std::thread::sleep(Duration::from_millis(5));
+        writer.trigger();
+        let res = rx.recv_timeout(Duration::from_secs(10));
+        assert!(
+            res.is_ok(),
+            "readiness sampler did not exit promptly: timed out waiting for trigger"
+        );
+        assert!(handle.join().is_ok(), "thread panicked");
+    }
+
+    #[test]
+    fn metrics_listener_stops_promptly_on_cancellation() {
+        let _guard = SERVER_TEST_LOCK.lock();
+        let writer = bitcoin_rs_consensus::latch::LatchWriter::new();
+        let reader = writer.reader();
+        let mut server = MetricsServer::bind(unused_ephemeral(), reader, &identity())
+            .unwrap_or_else(|error| panic!("bind metrics: {error}"));
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let handle = std::thread::spawn(move || {
+            let res = server.stop_and_join();
+            let _ = tx.send(res);
+        });
+        std::thread::sleep(Duration::from_millis(5));
+        writer.trigger();
+        let Ok(outcome) = rx.recv_timeout(Duration::from_secs(5)) else {
+            panic!("join deadline exceeded: metrics server did not stop within 5 seconds");
+        };
+        assert!(outcome.is_ok(), "stop_and_join failed: {outcome:?}");
+        assert!(handle.join().is_ok(), "thread panicked");
+    }
+}

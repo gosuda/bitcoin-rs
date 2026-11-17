@@ -52,7 +52,7 @@ fn try_exclusive_lock(file: &std::fs::File) -> io::Result<()> {
 
 #[cfg(not(unix))]
 fn try_exclusive_lock(file: &std::fs::File) -> io::Result<()> {
-    file.try_lock().map_err(std::io::Error::from)
+    file.try_lock().map_err(io::Error::from)
 }
 
 impl DataDirLock {

@@ -20,8 +20,8 @@
 # checks the default feature set plus one explicit kernel-enabled check so
 # the optional C++ engine still sees its newest allowed versions; the named
 # feature matrix is owned by FEAT-01 / scripts/check-feature-matrix.sh.
-# The minimal endpoint uses --all-features, so the rocksdb backend builds
-# bindgen; bindgen's clang-sys dependency needs a visible libclang at build
+# The minimal endpoint uses --all-features and the maximum endpoint checks
+# the kernel engine; kernel build dependencies need cmake and libboost-dev at build
 # time. See CONTRIBUTING.md, Prerequisites.
 #
 # Owner: docs/contracts/dependency-range.md (DEP-01, DEP-02).

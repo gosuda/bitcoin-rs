@@ -12,12 +12,12 @@ This chapter shows the commands but no build transcript. The transcripts in late
 
 The workspace uses the `stable` channel; the MSRV is Rust 1.99.0. The policy is [source compatibility](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/source-compatibility.md).
 
-The default build compiles bundled ZeroMQ from source. Install a C compiler, a C++ compiler, and `ar`; on Debian or Ubuntu that is `build-essential`. You do not need system ZeroMQ headers, `pkg-config`, `cmake`, or `libsodium`.
+The default build compiles bundled ZeroMQ and RocksDB from source. Install a C compiler, a C++17 compiler (`g++`), `clang`, `libclang-dev`, `cmake`, and `ar`; on Debian or Ubuntu that is `build-essential clang libclang-dev cmake`. You do not need system ZeroMQ headers, `pkg-config`, or `libsodium`.
 
-A C compiler stays required even with the `zmq` feature off, because secp256k1 and mimalloc are vendored and compiled. The optional kernel lane also needs CMake and Boost:
+A C and C++ compiler stays required even with the `zmq` feature off, because secp256k1, mimalloc, and RocksDB are vendored and compiled. The optional kernel lane also needs Boost (`libboost-dev`):
 
 ```sh
-$ sudo apt-get install -y cmake libboost-dev
+$ sudo apt-get install -y libboost-dev
 ```
 
 ## Build lanes
@@ -26,11 +26,11 @@ Choose the lane for its purpose. The default binary is kernel-free.
 
 | Lane | Command | What it contains |
 | --- | --- | --- |
-| Default | `cargo build --locked --release -p bitcoin-rs` | `fjall` and `redb` storage backends, bundled ZeroMQ, native validation |
-| Minimal native | `cargo build --locked --release -p bitcoin-rs --no-default-features --features fjall` | One storage backend, optional extensions off |
+| Default | `cargo build --locked --release -p bitcoin-rs` | Mandatory RocksDB storage, bundled ZeroMQ, native validation |
+| Minimal native | `cargo build --locked --release -p bitcoin-rs --no-default-features` | Mandatory RocksDB storage, ZeroMQ off |
 | Kernel | `CARGO_TARGET_DIR=target/oracle cargo build --locked --release -p bitcoin-rs --features kernel` | Optional `bitcoinkernel` validation and oracle lane |
 
-The default feature set in `bin/bitcoin-rs/Cargo.toml` is `fjall`, `redb`, and `zmq`. `rocksdb` is a separate non-default feature.
+The default feature set in `bin/bitcoin-rs/Cargo.toml` is `zmq`. RocksDB is the mandatory default storage engine, always compiled into the binary; `fjall` and `redb` are removed from runtime.
 
 Keep the kernel lane in its own `CARGO_TARGET_DIR` when you need to prove that a kernel-free binary contains no kernel support; building with `--features kernel` in the shared target directory would leave kernel-linked artifacts beside the default build.
 
@@ -64,7 +64,7 @@ Help output is the authoritative flag list for the binary in front of you. The [
 
 ## Docker
 
-The shipped image is not the default kernel-free build. Its Dockerfile builds with `--no-default-features --features fjall,kernel` and selects `kernel` at the config-file layer, so a bare `docker run` uses the kernel engine. Setting `BITCOIN_RS_VALIDATION_ENGINE=native` or mounting your own config file over the image's default still overrides it.
+The shipped image is not the default kernel-free build. Its Dockerfile builds with `--no-default-features --features kernel` and selects `kernel` at the config-file layer, so a bare `docker run` uses the kernel engine. Setting `BITCOIN_RS_VALIDATION_ENGINE=native` or mounting your own config file over the image's default still overrides it.
 
 > **Warning** The image keeps RPC on loopback. To serve RPC outside the container you must set an explicit bind and operator credentials; Basic authentication is unencrypted without a TLS-terminating proxy.
 

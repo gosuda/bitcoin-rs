@@ -19,9 +19,9 @@ cargo test --locked --manifest-path tools/ldk/Cargo.toml
 cargo clippy --locked --manifest-path tools/ldk/Cargo.toml --all-targets -- -D warnings
 cargo fmt --manifest-path tools/ldk/Cargo.toml --check
 cargo test --locked -p bitcoin-rs-mempool --lib
-cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --lib chain_feed::tests
+cargo test --locked -p bitcoin-rs-node --no-default-features --lib chain_feed::tests
 ```
 
-The public consumer test starts a temporary fjall regtest Node. It reads genesis
+The public consumer test starts a temporary RocksDB regtest Node. It reads genesis
 through real LDK traits. It checks byte conversions and fee fallback, and it
 exercises admission errors and settled polling. Then it shuts down and reopens.
