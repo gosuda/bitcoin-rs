@@ -27,6 +27,11 @@ pub(crate) enum ConvertError {
     #[error("destination directory is not empty: {0}")]
     DestinationNotEmpty(PathBuf),
 
+    #[error(
+        "pending derived-index reset intent at '{0}'; complete node startup recovery before rebuilding offline"
+    )]
+    PendingIndexReset(PathBuf),
+
     #[error("failed to open storage engine: {0}")]
     EngineOpen(#[from] EngineOpenError),
     #[cfg(any(not(feature = "surrealkv"), not(feature = "mdbx")))]

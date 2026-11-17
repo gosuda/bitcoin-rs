@@ -1096,11 +1096,13 @@ impl JsonRpcVersion {
         }
     }
 
-    fn success_response(self, result: &Value, id: &Value) -> Value {
-        match self {
-            Self::Legacy => json!({"result": result, "error": null, "id": id}),
-            Self::V2 => json!({"jsonrpc": "2.0", "result": result, "id": id}),
-        }
+    fn success_response(self, result: Value, id: &Value) -> Value {
+        let mut response = match self {
+            Self::Legacy => json!({"result": null, "error": null, "id": id}),
+            Self::V2 => json!({"jsonrpc": "2.0", "result": null, "id": id}),
+        };
+        let _ = response.insert("result", result);
+        response
     }
 
     fn error_response(self, error: &RpcError, id: &Value) -> Value {
@@ -1307,7 +1309,7 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
             close: worker_held,
             status: 200,
             reason: reason_for_status(200),
-            body: Some(json!(responses)),
+            body: Some(Value::from(responses)),
         };
     }
     let close = crate::registry::blocking_request(request);
@@ -1388,7 +1390,7 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
         };
     }
     match result {
-        Ok(result) => CallResponse::reply(version.success_response(&result, &id), version, None),
+        Ok(result) => CallResponse::reply(version.success_response(result, &id), version, None),
         Err(error) => {
             CallResponse::reply(version.error_response(&error, &id), version, Some(error))
         }
@@ -1698,6 +1700,61 @@ struct ResponseHead<'a> {
 mod tests {
     mod listeners {
         use super::*;
+
+        // API-10
+        #[test]
+        fn raw_transaction_budget_is_shared_across_public_and_authenticated_listeners()
+        -> io::Result<()> {
+            let ctx = Arc::new(Context::new());
+            let public = RunningServer::start(&ctx, RpcSurface::Public, 32)?;
+            let rpc = RunningServer::start(&ctx, RpcSurface::Shared, 32)?;
+            let permits = (0..8)
+                .map(|_| {
+                    ctx.tx_decode_admission
+                        .reserve(["00"])
+                        .expect("reserve decode")
+                })
+                .collect::<Vec<_>>();
+            std::thread::scope(|scope| {
+                let tasks = (0..8)
+                    .map(|_| {
+                        let public = &public;
+                        scope.spawn(move || {
+                            let response = public.request(b"POST /api/tx HTTP/1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n00").expect("public request");
+                            assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let body =
+                    r#"{"jsonrpc":"2.0","id":1,"method":"decoderawtransaction","params":["00"]}"#;
+                let request = format!(
+                    "POST / HTTP/1.1\r\nAuthorization: Basic {GOOD_TOKEN}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let response = rpc
+                    .request(request.as_bytes())
+                    .expect("authenticated request");
+                assert!(
+                    response.contains("raw transaction decode budget exhausted; retry"),
+                    "{response}"
+                );
+                for task in tasks {
+                    task.join().expect("public worker");
+                }
+            });
+            let response = public
+                .request(b"POST / HTTP/1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")?;
+            assert!(response.starts_with("HTTP/1.1 404"));
+            drop(permits);
+            let response = public.request(
+                b"POST /api/tx HTTP/1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n00",
+            )?;
+            assert!(
+                response.starts_with("HTTP/1.1 400"),
+                "decode resumes: {response}"
+            );
+            Ok(())
+        }
 
         struct RunningServer {
             address: SocketAddr,

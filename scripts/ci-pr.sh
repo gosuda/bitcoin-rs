@@ -124,6 +124,12 @@ test_crates_storage() {
     cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx --test mdbx_bounded_read_allocation
   profile "test: bitcoin-rs-storage utxo_query_lifetime" \
     cargo_test -p bitcoin-rs-storage --test utxo_query_lifetime
+  profile "test: bitcoin-rs-projection (namespace recovery)" \
+    cargo_test -p bitcoin-rs-projection --features surrealkv,mdbx --lib runtime::startup::tests::namespace_reset::
+  profile "test: bitcoin-rs-projection (populated namespace recreation)" \
+    cargo_test -p bitcoin-rs-projection --features surrealkv,mdbx --lib incompatible_populated_index_reopens_without_writing_obsolete_rows
+  profile "test: bitcoin-rs-projection (worker failure isolation)" \
+    cargo_test -p bitcoin-rs-projection --features surrealkv,mdbx --lib unusable_worker_makes_queries_unavailable
 }
 
 test_crates_consensus_execution() {

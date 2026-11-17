@@ -21,8 +21,8 @@ pub(super) const FORMAT_VERSION_KEY: &[u8] = crate::types::INDEX_FORMAT_VERSION_
 /// `varint(compress_amount(value)) || varint((height << 1) | coinbase)`
 /// (`PRJ-11`). Version 7 is reserved for the index-generation layout
 /// (PRJ-05..09). Any older marker refuses start
-/// (`UnsupportedTxIndexFormatVersion`), so `open_writer` resets the derived
-/// store and rebuilds it from chainstate; no in-place upgrade or dual-read
+/// (`UnsupportedTxIndexFormatVersion`), so startup recreates the derived
+/// namespace and rebuilds it from chainstate; no in-place upgrade or dual-read
 /// path exists. `bitcoin-rs-storage-convert rebuild-index` performs the same
 /// reset offline. Every per-block tail log record carries the block hash anchor.
 pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = crate::types::INDEX_FORMAT_VERSION_VALUE;
@@ -129,6 +129,18 @@ fn parse_reset_state(bytes: &[u8]) -> Result<ResetState, IndexError> {
             })
         }
         _ => Err(IndexError::InvalidResetMarker),
+    }
+}
+
+impl<S: KvStore> super::IndexWriter<S> {
+    pub(crate) fn check_startup_reset(store: &S) -> Result<(), IndexError> {
+        if let Some(bytes) = store.get(ColumnFamily::UtxoMeta, RESET_CAPABILITIES_KEY)?
+            && let ResetState::Claim { mask, .. } = parse_reset_state(&bytes)?
+            && mask == IndexCapabilities::ALL.to_mask()
+        {
+            return Err(IndexError::FullResetRequired);
+        }
+        Ok(())
     }
 }
 

@@ -251,7 +251,29 @@ pub(crate) fn generateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let output = required_str(params, 0, "output is required")?;
     let payout =
         generateblock_payout_script(output, convert::bitcoin_network(ctx.chain.chain_network))?;
-    let transactions = parse_generateblock_transactions(ctx, params)?;
+    let array = params_array(params)?;
+    let Some(value) = array.get(1) else {
+        return Err(RpcError::InvalidParams("transactions is required"));
+    };
+    if value.is_null() {
+        return Err(RpcError::InvalidParams("transactions must be an array"));
+    }
+    let Some(entries) = value.as_array() else {
+        return Err(RpcError::InvalidType(
+            "transactions must be an array".to_owned(),
+        ));
+    };
+    let mut raw_entries = entries
+        .iter()
+        .filter_map(JsonValueTrait::as_str)
+        .filter(|text| Txid::from_str(text).is_err())
+        .peekable();
+    let _decode = if raw_entries.peek().is_some() {
+        Some(ctx.tx_decode_admission.reserve(raw_entries)?)
+    } else {
+        None
+    };
+    let transactions = parse_generateblock_transactions(ctx, entries)?;
     let submit = optional_bool(params, 2, true)?;
     let generated = control
         .generate(GenerateRequest {
@@ -369,20 +391,8 @@ fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcEr
 
 fn parse_generateblock_transactions(
     ctx: &Context,
-    params: &Value,
+    entries: &sonic_rs::Array,
 ) -> Result<Vec<GenerateTx>, RpcError> {
-    let array = params_array(params)?;
-    let Some(value) = array.get(1) else {
-        return Err(RpcError::InvalidParams("transactions is required"));
-    };
-    if value.is_null() {
-        return Err(RpcError::InvalidParams("transactions must be an array"));
-    }
-    let Some(entries) = value.as_array() else {
-        return Err(RpcError::InvalidType(
-            "transactions must be an array".to_owned(),
-        ));
-    };
     let mut transactions = Vec::with_capacity(entries.len());
     let mut snapshot: Option<Arc<MempoolMiningSnapshot>> = None;
     for entry in entries {
@@ -1969,6 +1979,134 @@ mod tests {
         };
         assert_eq!(items.len(), 1, "the raw transaction reaches the template");
         assert!(!request.submit);
+    }
+
+    // API-10
+    #[test]
+    fn generateblock_raw_entries_share_the_decode_budget() {
+        let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
+        let ctx = ctx_with_control(control.clone());
+        let permits = (0..8)
+            .map(|_| {
+                ctx.tx_decode_admission
+                    .reserve(["00"])
+                    .expect("reserve decode")
+            })
+            .collect::<Vec<_>>();
+        let busy = generateblock(&ctx, &json!([REGTEST_ADDRESS, ["00"], false]))
+            .err()
+            .unwrap_or_else(|| panic!("generateblock must refuse while the budget is held"));
+        assert_eq!(busy.code(), -1);
+        assert!(
+            busy.to_string()
+                .contains("raw transaction decode budget exhausted; retry"),
+            "{busy}"
+        );
+        assert!(control.last_generate.lock().is_none());
+        drop(permits);
+        let resumed = generateblock(&ctx, &json!([REGTEST_ADDRESS, ["zz"], false]))
+            .err()
+            .unwrap_or_else(|| panic!("generateblock must reach decode after release"));
+        assert_ne!(resumed.code(), -1);
+    }
+
+    // API-10, API-27
+    #[test]
+    fn generateblock_without_raw_entries_does_not_use_the_decode_budget() {
+        use bitcoin_rs_mempool::MempoolEntry;
+
+        let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
+        let ctx = ctx_with_control(control.clone());
+        let pooled = sample_raw_tx();
+        let txid = pooled.txid();
+        ctx.mempool
+            .gateway
+            .pool()
+            .write()
+            .insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7, 0))
+            .unwrap_or_else(|err| panic!("insert failed: {err}"));
+        let permits = (0..8)
+            .map(|_| {
+                ctx.tx_decode_admission
+                    .reserve(["00"])
+                    .expect("reserve decode")
+            })
+            .collect::<Vec<_>>();
+
+        for entries in [json!([]), json!([txid.to_string().to_uppercase()])] {
+            generateblock(&ctx, &json!([REGTEST_ADDRESS, entries, false]))
+                .unwrap_or_else(|err| panic!("generation without raw entries failed: {err}"));
+        }
+        let request = control
+            .last_generate
+            .lock()
+            .clone()
+            .unwrap_or_else(|| panic!("generateblock must call generate"));
+        let GenerateSelection::Ordered(transactions) = request.selection else {
+            panic!("expected ordered selection");
+        };
+        assert!(matches!(
+            transactions.as_slice(),
+            [GenerateTx::ResolvedMempool(entry)] if entry.txid == txid
+        ));
+        let missing = "CD".repeat(32);
+        let error = generateblock(&ctx, &json!([REGTEST_ADDRESS, [missing.as_str()]]))
+            .expect_err("unknown txid");
+        assert_eq!(error.code(), -5);
+        let error =
+            generateblock(&ctx, &json!([REGTEST_ADDRESS, [false]])).expect_err("non-string entry");
+        assert_eq!(error.code(), -3);
+        let error = generateblock(&ctx, &json!([REGTEST_ADDRESS, [txid.to_string(), "00"]]))
+            .expect_err("mixed raw entry");
+        assert_eq!(error.code(), -1);
+        drop(permits);
+    }
+
+    // API-10, API-27
+    #[test]
+    fn generateblock_charges_only_raw_transaction_bytes() {
+        use bitcoin_rs_mempool::MempoolEntry;
+
+        let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
+        let ctx = ctx_with_control(control.clone());
+        let pooled = sample_raw_tx();
+        let txid = pooled.txid();
+        ctx.mempool
+            .gateway
+            .pool()
+            .write()
+            .insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7, 0))
+            .unwrap_or_else(|err| panic!("insert failed: {err}"));
+        let mut raw = sample_raw_tx();
+        raw.lock_time = LockTime::from_consensus(1);
+        let wire = consensus_bytes(&raw);
+        let held = "00".repeat(8 * 1_024 * 1_024 - wire.len());
+        let _permit = ctx
+            .tx_decode_admission
+            .reserve([held.as_str()])
+            .expect("reserve all but raw bytes");
+
+        generateblock(
+            &ctx,
+            &json!([
+                REGTEST_ADDRESS,
+                [txid.to_string(), wire.to_lower_hex_string()]
+            ]),
+        )
+        .unwrap_or_else(|err| panic!("only raw bytes consume the budget: {err}"));
+        let request = control
+            .last_generate
+            .lock()
+            .clone()
+            .unwrap_or_else(|| panic!("generateblock must call generate"));
+        let GenerateSelection::Ordered(transactions) = request.selection else {
+            panic!("expected ordered selection");
+        };
+        assert!(matches!(
+            transactions.as_slice(),
+            [GenerateTx::ResolvedMempool(entry), GenerateTx::Raw(decoded)]
+                if entry.txid == txid && *decoded == raw
+        ));
     }
 
     #[test]

@@ -346,6 +346,13 @@ mod tests {
             largest_body_read <= APPROVED_RECEIVE_READ_STEP,
             "encrypted body read requested {largest_body_read} bytes"
         );
+        assert!(
+            reader
+                .body
+                .as_ref()
+                .is_none_or(|body| body.bytes.capacity() <= 2 * 103),
+            "a cancelled packet must not retain an allocation sized by the declared contents"
+        );
         Ok(())
     }
 
