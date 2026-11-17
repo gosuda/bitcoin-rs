@@ -32,6 +32,30 @@ fn read_history(path: &Path) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// `FlushFileBuffers` needs write access, and opening a directory handle needs
+/// `FILE_FLAG_BACKUP_SEMANTICS`.
+#[cfg(windows)]
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)?
+        .sync_all()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 pub fn load(data_dir: &Path, mempool: &RwLock<Mempool>) {
     let path = data_dir.join(HISTORY_FILE);
     let bytes = match read_history(&path) {
@@ -106,7 +130,7 @@ pub fn save(data_dir: &Path, history_bytes: &[u8]) {
         std::io::Write::write_all(&mut file, history_bytes)?;
         file.sync_all()?;
         std::fs::rename(&temp_path, &live_path)?;
-        if let Err(error) = std::fs::File::open(data_dir).and_then(|dir| dir.sync_all()) {
+        if let Err(error) = sync_dir(data_dir) {
             tracing::warn!(
                 path = %live_path.display(),
                 %error,

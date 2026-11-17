@@ -1449,9 +1449,28 @@ pub(crate) fn write_key_file(path: &Path, contents: &str) -> io::Result<()> {
     let _ = std::fs::remove_file(&temp_path);
     drop(cleanup);
 
-    let dir = std::fs::File::open(parent)?;
-    dir.sync_all()?;
+    sync_dir(parent)
+}
 
+#[cfg(all(test, unix))]
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    std::fs::File::open(dir).and_then(|handle| handle.sync_all())
+}
+
+#[cfg(all(test, windows))]
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)
+        .and_then(|handle| handle.sync_all())
+}
+
+#[cfg(all(test, not(any(unix, windows))))]
+fn sync_dir(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
