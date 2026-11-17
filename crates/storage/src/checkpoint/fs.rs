@@ -213,44 +213,28 @@ pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
     let from_file = dir.open_with(from, &options)?;
 
     let mut root = vec![0_u16; 512];
-    // SAFETY: `root` is a live, writable buffer of the given length.
-    let root_len = unsafe {
-        GetFinalPathNameByHandleW(
-            dir.as_raw_handle().cast(),
-            root.as_mut_ptr(),
-            u32::try_from(root.len()).unwrap_or(u32::MAX),
-            0,
-        )
+    let root_len = loop {
+        // SAFETY: `root` is a live, writable buffer of the given length.
+        let written = unsafe {
+            GetFinalPathNameByHandleW(
+                dir.as_raw_handle().cast(),
+                root.as_mut_ptr(),
+                u32::try_from(root.len()).unwrap_or(u32::MAX),
+                0,
+            )
+        };
+        if written == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let written = usize::try_from(written).unwrap_or(usize::MAX);
+        if written < root.len() {
+            break written;
+        }
+        root.resize(written + 1, 0);
     };
-    if root_len == 0 || usize::try_from(root_len).unwrap_or(usize::MAX) >= root.len() {
-        return Err(io::Error::last_os_error());
-    }
-    let root = &root[..usize::try_from(root_len).unwrap_or(usize::MAX)];
-    let win_prefix = [
-        u16::from(b'\\'),
-        u16::from(b'\\'),
-        u16::from(b'?'),
-        u16::from(b'\\'),
-    ];
-    let unc_prefix = [
-        u16::from(b'\\'),
-        u16::from(b'\\'),
-        u16::from(b'?'),
-        u16::from(b'\\'),
-        u16::from(b'U'),
-        u16::from(b'N'),
-        u16::from(b'C'),
-        u16::from(b'\\'),
-    ];
+    let root = &root[..root_len];
     let mut name: Vec<u16> = Vec::with_capacity(root.len() + to.len() + 2);
-    if root.starts_with(&unc_prefix) {
-        name.extend_from_slice(&win_prefix[..2]);
-        name.extend_from_slice(&root[unc_prefix.len()..]);
-    } else if root.starts_with(&win_prefix) {
-        name.extend_from_slice(&root[win_prefix.len()..]);
-    } else {
-        name.extend_from_slice(root);
-    }
+    name.extend_from_slice(root);
     name.push(u16::from(b'\\'));
     name.extend(to.encode_utf16());
     name.push(0);
