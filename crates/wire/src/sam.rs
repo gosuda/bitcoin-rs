@@ -2034,7 +2034,10 @@ mod tests {
                 if stop.load(Ordering::Acquire) {
                     return Ok(None);
                 }
-                if error.kind() == io::ErrorKind::ConnectionReset && pending.is_empty() {
+                if error.kind() == io::ErrorKind::ConnectionReset
+                    && pending.is_empty()
+                    && !ctx.last_command.is_empty()
+                {
                     return Ok(None);
                 }
                 if ctx.last_command.is_empty() && !ctx.opened_by_session {
