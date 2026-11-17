@@ -198,8 +198,6 @@ pub fn commit_publication(
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::StageSync)?;
     sync_dir(&staging)?;
-    // cap-std opens directories without FILE_SHARE_DELETE; the staging handle and
-    // the manifest file must be closed before the directory can be renamed.
     drop(mf);
     drop(staging);
     #[cfg(any(test, feature = "test-seam"))]

@@ -568,15 +568,19 @@ impl Read for RequestDeadlineStream {
         if buffer.is_empty() {
             return Ok(0);
         }
+        let read_deadline = Instant::now()
+            + self
+                .idle_timeout
+                .min(self.deadline.saturating_duration_since(Instant::now()));
         loop {
-            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            let remaining = read_deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "HTTP request deadline exceeded",
                 ));
             }
-            let timeout = self.idle_timeout.min(remaining).min(READ_WAKE_TICK);
+            let timeout = remaining.min(READ_WAKE_TICK);
             if self.applied_timeout != Some(timeout) {
                 self.stream.set_read_timeout(Some(timeout))?;
                 self.applied_timeout = Some(timeout);
@@ -624,6 +628,9 @@ fn serve_connection(
             Ok(Some(head)) => head,
             Ok(None) => return Ok(()),
             Err(error) => {
+                if handler.is_stopping() {
+                    return Ok(());
+                }
                 return handle_read_error(
                     reader.get_mut().socket_mut(),
                     error,
@@ -650,6 +657,9 @@ fn serve_connection(
         let request = match read_request_body(&mut reader, head) {
             Ok(request) => request,
             Err(error) => {
+                if handler.is_stopping() {
+                    return Ok(());
+                }
                 return handle_read_error(
                     reader.get_mut().socket_mut(),
                     error,

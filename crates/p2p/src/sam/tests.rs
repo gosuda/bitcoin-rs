@@ -513,10 +513,11 @@ fn read_fake_sam_line(
         Ok(0) => Ok(None),
         Ok(_) => Ok(Some(())),
         Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
-            ) =>
+            if cfg!(windows)
+                && matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                ) =>
         {
             Ok(None)
         }
