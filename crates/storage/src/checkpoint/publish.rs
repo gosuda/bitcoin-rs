@@ -229,8 +229,6 @@ pub fn commit_publication(
         windows
     ))]
     {
-        drop(mf);
-        drop(staging);
         super::fs::rename_noreplace(root.dir(), &paths.staging, &paths.final_dir)?;
     }
     #[cfg(any(test, feature = "test-seam"))]
