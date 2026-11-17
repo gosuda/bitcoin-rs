@@ -1,5 +1,6 @@
 use bitcoin_rs_consensus::primitives::unix_time_secs;
 
+use std::cell::Cell;
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -308,6 +309,8 @@ pub struct CountingStream<S> {
     counters: Arc<PeerCounters>,
     lease: Option<crate::PeerLease>,
     cancel_guard: Option<bitcoin_rs_consensus::latch::HookGuard>,
+    cancel: Option<bitcoin_rs_consensus::latch::LatchReader>,
+    read_timeout: Cell<Option<core::time::Duration>>,
     /// The connection's send-activity clock, shared with the lease the
     /// message loop reads it through. Stamped beside the byte counters
     /// when the socket accepts bytes, so keepalive send silence tracks
@@ -320,6 +323,9 @@ pub struct CountingStream<S> {
 
 const INBOUND_READ_BUFFER: usize = 8 * 1024;
 
+#[cfg(windows)]
+const CANCEL_POLL: core::time::Duration = core::time::Duration::from_millis(25);
+
 impl<S> CountingStream<S> {
     #[must_use]
     pub const fn new(inner: S, counters: Arc<PeerCounters>) -> Self {
@@ -328,6 +334,8 @@ impl<S> CountingStream<S> {
             counters,
             lease: None,
             cancel_guard: None,
+            cancel: None,
+            read_timeout: Cell::new(None),
             send_activity: None,
             read_buf: Vec::new(),
             read_pos: 0,
@@ -370,13 +378,41 @@ impl<S> CountingStream<S> {
             .as_ref()
             .is_some_and(crate::PeerLease::is_cancelled)
         {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionAborted,
-                "connection cancelled",
-            ));
+            return Err(cancelled_read());
         }
         Ok(())
     }
+
+    /// Windows cannot interrupt a pending `recv` (neither `shutdown` on a
+    /// duplicate nor `CancelSynchronousIo` reaches it), so `with_cancel`
+    /// clamps the socket's read timeout to a short poll and a `WouldBlock`
+    /// retry observes the latch while the caller's deadline still stands.
+    fn retry_timed_out_read(&self, error: &std::io::Error, start: Instant) -> IoResult<bool> {
+        if !matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ) {
+            return Ok(false);
+        }
+        let Some(cancel) = &self.cancel else {
+            return Ok(false);
+        };
+        if cancel.is_triggered() {
+            return Err(cancelled_read());
+        }
+        self.check_cancelled()?;
+        Ok(match self.read_timeout.get() {
+            Some(timeout) => start.elapsed() < timeout,
+            None => true,
+        })
+    }
+}
+
+fn cancelled_read() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::ConnectionAborted,
+        "connection cancelled",
+    )
 }
 
 impl CountingStream<std::net::TcpStream> {
@@ -399,6 +435,11 @@ impl CountingStream<std::net::TcpStream> {
         self.cancel_guard = Some(cancel.on_cancel(move || {
             let _ = shutdown_stream.shutdown(std::net::Shutdown::Both);
         }));
+        #[cfg(windows)]
+        {
+            self.cancel = Some(cancel.clone());
+            self.inner.set_read_timeout(Some(CANCEL_POLL))?;
+        }
         Ok(self)
     }
 
@@ -413,6 +454,11 @@ impl CountingStream<std::net::TcpStream> {
     }
 
     pub fn set_read_timeout(&self, timeout: Option<core::time::Duration>) -> IoResult<()> {
+        #[cfg(windows)]
+        if self.cancel.is_some() {
+            self.read_timeout.set(timeout);
+            return self.inner.set_read_timeout(Some(CANCEL_POLL));
+        }
         self.inner.set_read_timeout(timeout)
     }
 
@@ -464,14 +510,26 @@ impl<S: Read> Read for CountingStream<S> {
         if buffer.is_empty() {
             return Ok(0);
         }
-        let read = self.read_buffered(buffer)?;
+        let start = Instant::now();
+        let read = loop {
+            match self.read_buffered(buffer) {
+                Err(error) if self.retry_timed_out_read(&error, start)? => continue,
+                result => break result,
+            }
+        }?;
         self.counters.record_recv(read);
         Ok(read)
     }
 
     fn read_vectored(&mut self, buffers: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
         self.check_cancelled()?;
-        let read = self.inner.read_vectored(buffers)?;
+        let start = Instant::now();
+        let read = loop {
+            match self.inner.read_vectored(buffers) {
+                Err(error) if self.retry_timed_out_read(&error, start)? => continue,
+                result => break result,
+            }
+        }?;
         self.counters.record_recv(read);
         Ok(read)
     }

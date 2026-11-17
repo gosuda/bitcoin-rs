@@ -264,15 +264,22 @@ impl RpcServer {
             context.connections.wake_readers();
         }
         let tracker = Arc::clone(&context.connections);
+        let connection_shutdown = context.shutdown.clone();
         let spawned = thread::Builder::new()
             .name("rpc-connection".to_owned())
             .stack_size(RPC_CONNECTION_STACK_BYTES)
             .spawn(move || {
                 let _slot = ConnectionSlot { tracker, id };
                 let _permit = permit;
-                if let Err(error) =
-                    serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout, surface)
-                {
+                if let Err(error) = serve_connection(
+                    stream,
+                    &auth,
+                    &handler,
+                    rest_enabled,
+                    idle_timeout,
+                    surface,
+                    connection_shutdown,
+                ) {
                     debug!(%error, "rpc connection closed with error");
                 }
             });
@@ -525,18 +532,31 @@ impl Drop for RpcStop {
     }
 }
 
+/// Windows cannot interrupt a pending `recv` (`wake_readers` only
+/// `shutdown`s a duplicate, which does not reach Winsock blocking calls), so
+/// the deadline stream caps its poll there and a `WouldBlock` retry observes
+/// the shutdown latch.
+#[cfg(windows)]
+const CANCEL_POLL: Duration = Duration::from_millis(100);
+
 struct RequestDeadlineStream {
     stream: TcpStream,
     idle_timeout: Duration,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
     deadline: Instant,
     applied_timeout: Option<Duration>,
 }
 
 impl RequestDeadlineStream {
-    fn new(stream: TcpStream, idle_timeout: Duration) -> Self {
+    fn new(
+        stream: TcpStream,
+        idle_timeout: Duration,
+        shutdown: bitcoin_rs_consensus::latch::LatchReader,
+    ) -> Self {
         Self {
             stream,
             idle_timeout,
+            shutdown,
             deadline: Instant::now() + idle_timeout,
             applied_timeout: None,
         }
@@ -556,19 +576,39 @@ impl Read for RequestDeadlineStream {
         if buffer.is_empty() {
             return Ok(0);
         }
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "HTTP request deadline exceeded",
-            ));
+        loop {
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "HTTP request deadline exceeded",
+                ));
+            }
+            let timeout = self.idle_timeout.min(remaining);
+            #[cfg(windows)]
+            let timeout = timeout.min(CANCEL_POLL);
+            if self.applied_timeout != Some(timeout) {
+                self.stream.set_read_timeout(Some(timeout))?;
+                self.applied_timeout = Some(timeout);
+            }
+            match self.stream.read(buffer) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if self.shutdown.is_triggered() {
+                        return Ok(0);
+                    }
+                    if cfg!(windows) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                other => return other,
+            }
         }
-        let timeout = self.idle_timeout.min(remaining);
-        if self.applied_timeout != Some(timeout) {
-            self.stream.set_read_timeout(Some(timeout))?;
-            self.applied_timeout = Some(timeout);
-        }
-        self.stream.read(buffer)
     }
 }
 
@@ -579,9 +619,10 @@ fn serve_connection(
     rest_enabled: bool,
     idle_timeout: Duration,
     surface: RpcSurface,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
 ) -> io::Result<()> {
     stream.set_write_timeout(Some(idle_timeout))?;
-    let mut reader = BufReader::new(RequestDeadlineStream::new(stream, idle_timeout));
+    let mut reader = BufReader::new(RequestDeadlineStream::new(stream, idle_timeout, shutdown));
     loop {
         reader.get_mut().reset_deadline(idle_timeout);
         if reader.fill_buf()?.is_empty() {
@@ -2071,6 +2112,7 @@ mod tests {
                 enabled,
                 Duration::from_secs(2),
                 RpcSurface::Shared,
+                bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
             )
         });
         client.write_all(request)?;
@@ -2098,7 +2140,11 @@ mod tests {
             let _ = client.shutdown(Shutdown::Write);
         });
 
-        let mut reader = BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(3)));
+        let mut reader = BufReader::new(RequestDeadlineStream::new(
+            server,
+            Duration::from_secs(3),
+            bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
+        ));
         reader.get_mut().reset_deadline(Duration::from_millis(200));
         let start = Instant::now();
         let result = read_whole_request(
@@ -2148,7 +2194,11 @@ mod tests {
             client.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
         });
 
-        let mut reader = BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(3)));
+        let mut reader = BufReader::new(RequestDeadlineStream::new(
+            server,
+            Duration::from_secs(3),
+            bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
+        ));
         reader.get_mut().reset_deadline(Duration::from_secs(3));
         let result = read_whole_request(
             &mut reader,
@@ -2611,7 +2661,11 @@ mod tests {
             }
             client.shutdown(Shutdown::Write)
         });
-        let mut reader = BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(3)));
+        let mut reader = BufReader::new(RequestDeadlineStream::new(
+            server,
+            Duration::from_secs(3),
+            bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
+        ));
         let result =
             read_whole_request(&mut reader, Duration::from_secs(3), Duration::from_secs(3));
         drop(reader);
@@ -2792,6 +2846,7 @@ mod tests {
                     false,
                     core::time::Duration::from_secs(5),
                     RpcSurface::Shared,
+                    bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
                 )
             });
 
@@ -2828,6 +2883,7 @@ mod tests {
                 false,
                 core::time::Duration::from_secs(5),
                 RpcSurface::Shared,
+                bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
             )
         });
 
@@ -2909,6 +2965,7 @@ mod tests {
                 false,
                 core::time::Duration::from_secs(1),
                 RpcSurface::Shared,
+                bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
             )
         });
 
@@ -3565,6 +3622,7 @@ mod tests {
                 false,
                 Duration::from_secs(30),
                 RpcSurface::Shared,
+                bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
             )
         });
         let started = Instant::now();
@@ -3650,8 +3708,11 @@ mod tests {
         let mut request = json_rpc_head(None, 1);
         request.extend_from_slice(b"X");
         client.write_all(&request)?;
-        let mut reader =
-            BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(30)));
+        let mut reader = BufReader::new(RequestDeadlineStream::new(
+            server,
+            Duration::from_secs(30),
+            bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
+        ));
         let head = match read_request_head(&mut reader) {
             Ok(Some(head)) => head,
             Ok(None) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "missing head")),
@@ -3692,8 +3753,11 @@ mod tests {
         let addr = listener.local_addr()?;
         let server = thread::spawn(move || -> io::Result<Vec<u8>> {
             let (stream, _) = listener.accept()?;
-            let mut reader =
-                BufReader::new(RequestDeadlineStream::new(stream, Duration::from_secs(30)));
+            let mut reader = BufReader::new(RequestDeadlineStream::new(
+                stream,
+                Duration::from_secs(30),
+                bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
+            ));
             let head = match read_request_head(&mut reader) {
                 Ok(Some(head)) => head,
                 Ok(None) => {
@@ -3787,6 +3851,7 @@ mod tests {
                 false,
                 Duration::from_secs(30),
                 RpcSurface::Shared,
+                bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
             )
         });
         let mut request = json_rpc_head(Some(GOOD_TOKEN), 16);
@@ -4332,6 +4397,7 @@ mod tests {
                 false,
                 Duration::from_secs(5),
                 RpcSurface::Shared,
+                bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
             )
         });
 
@@ -4374,6 +4440,7 @@ mod tests {
                 false,
                 Duration::from_secs(5),
                 RpcSurface::Shared,
+                bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
             )
         });
 

@@ -357,10 +357,8 @@ impl PreparedSnapshot {
         }
         check_deadline(self.deadline)?;
         self.file.persist(&live).map_err(|error| error.error)?;
-        if let Ok(directory) = std::fs::File::open(&data_dir) {
-            if let Err(error) = directory.sync_all() {
-                tracing::warn!(%error, "mempool snapshot published but directory sync failed; crash durability is uncertain");
-            }
+        if let Err(error) = crate::fee_history::sync_dir(&data_dir) {
+            tracing::warn!(%error, "mempool snapshot published but directory sync failed; crash durability is uncertain");
         }
         Ok(())
     }

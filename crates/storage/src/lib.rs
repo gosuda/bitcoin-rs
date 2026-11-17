@@ -167,8 +167,10 @@ pub(crate) mod test_support {
         #[error("unexpected success: {0}")]
         UnexpectedSuccess(&'static str),
         #[error("worker panicked: {0}")]
+        #[allow(dead_code)]
         WorkerPanicked(&'static str),
         #[error("blocked past the deadline: {0}")]
+        #[allow(dead_code)]
         Blocked(&'static str),
     }
 
