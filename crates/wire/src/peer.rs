@@ -384,18 +384,20 @@ impl<S: Read + Write> Peer<S> {
 }
 
 impl<S: Read> Peer<S> {
-    /// `Ok(None)` only from a v2 session: the packet was a BIP324 decoy or a message of
-    /// an empty or undefined type, both dropped.
+    /// `Ok(None)` means the packet was dropped: a BIP324 decoy, a message of
+    /// an empty or undefined type, or a completed `block` frame the image
+    /// lane refused (its charges release with the frame).
     ///
-    /// A v1 frame always yields `Some`. A poll timeout part-way through a frame or
+    /// A poll timeout part-way through a frame or
     /// packet keeps the bytes already read, so retrying after `TimedOut` or
     /// `WouldBlock` continues it.
     pub fn read_message(&mut self) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
-        self.read_message_admitted(|_, _| Ok(()))
+        self.read_message_admitted(|_, _| Ok(()), |_, _| Ok(()))
     }
 
     pub(crate) fn read_message_admitted(
         &mut self,
+        check: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
         admit: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
     ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         let net_trace = self.net_trace.as_ref();
@@ -409,8 +411,9 @@ impl<S: Read> Peer<S> {
                     if let Some(counters) = counters.as_ref() {
                         counters.record_msg_recv(command, wire_len);
                     }
-                    admit(command, payload)
                 },
+                check,
+                admit,
             )
             .map_err(PeerError::inbound)
     }
@@ -427,26 +430,44 @@ impl<S: Read> Peer<S> {
         )>,
         PeerError,
     > {
+        self.recv.bind_memory(memory)?;
+        if self.recv.receive_pending() && cancelled() {
+            self.recv.cancel_receive();
+            return Err(
+                std::io::Error::new(std::io::ErrorKind::Interrupted, "receive cancelled").into(),
+            );
+        }
         let mut credit = None;
-        let Some((message, raw)) = self.read_message_admitted(|command, payload| {
-            if crate::inbound::block_memory::expands_on_decode(command) {
-                credit = Some(memory.reserve(
-                    bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len()),
-                    cancelled,
-                )?);
-            }
-            Ok(())
-        })?
+        let Some((message, raw)) = self.read_message_admitted(
+            |_, _| Ok(()),
+            |command, payload| {
+                if crate::inbound::block_memory::expands_on_decode(command) {
+                    if cancelled() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "decode cancelled",
+                        )
+                        .into());
+                    }
+                    let bound =
+                        bitcoin_rs_consensus::primitives::layout::decode_reservation(payload.len());
+                    let distinct = if command == "block" {
+                        bound.saturating_sub(payload.len())
+                    } else {
+                        bound
+                    };
+                    credit = Some(memory.try_reserve_decode(distinct)?);
+                }
+                Ok(())
+            },
+        )?
         else {
             return Ok(None);
         };
         match (&message, credit.as_mut()) {
-            (Message::Block(payload), Some(credit)) => credit.retain(
-                payload
-                    .bytes()
-                    .len()
-                    .saturating_add(payload.retained_heap_bytes()),
-            )?,
+            (Message::Block(payload), Some(credit)) => {
+                credit.retain(payload.retained_heap_bytes())?
+            }
             (Message::Tx(tx), Some(credit)) => {
                 credit.retain(tx.total_size().saturating_add(tx.retained_heap_bytes()))?;
             }

@@ -81,6 +81,7 @@ mod budget {
             BudgetOwner::IndexBuilder,
             BudgetOwner::QueryViews,
             BudgetOwner::PeerOutbound,
+            BudgetOwner::PeerReceive,
         ];
         for owner in owners {
             let avail = budget.available(owner);

@@ -5,11 +5,11 @@ use super::{
 
 fn any_budget_state() -> BudgetState {
     let total_budget: u32 = 4;
-    let mut charges = [0u32; 7];
-    let mut reserved = [0u32; 7];
-    let mut owner_caps = [0u32; 7];
+    let mut charges = [0u32; 8];
+    let mut reserved = [0u32; 8];
+    let mut owner_caps = [0u32; 8];
     let mut i = 0;
-    while i < 7 {
+    while i < 8 {
         let c: u32 = kani::any();
         let r: u32 = kani::any();
         let cap: u32 = kani::any();
@@ -27,6 +27,8 @@ fn any_budget_state() -> BudgetState {
     let foreground_reserve: u32 = 1;
     let consensus_invalid: bool = kani::any();
     kani::assume(!consensus_invalid);
+    let ingress_cap: u32 = kani::any();
+    kani::assume(ingress_cap <= total_budget);
 
     BudgetState {
         charges,
@@ -38,12 +40,13 @@ fn any_budget_state() -> BudgetState {
         total_budget,
         foreground_reserve,
         owner_caps,
+        ingress_cap,
     }
 }
 
 fn any_owner() -> AllocationOwner {
     let tag: u8 = kani::any();
-    kani::assume(tag < 7);
+    kani::assume(tag < 8);
     match tag {
         0 => AllocationOwner::CoinCache,
         1 => AllocationOwner::EngineCache,
@@ -51,7 +54,8 @@ fn any_owner() -> AllocationOwner {
         3 => AllocationOwner::IndexBuilder,
         4 => AllocationOwner::StagedImages,
         5 => AllocationOwner::QueryViews,
-        _ => AllocationOwner::PeerOutbound,
+        6 => AllocationOwner::PeerOutbound,
+        _ => AllocationOwner::PeerReceive,
     }
 }
 
@@ -68,7 +72,7 @@ fn any_bg_owner() -> AllocationOwner {
 fn any_action() -> Action {
     let tag: u8 = kani::any();
     let amt: u32 = kani::any();
-    kani::assume(tag < 18);
+    kani::assume(tag < 22);
     kani::assume(amt <= 2);
     match tag {
         0 => Action::ReserveIngress(amt),
@@ -89,6 +93,9 @@ fn any_action() -> Action {
         15 => Action::ReservePeerOutbound(amt),
         16 => Action::AllocatePeerOutbound(amt),
         17 => Action::ReleasePeerOutbound(amt),
+        18 => Action::ReservePeerReceive(amt),
+        19 => Action::AllocatePeerReceive(amt),
+        20 => Action::ReleasePeerReceive(amt),
         _ => Action::Stutter,
     }
 }
@@ -195,4 +202,19 @@ fn harness_negative_control_ingress_refusal_invalidation() {
     kani::assume(s.total_committed() + u64::from(req) > u64::from(s.total_budget));
     let s_next = step_mutant_ingress_invalidation(&s, Action::ReserveIngress(req));
     assert!(!s_next.consensus_invalid);
+}
+
+// BUD-05
+#[kani::proof]
+fn harness_receive_partition_preserves_total_and_ingress_headroom() {
+    let staged: u32 = kani::any();
+    let foreground: u32 = kani::any();
+    let ceiling: u32 = kani::any();
+    let (receive, image, ingress) = super::ingress_partition(staged, foreground, ceiling);
+    assert_eq!(u64::from(receive) + u64::from(image), u64::from(staged));
+    assert!(receive <= staged / 8);
+    assert!(receive <= ceiling);
+    assert!(ingress >= receive);
+    assert!(ingress <= image);
+    assert!(image - ingress <= foreground);
 }
