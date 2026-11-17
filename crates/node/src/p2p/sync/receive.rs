@@ -12,9 +12,11 @@ use bitcoin_rs_execution::chain::BlockTree;
 use bitcoin_rs_execution::chain::ChainError;
 use bitcoin_rs_execution::chain::NodeId;
 use bitcoin_rs_execution::chain::TipSnapshot;
+use bitcoin_rs_storage::budget::BudgetReclaimer;
 use bitcoin_rs_wire::connection::PeerSource;
 use bitcoin_rs_wire::inbound::InboundBlock;
 use smallvec::SmallVec;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -666,6 +668,68 @@ impl BlockSync {
                 }
             }
         }
+    }
+    pub(crate) fn staged_image_reclaimer(
+        self: &Arc<Self>,
+        budget: &Arc<crate::budget::NodeBudget>,
+    ) -> Arc<dyn BudgetReclaimer> {
+        Arc::new(StagedImageReclaimer {
+            sync: Arc::downgrade(self),
+            budget: Arc::downgrade(budget),
+        })
+    }
+
+    /// The current frontier remains staged, and evicted known-header bodies remain requestable.
+    pub(super) fn reclaim_staged_for_ingress(
+        &self,
+        bytes: u64,
+        budget: &crate::budget::NodeBudget,
+    ) -> u64 {
+        let expected = self.next_expected_block_hash();
+        let target = usize::try_from(bytes).unwrap_or(usize::MAX);
+        let charged =
+            || budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages);
+        let (evicted, progress) = {
+            let mut scheduler = self.scheduler.lock();
+            scheduler
+                .stager
+                .evict_for_reclaim(expected, target, charged)
+        };
+        let tree = self.chain.block_tree();
+        let now = Instant::now();
+        if !evicted.is_empty() {
+            let mut scheduler = self.scheduler.lock();
+            for hash in &evicted {
+                let height = tree
+                    .lookup(*hash)
+                    .and_then(|node_id| tree.node(node_id).ok())
+                    .map(|node| node.height);
+                scheduler.window.requeue_for_retry(hash, height, now);
+            }
+        }
+        let mut freed = progress.released_bytes;
+        let consumed = freed.max(progress.evicted_bytes);
+        if consumed < bytes {
+            let remaining = usize::try_from(bytes - consumed).unwrap_or(usize::MAX);
+            let mut historical = self.historical.lock();
+            freed =
+                freed.saturating_add(historical.evict_for_reclaim(remaining, now, &tree, charged));
+        }
+        freed
+    }
+}
+
+struct StagedImageReclaimer {
+    sync: Weak<BlockSync>,
+    budget: Weak<crate::budget::NodeBudget>,
+}
+
+impl BudgetReclaimer for StagedImageReclaimer {
+    fn reclaim(&self, bytes: u64) -> u64 {
+        let (Some(sync), Some(budget)) = (self.sync.upgrade(), self.budget.upgrade()) else {
+            return 0;
+        };
+        sync.reclaim_staged_for_ingress(bytes, &budget)
     }
 }
 

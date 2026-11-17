@@ -1,6 +1,6 @@
 /-
 Safety invariants of the NodeBudget accounting model.
-Rust reference model: crates/node/src/budget_model.rs (all seven owners).
+Rust reference model: crates/node/src/budget_model.rs (all eight owners).
 Rust implementation: crates/node/src/budget.rs.
 
 Anchors: Tony Hoare, John Carmack, Dieter Rams.
@@ -16,8 +16,13 @@ Not an implementation refinement proof or physical durability proof.
 
 namespace NodeBudget
 
-def totalBudget : Nat := 4
+def totalBudget : Nat := 8
 def foregroundReserve : Nat := 1
+def stagedBudget : Nat := 8
+def receiveCap : Nat := min 1 (stagedBudget / 8)
+def imageCap : Nat := stagedBudget - receiveCap
+def imageForegroundReserve : Nat := min foregroundReserve (imageCap - receiveCap)
+def imageIngressCap : Nat := imageCap - imageForegroundReserve
 
 structure State where
   coinCache : Nat
@@ -27,6 +32,7 @@ structure State where
   stagedImages : Nat
   queryViews : Nat
   peerOutbound : Nat
+  peerReceive : Nat
   reservedCoinCache : Nat
   reservedEngineCache : Nat
   reservedFactsQueue : Nat
@@ -34,21 +40,30 @@ structure State where
   reservedStagedImages : Nat
   reservedQueryViews : Nat
   reservedPeerOutbound : Nat
+  reservedPeerReceive : Nat
   ingressRefused : Bool
   consensusInvalid : Bool
   isMdbx : Bool
 
 def totalCharges (s : State) : Nat :=
   s.coinCache + s.engineCache + s.factsQueue + s.indexBuilder + s.stagedImages + s.queryViews +
-  s.peerOutbound
+  s.peerOutbound + s.peerReceive
 
 def totalReserved (s : State) : Nat :=
   s.reservedCoinCache + s.reservedEngineCache + s.reservedFactsQueue +
   s.reservedIndexBuilder + s.reservedStagedImages + s.reservedQueryViews +
-  s.reservedPeerOutbound
+  s.reservedPeerOutbound + s.reservedPeerReceive
 
 def totalCommitted (s : State) : Nat :=
   totalCharges s + totalReserved s
+
+def receiveCommitted (s : State) : Nat :=
+  s.peerReceive + s.reservedPeerReceive
+
+def nonReceiveCommitted (s : State) : Nat :=
+  s.coinCache + s.engineCache + s.factsQueue + s.indexBuilder + s.stagedImages + s.queryViews +
+  s.peerOutbound + s.reservedCoinCache + s.reservedEngineCache + s.reservedFactsQueue +
+  s.reservedIndexBuilder + s.reservedStagedImages + s.reservedQueryViews + s.reservedPeerOutbound
 
 def backgroundCommitted (s : State) : Nat :=
   s.factsQueue + s.indexBuilder + s.queryViews +
@@ -62,6 +77,7 @@ def init (isMdbx : Bool) : State :=
     stagedImages := 0,
     queryViews := 0,
     peerOutbound := 0,
+    peerReceive := 0,
     reservedCoinCache := 0,
     reservedEngineCache := 0,
     reservedFactsQueue := 0,
@@ -69,6 +85,7 @@ def init (isMdbx : Bool) : State :=
     reservedStagedImages := 0,
     reservedQueryViews := 0,
     reservedPeerOutbound := 0,
+    reservedPeerReceive := 0,
     ingressRefused := false,
     consensusInvalid := false,
     isMdbx := isMdbx }
@@ -95,15 +112,22 @@ inductive Action
   | reservePeerOutbound (amt : Nat)
   | allocatePeerOutbound (amt : Nat)
   | releasePeerOutbound (amt : Nat)
+  | reservePeerReceive (amt : Nat)
+  | allocatePeerReceive (amt : Nat)
+  | releasePeerReceive (amt : Nat)
   | stutter
 
 def step (s : State) : Action → State
   | .reserveIngress amt =>
-    if totalCommitted s + amt ≤ totalBudget then
+    if totalCommitted s + amt ≤ totalBudget ∧
+       nonReceiveCommitted s + amt ≤ totalBudget - receiveCap ∧
+       s.stagedImages + s.reservedStagedImages + amt ≤ imageIngressCap then
       { s with reservedStagedImages := s.reservedStagedImages + amt }
     else s
   | .refuseIngress amt =>
-    if totalBudget < totalCommitted s + amt then
+    if totalBudget < totalCommitted s + amt ∨
+       totalBudget - receiveCap < nonReceiveCommitted s + amt ∨
+       imageIngressCap < s.stagedImages + s.reservedStagedImages + amt then
       { s with ingressRefused := true }
     else s
   | .allocateIngress amt =>
@@ -116,7 +140,8 @@ def step (s : State) : Action → State
       { s with stagedImages := s.stagedImages - amt }
     else s
   | .reserveFactsQueue amt =>
-    if totalCommitted s + amt ≤ totalBudget - foregroundReserve then
+    if totalCommitted s + amt ≤ totalBudget - foregroundReserve ∧
+       nonReceiveCommitted s + amt ≤ totalBudget - receiveCap then
       { s with reservedFactsQueue := s.reservedFactsQueue + amt }
     else s
   | .allocateFactsQueue amt =>
@@ -129,7 +154,8 @@ def step (s : State) : Action → State
       { s with factsQueue := s.factsQueue - amt }
     else s
   | .reserveIndexBuilder amt =>
-    if totalCommitted s + amt ≤ totalBudget - foregroundReserve then
+    if totalCommitted s + amt ≤ totalBudget - foregroundReserve ∧
+       nonReceiveCommitted s + amt ≤ totalBudget - receiveCap then
       { s with reservedIndexBuilder := s.reservedIndexBuilder + amt }
     else s
   | .allocateIndexBuilder amt =>
@@ -142,7 +168,8 @@ def step (s : State) : Action → State
       { s with indexBuilder := s.indexBuilder - amt }
     else s
   | .reserveQueryViews amt =>
-    if totalCommitted s + amt ≤ totalBudget - foregroundReserve then
+    if totalCommitted s + amt ≤ totalBudget - foregroundReserve ∧
+       nonReceiveCommitted s + amt ≤ totalBudget - receiveCap then
       { s with reservedQueryViews := s.reservedQueryViews + amt }
     else s
   | .allocateQueryViews amt =>
@@ -155,7 +182,8 @@ def step (s : State) : Action → State
       { s with queryViews := s.queryViews - amt }
     else s
   | .reserveCoinCache amt =>
-    if totalCommitted s + amt ≤ totalBudget then
+    if totalCommitted s + amt ≤ totalBudget ∧
+       nonReceiveCommitted s + amt ≤ totalBudget - receiveCap then
       { s with reservedCoinCache := s.reservedCoinCache + amt }
     else s
   | .allocateCoinCache amt =>
@@ -168,7 +196,8 @@ def step (s : State) : Action → State
       { s with coinCache := s.coinCache - amt }
     else s
   | .growEngineCache amt =>
-    if ¬s.isMdbx ∧ totalCommitted s + amt ≤ totalBudget then
+    if ¬s.isMdbx ∧ totalCommitted s + amt ≤ totalBudget ∧
+       nonReceiveCommitted s + amt ≤ totalBudget - receiveCap then
       { s with engineCache := s.engineCache + amt }
     else s
   | .shrinkEngineCache amt =>
@@ -176,7 +205,8 @@ def step (s : State) : Action → State
       { s with engineCache := s.engineCache - amt }
     else s
   | .reservePeerOutbound amt =>
-    if totalCommitted s + amt ≤ totalBudget then
+    if totalCommitted s + amt ≤ totalBudget ∧
+       nonReceiveCommitted s + amt ≤ totalBudget - receiveCap then
       { s with reservedPeerOutbound := s.reservedPeerOutbound + amt }
     else s
   | .allocatePeerOutbound amt =>
@@ -188,6 +218,19 @@ def step (s : State) : Action → State
     if amt ≤ s.peerOutbound then
       { s with peerOutbound := s.peerOutbound - amt }
     else s
+  | .reservePeerReceive amt =>
+    if totalCommitted s + amt ≤ totalBudget ∧ receiveCommitted s + amt ≤ receiveCap then
+      { s with reservedPeerReceive := s.reservedPeerReceive + amt }
+    else s
+  | .allocatePeerReceive amt =>
+    if amt ≤ s.reservedPeerReceive then
+      { s with reservedPeerReceive := s.reservedPeerReceive - amt,
+               peerReceive := s.peerReceive + amt }
+    else s
+  | .releasePeerReceive amt =>
+    if amt ≤ s.peerReceive then
+      { s with peerReceive := s.peerReceive - amt }
+    else s
   | .stutter => s
 
 def safety (s : State) : Prop :=
@@ -195,23 +238,26 @@ def safety (s : State) : Prop :=
   ∧ backgroundCommitted s ≤ totalBudget - foregroundReserve
   ∧ ¬s.consensusInvalid
   ∧ (s.isMdbx → s.engineCache = 0 ∧ s.reservedEngineCache = 0)
+  ∧ receiveCommitted s ≤ receiveCap
+  ∧ nonReceiveCommitted s ≤ totalBudget - receiveCap
+  ∧ s.stagedImages + s.reservedStagedImages ≤ imageCap
 
 -- BUD-01, BUD-02, BUD-03, BUD-05, BUD-06, BUD-07
 theorem safety_init (isMdbx : Bool) : safety (init isMdbx) := by
-  unfold safety init totalCommitted totalCharges totalReserved backgroundCommitted totalBudget foregroundReserve
+  unfold safety init totalCommitted totalCharges totalReserved backgroundCommitted receiveCommitted nonReceiveCommitted totalBudget foregroundReserve receiveCap stagedBudget imageCap
   cases isMdbx <;> decide
 
 -- BUD-01, BUD-02, BUD-03, BUD-05, BUD-06, BUD-07
 theorem safety_inductive (s : State) (a : Action) (h : safety s) :
     safety (step s a) := by
-  rcases h with ⟨hTot, hBg, hInv, hMdbx⟩
+  rcases h with ⟨hTot, hBg, hInv, hMdbx, hReceive, hNonReceive, hImage⟩
   cases a
   all_goals
     dsimp only [step]
     try split
   all_goals
-    dsimp [safety, totalCommitted, totalCharges, totalReserved, backgroundCommitted, totalBudget, foregroundReserve] at *
-    refine ⟨by omega, by omega, hInv, ?_⟩
+    dsimp [safety, totalCommitted, totalCharges, totalReserved, backgroundCommitted, receiveCommitted, nonReceiveCommitted, totalBudget, foregroundReserve, receiveCap, stagedBudget, imageCap, imageForegroundReserve, imageIngressCap] at *
+    refine ⟨by omega, by omega, hInv, ?_, by omega, by omega, by omega⟩
   all_goals
     first
       | exact hMdbx

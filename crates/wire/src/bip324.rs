@@ -19,8 +19,10 @@ pub use reader::is_poll_timeout;
 
 /// A BIP324 transport failure.
 ///
-/// A poll-timeout [`TransportError::Io`] keeps the connection alive; every
-/// other variant is terminal and poisons the reader.
+/// A poll-timeout [`TransportError::Io`] keeps the connection alive, as does
+/// a [`TransportError::BudgetDrop`]; every other variant is terminal and
+/// poisons the reader.
+
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     #[error("BIP324 garbage terminator not found within the garbage limit")]
@@ -35,6 +37,16 @@ pub enum TransportError {
     KeySchedule(hkdf::InvalidLength),
     #[error("BIP324 handshake already completed")]
     Completed,
+    /// A completed `block` frame the image lane refused. Unlike the other
+    /// non-timeout variants this is not terminal and never poisons the
+    /// reader: it carries the decoded command, payload, and wire size so
+    /// the caller observes the frame, then keeps reading.
+    #[error("block frame dropped for image budget")]
+    BudgetDrop {
+        command: String,
+        payload: bytes::Bytes,
+        wire_len: usize,
+    },
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -93,6 +105,9 @@ mod vector_tests {
                 assert_eq!(command, "block");
                 assert_eq!(payload.len(), 80);
                 called = true;
+            },
+            |_, _| Ok(()),
+            |_, _| {
                 Err(
                     std::io::Error::new(std::io::ErrorKind::Interrupted, "admission cancelled")
                         .into(),

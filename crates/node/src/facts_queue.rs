@@ -114,13 +114,13 @@ impl FactsQueue {
 mod tests {
     use super::*;
     use crate::budget::{BudgetCaps, NodeBudget};
-    use bitcoin_rs_storage::budget::{BudgetCharge, BudgetOwner};
+    use bitcoin_rs_storage::budget::{BudgetCharge, BudgetError, BudgetOwner};
     use bitcoin_rs_storage::committed_facts::{CommittedBlock, CommittedFacts};
 
     fn budget() -> Arc<NodeBudget> {
         Arc::new(NodeBudget::new(
             BudgetCaps {
-                staged_images: 8_192,
+                staged_images: 9_362,
                 engine_cache: 0,
                 coin_cache: 0,
                 facts_queue: 4_096,
@@ -178,7 +178,7 @@ mod tests {
     fn ensure_available_reclaims_queued_facts() {
         let budget = budget();
         let queue = Arc::new(queue(&budget));
-        budget.add_reclaimer(queue.reclaimer());
+        budget.add_reclaimer(BudgetOwner::FactsQueue, queue.reclaimer());
         let facts = facts(1);
         let size = facts.size_bytes();
         assert!(queue.try_push(facts));
@@ -190,7 +190,14 @@ mod tests {
         budget
             .allocate(BudgetOwner::StagedImages, staged)
             .expect("staged allocation fits");
-        assert_eq!(budget.total_committed(), 8_192 + size);
+        let receiving = budget.caps().receive_cap();
+        budget
+            .reserve(BudgetOwner::PeerReceive, receiving)
+            .expect("receive reservation fits");
+        budget
+            .allocate(BudgetOwner::PeerReceive, receiving)
+            .expect("receive allocation fits");
+        assert_eq!(budget.total_committed(), staged + receiving + size);
 
         budget
             .ensure_available(BudgetOwner::FactsQueue, 4_096)
@@ -205,5 +212,137 @@ mod tests {
             4_096
         );
         assert!(queue.has_gap(), "dropping queued facts sets the gap");
+    }
+
+    // BUD-07, SYNC-03
+    #[expect(clippy::expect_used)]
+    #[test]
+    fn image_and_permanent_refusals_do_not_reclaim_queued_facts() {
+        use crate::budget::BudgetedIngressLedger;
+        use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
+
+        #[derive(Clone, Copy, Debug)]
+        enum Request {
+            Ingress,
+            Transfer,
+            Execution,
+            OversizedIngress,
+            OversizedExecution,
+            UnsupportedEngineCache,
+            UnchargedTransfer,
+        }
+
+        for request in [
+            Request::Ingress,
+            Request::Transfer,
+            Request::Execution,
+            Request::OversizedIngress,
+            Request::OversizedExecution,
+            Request::UnsupportedEngineCache,
+            Request::UnchargedTransfer,
+        ] {
+            let budget = budget();
+            let queue = Arc::new(queue(&budget));
+            budget.add_reclaimer(BudgetOwner::FactsQueue, queue.reclaimer());
+            let facts = facts(1);
+            let size = facts.size_bytes();
+            assert!(queue.try_push(Arc::clone(&facts)));
+            let ingress = BudgetedIngressLedger::new(Arc::clone(&budget));
+            assert!(ingress.try_take(ingress.capacity()));
+
+            match request {
+                Request::Ingress => assert!(!ingress.try_take(1)),
+                Request::Transfer => {
+                    assert!(ingress.try_take_receive(1));
+                    assert!(!ingress.transfer_receive_to_image(1));
+                    assert_eq!(budget.charged_bytes(BudgetOwner::PeerReceive), 1);
+                    ingress.give_back_receive(1);
+                }
+                Request::Execution => assert_eq!(
+                    budget.ensure_available(BudgetOwner::StagedImages, 1),
+                    Err(BudgetError::BudgetExhausted)
+                ),
+                Request::OversizedIngress => {
+                    assert!(!ingress.try_take(ingress.capacity() + 1));
+                }
+                Request::OversizedExecution => assert_eq!(
+                    budget
+                        .ensure_available(BudgetOwner::StagedImages, budget.caps().image_cap() + 1),
+                    Err(BudgetError::BudgetExhausted)
+                ),
+                Request::UnsupportedEngineCache => {
+                    budget.set_mdbx(true);
+                    assert_eq!(
+                        budget.ensure_available(BudgetOwner::EngineCache, 1),
+                        Err(BudgetError::EngineCacheUnsupported)
+                    );
+                }
+                Request::UnchargedTransfer => {
+                    assert!(!ingress.transfer_receive_to_image(1));
+                }
+            }
+
+            assert!(
+                !queue.has_gap(),
+                "unrelated refusal {request:?} must retain facts"
+            );
+            assert_eq!(budget.charged_bytes(BudgetOwner::FactsQueue), size);
+            let retained = queue
+                .receiver()
+                .try_recv()
+                .expect("the queued fact remains");
+            assert!(Arc::ptr_eq(&retained, &facts));
+            queue.charge_handle().release(retained.size_bytes());
+            ingress.give_back(ingress.capacity());
+            assert_eq!(budget.total_committed(), 0);
+        }
+    }
+
+    // BUD-05, BUD-07, SYNC-03
+    #[expect(clippy::expect_used)]
+    #[test]
+    fn shared_background_pressure_reclaims_facts_for_another_owner() {
+        let budget = Arc::new(NodeBudget::new(
+            BudgetCaps {
+                staged_images: 8_192,
+                engine_cache: 0,
+                coin_cache: 0,
+                facts_queue: 4_096,
+                index_builder: 8_192,
+                query_views: 0,
+                peer_outbound: 0,
+                foreground_reserve: 16_384,
+            },
+            4,
+        ));
+        let queue = Arc::new(queue(&budget));
+        budget.add_reclaimer(BudgetOwner::FactsQueue, queue.reclaimer());
+        assert!(queue.try_push(facts(1)));
+        assert_eq!(budget.available(BudgetOwner::IndexBuilder), 8_192);
+        assert!(budget.total_committed() + 4_096 <= 20_480);
+        assert!(budget.background_committed() + 4_096 > 4_096);
+
+        assert_eq!(
+            budget.ensure_available(BudgetOwner::IndexBuilder, 4_097),
+            Err(BudgetError::BudgetExhausted)
+        );
+        assert!(
+            !queue.has_gap(),
+            "a request above the shared ceiling cannot be reclaimed"
+        );
+        assert_eq!(queue.receiver().len(), 1);
+
+        budget
+            .ensure_available(BudgetOwner::IndexBuilder, 4_096)
+            .expect("facts reclamation frees shared background headroom");
+
+        assert!(queue.receiver().is_empty());
+        assert!(queue.has_gap());
+        assert_eq!(budget.charged_bytes(BudgetOwner::FactsQueue), 0);
+        assert_eq!(
+            budget.available_of_reservations(BudgetOwner::IndexBuilder),
+            4_096
+        );
+        assert!(budget.is_safe());
     }
 }
