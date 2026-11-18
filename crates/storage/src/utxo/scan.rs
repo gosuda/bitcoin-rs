@@ -88,10 +88,12 @@ impl ScanWalkGate {
         self.state.lock().parked
     }
 
-    pub fn open(&self) {
+    pub fn open(&self) -> bool {
         let mut state = self.state.lock();
+        let was_open = state.open;
         state.open = true;
         self.cvar.notify_all();
+        !was_open
     }
 }
 

@@ -6846,7 +6846,9 @@ mod scantxoutset_tests {
             commit_ctx
                 .populate_fixture_coins(&changes)
                 .unwrap_or_else(|err| panic!("mid-scan commit failed: {err}"));
-            commit_gate.open();
+            if !commit_gate.open() {
+                panic!("scan walk gate timed out before the mid-scan commit");
+            }
             committed_tx
                 .send(())
                 .unwrap_or_else(|err| panic!("commit signal failed: {err}"));
