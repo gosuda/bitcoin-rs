@@ -58,8 +58,8 @@ bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-storage = { workspace = true, features = ["test-seam", "redb", "fjall"] }
 tempfile.workspace = true
-# Miner-side test key generation; independent of the Noise graph pin.
-secp256k1 = { version = "=0.33.1", default-features = false, features = ["std", "rand"] }
+# Miner-side test key generation uses the workspace pin, not the Noise-graph copy.
+secp256k1.workspace = true
 
 
 [[test]]
