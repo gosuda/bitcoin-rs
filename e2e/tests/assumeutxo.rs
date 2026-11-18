@@ -426,15 +426,20 @@ fn invalid_core_snapshots_fail_without_activating() -> Result<()> {
         );
         assert_eq!(view["chainstates"][0]["blocks"], 0, "{name}: {view}");
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let _non_utf8_target_dir = {
-        use std::os::unix::{ffi::OsStringExt as _, fs::symlink};
+    #[cfg(unix)]
+    let _symlink_target_dir = {
+        use std::os::unix::fs::symlink;
+        #[cfg(not(target_vendor = "apple"))]
+        let name = {
+            use std::os::unix::ffi::OsStringExt as _;
+            std::ffi::OsString::from_vec(b"core-\xff.dat".to_vec())
+        };
+        #[cfg(target_vendor = "apple")]
+        let name = std::ffi::OsString::from("core-v.dat");
         let dir = tempfile::Builder::new()
-            .prefix("assumeutxo-non-utf8-")
+            .prefix("assumeutxo-symlink-")
             .tempdir_in("/tmp")?;
-        let target = dir
-            .path()
-            .join(std::ffi::OsString::from_vec(b"core-\xff.dat".to_vec()));
+        let target = dir.path().join(name);
         std::fs::copy(&snapshot, &target)?;
         std::fs::remove_file(&snapshot)?;
         symlink(&target, &snapshot)?;
