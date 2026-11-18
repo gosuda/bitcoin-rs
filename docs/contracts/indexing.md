@@ -76,7 +76,7 @@ Owners:
 - Proof:
   - `crates/index/src/runtime.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
   - `crates/rpc/tests.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
-- `crates/p2p/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
+  - `crates/p2p/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
 - `ScriptLive` is self-contained under format 10 (PRJ-11).
 - Its 43-byte key is `script-hash-prefix || full-outpoint`.
 - Its value stores `script_hash` followed by the compact varint coin payload `varint(compress_amount(value)) || varint((height << 1) | coinbase)` with Core's `CompressAmount` and minimal varints; decoding refuses truncated input, malformed varints, amount overflow, height overflow, and trailing bytes.
