@@ -443,6 +443,50 @@ impl CoinCache {
         *resident += shard.backing_bytes();
     }
 
+    fn reindex(
+        &self,
+        shard: &mut ShardState,
+        resident: &mut u64,
+        value_bytes: u64,
+        released: &mut u64,
+    ) -> bool {
+        let Some(needed) = shard.entries.len().checked_add(1) else {
+            return false;
+        };
+        let Some(bound) = table_reservation_bound(needed) else {
+            return false;
+        };
+        let old_index_bytes = u64::try_from(shard.index.allocation_size()).unwrap_or(u64::MAX);
+        let available = self
+            .budget_bytes
+            .saturating_sub(resident.saturating_sub(old_index_bytes))
+            .saturating_sub(value_bytes);
+        if u64::try_from(bound).unwrap_or(u64::MAX) > available {
+            return false;
+        }
+        let old_index = std::mem::replace(&mut shard.index, HashTable::new());
+        *resident = resident.saturating_sub(old_index_bytes);
+        drop(old_index);
+        let mut index = HashTable::new();
+        if index.try_reserve(needed, |_| 0).is_err() {
+            for entry in shard.entries.drain(..) {
+                let bytes = u64::try_from(entry.value.len()).unwrap_or(u64::MAX);
+                *resident = resident.saturating_sub(bytes);
+                *released = released.saturating_add(bytes);
+            }
+            shard.hand = 0;
+            return false;
+        }
+        for (slot, entry) in shard.entries.iter().enumerate() {
+            index.insert_unique(self.hasher.hash_one(entry.key.0), slot, |&slot| {
+                self.hasher.hash_one(shard.entries[slot].key.0)
+            });
+        }
+        *resident += u64::try_from(index.allocation_size()).unwrap_or(u64::MAX);
+        shard.index = index;
+        true
+    }
+
     /// Runs under the resident lock then the shard lock.
     fn admit_locked(
         &self,
@@ -464,16 +508,20 @@ impl CoinCache {
         let mut freed = 0_u64;
         while !shard.entries.is_empty()
             && (value_bytes > self.budget_bytes.saturating_sub(*resident)
-                || shard.entries.len() == shard.entries.capacity()
-                || shard.index.capacity() == shard.entries.len())
+                || shard.entries.len() == shard.entries.capacity())
         {
             let evicted = shard.evict(&self.hasher);
             freed += evicted;
             *resident -= evicted;
         }
+        if shard.entries.len() < shard.entries.capacity()
+            && shard.index.capacity() <= shard.entries.len()
+        {
+            self.reindex(shard, resident, value_bytes, &mut freed);
+        }
         if value_bytes > self.budget_bytes.saturating_sub(*resident)
             || shard.entries.len() == shard.entries.capacity()
-            || shard.index.capacity() == shard.entries.len()
+            || shard.index.capacity() <= shard.entries.len()
         {
             return (false, freed);
         }

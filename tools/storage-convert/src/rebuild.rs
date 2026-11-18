@@ -188,6 +188,12 @@ pub(crate) fn run_rebuild_index(
         )));
     }
     read_datadir_epoch(datadir)?;
+    let reset_intent = datadir.join(".txindex.reset");
+    match std::fs::symlink_metadata(&reset_intent) {
+        Ok(_) => return Err(ConvertError::PendingIndexReset(reset_intent)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     let txindex_dir = datadir.join("txindex");
     check_symlink_final_component(&txindex_dir)?;
     if !txindex_dir.is_dir() {
@@ -739,6 +745,33 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // IDX-05
+    #[test]
+    fn pending_startup_reset_refuses_offline_rebuild_without_mutation() -> Result<(), ConvertError>
+    {
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("CURRENT_SCHEMA"), b"6\n")?;
+        let namespace = root.path().join("txindex");
+        std::fs::create_dir(&namespace)?;
+        std::fs::write(namespace.join("keep"), b"offline index bytes")?;
+        let marker = root.path().join(".txindex.reset");
+        for intent in [
+            b"bitcoin-rs-derived-index-reset-v1\n".as_slice(),
+            b"unknown intent".as_slice(),
+        ] {
+            std::fs::write(&marker, intent)?;
+            assert!(
+                matches!(run_rebuild_index(root.path(), 1024 * 1024), Err(ConvertError::PendingIndexReset(ref path)) if path == &marker)
+            );
+            assert_eq!(std::fs::read(&marker)?, intent);
+            assert_eq!(
+                std::fs::read(namespace.join("keep"))?,
+                b"offline index bytes"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn rebuild_accepts_current_epoch_datadir() -> Result<(), String> {

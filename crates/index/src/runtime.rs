@@ -809,6 +809,8 @@ enum ReconcileAction {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DerivedIndexWorkerError {
+    #[error("txindex namespace open or recreation failed: {0}")]
+    NamespaceOpen(#[from] std::io::Error),
     #[error("txindex worker stopped")]
     Stopped,
     #[error("txindex store open abandoned on shutdown")]
@@ -1026,6 +1028,19 @@ mod query_tests {
             _limit: PrefixScanLimit,
         ) -> Result<TxIndexScan, IndexError> {
             self.typed_scan(ColumnFamily::TxConfirmed, &TxidRow::scan_prefix(txid))
+        }
+
+        fn funding_transaction_rows(
+            &self,
+            _txid: &Txid,
+            _limit: PrefixScanLimit,
+        ) -> Result<crate::FundingTransactionScan, IndexError> {
+            Ok(crate::FundingTransactionScan {
+                rows: Vec::new(),
+                examined_rows: 0,
+                encoded_bytes: 0,
+                complete: true,
+            })
         }
 
         fn funding_rows(
@@ -2708,6 +2723,19 @@ mod query_tests {
             self.typed_scan(ColumnFamily::TxConfirmed, &TxidRow::scan_prefix(txid))
         }
 
+        fn funding_transaction_rows(
+            &self,
+            _txid: &Txid,
+            _limit: PrefixScanLimit,
+        ) -> Result<crate::FundingTransactionScan, IndexError> {
+            Ok(crate::FundingTransactionScan {
+                rows: Vec::new(),
+                examined_rows: 0,
+                encoded_bytes: 0,
+                complete: true,
+            })
+        }
+
         fn funding_rows(
             &self,
             scripthash: ScriptHash,
@@ -3763,6 +3791,459 @@ mod query_tests {
         assert_eq!(at.coverage.floor, 1);
         assert_eq!(at.coverage.height, 1);
         assert_eq!(at.value, None);
+        Ok(())
+    }
+
+    // IDX-12
+    #[test]
+    fn spender_at_prefix_preserves_spend_of_unindexed_below_floor_creation()
+    -> Result<(), crate::portable::TestError> {
+        struct FundingCoin {
+            outpoint: OutPoint,
+            output: TxOut,
+        }
+
+        impl crate::SpentCoins for FundingCoin {
+            fn spent_coin(&self, txid: &[u8; 32], vout: u32) -> Option<crate::SpentCoin<'_>> {
+                (*txid == *self.outpoint.txid.as_bytes() && vout == self.outpoint.vout).then_some(
+                    crate::SpentCoin {
+                        script: self.output.script_pubkey.as_bytes(),
+                        value: self.output.value.to_sat(),
+                        height: 0,
+                        coinbase: true,
+                    },
+                )
+            }
+        }
+
+        let genesis = Network::Regtest.genesis_block();
+        let (spending_fixture, outpoint, scripthash, _) = block_with_spending_transaction()?;
+        let spending_tx = spending_fixture.txs[1].clone();
+        assert_eq!(spending_tx.inputs[0].previous_output, outpoint);
+        let mined = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)
+            .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+        let child = child_block(&genesis, vec![mined.txs[0].clone(), spending_tx.clone()])?;
+        let body_bytes = consensus_bytes(&child);
+        let funding = FundingCoin {
+            outpoint,
+            output: genesis.txs[0].outputs[0].clone(),
+        };
+        let dir = tempfile::TempDir::new()?;
+        let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(dir.path())?);
+        let mut writer = crate::IndexWriter::open(Arc::clone(&store), 1)?;
+        writer.anchor_watermark(
+            IndexCapabilities::HISTORICAL,
+            IndexWatermark {
+                height: 0,
+                hash: *genesis.block_hash().as_bytes(),
+            },
+            1,
+        )?;
+        let prepared = writer.prepare_block_with_spent_scripts(
+            IndexCapabilities::HISTORICAL,
+            1,
+            *child.block_hash().as_bytes(),
+            &body_bytes,
+            &funding,
+        )?;
+        let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+        if batch.try_push(prepared).is_err() {
+            return Err("one covered block is admitted per batch".into());
+        }
+        writer.commit_forward(batch)?;
+
+        let mut tree = BlockTree::new();
+        tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+        let tip_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+        let tip = tip_snapshot_for(&tree, tip_id)?;
+        let tip_cell = Arc::new(ArcSwapOption::empty());
+        tip_cell.store(Some(Arc::new(tip)));
+        let body = Arc::new(MovingBody::new(
+            vec![(1, child.block_hash(), body_bytes)],
+            None,
+        ));
+        let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+        let engine = Arc::new(DerivedIndexQueryEngine::new(
+            DerivedIndexRuntime::new(wake_tx),
+            Arc::new(crate::Indexer::new(Arc::clone(&store))),
+            bitcoin_rs_chain::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+            bitcoin_rs_chain::chain::TipReader::new(tip_cell),
+            Some(body),
+            QueryEngineLive {
+                enabled: IndexCapabilities::HISTORICAL,
+                generation: Arc::new(Generation::new(1)),
+                historical_verified: None,
+                chain_transition: None,
+            },
+        ));
+        let adapter = DerivedIndexQueryAdapter::new(Arc::new(arc_swap::ArcSwap::from_pointee(
+            DerivedIndexLifecycle::Serving(engine),
+        )));
+        let answer = adapter.spender_at_prefix(outpoint)?;
+        assert_eq!(answer.coverage.floor, 1);
+        assert_eq!(answer.coverage.height, 1);
+        assert_eq!(
+            answer
+                .value
+                .as_ref()
+                .map(|record| (record.txid, record.height)),
+            Some((spending_tx.txid(), 1)),
+            "the covered canonical input must remain discoverable without its funding transaction"
+        );
+        let unrelated = adapter.spender_at_prefix(OutPoint::new(outpoint.txid, 1))?;
+        assert_eq!(unrelated.coverage.floor, 1);
+        assert_eq!(unrelated.value, None);
+        assert_eq!(adapter.transaction_at_prefix(&outpoint.txid)?.value, None);
+        assert!(matches!(
+            adapter.script_history_at_prefix(scripthash),
+            Err(TxQueryError::Unavailable(
+                TxUnavailableCause::HistoryUnproven { floor: 1 }
+            ))
+        ));
+        Ok(())
+    }
+
+    // IDX-12
+    #[test]
+    fn spender_at_prefix_distinguishes_recreated_outpoints_at_each_canonical_prefix()
+    -> Result<(), crate::portable::TestError> {
+        assert_recreated_outpoint_spenders_at_canonical_prefixes(
+            IndexCapabilities::HISTORICAL,
+            false,
+        )
+    }
+
+    // IDX-12
+    #[test]
+    fn spender_at_prefix_distinguishes_recreated_outpoints_with_script_history_only()
+    -> Result<(), crate::portable::TestError> {
+        assert_recreated_outpoint_spenders_at_canonical_prefixes(
+            IndexCapabilities::SCRIPT_HISTORY,
+            false,
+        )
+    }
+
+    // IDX-02, IDX-12
+    #[test]
+    fn spender_at_prefix_distinguishes_recreated_outpoints_with_pruned_creation_bodies()
+    -> Result<(), crate::portable::TestError> {
+        assert_recreated_outpoint_spenders_at_canonical_prefixes(
+            IndexCapabilities::SCRIPT_HISTORY,
+            true,
+        )
+    }
+
+    fn assert_recreated_outpoint_spenders_at_canonical_prefixes(
+        capabilities: IndexCapabilities,
+        prune_creations: bool,
+    ) -> Result<(), crate::portable::TestError> {
+        struct FundingOccurrence<'a> {
+            transaction: &'a Tx,
+            height: u32,
+        }
+
+        impl crate::SpentCoins for FundingOccurrence<'_> {
+            fn spent_coin(&self, txid: &[u8; 32], vout: u32) -> Option<crate::SpentCoin<'_>> {
+                if txid != self.transaction.txid().as_bytes() {
+                    return None;
+                }
+                let output = self.transaction.outputs.get(usize::try_from(vout).ok()?)?;
+                Some(crate::SpentCoin {
+                    script: output.script_pubkey.as_bytes(),
+                    value: output.value.to_sat(),
+                    height: self.height,
+                    coinbase: true,
+                })
+            }
+        }
+
+        let genesis = Network::Regtest.genesis_block();
+        let mut creation = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)
+            .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+        let mut funding_tx = creation.txs[0].clone();
+        funding_tx.outputs[0].value = Amount::from_sat(2_500_000_000);
+        funding_tx.outputs.push(funding_tx.outputs[0].clone());
+        creation = child_block(&genesis, vec![funding_tx.clone()])?;
+        let outpoints = [
+            OutPoint::new(funding_tx.txid(), 0),
+            OutPoint::new(funding_tx.txid(), 1),
+        ];
+        let spend = |height: u32, vout: u8| Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: outpoints[usize::from(vout)],
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1_000 + u64::from(height) + u64::from(vout)),
+                script_pubkey: Script::new(),
+            }],
+        };
+        let first_spends = [spend(3, 0), spend(3, 1)];
+        let second_spends = [spend(5, 0), spend(5, 1)];
+        let mut blocks = Vec::new();
+        let mut parent = creation.clone();
+        for height in 2..=5 {
+            let mined = regtest_fixture::mined_regtest_child_at(parent.block_hash(), height)
+                .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+            let transactions = match height {
+                3 => vec![
+                    mined.txs[0].clone(),
+                    first_spends[0].clone(),
+                    first_spends[1].clone(),
+                ],
+                4 => vec![funding_tx.clone()],
+                5 => vec![
+                    mined.txs[0].clone(),
+                    second_spends[0].clone(),
+                    second_spends[1].clone(),
+                ],
+                _ => vec![mined.txs[0].clone()],
+            };
+            let block = child_block(&parent, transactions)?;
+            parent = block.clone();
+            blocks.push((height, block));
+        }
+        let dir = tempfile::TempDir::new()?;
+        let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(dir.path())?);
+        let mut writer = crate::IndexWriter::open(Arc::clone(&store), 1)?;
+        writer.anchor_watermark(
+            capabilities,
+            IndexWatermark {
+                height: 1,
+                hash: *creation.block_hash().as_bytes(),
+            },
+            2,
+        )?;
+        let mut tree = BlockTree::new();
+        tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+        tree.insert_header(creation.header, NodeStatus::HeaderValid)?;
+        let tree = Arc::new(RwLock::new(tree));
+        let mut bodies = Vec::new();
+        let mut answers = Vec::new();
+        for (height, block) in blocks {
+            let body_bytes = consensus_bytes(&block);
+            let prepared = writer.prepare_block_with_spent_scripts(
+                capabilities,
+                height,
+                *block.block_hash().as_bytes(),
+                &body_bytes,
+                &FundingOccurrence {
+                    transaction: &funding_tx,
+                    height: if height == 5 { 4 } else { 1 },
+                },
+            )?;
+            let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+                max_rows: usize::MAX,
+                max_bytes: usize::MAX,
+            });
+            if batch.try_push(prepared).is_err() {
+                return Err("one canonical block is admitted per batch".into());
+            }
+            writer.commit_forward(batch)?;
+            if !prune_creations || height != 4 {
+                bodies.push((height, block.block_hash(), body_bytes));
+            }
+            let tip_id = tree
+                .write()
+                .insert_header(block.header, NodeStatus::HeaderValid)?;
+            if height < 3 {
+                continue;
+            }
+            let tip = tip_snapshot_for(&tree.read(), tip_id)?;
+            let tip_cell = Arc::new(ArcSwapOption::empty());
+            tip_cell.store(Some(Arc::new(tip)));
+            let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+            let engine = Arc::new(DerivedIndexQueryEngine::new(
+                DerivedIndexRuntime::new(wake_tx),
+                Arc::new(crate::Indexer::new(Arc::clone(&store))),
+                bitcoin_rs_chain::chain::BlockTreeReader::new(Arc::clone(&tree)),
+                bitcoin_rs_chain::chain::TipReader::new(tip_cell),
+                Some(Arc::new(MovingBody::new(bodies.clone(), None))),
+                QueryEngineLive {
+                    enabled: capabilities,
+                    generation: Arc::new(Generation::new(1)),
+                    historical_verified: None,
+                    chain_transition: None,
+                },
+            ));
+            let adapter = DerivedIndexQueryAdapter::new(Arc::new(arc_swap::ArcSwap::from_pointee(
+                DerivedIndexLifecycle::Serving(engine),
+            )));
+            for (vout, outpoint) in outpoints.iter().enumerate() {
+                let answer = adapter.spender_at_prefix(*outpoint)?;
+                assert_eq!(answer.height, height);
+                assert_eq!(answer.coverage.floor, 2);
+                assert_eq!(answer.coverage.height, height);
+                answers.push((
+                    height,
+                    vout,
+                    answer.value.map(|record| (record.txid, record.height)),
+                ));
+            }
+        }
+        for (height, vout, actual) in answers {
+            let expected = match height {
+                3 => Some((first_spends[vout].txid(), 3)),
+                4 => None,
+                5 => Some((second_spends[vout].txid(), 5)),
+                _ => return Err("only prefixes 3, 4, and 5 are queried".into()),
+            };
+            assert_eq!(actual, expected, "canonical prefix {height}, vout {vout}");
+        }
+        Ok(())
+    }
+
+    // IDX-12
+    #[test]
+    fn spender_at_prefix_finds_later_same_block_spend_with_script_history_only()
+    -> Result<(), crate::portable::TestError> {
+        struct AvailableInputs<'a> {
+            genesis: &'a Tx,
+            funding: &'a Tx,
+        }
+
+        impl crate::SpentCoins for AvailableInputs<'_> {
+            fn spent_coin(&self, txid: &[u8; 32], vout: u32) -> Option<crate::SpentCoin<'_>> {
+                let (transaction, height, coinbase) = if txid == self.genesis.txid().as_bytes() {
+                    (self.genesis, 0, true)
+                } else if txid == self.funding.txid().as_bytes() {
+                    (self.funding, 1, false)
+                } else {
+                    return None;
+                };
+                let output = transaction.outputs.get(usize::try_from(vout).ok()?)?;
+                Some(crate::SpentCoin {
+                    script: output.script_pubkey.as_bytes(),
+                    value: output.value.to_sat(),
+                    height,
+                    coinbase,
+                })
+            }
+        }
+
+        let genesis = Network::Regtest.genesis_block();
+        let funding = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(genesis.txs[0].txid(), 0),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![
+                TxOut {
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: Script::new(),
+                },
+                TxOut {
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: Script::new(),
+                },
+            ],
+        };
+        let outpoints = [
+            OutPoint::new(funding.txid(), 0),
+            OutPoint::new(funding.txid(), 1),
+        ];
+        let spending = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: outpoints
+                .iter()
+                .map(|&previous_output| TxIn {
+                    previous_output,
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1_500),
+                script_pubkey: Script::new(),
+            }],
+        };
+        let mined = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)
+            .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+        let child = child_block(
+            &genesis,
+            vec![mined.txs[0].clone(), funding.clone(), spending.clone()],
+        )?;
+        let body_bytes = consensus_bytes(&child);
+        let dir = tempfile::TempDir::new()?;
+        let store = Arc::new(bitcoin_rs_storage::RocksDbStore::open(dir.path())?);
+        let mut writer = crate::IndexWriter::open(Arc::clone(&store), 1)?;
+        writer.anchor_watermark(
+            IndexCapabilities::SCRIPT_HISTORY,
+            IndexWatermark {
+                height: 0,
+                hash: *genesis.block_hash().as_bytes(),
+            },
+            1,
+        )?;
+        let prepared = writer.prepare_block_with_spent_scripts(
+            IndexCapabilities::SCRIPT_HISTORY,
+            1,
+            *child.block_hash().as_bytes(),
+            &body_bytes,
+            &AvailableInputs {
+                genesis: &genesis.txs[0],
+                funding: &funding,
+            },
+        )?;
+        let mut batch = crate::PreparedBatch::new(crate::PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+        if batch.try_push(prepared).is_err() {
+            return Err("the same-block funding and spending body is admitted together".into());
+        }
+        writer.commit_forward(batch)?;
+        let mut tree = BlockTree::new();
+        tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+        let tip_id = tree.insert_header(child.header, NodeStatus::HeaderValid)?;
+        let tip = tip_snapshot_for(&tree, tip_id)?;
+        let tip_cell = Arc::new(ArcSwapOption::empty());
+        tip_cell.store(Some(Arc::new(tip)));
+        let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
+        let engine = Arc::new(DerivedIndexQueryEngine::new(
+            DerivedIndexRuntime::new(wake_tx),
+            Arc::new(crate::Indexer::new(Arc::clone(&store))),
+            bitcoin_rs_chain::chain::BlockTreeReader::new(Arc::new(RwLock::new(tree))),
+            bitcoin_rs_chain::chain::TipReader::new(tip_cell),
+            Some(Arc::new(MovingBody::new(
+                vec![(1, child.block_hash(), body_bytes)],
+                None,
+            ))),
+            QueryEngineLive {
+                enabled: IndexCapabilities::SCRIPT_HISTORY,
+                generation: Arc::new(Generation::new(1)),
+                historical_verified: None,
+                chain_transition: None,
+            },
+        ));
+        let adapter = DerivedIndexQueryAdapter::new(Arc::new(arc_swap::ArcSwap::from_pointee(
+            DerivedIndexLifecycle::Serving(engine),
+        )));
+        for (vin, outpoint) in outpoints.iter().enumerate() {
+            let answer = adapter.spender_at_prefix(*outpoint)?;
+            assert_eq!(answer.height, 1);
+            assert_eq!(answer.coverage.floor, 1);
+            assert_eq!(answer.coverage.height, 1);
+            assert_eq!(
+                answer
+                    .value
+                    .map(|record| (record.txid, record.height, record.vin)),
+                Some((spending.txid(), 1, u32::try_from(vin)?)),
+            );
+        }
         Ok(())
     }
 
@@ -5706,6 +6187,141 @@ mod supervisor_tests {
             .expect("must exit within 5 s deadline");
         assert_eq!(result, super::catch_up::BatchWait::Stopped);
         assert!(join_thread.join().is_ok());
+    }
+    // IDX-05
+    #[test]
+    fn incompatible_populated_index_reopens_without_writing_obsolete_rows()
+    -> Result<(), crate::portable::TestError> {
+        assert_namespace_rebuild(bitcoin_rs_storage::StorageBackend::RocksDb, |path| {
+            bitcoin_rs_storage::RocksDbStore::open_with_cache(path, 8 * 1024 * 1024)
+        })
+    }
+
+    // IDX-05
+    #[test]
+    #[cfg(feature = "surrealkv")]
+    fn surrealkv_incompatible_populated_index_reopens_without_writing_obsolete_rows()
+    -> Result<(), crate::portable::TestError> {
+        assert_namespace_rebuild(bitcoin_rs_storage::StorageBackend::SurrealKv, |path| {
+            bitcoin_rs_storage::SurrealKvStore::open_with_cache(path, 8 * 1024 * 1024)
+        })
+    }
+
+    // IDX-05
+    #[test]
+    #[cfg(feature = "mdbx")]
+    fn mdbx_incompatible_populated_index_reopens_without_writing_obsolete_rows()
+    -> Result<(), crate::portable::TestError> {
+        assert_namespace_rebuild(bitcoin_rs_storage::StorageBackend::Mdbx, |path| {
+            bitcoin_rs_storage::MdbxStore::open_with_cache(path, 8 * 1024 * 1024)
+        })
+    }
+
+    fn assert_namespace_rebuild<S: bitcoin_rs_storage::KvStore>(
+        backend: bitcoin_rs_storage::StorageBackend,
+        open_store: fn(&std::path::Path) -> Result<S, bitcoin_rs_storage::StorageError>,
+    ) -> Result<(), crate::portable::TestError> {
+        use bitcoin_rs_storage::{ColumnFamily, PersistFault};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for marker in [Some(5_u32), None, Some(9_u32)] {
+            let dir = tempfile::tempdir()?;
+            let index_dir = dir.path().join("txindex");
+            let sibling = dir.path().join("chainstate-evidence");
+            std::fs::write(&sibling, b"authoritative bytes")?;
+            {
+                let store = open_store(&index_dir)?;
+                let mut batch = store.new_batch();
+                for family in [
+                    ColumnFamily::TxConfirmed,
+                    ColumnFamily::Funding,
+                    ColumnFamily::Spending,
+                    ColumnFamily::ScriptLive,
+                ] {
+                    for index in 0..32_000_u32 {
+                        batch.put(family, &index.to_be_bytes(), &[0xa5; 16]);
+                    }
+                }
+                if let Some(marker) = marker {
+                    batch.put(ColumnFamily::UtxoMeta, &[0, b'V'], &marker.to_le_bytes());
+                    if marker == 9 {
+                        let mut claim = vec![0b1111];
+                        claim.extend_from_slice(&1_u64.to_le_bytes());
+                        claim.extend_from_slice(&0_u64.to_le_bytes());
+                        batch.put(ColumnFamily::UtxoMeta, &[0, b'R'], &claim);
+                    }
+                }
+                store.write_durable(batch)?;
+            }
+            let obsolete_file = index_dir.join("obsolete-layout");
+            std::fs::write(&obsolete_file, b"obsolete")?;
+            let mut inputs = build_worker_inputs(dir.path(), 1780);
+            inputs.spec.storage_backend = backend;
+            let opens = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&opens);
+            inputs.spec.open_store = Arc::new(move |path| {
+                let attempt = observed.fetch_add(1, Ordering::SeqCst);
+                let store = Arc::new(open_store(path)?);
+                if attempt == 0 {
+                    store.arm_persist_fault(PersistFault::FailApply);
+                } else {
+                    for family in [
+                        ColumnFamily::TxConfirmed,
+                        ColumnFamily::Funding,
+                        ColumnFamily::Spending,
+                        ColumnFamily::ScriptLive,
+                    ] {
+                        assert!(store.iter_prefix(family, &[])?.next().is_none());
+                    }
+                }
+                open_derived_index_store_on_worker(store, DEFAULT_BATCH_LIMITS, 1780)
+            });
+            let worker = DerivedIndexWorker::spawn_with_open(
+                Arc::clone(&inputs.runtime),
+                inputs.spec,
+                Arc::clone(&inputs.lifecycle),
+                inputs.generation.clone(),
+                bitcoin_rs_chain::chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+                None,
+                bitcoin_rs_chain::chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
+                None,
+                bitcoin_rs_storage::pruning::HistoryAccess::new(
+                    Arc::new(bitcoin_rs_storage::pruning::RetentionRegistry::new()),
+                    bitcoin_rs_storage::pruning::RetentionBudget::Unlimited,
+                ),
+                None,
+                Arc::clone(&inputs.chain_events),
+                RecordedIndexAhead::new(),
+                inputs.shutdown.reader(),
+                inputs.wake_rx,
+            )
+            .expect("spawn");
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while matches!(**inputs.lifecycle.load(), DerivedIndexLifecycle::Opening)
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let final_lifecycle = inputs.lifecycle.load_full();
+            let serving = matches!(**inputs.lifecycle.load(), DerivedIndexLifecycle::Serving(_));
+            let failure = match final_lifecycle.as_ref() {
+                DerivedIndexLifecycle::Failed(reason) => reason.as_str(),
+                DerivedIndexLifecycle::Opening => "still opening",
+                DerivedIndexLifecycle::ShutdownAbandoned => "shutdown abandoned",
+                DerivedIndexLifecycle::Serving(_) => "serving",
+            };
+            inputs.shutdown.trigger();
+            worker.join();
+            assert!(
+                serving,
+                "obsolete rows must not be deleted through durable writes: {failure}"
+            );
+            assert_eq!(opens.load(Ordering::SeqCst), 2);
+            assert!(!obsolete_file.exists());
+            assert_eq!(std::fs::read(&sibling)?, b"authoritative bytes");
+            assert!(!NAMESPACE_REGISTRY.is_poisoned(&index_dir));
+        }
+        Ok(())
     }
 }
 

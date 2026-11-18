@@ -113,6 +113,10 @@ pub trait TxIndexWriter: Send + Sync {
         fence: IndexWriteFence,
         cursor: &[u8],
     ) -> Result<(), IndexError>;
+    /// Node-owned scratch directory for bundle restore spill, when configured.
+    fn restore_scratch(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 impl<S> TxIndexWriter for RwLock<IndexWriter<S>>
@@ -267,5 +271,9 @@ where
         cursor: &[u8],
     ) -> Result<(), IndexError> {
         self.write().commit_consumer_cursor(fence, cursor)
+    }
+
+    fn restore_scratch(&self) -> Option<std::path::PathBuf> {
+        self.read().scratch_dir().map(std::path::Path::to_path_buf)
     }
 }

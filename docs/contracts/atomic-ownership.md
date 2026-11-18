@@ -284,6 +284,7 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 - A script identity must be stored once per segment dictionary.
 - A posting entry must hold an occurrence reference and flags, not a full script hash and transaction id.
+- Store one posting item per funding or spending event. Keep events with the same ordinal separate. The history reader merges their flags for the public transaction occurrence.
 - A sealed posting chunk must be keyed by `gen_id` (BE8), `script_id` (BE4), and the inverted absolute ordinal of its first posting (BE4), so that a forward scan from a cursor's ordinal yields chunks newest first. A chunk must never split a run of postings that share one ordinal, and its first posting must carry delta zero.
 - A chunk must hold at most 4 KiB of encoded postings, except a chunk holding one transaction's postings for one script, which may be larger because a same-ordinal run is never split.
 
@@ -315,8 +316,12 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 ### `QRY-03`: Extension stability for historical queries
 
-- An ordinary chain extension must not invalidate a coherent historical query answer.
+- An ordinary chain extension must not invalidate a coherent historical answer from an immutable owner view.
 - An endpoint that requires current-tip data must verify that condition explicitly.
+- Composed HTTP responses must use a stable applied-tip publication when they combine index state with mempool data.
+- Public address and scripthash `txs/mempool` responses include confirmed prevout or unspent index state. They are not pure mempool reads.
+- If the publication changes during a composed read, the endpoint must return `503 Service Unavailable`. This includes extension, replacement, and ABA republication.
+- This fence must not invalidate immutable historical owner reads or change confirmed-occurrence identity. Pure mempool reads do not require this fence.
 
 ### `QRY-04`: Provenance metadata in query responses
 
@@ -421,6 +426,8 @@ Nothing below the owner facade can interpret or copy the same data again.
 ### `BUD-01`: Upfront ingress resource reservation
 
 - Ingress processing must reserve resources before materializing variable-sized data structures.
+- A production receive buffer must reserve its allocation capacity before allocation or growth. A replacement buffer must hold its new receipt while the old buffer and receipt remain live during copying.
+- Partial receive state and every final shared raw-byte clone or slice must keep the backing receipt. Encrypted handshake garbage and its AAD allocation have the same ownership rule before a peer exists.
 
 ### `BUD-02`: Unified accounting model
 
@@ -447,25 +454,37 @@ Nothing below the owner facade can interpret or copy the same data again.
 
 - Foreground chain progress must have reserved execution capacity.
 - Historical validation and background projections receive bounded, fair service.
-- Network ingress MUST leave `foreground_reserve` outside its admission ceiling within `StagedImages`.
-- The ingress check MUST use current `StagedImages` charges and reservations.
-- The check and reservation MUST occur under one ledger lock.
-- Ingress MUST report `staged_images.saturating_sub(foreground_reserve)` as its capacity.
-- Execution MAY reserve against the full staged-images owner cap.
+- Let `S` be the configured staged-images allocation. `PeerReceive` owns `R = min(64 MiB, S / 8)` and `StagedImages` owns `I = S - R`. This split must not increase the configured node total.
+- Image ingress must leave `F = min(foreground_reserve, I - R)` outside its admission ceiling. Its capacity is `I - F`. Global background exclusion continues to use the configured `foreground_reserve`.
+- The ingress check must use current `StagedImages` charges and reservations. The check and reservation must occur under one ledger lock.
+- Execution can reserve against the full `I` owner cap. Saturated image admission must not consume the distinct raw receive allowance or prevent an otherwise-admissible control message.
+- Zero or tiny quotas remain valid. A request that cannot fit must receive a local resource refusal, not an uncharged allocation.
 
-Proof: `crates/node/src/budget.rs::saturated_ingress_preserves_execution_headroom_and_recovers_after_release` checks execution credit at ingress saturation and resumed ingress admission after release.
+Proof: `crates/node/src/budget.rs::saturated_ingress_preserves_execution_headroom_and_recovers_after_release` checks execution credit at ingress saturation and resumed ingress admission after release. `crates/node/src/budget.rs::receive_partition_preserves_total_for_default_small_and_zero_quotas` checks the receive/image partition preserves the configured total for default, small, and zero quotas.
 
 ### `BUD-06`: Unified retained memory budget
 
 - One memory budget must cover all retained allocations: block images and layouts, resolved prevouts, window workspaces, verification scratch, coin cache, projection buffers, query snapshots, and backend caches.
 - A shared buffer is charged once to its owner.
+- Production raw receive allocations use `PeerReceive` on the same node ledger as image and decoder allocations. Shared raw backing is charged once; decoder receipts cover only distinct heaps.
+- Standalone wire `BlockMemory::default` has a bounded 512 MiB image lane plus a bounded 64 MiB receive lane, for a combined 576 MiB allowance. Utilities without a node ledger keep their standalone framing semantics. These are not the production node's allocation policy.
+- Outbound-generated handshake garbage and outbound buffers are not receive-origin allocations.
 - The libmdbx storage engine relies on the operating system page cache, so its cache memory is accounted by the kernel rather than this budget; the node budget records this engine limitation as an explicit exception to backend cache tracking.
 
 ### `BUD-07`: Work refusal on budget exhaustion
 
 - When a resource budget is exhausted, the owner must release resources or refuse new work.
+- A refused receive allocation must end the connection with a local resource error and release partial backing. It must not report a resumable socket poll timeout or blame the peer.
+- A completed receive frame that cannot reserve distinct decoder memory must be refused as terminal local resource exhaustion. It must not wait while holding raw memory, blame the peer, or report a resumable poll timeout after consuming the frame.
 - A refused coin-cache charge MUST release eligible resident records before one retry. Eviction MUST release their ledger charges before the retry.
+- An owner-cap refusal must reclaim only charges of that owner. If the owner cap has room, a shared background-ceiling refusal may reclaim background owners. A refusal caused only by the node total may reclaim any registered owner. A request above its applicable owner or background ceiling or unsupported by its backend must not reclaim queued work.
+- Receive-to-image transfer preserves the node total and must reclaim only staged images. Reclaim callbacks must run without the ledger lock, and the final reservation or transfer retry decides admission.
+- Staged-image reclamation must stop once the requested ledger release or attributed eviction work is reached. Active and historical stagers share this work limit. Attributed eviction bytes are not released credit; admission still requires the ledger's reservation retry.
 - The component must not add unbounded memory buffering.
+
+The node-total fallback is defensive. `BudgetCaps::total` is the sum of the owner caps, including the receive/image partition in `BUD-05`. Every public ledger mutation preserves each owner's combined charge and reservation bound. `sample_engine_cache` also caps its charge at the owner cap minus live reservations. A request that fits its owner therefore fits the node total. If the configured total saturates, the final saturating sum cannot exceed `u64::MAX`. Total-only pressure has no public-API fixture under these invariants.
+
+Proof: `crates/p2p/src/inbound/block_memory.rs::message_loop_refuses_receive_pressure_once_and_releases_partial_backing` checks terminal local receive refusal and released partial backing for both transports. `crates/p2p/src/inbound/block_memory.rs::decode_admission_refuses_without_waiting_on_retained_raw_memory` checks terminal decoder refusal without waiting on retained raw memory. `crates/p2p/src/inbound/block_memory.rs::cancellation_precedes_typed_decode_and_malformed_decode_releases_credit` checks cancellation before decoder admission and credit release after malformed decoding. `crates/node/src/p2p/block_stager.rs::reclaim_work_stays_bounded_when_admissions_replace_released_credit` checks the eviction work limit under replacement charges and zero requests. `crates/node/src/p2p/sync.rs::shared_staged_backing_bounds_reclaim_before_historical_eviction` and `crates/node/src/p2p/sync.rs::reclaimed_credit_preserves_historical_bodies_after_the_target_is_met` check historical preservation when either the work limit or actual release target is reached. `crates/node/src/budget.rs::transfer_reclaims_staged_image_and_retries_once` checks the authoritative transfer retry and conserved receive credit on refusal. `crates/node/src/facts_queue.rs::image_and_permanent_refusals_do_not_reclaim_queued_facts` checks that unrelated and permanent refusals preserve queued facts. `crates/node/src/facts_queue.rs::shared_background_pressure_reclaims_facts_for_another_owner` and `crates/node/src/facts_queue.rs::ensure_available_reclaims_queued_facts` check applicable shared and owner pressure.
 
 ### `MPS-01`: Mempool dependency graph and settlement
 

@@ -4,6 +4,11 @@ use std::time::{Duration, Instant};
 use bitcoin_rs_consensus::primitives::{Amount, OutPoint, TxOut};
 use parking_lot::Mutex;
 
+#[cfg(any(test, feature = "test-seam"))]
+use parking_lot::Condvar;
+#[cfg(any(test, feature = "test-seam"))]
+use std::sync::Arc;
+
 use crate::utxo::record::UtxoRecord;
 use crate::utxo::{UtxoCoin, UtxoScan, UtxoSet};
 use crate::{ColumnFamily, KvSnapshot, StorageError};
@@ -52,11 +57,45 @@ fn snapshot_error(error: StorageError) -> UtxoScanError {
     UtxoScanError::Corrupt(error.to_string())
 }
 #[derive(Default)]
-pub(crate) struct ScanState(Mutex<Option<Progress>>);
+pub(crate) struct ScanState(
+    Mutex<Option<Progress>>,
+    #[cfg(any(test, feature = "test-seam"))] Mutex<Option<Arc<ScanWalkGate>>>,
+);
 
 struct Progress {
     percent: u8,
     abort: bool,
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+#[derive(Default)]
+pub struct ScanWalkGate {
+    state: Mutex<WalkGateState>,
+    cvar: Condvar,
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+#[derive(Default)]
+struct WalkGateState {
+    parked: bool,
+    open: bool,
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+impl ScanWalkGate {
+    #[must_use]
+    pub fn parked(&self) -> bool {
+        self.state.lock().parked
+    }
+
+    #[must_use]
+    pub fn open(&self) -> bool {
+        let mut state = self.state.lock();
+        let was_open = state.open;
+        state.open = true;
+        self.cvar.notify_all();
+        !was_open
+    }
 }
 
 impl ScanState {
@@ -83,6 +122,29 @@ impl ScanState {
         };
         progress.abort = true;
         true
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    pub(crate) fn arm_walk_gate(&self) -> Arc<ScanWalkGate> {
+        let gate = Arc::new(ScanWalkGate::default());
+        *self.1.lock() = Some(Arc::clone(&gate));
+        gate
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    fn park_walk_if_gated(&self) {
+        let Some(gate) = self.1.lock().clone() else {
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut state = gate.state.lock();
+        if !state.open {
+            state.parked = true;
+            while !state.open && Instant::now() < deadline {
+                let _ = gate.cvar.wait_for(&mut state, Duration::from_secs(1));
+            }
+            state.open = true;
+        }
     }
 }
 
@@ -226,6 +288,8 @@ impl<'a> UtxoScanPermit<'a> {
                 if let Some(progress) = self.set.scan.0.lock().as_mut() {
                     progress.percent = percent;
                 }
+                #[cfg(any(test, feature = "test-seam"))]
+                self.set.scan.park_walk_if_gated();
             }
         }
         if let Some(progress) = self.set.scan.0.lock().as_mut() {

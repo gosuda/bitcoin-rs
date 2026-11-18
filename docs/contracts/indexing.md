@@ -1,6 +1,6 @@
 # Indexing contract
 
-**Contract version: 1.7** (2026-10-31)
+**Contract version: 1.8** (2026-11-16)
 
 The normative contract for node-owned indexing runtimes, capability gating, and asynchronous reconciliation across restarts, reorganizations, and selective rebuilds.
 
@@ -76,8 +76,8 @@ Owners:
 - Proof:
   - `crates/index/src/runtime.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
   - `crates/rpc/tests.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
-  - `crates/p2p/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
-- `ScriptLive` is self-contained under format 9 (PRJ-11).
+- `crates/p2p/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
+- `ScriptLive` is self-contained under format 10 (PRJ-11).
 - Its 43-byte key is `script-hash-prefix || full-outpoint`.
 - Its value stores `script_hash` followed by the compact varint coin payload `varint(compress_amount(value)) || varint((height << 1) | coinbase)` with Core's `CompressAmount` and minimal varints; decoding refuses truncated input, malformed varints, amount overflow, height overflow, and trailing bytes.
 - Readers exact-check the full script hash directly from the stored coin without requiring a live UTXO read or chain-transition lock.
@@ -89,10 +89,11 @@ Owners:
   - `txid`
   - 6-byte transaction position
   - a flag byte
-- Funding and spending references from one transaction to one script merge into one occurrence with both flags.
+- Stored `ScriptPost` items keep each funding and spending event, including events with the same transaction ordinal. The history reader merges these items into one public occurrence per script and transaction with both flags.
 - The spent script comes from authoritative UTXO or undo state.
 - A missing spent script fails preparation with `MissingSpentCoin` instead of writing a partial history.
-- `ColumnFamily::Spending` keeps outpoint-keyed rows for `spender` queries only.
+- `ColumnFamily::SpendDir` keeps outpoint-keyed spend events for `spender` queries only. Each format 10 key is `generation_BE8 || funding_txid_32 || vout_BE4 || spending_height_BE4`; its value is `spending_ordinal_BE4`.
+- Each spend event MUST be stored independently of the funding transaction's creation height or retained coverage. The spender transaction directory resolves only the spending occurrence; funding discovery is not required.
 - Each occurrence names the script and the block position.
 - A history page is one bounded seek over one script prefix.
 - Exact script-hash comparison filters prefix collisions without loading a block.
@@ -110,6 +111,7 @@ Owners:
 - An enabled `TxLookup` whose watermark is not at the applied tip refuses a cursor page with `Retry`.
 - An enabled `TxLookup` whose floor does not cover the page refuses a cursor page with a typed unavailable cause.
 - Without `TxLookup`, the page starts from the first page, as `API-09` defines for an unknown cursor.
+- Proof: `crates/index/tests.rs` (`same_tx_fund_and_spend_keeps_both_posting_occurrences`) checks stored funding and spending events merge into one public occurrence with both flags; `crates/index/src/index.rs` (`spend_event_codec_preserves_full_identity_and_rejects_noncanonical_lengths`) checks the format 10 spend-row layout; `crates/index/tests.rs` (`spending_rows_carry_transaction_positions`) checks stored transaction positions.
 
 ### `IDX-03`: Query gating and snapshot consistency
 
@@ -181,24 +183,51 @@ Owners:
 - The `data_dir/txindex` namespace maintains durable format versions and capability watermarks (`IndexWatermarks`, `ConsumerCursor`).
 - A stored schema or format version foreign to this build MUST reset and rebuild the store per `docs/policies/db-migration.md`.
 - The store MUST never perform an in-place migration.
-- `IndexWriter::open` (`crates/index/src/index/write.rs`) accepts format 9 (`INDEX_FORMAT_VERSION_VALUE`) as the current durability marker only.
-- This format provides newest-first history-occurrence rows with inverted heights, 43-byte live rows, and 6-byte positions.
+- `IndexWriter::open` (`crates/index/src/index/write.rs`) accepts format 10 (`INDEX_FORMAT_VERSION_VALUE`) as the current durability marker only.
+- This format provides newest-first history-occurrence rows with inverted heights, 43-byte live rows, 6-byte positions, and outpoint spend events keyed by generation, funding outpoint, and spending height with a spending ordinal value.
 - The row format is owned by this clause; any format change requires a new durability marker.
 - Every older marker returns `IndexError::UnsupportedTxIndexFormatVersion`.
-- In that case, `open_writer` in `crates/index/src/runtime/startup.rs` full-resets the derived store for rebuild without an in-place upgrade path.
+- In that case, worker startup MUST close the rejected store and recreate only its dedicated namespace before it opens the replacement store.
+- An unversioned populated store and a valid interrupted full-capability reset claim use the same path.
+- Startup MUST publish and sync a `.txindex.reset` intent in the data root before it removes the namespace.
+- A crash before fixed-name intent publication can leave an unpublished temporary file in the data root.
+- Only the fixed `.txindex.reset` path with the expected intent contents authorizes namespace removal. An unpublished temporary file does not authorize removal.
+- Reset recovery does not scan or delete arbitrary temporary files in the data root.
+- A pending intent MUST complete recreation before the backend opens.
+- Startup MUST remove and sync the intent only after the replacement store opens successfully. An unexpectedly missing intent at retirement MUST refuse publication.
+- A failed or cancelled recreation MUST retain the intent for the next start.
+- Startup MUST refuse an unknown intent and preserve its bytes.
+- Recreation MUST refuse a namespace outside the named direct child of the data root or a namespace that is a link.
+- A backend error or malformed reset claim MUST NOT authorize namespace removal.
+- An abandoned opener MUST check cancellation before it starts a reset. This check includes generation revocation.
+- No serving reader or writer can hold the replaced store.
+- Startup recreation writes no deletion batches to the rejected store.
+- Live capability resets retain the conditional purge and monotonic fences.
+- Proof: `crates/index/src/runtime.rs` (`incompatible_populated_index_reopens_without_writing_obsolete_rows`, `surrealkv_incompatible_populated_index_reopens_without_writing_obsolete_rows`, `mdbx_incompatible_populated_index_reopens_without_writing_obsolete_rows`).
+- Proof: `crates/index/src/runtime/startup.rs` (`pending_namespace_reset_completes_before_backend_open`, `unknown_namespace_reset_intent_preserves_files_and_refuses_open`, `namespace_reset_refuses_paths_outside_the_named_child`, `namespace_reset_refuses_a_link_to_another_directory`, `surrealkv_namespace_reset_refuses_a_link_to_another_directory`, `mdbx_namespace_reset_refuses_a_link_to_another_directory`, `backend_failure_does_not_authorize_namespace_reset`, `malformed_reset_claim_does_not_authorize_namespace_reset`, `cancelled_fresh_open_releases_store_and_retains_reset_intent`, `abandoned_open_cannot_start_a_late_namespace_reset`, `revoked_generation_cannot_authorize_namespace_reset`, `compatible_linked_namespace_opens_without_recreation`, `missing_reset_intent_after_fresh_open_is_refused`).
+- A compatible namespace MAY open through a link. Only recreation requires a direct directory.
+- With no pending intent, the configured backend can open a linked target to check its index format.
+- A foreign format, an unversioned populated index, or a full-capability reset claim MUST preserve the target rows and MUST NOT publish a reset intent through the link.
+- Backend open can run normal engine recovery and can change engine files.
+- The public worker-store open helpers MUST report `FullResetRequired` for a valid interrupted full-capability claim. They do not own namespace removal. `IndexWriter::open` retains its in-store reset recovery.
+- Offline `rebuild-index` MUST refuse a pending startup reset intent before it opens a backend. The node owns completion of that reset.
+- Proof: `tools/storage-convert/src/rebuild.rs::pending_startup_reset_refuses_offline_rebuild_without_mutation`.
+- Format 9 spend rows omitted events when funding creation was outside retained coverage. An owner-local rebuild from retained canonical blocks and undo is required to recover those events; row conversion cannot recover missing events.
+- This cutover changes only the index durability marker, not `CURRENT_SCHEMA`. There is one current reader and writer, with no dual reader or in-place conversion.
 - Selective reset under `IDX-04` covers corrupt watermarks, not versions.
 - Reset recovery accepts only current 17-byte claims and 9-byte Idle states.
 - Idle versions MUST remain monotonic generations to prevent ABA races.
 - Obsolete or malformed claims return `InvalidResetMarker` without modifying derived rows.
 - The worker reports failure through its existing startup boundary.
 - The store opens only the canonical 43-byte ScriptLive table.
-- An incompatible declaration, empty or populated, MUST refuse open without changing data.
-- The operator MUST rebuild the derived index in a separately named directory, with no live-row conversion.
+- Store-level open MUST refuse an incompatible declaration, empty or populated, without changing data. Worker startup then owns namespace recreation as specified above.
+- An operator who preserves an incompatible index MUST rebuild into a separately named directory, with no live-row conversion.
 - Current writers emit position values only for nonempty transaction groups.
 - Queries MUST reject empty values as corrupt derived state.
 - They emit a storage error that directs a rebuild of the derived index.
 - Other invalid or mismatched positions retain full-block verification for collision and correctness handling.
-- Proof: `empty_position_rows_are_refused_before_body_reads`, position-mismatch and full-block tests in `runtime/query_tests.rs`, and `tests/tx_positions.rs`.
+- Proof: `empty_position_rows_are_refused_before_body_reads`, position-mismatch and full-block tests in `runtime.rs`, and `crates/index/tests.rs`.
+- Proof: `crates/index/tests.rs` (`wrong_format_version_refuses_open`) and `crates/index/tests.rs` (`format_5_marker_refuses_and_rebuilds_the_derived_store`) check foreign-marker refusal and the owner-local rebuild; `tools/storage-convert/tests/rebuild_index.rs` (`rebuild_index_resets_derived_rows_and_stamps_the_current_format`) checks the rebuild stamps the current format marker.
 - On node startup, index workers read persisted watermarks and reconcile against `Chainstate::chain_snapshot()` through `NodeState::chainstate()`.
 - A watermark that is an ancestor of the restored tip connects forward.
 - A watermark on an abandoned branch rolls back to the common ancestor and connects forward to the active tip.
@@ -463,6 +492,10 @@ Owners:
 - In withhold cases, restore writes nothing, logs a warning, and normal backfill proceeds.
 - Any identity refusal is reported before a withhold.
 - Restore apply:
+  - Locator validation and row import MUST create the configured scratch root before they create temporary work directories.
+  - Scratch creation failures return the existing I/O refusal with the failing path.
+  - Each phase removes its temporary work directory when it finishes.
+  - Proof: `crates/index/tests.rs` (`export_then_restore_serves_the_same_queries_as_backfill`) starts with no receiver scratch directory, checks restored queries against backfill, and checks that temporary directories are removed.
   - The row stream writes the receiver's 80-byte header for every height from 0 to the base (from its block tree, not the bundle).
   - The stream then writes the `TxConfirmed` rows.
   - A batch commits after 65,536 rows (headers included) or 8 MiB.
@@ -579,14 +612,15 @@ That document gives consumer usage and defers to this clause for every consisten
   - Full `script_history_at_prefix` answers stay unproven on a positive floor and return `Unavailable(HistoryUnproven { floor })`.
   - Standalone `spender_at_prefix` takes the exact `OutPoint`.
   - Its spender rows are keyed directly by outpoint prefix and height and verified per candidate.
-  - It needs no funding discovery and may return a scoped `Ok(None)` above a positive floor after verifying matching spender rows in range and none below it.
-  - That `None` means no verified spend in `[floor, anchor]`, not that the coin is unspent and not that the outpoint exists.
+  - When a covered funding occurrence is present, the latest canonical occurrence of its exact txid bounds the current outpoint lifetime. Earlier-lifetime spends are excluded; later transactions in the funding block remain eligible. These candidates belong to `ScriptHistory` and do not require `TxLookup`.
+  - Funding selection MUST compare the full transaction id and recorded block hash from the transaction directory against `chain(anchor)`. It MUST NOT require the funding body. The metadata scan charges every examined row and encoded byte to the query budget, including rows outside the published scope.
+  - Missing covered funding leaves the lower bound unknown and MUST NOT suppress a verified covered spend or require a below-floor funding body. A scoped `Ok(None)` means no verified spend in the covered current lifetime when its creation is known, or in `[floor, anchor]` otherwise; it does not prove that the outpoint exists.
 - Unchanged and not added:
   - Strict `ScriptLive` reads, current Core RPC handlers, compact-filter serving, and existing exact-tip methods keep their behavior.
   - Index reads stay synchronous and bounded.
   - Esplora consumes `confirmed_history_page` pages for `/txs/chain`.
   - The index owns no HTTP route.
-  - Nothing here adds a runtime, framework, persistent query state, durable format, full-scan compatibility path, or arbitrary historical anchor.
+  - The prefix query interface adds no independent durable format; it uses the format 10 outpoint spend-event representation in `IDX-02` and the rebuild policy in `IDX-05`. It adds no runtime, framework, persistent query state, full-scan compatibility path, or arbitrary historical anchor.
 - Error shape:
   | Case | Result |
   |---|---|
@@ -601,6 +635,8 @@ That document gives consumer usage and defers to this clause for every consisten
   | Positive floor on full script history | `Unavailable(HistoryUnproven { floor })` |
   | Row, scan, body-read, and body-byte budgets, truncated scans, `BlockBodyMissing`, disabled capability, worker failure/stop, missing authority, lifecycle causes | `Unavailable(...)` with the identical variant |
   | Snapshot-open and body-read storage failures | `Storage(...)` |
+
+Proof: `crates/index/src/runtime/query/scripts.rs::spender_uses_indexed_creation_when_funding_body_is_pruned` checks both spender APIs, full transaction identity, canonical block hashes, and zero funding-body reads. `crates/index/src/runtime.rs::spender_at_prefix_distinguishes_recreated_outpoints_with_pruned_creation_bodies` checks the current outpoint lifetime when creation bodies are pruned. `crates/index/src/segment/read.rs::funding_transaction_rows_preserve_full_identity_and_bound_all_scopes` checks full identity, encoded-byte accounting, and aggregate row limits across scopes, including excluded rows.
 
 ### Compact-filter data and serving
 

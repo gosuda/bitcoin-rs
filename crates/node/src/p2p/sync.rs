@@ -4432,7 +4432,20 @@ mod tests {
     #[cfg(test)]
     mod headroom_throttling {
         use super::*;
+        use crate::budget::{BudgetedIngressLedger, NodeBudget};
         use bitcoin_rs_consensus::primitives::BlockImage;
+        use bitcoin_rs_p2p::inbound::block_memory::{BlockMemory, BlockMemoryCredit};
+
+        fn image_budget() -> (Arc<NodeBudget>, Arc<BlockMemory>) {
+            let budget = Arc::new(NodeBudget::from_chainstate_cache_budget(
+                split_chainstate_cache_budget(64 * 1024 * 1024),
+                4,
+            ));
+            let memory = Arc::new(BlockMemory::new(Arc::new(BudgetedIngressLedger::new(
+                Arc::clone(&budget),
+            ))));
+            (budget, memory)
+        }
 
         #[test]
         fn tick_caps_requests_at_staged_byte_headroom() -> TestResult {
@@ -5035,6 +5048,192 @@ mod tests {
             block.txs[0].outputs[0].script_pubkey = vec![0_u8; script_len].into();
             assert_eq!(consensus_bytes(&block).len(), size);
             block
+        }
+        // BUD-07, SYNC-02, SYNC-06
+        #[test]
+        fn reclaimed_successor_is_requeued_with_height_for_refetch() -> TestResult {
+            let (sync, peers, _block_tree, _applied_tip, expected) = sync_with_header_chain(4)?;
+            let (budget, memory) = image_budget();
+            install_budget(&sync, super::super::default_sync_budget(Network::Regtest));
+            let addr = test_addr(9471, 0)?;
+            let rx = connect_peer(&peers, synthetic_peer(addr, 100));
+
+            sync.scheduler
+                .lock()
+                .window
+                .seed_front_cadence_for_test(50, Instant::now());
+
+            sync.tick();
+            assert!(witness_block_inventory(next_getdata(&rx)?)?.contains(&expected[1]));
+
+            let successor = Hash256::from_le_bytes(expected[1].as_bytes());
+            let mut batch = vec![bitcoin_rs_p2p::InboundBlock::from_local(
+                super::header_chain_block(&expected, 2)?,
+            )];
+            batch[0].source = Some(current_source(&peers, addr));
+            batch[0].memory_credit = Some(memory.reserve(4096, || false).or_fail("staged credit"));
+            assert_eq!(
+                sync.buffer_received_block_chunk(
+                    &mut batch,
+                    Some(Hash256::from_le_bytes(expected[0].as_bytes()))
+                ),
+                1
+            );
+            assert!(sync.scheduler.lock().stager.contains(&successor));
+            assert!(
+                !sync.scheduler.lock().window.contains_pending(&successor),
+                "staging must consume the pending fetch"
+            );
+
+            let freed = sync.reclaim_staged_for_ingress(u64::MAX, &budget);
+            assert_eq!(freed, 4096);
+            assert!(!sync.scheduler.lock().stager.contains(&successor));
+            assert!(
+                sync.scheduler.lock().window.request_cursor() <= 2,
+                "requeue must rewind the request cursor to the evicted height"
+            );
+
+            sync.tick();
+            let mut refetched = false;
+            for _ in 0..3 {
+                match next_getdata(&rx) {
+                    Ok(inventory) => {
+                        if witness_block_inventory(inventory)?.contains(&expected[1]) {
+                            refetched = true;
+                            break;
+                        }
+                    }
+                    Err(_) => sync.tick(),
+                }
+            }
+            assert!(refetched, "the evicted successor must be re-requested");
+            Ok(())
+        }
+
+        // BUD-07, SYNC-03
+        #[test]
+        fn reclaimed_credit_preserves_historical_bodies_after_the_target_is_met() -> TestResult {
+            const CREDIT: usize = 64 * 1024;
+            const REQUESTED: u64 = 32 * 1024;
+            let (sync, _, _, _, expected) = sync_with_header_chain(4)?;
+            let (budget, memory) = image_budget();
+            let successor = BlockImage::from_local(super::header_chain_block(&expected, 2)?);
+            let historical = BlockImage::from_local(super::header_chain_block(&expected, 3)?);
+            let successor_hash = Hash256::from(successor.block_hash());
+            let historical_hash = Hash256::from(historical.block_hash());
+            assert!(successor.bytes().len() + successor.retained_heap_bytes() < 32 * 1024);
+            sync.scheduler.lock().stager.insert_with_credit(
+                successor_hash,
+                None,
+                successor,
+                None,
+                Instant::now(),
+                Some(memory.reserve(CREDIT, || false).or_fail("successor credit")),
+            );
+            sync.historical.lock().stager.insert_with_credit(
+                historical_hash,
+                None,
+                historical,
+                None,
+                Instant::now(),
+                Some(
+                    memory
+                        .reserve(CREDIT, || false)
+                        .or_fail("historical credit"),
+                ),
+            );
+            assert_eq!(
+                sync.reclaim_staged_for_ingress(REQUESTED, &budget),
+                64 * 1024
+            );
+            assert!(!sync.scheduler.lock().stager.contains(&successor_hash));
+            assert!(sync.historical.lock().stager.contains(&historical_hash));
+            assert_eq!(
+                budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages),
+                64 * 1024,
+            );
+            Ok(())
+        }
+
+        // BUD-06, BUD-07, SYNC-03
+        #[test]
+        fn shared_staged_backing_bounds_reclaim_before_historical_eviction() -> TestResult {
+            struct ChargedBytes {
+                raw: Vec<u8>,
+                _credit: BlockMemoryCredit,
+            }
+
+            impl AsRef<[u8]> for ChargedBytes {
+                fn as_ref(&self) -> &[u8] {
+                    &self.raw
+                }
+            }
+
+            const CREDIT: usize = 64 * 1024;
+            let (sync, _, _, _, expected) = sync_with_header_chain(4)?;
+            let (budget, memory) = image_budget();
+            let mut raw = Vec::with_capacity(CREDIT);
+            raw.extend_from_slice(
+                BlockImage::from_local(super::header_chain_block(&expected, 2)?).bytes(),
+            );
+            let backing_charge = raw.capacity();
+            let successor = BlockImage::from_raw(bytes::Bytes::from_owner(ChargedBytes {
+                raw,
+                _credit: memory
+                    .reserve(backing_charge, || false)
+                    .or_fail("shared backing credit"),
+            }))
+            .or_fail("charged successor");
+            let requested =
+                u64::try_from(successor.bytes().len() + successor.retained_heap_bytes())
+                    .or_fail("retained byte count");
+            let successor_hash = Hash256::from(successor.block_hash());
+            sync.scheduler.lock().stager.insert_with_credit(
+                successor_hash,
+                None,
+                successor,
+                None,
+                Instant::now(),
+                None,
+            );
+            let shared = sync
+                .scheduler
+                .lock()
+                .stager
+                .staged_body(successor_hash)
+                .or_fail("shared staged body");
+            let historical = BlockImage::from_local(super::header_chain_block(&expected, 3)?);
+            let historical_hash = Hash256::from(historical.block_hash());
+            sync.historical.lock().stager.insert_with_credit(
+                historical_hash,
+                None,
+                historical,
+                None,
+                Instant::now(),
+                Some(
+                    memory
+                        .reserve(CREDIT, || false)
+                        .or_fail("historical credit"),
+                ),
+            );
+            let expected_charge = u64::try_from(backing_charge + CREDIT).or_fail("combined credit");
+            assert_eq!(
+                budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages),
+                expected_charge,
+            );
+            assert_eq!(sync.reclaim_staged_for_ingress(requested, &budget), 0);
+            assert!(!sync.scheduler.lock().stager.contains(&successor_hash));
+            assert!(sync.historical.lock().stager.contains(&historical_hash));
+            assert_eq!(
+                budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages),
+                expected_charge,
+            );
+            drop(shared);
+            assert_eq!(
+                budget.charged_bytes(bitcoin_rs_storage::budget::BudgetOwner::StagedImages),
+                64 * 1024,
+            );
+            Ok(())
         }
     }
 
@@ -9952,6 +10151,184 @@ mod tests {
                 tree_node_count(&sync),
                 1,
                 "the low-work header remains unadmitted"
+            );
+            Ok(())
+        }
+        fn harness_with_applied_main_chain(
+            length: u32,
+            floor: ChainWork,
+        ) -> Result<(SyncHarness, Vec<Header>), TestError> {
+            let mut tree = BlockTree::new();
+            let genesis = genesis_header();
+            tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+            let harness =
+                SyncHarness::with_chain_work(tree, crate::p2p::sync::syncing_ibd_latch(), floor);
+            install_budget(
+                &harness.sync,
+                SyncBudget {
+                    max_pending_blocks: 0,
+                    ..default_sync_budget(Network::Regtest)
+                },
+            );
+            let mut main = Vec::new();
+            let mut prev = genesis.compute_hash();
+            for height in 1..=length {
+                let header = test_header(prev, height);
+                prev = header.compute_hash();
+                main.push(header);
+            }
+            assert!(matches!(
+                harness.sync.chain.admit_headers(&main),
+                HeaderAdmission::Accepted { .. }
+            ));
+            let applied = {
+                let tree = harness.block_tree.read();
+                let tip_id = tree.lookup(Hash256::from(prev)).ok_or("missing main tip")?;
+                let node = tree.node(tip_id)?;
+                TipSnapshot {
+                    tip_id,
+                    chain_tx_count: node.chain_tx_count,
+                    height: node.height,
+                    chainwork: node.chainwork,
+                    hash: node.hash,
+                }
+            };
+            harness.applied_tip.store(Some(Arc::new(applied)));
+            Ok((harness, main))
+        }
+
+        // P2P-10
+        #[test]
+        fn forks_below_the_applied_tip_work_window_are_presynced_not_stored() -> TestResult {
+            let floor = ChainWork::from(WORK_PER_HEADER * 10);
+            let (harness, main) = harness_with_applied_main_chain(400, floor)?;
+
+            let before = tree_node_count(&harness.sync);
+            let (addr, _lease, _rx) = connect(&harness.peers, 9799, 100_000);
+            let source = current_source(&harness.peers, addr);
+            for fork_index in 0..50_u32 {
+                let parent = &main[usize::try_from(19 + fork_index)?];
+                let fork = chain_on(parent, 20 + fork_index, 3);
+                deliver_headers(&harness.inbound_headers_tx, fork, source)?;
+                harness.sync.tick();
+            }
+            assert_eq!(
+                tree_node_count(&harness.sync),
+                before,
+                "forks far below tip work minus 144 blocks must not reach the block tree"
+            );
+            assert!(harness.peers.is_connected(addr));
+
+            let near_tip = chain_on(&main[389], 390, 3);
+            deliver_headers(&harness.inbound_headers_tx, near_tip, source)?;
+            harness.sync.tick();
+            assert_eq!(
+                tree_node_count(&harness.sync),
+                before + 3,
+                "a fork inside the 144-block work window is admitted directly"
+            );
+            Ok(())
+        }
+
+        // P2P-10
+        #[test]
+        fn the_presync_gate_sits_144_blocks_of_work_below_the_applied_tip() -> TestResult {
+            let floor = ChainWork::from(WORK_PER_HEADER * 10);
+            let (harness, main) = harness_with_applied_main_chain(400, floor)?;
+            let tip_work = harness
+                .sync
+                .chain
+                .applied_tip()
+                .ok_or("missing applied tip")?
+                .chainwork;
+            let gate = tip_work.saturating_sub(ChainWork::from(WORK_PER_HEADER * 144));
+            let claimed_work = |parent: usize| -> Result<ChainWork, TestError> {
+                let tree = harness.block_tree.read();
+                let id = tree
+                    .lookup(Hash256::from(main[parent].compute_hash()))
+                    .ok_or("missing fork parent")?;
+                Ok(tree
+                    .node(id)?
+                    .chainwork
+                    .saturating_add(ChainWork::from(WORK_PER_HEADER * 3)))
+            };
+            let mut edge = 1;
+            while claimed_work(edge)? < gate {
+                edge += 1;
+            }
+            assert_eq!(
+                claimed_work(edge)?,
+                gate,
+                "the fixture reaches the gate exactly"
+            );
+
+            let before = tree_node_count(&harness.sync);
+            let (below_addr, _below_lease, below_rx) = connect(&harness.peers, 9801, 100_000);
+            let below_source = current_source(&harness.peers, below_addr);
+            harness.sync.tick();
+            assert!(matches!(below_rx.try_recv()?, Message::GetHeaders(_)));
+            let below = chain_on(&main[edge - 1], u32::try_from(edge)?, 3);
+            deliver_headers(&harness.inbound_headers_tx, below, below_source)?;
+            harness.sync.tick();
+            assert_eq!(
+                tree_node_count(&harness.sync),
+                before,
+                "a fork one header of work below the gate is presynced"
+            );
+            assert_eq!(
+                sync_phase(&harness.sync, below_source),
+                None,
+                "a page that ends below the gate finishes presync without a re-download"
+            );
+
+            let (at_addr, _at_lease, _at_rx) = connect(&harness.peers, 9802, 100_000);
+            let at_source = current_source(&harness.peers, at_addr);
+            let at = chain_on(&main[edge], u32::try_from(edge + 1)?, 3);
+            deliver_headers(&harness.inbound_headers_tx, at, at_source)?;
+            harness.sync.tick();
+            assert_eq!(
+                tree_node_count(&harness.sync),
+                before + 3,
+                "a fork whose work equals the gate is stored directly"
+            );
+            Ok(())
+        }
+
+        // P2P-10
+        #[test]
+        fn an_applied_tip_missing_from_the_tree_requires_the_full_tip_work() -> TestResult {
+            let floor = ChainWork::from(WORK_PER_HEADER * 10);
+            let (harness, main) = harness_with_applied_main_chain(30, floor)?;
+            let applied = harness
+                .sync
+                .chain
+                .applied_tip()
+                .ok_or("missing applied tip")?;
+            harness.applied_tip.store(Some(Arc::new(TipSnapshot {
+                tip_id: bitcoin_rs_chain::chain::NodeId::new(u32::MAX),
+                chain_tx_count: applied.chain_tx_count,
+                height: applied.height,
+                chainwork: applied.chainwork,
+                hash: applied.hash,
+            })));
+
+            let before = tree_node_count(&harness.sync);
+            let (addr, _lease, rx) = connect(&harness.peers, 9803, 100_000);
+            let source = current_source(&harness.peers, addr);
+            harness.sync.tick();
+            assert!(matches!(rx.try_recv()?, Message::GetHeaders(_)));
+            let fork = chain_on(&main[9], 10, 3);
+            deliver_headers(&harness.inbound_headers_tx, fork, source)?;
+            harness.sync.tick();
+            assert_eq!(
+                tree_node_count(&harness.sync),
+                before,
+                "a fork above the floor but below the tip work is presynced, not stored"
+            );
+            assert_eq!(
+                sync_phase(&harness.sync, source),
+                None,
+                "a page that ends below the tip work finishes presync without a re-download"
             );
             Ok(())
         }

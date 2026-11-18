@@ -34,7 +34,7 @@ struct EnabledDerivedIndex {
 }
 
 enum DerivedIndexPhase {
-    Ready(TxIndexSpawn),
+    Ready(Box<TxIndexSpawn>),
     Running(bitcoin_rs_index::runtime::DerivedIndexWorker),
     Stopped,
 }
@@ -55,7 +55,7 @@ impl DerivedIndexHost {
             runtime,
             lifecycle,
             adapter,
-            phase: DerivedIndexPhase::Ready(spawn),
+            phase: DerivedIndexPhase::Ready(Box::new(spawn)),
         });
         Self {
             status,

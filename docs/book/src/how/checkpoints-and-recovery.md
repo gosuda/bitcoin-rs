@@ -81,7 +81,11 @@ A reorg disconnect is the one operation that moves the coin set backward. If a c
 checkpoint refused while disconnect of block {hash} at height {height} is in flight
 ```
 
-The refusal preserves everything: the marker stays armed, `CURRENT` is untouched, and no generation directory appears. `crates/chain/src/lib.rs::checkpoint_debt_tests::checkpoint_refuses_inflight_disconnect_and_preserves_state` arms a disconnect marker, calls `publish_checkpoint`, and asserts the error plus byte-identical `CURRENT` and directory listing. After the disconnect completes, `settle_disconnect_debt` (`publisher.rs:168`) finds the marker in a completed phase and publishes normally, which also retires the disconnect marker through `undo_store.retire_disconnect_marker`.
+The refusal leaves the marker armed and `CURRENT` unchanged. It creates no generation directory. The test `tests::checkpoint_debt_tests::checkpoint_refuses_inflight_disconnect_and_preserves_state` (checked source citation: `crates/chain/src/lib.rs::checkpoint_refuses_inflight_disconnect_and_preserves_state`) arms a disconnect marker, calls `publish_checkpoint`, and asserts the error plus byte-identical `CURRENT` and directory listing.
+
+Normal successful disconnects disarm their marker immediately in `crates/chain/src/disconnect.rs`. During live reorg settlement and periodic maintenance, `CheckpointPublisher::settle_disconnect_debt` in `crates/chain/src/checkpoint/publisher.rs` handles a remaining `DisconnectPhase::RolledBack` marker by requesting ordinary checkpoint publication. It skips `InFlight` markers. A successful ordinary publication clears the marker through `undo_store.disarm_disconnect()`.
+
+At startup, `recover_disconnect_marker` in `crates/chain/src/durable.rs` reconciles the restored state with the durable head, including any required rewind or replay. If it found a marker, it then calls `Chainstate::publish_recovery_checkpoint`. That publishes with `DisconnectRetirement::Recovered`; successful recovery publication retires the marker through `undo_store.retire_disconnect_marker()`. This path covers both `InFlight` and `RolledBack` markers surviving a crash.
 
 ## Header checkpoint file
 
@@ -141,8 +145,9 @@ The matching live IBD case (checkpoint restore) is documented with verified outp
 
 - [`RCV-10`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md): a checkpoint is not recovery authority; the durable head is. Enforcement lives in the publish-time refusals above.
 - [`RCV-14`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/recovery.md): the publisher freezes the published state before writing and reconciles against the durable head.
-- Crash-at-every-boundary coverage: `crates/storage/src/checkpoint/publish.rs` accepts injected failpoints at each write, sync, and rename step (`CheckpointFailpoint`); `crates/chain/src/checkpoint.rs::tip_transitions::failed_publication_preserves_current` fails a publication and requires the old generation to stay intact.
-- Disconnect refusal and preservation: `crates/chain/src/lib.rs::checkpoint_debt_tests::checkpoint_refuses_inflight_disconnect_and_preserves_state`.
+- Crash-at-every-boundary coverage: `crates/storage/src/checkpoint/publish.rs` accepts injected failpoints at each write, sync, and rename step (`CheckpointFailpoint`); `checkpoint::tests::tip_transitions::failed_publication_preserves_current` (checked source citation: `crates/chain/src/checkpoint.rs::failed_publication_preserves_current`) fails a publication and requires the old generation to stay intact.
+- Disconnect refusal and preservation: `tests::checkpoint_debt_tests::checkpoint_refuses_inflight_disconnect_and_preserves_state` (checked source citation: `crates/chain/src/lib.rs::checkpoint_refuses_inflight_disconnect_and_preserves_state`).
+- Source citations use `file.rs::function`, the notation checked by `contract-index`; the separate Rust path names the test.
 - Contract-clause and proof coverage counts live in [`docs/contracts/evidence-index.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/evidence-index.md).
 
 Difference from Bitcoin Core worth knowing: Core checkpoints the UTXO set only through `dumptxoutset`/assumeutxo machinery and rebuilds the block tree from headers on restart; bitcoin-rs writes the full tree including side branches into the checkpoint, so a restart preserves knowledge of competing fork tips without a network round trip.

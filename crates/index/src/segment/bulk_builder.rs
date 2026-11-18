@@ -171,7 +171,6 @@ pub struct StreamingSegmentBuilder {
     gen_id: u64,
     _permit: Option<BackgroundCpuPermit>,
     tx_dir: SpillSorter,
-    spend_candidates: SpillSorter,
     occurrences: SpillSorter,
     spend_dir: SpillSorter,
     script_dict: SpillSorter,
@@ -234,6 +233,66 @@ fn sweep_stale_runs(scratch_dir: &Path) {
     }
 }
 
+struct ScriptReducer {
+    hash: [u8; 32],
+    script_id: u32,
+    stats: ScriptStats,
+    pending: Option<(u32, u8)>,
+    last_chunked_ordinal: u32,
+    chunker: PostingChunker,
+}
+
+impl ScriptReducer {
+    fn new(gen_id: u64, hash: [u8; 32], script_id: u32) -> Self {
+        Self {
+            hash,
+            script_id,
+            stats: ScriptStats::default(),
+            pending: None,
+            last_chunked_ordinal: 0,
+            chunker: PostingChunker::new(gen_id, script_id),
+        }
+    }
+
+    fn push(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        output: &mut SpillSorter,
+    ) -> Result<(), BulkBuilderError> {
+        let ordinal = decode_be_u32(
+            key.get(32..36)
+                .ok_or(BulkBuilderError::InvalidBlockSequence)?,
+        )?;
+        let flags = decode_flags(key)?;
+        let sats = u64::from_le_bytes(decode_array8(value)?);
+        if flags == POSTING_FLAG_FUNDING {
+            self.stats.funded_count = self.stats.funded_count.saturating_add(1);
+            self.stats.funded_sats = self.stats.funded_sats.saturating_add(sats);
+        } else if flags == POSTING_FLAG_SPENDING {
+            self.stats.spent_count = self.stats.spent_count.saturating_add(1);
+            self.stats.spent_sats = self.stats.spent_sats.saturating_add(sats);
+        }
+        self.flush_pending(output)?;
+        self.pending = Some((ordinal, flags));
+        Ok(())
+    }
+
+    fn flush_pending(&mut self, output: &mut SpillSorter) -> Result<(), BulkBuilderError> {
+        let Some((ordinal, flags)) = self.pending.take() else {
+            return Ok(());
+        };
+        let delta = ordinal
+            .checked_sub(self.last_chunked_ordinal)
+            .ok_or(BulkBuilderError::InvalidBlockSequence)?;
+        if let Some((key, value)) = self.chunker.push(delta, flags) {
+            output.push_row(key, value)?;
+        }
+        self.last_chunked_ordinal = ordinal;
+        Ok(())
+    }
+}
+
 impl StreamingSegmentBuilder {
     fn new(
         gen_id: u64,
@@ -264,7 +323,6 @@ impl StreamingSegmentBuilder {
             gen_id,
             _permit: permit,
             tx_dir: maker(),
-            spend_candidates: maker(),
             occurrences: maker(),
             spend_dir: maker(),
             script_dict: maker(),
@@ -287,7 +345,6 @@ impl StreamingSegmentBuilder {
     #[must_use]
     pub fn total_runs_spilled(&self) -> usize {
         self.tx_dir.spilled
-            + self.spend_candidates.spilled
             + self.occurrences.spilled
             + self.spend_dir.spilled
             + self.script_dict.spilled
@@ -316,7 +373,7 @@ impl StreamingSegmentBuilder {
                 self.tx_dir.push_row(rev_key.to_vec(), rev_val.to_vec())?;
             }
             if self.capabilities.contains(IndexCapability::ScriptHistory) {
-                self.push_inputs(ordinal, &tx.inputs)?;
+                self.push_inputs(block.height, ordinal, &tx.inputs)?;
                 self.push_outputs(ordinal, &tx.outputs)?;
             }
         }
@@ -336,6 +393,7 @@ impl StreamingSegmentBuilder {
 
     fn push_inputs(
         &mut self,
+        height: u32,
         ordinal: u32,
         inputs: &[SpentPrevout],
     ) -> Result<(), BulkBuilderError> {
@@ -343,11 +401,9 @@ impl StreamingSegmentBuilder {
             if input.txid == [0u8; 32] && input.vout == u32::MAX {
                 continue;
             }
-            let mut candidate_key = Vec::with_capacity(40);
-            candidate_key.extend_from_slice(&input.txid);
-            candidate_key.extend_from_slice(&ordinal.to_be_bytes());
-            candidate_key.extend_from_slice(&input.vout.to_be_bytes());
-            self.spend_candidates.push_row(candidate_key, Vec::new())?;
+            let key = encode_spend_dir_key(self.gen_id, &input.txid, input.vout, height);
+            let value = encode_spend_dir_value(ordinal);
+            self.spend_dir.push_row(key.to_vec(), value.to_vec())?;
             self.push_occurrence(&input.script, ordinal, POSTING_FLAG_SPENDING, input.value)?;
         }
         Ok(())
@@ -439,7 +495,6 @@ impl StreamingSegmentBuilder {
     // PRJ-09
     pub fn finish<S: KvStore + ?Sized>(&mut self, store: &S) -> Result<Coverage, BulkBuilderError> {
         let coverage = self.coverage()?;
-        self.resolve_spends()?;
         self.emit_script_rows()?;
 
         let families = [
@@ -466,7 +521,6 @@ impl StreamingSegmentBuilder {
     // PRJ-09
     pub fn finish_rows(&mut self) -> Result<GenerationRows, BulkBuilderError> {
         let coverage = self.coverage()?;
-        self.resolve_spends()?;
         self.emit_script_rows()?;
 
         let tx_dir = self.tx_dir.collect_rows()?;
@@ -498,126 +552,48 @@ impl StreamingSegmentBuilder {
         ))
     }
 
-    /// Merge-joins spend candidates against the sorted transaction
-    /// directory: in-generation creations resolve to the newest creation
-    /// ordinal strictly before the spending transaction (BIP30 duplicates
-    /// included), older coins leave no spender row, and spends ordered by
-    /// ordinal share one forward directory cursor.
-    fn resolve_spends(&mut self) -> Result<(), BulkBuilderError> {
-        self.tx_dir.finalize()?;
-        self.spend_candidates.finalize()?;
-        let mut directory = DirectoryScan {
-            rows: self.tx_dir.sorted_rows()?,
-            front: None,
-        };
-        directory.front = next_directory_row(&mut directory.rows)?;
-        let mut candidates = self.spend_candidates.sorted_rows()?;
-        let mut group_txid: Option<[u8; 32]> = None;
-        let mut creation: Option<u32> = None;
-        while let Some(candidate) = candidates.try_next()? {
-            let (spent_txid, spending_ordinal, vout) = decode_candidate(&candidate)?;
-            if group_txid != Some(spent_txid) {
-                group_txid = Some(spent_txid);
-                creation = None;
-                advance_directory_to(&mut directory, spent_txid)?;
-            }
-            while let Some((txid, ordinal)) = directory.front {
-                if txid != spent_txid || ordinal >= spending_ordinal {
-                    break;
-                }
-                creation = Some(ordinal);
-                directory.front = next_directory_row(&mut directory.rows)?;
-            }
-            let Some(creation_ordinal) = creation else {
-                continue;
-            };
-            let spend_key = encode_spend_dir_key(self.gen_id, creation_ordinal, vout);
-            let spend_val = encode_spend_dir_value(spending_ordinal);
-            self.spend_dir
-                .push_row(spend_key.to_vec(), spend_val.to_vec())?;
-        }
-        Ok(())
-    }
-
     /// Drains script occurrences in hash order, assigns dense dictionary
     /// ids, and emits stats and size-chunked postings per script.
     fn emit_script_rows(&mut self) -> Result<(), BulkBuilderError> {
         self.occurrences.finalize()?;
         let mut merged = self.occurrences.sorted_rows()?;
         let mut script_id: u32 = 0;
-        let mut group: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        let mut group_hash: Option<[u8; 32]> = None;
-        while let Some(row) = merged.try_next()? {
-            let hash: [u8; 32] = row.0[..32]
-                .try_into()
-                .map_err(|_| BulkBuilderError::InvalidBlockSequence)?;
-            match group_hash {
-                Some(existing) if existing == hash => {}
-                Some(_) => {
-                    self.flush_script_group(&group, script_id)?;
-                    script_id = script_id.saturating_add(1);
-                    group.clear();
-                    group_hash = Some(hash);
+        let mut active: Option<ScriptReducer> = None;
+        while let Some((key, value)) = merged.try_next()? {
+            let hash = decode_script_hash(&key)?;
+            if active.as_ref().is_some_and(|script| script.hash != hash) {
+                if let Some(script) = active.take() {
+                    self.finish_script(script)?;
                 }
-                None => group_hash = Some(hash),
+                script_id = script_id.saturating_add(1);
             }
-            group.push(row);
+            let script =
+                active.get_or_insert_with(|| ScriptReducer::new(self.gen_id, hash, script_id));
+            script.push(&key, &value, &mut self.script_post)?;
         }
-        if group_hash.is_some() {
-            self.flush_script_group(&group, script_id)?;
+        if let Some(script) = active {
+            self.finish_script(script)?;
         }
         Ok(())
     }
 
-    fn flush_script_group(
-        &mut self,
-        group: &[(Vec<u8>, Vec<u8>)],
-        script_id: u32,
-    ) -> Result<(), BulkBuilderError> {
-        let Some(hash) = group.first().map(|row| decode_script_hash(&row.0)) else {
-            return Ok(());
-        };
-        let hash = hash?;
-        let dict_key = encode_script_dict_key(self.gen_id, &hash);
-        self.script_dict.push_row(
-            dict_key.to_vec(),
-            encode_script_dict_value(script_id).to_vec(),
-        )?;
-
-        let mut stats = ScriptStats::default();
-        let mut items = Vec::with_capacity(group.len());
-        let mut last_ordinal = 0u32;
-        for (key, value) in group {
-            let ordinal = decode_be_u32(&key[32..36])?;
-            let flags = decode_flags(key)?;
-            let sats = u64::from_le_bytes(decode_array8(value)?);
-            if flags == POSTING_FLAG_FUNDING {
-                stats.funded_count = stats.funded_count.saturating_add(1);
-                stats.funded_sats = stats.funded_sats.saturating_add(sats);
-            } else if flags == POSTING_FLAG_SPENDING {
-                stats.spent_count = stats.spent_count.saturating_add(1);
-                stats.spent_sats = stats.spent_sats.saturating_add(sats);
-            }
-            let delta = ordinal.saturating_sub(last_ordinal);
-            last_ordinal = ordinal;
-            items.push(PostingItem {
-                delta_ordinal: delta,
-                flags,
-            });
-        }
-        let stats_key = encode_script_stats_key(self.gen_id, script_id);
-        self.script_stats.push_row(
-            stats_key.to_vec(),
-            encode_script_stats_value(&stats).to_vec(),
-        )?;
-        for (key, value) in chunk_postings(self.gen_id, script_id, items) {
+    fn finish_script(&mut self, mut script: ScriptReducer) -> Result<(), BulkBuilderError> {
+        script.flush_pending(&mut self.script_post)?;
+        if let Some((key, value)) = script.chunker.finish() {
             self.script_post.push_row(key, value)?;
         }
+        self.script_dict.push_row(
+            encode_script_dict_key(self.gen_id, &script.hash).to_vec(),
+            encode_script_dict_value(script.script_id).to_vec(),
+        )?;
+        self.script_stats.push_row(
+            encode_script_stats_key(self.gen_id, script.script_id).to_vec(),
+            encode_script_stats_value(&script.stats).to_vec(),
+        )?;
         Ok(())
     }
 
     fn release_all(&mut self) {
-        self.spend_candidates.release();
         self.occurrences.release();
     }
 }
@@ -635,52 +611,6 @@ fn decode_script_hash(key: &[u8]) -> Result<[u8; 32], BulkBuilderError> {
     key[..32]
         .try_into()
         .map_err(|_| BulkBuilderError::InvalidBlockSequence)
-}
-
-fn decode_candidate(
-    candidate: &(Vec<u8>, Vec<u8>),
-) -> Result<([u8; 32], u32, u32), BulkBuilderError> {
-    let key = &candidate.0;
-    if key.len() != 40 {
-        return Err(BulkBuilderError::InvalidBlockSequence);
-    }
-    let txid: [u8; 32] = key[..32]
-        .try_into()
-        .map_err(|_| BulkBuilderError::InvalidBlockSequence)?;
-    let spending_ordinal = u32::from_be_bytes(decode_array4(&key[32..36])?);
-    let vout = u32::from_be_bytes(decode_array4(&key[36..40])?);
-    Ok((txid, spending_ordinal, vout))
-}
-
-struct DirectoryScan {
-    rows: SortedRows,
-    front: Option<([u8; 32], u32)>,
-}
-
-fn advance_directory_to(
-    directory: &mut DirectoryScan,
-    spent_txid: [u8; 32],
-) -> Result<Option<([u8; 32], u32)>, BulkBuilderError> {
-    while let Some((txid, ordinal)) = directory.front {
-        if txid >= spent_txid {
-            return Ok(Some((txid, ordinal)));
-        }
-        directory.front = next_directory_row(&mut directory.rows)?;
-    }
-    Ok(None)
-}
-
-fn next_directory_row(rows: &mut SortedRows) -> Result<Option<([u8; 32], u32)>, BulkBuilderError> {
-    while let Some(row) = rows.try_next()? {
-        let Some((_, txid, _)) = decode_tx_dir_key(&row.0) else {
-            continue;
-        };
-        if row.1.len() >= 36 {
-            let ordinal = u32::from_be_bytes(decode_array4(&row.1[32..36])?);
-            return Ok(Some((txid, ordinal)));
-        }
-    }
-    Ok(None)
 }
 
 fn decode_array4(bytes: &[u8]) -> Result<[u8; 4], BulkBuilderError> {
@@ -1412,8 +1342,8 @@ mod tests {
 
     // PRJ-07
     #[test]
-    fn duplicate_txid_spends_resolve_to_the_creation_before_each_spend()
-    -> Result<(), BulkBuilderError> {
+    fn duplicate_txid_spends_preserve_outpoint_and_spending_height() -> Result<(), BulkBuilderError>
+    {
         let dup = [0xaa; 32];
         let script = |byte: u8| FactsScript::copy_from_slice(&[byte]);
         let output = |byte: u8| CreatedOutput {
@@ -1482,11 +1412,15 @@ mod tests {
         );
 
         let rows = &generation.spend_dir;
-        assert_eq!(rows.len(), 2, "each spend names its own preceding creation");
+        assert_eq!(
+            rows.len(),
+            2,
+            "each spending height retains the exact outpoint"
+        );
         assert_eq!(
             crate::segment::format::decode_spend_dir_key(&rows[0].0),
-            Some((1, 0, 0)),
-            "the spend at ordinal 1 resolves to the first creation"
+            Some((1, dup, 0, 2)),
+            "the first spend retains its funding txid and spending height"
         );
         assert_eq!(
             crate::segment::format::decode_spend_dir_value(&rows[0].1),
@@ -1494,8 +1428,8 @@ mod tests {
         );
         assert_eq!(
             crate::segment::format::decode_spend_dir_key(&rows[1].0),
-            Some((1, 2, 0)),
-            "the spend at ordinal 3 resolves to the recreation, not the first creation"
+            Some((1, dup, 0, 4)),
+            "the later spend retains the same outpoint at a different height"
         );
         assert_eq!(
             crate::segment::format::decode_spend_dir_value(&rows[1].1),
@@ -1722,6 +1656,72 @@ mod tests {
         assert!(
             cursor_peak() <= MAX_MERGE_FAN_IN,
             "merge held more open runs than the fan-in bound"
+        );
+        Ok(())
+    }
+    // PRJ-08, PRJ-09
+    #[test]
+    fn script_reduction_preserves_posting_events_and_statistics() -> Result<(), BulkBuilderError> {
+        let mut blocks = synthetic_blocks(1);
+        let script = blocks[0].txs[0].outputs[0].script.clone();
+        blocks[0].txs[0].outputs.push(CreatedOutput {
+            vout: 1,
+            value: 7,
+            script: script.clone(),
+        });
+        for value in [11, 13] {
+            blocks[0].txs[0].inputs.push(SpentPrevout {
+                txid: [0xab; 32],
+                vout: u32::try_from(value).unwrap(),
+                value,
+                script: script.clone(),
+                height: 0,
+                coinbase: false,
+            });
+        }
+        let scratch = tempfile::tempdir()?;
+        let rows = BulkSegmentBuilder::new(
+            Arc::new(UnboundedBudget),
+            None,
+            scratch.path().to_path_buf(),
+        )
+        .without_filter()
+        .build_generation_rows(7, &blocks)?;
+        assert_eq!(rows.script_dict.len(), 1);
+        assert_eq!(
+            decode_script_dict_key(&rows.script_dict[0].0),
+            Some((7, Sha256::digest(&script).into()))
+        );
+        assert_eq!(decode_script_dict_value(&rows.script_dict[0].1), Some(0));
+        assert_eq!(rows.script_stats.len(), 1);
+        assert_eq!(
+            decode_script_stats_key(&rows.script_stats[0].0),
+            Some((7, 0))
+        );
+        assert_eq!(
+            decode_script_stats_value(&rows.script_stats[0].1),
+            Some(ScriptStats {
+                funded_count: 4,
+                spent_count: 2,
+                funded_sats: 15_007,
+                spent_sats: 24,
+            })
+        );
+        assert_eq!(rows.script_post.len(), 1);
+        assert_eq!(
+            decode_script_post_chunk_key(&rows.script_post[0].0),
+            Some((7, 0, 0))
+        );
+        assert_eq!(
+            decode_chunk_postings(0, &rows.script_post[0].1),
+            Some(vec![
+                (0, POSTING_FLAG_SPENDING),
+                (0, POSTING_FLAG_SPENDING),
+                (0, POSTING_FLAG_FUNDING),
+                (0, POSTING_FLAG_FUNDING),
+                (1, POSTING_FLAG_FUNDING),
+                (2, POSTING_FLAG_FUNDING),
+            ])
         );
         Ok(())
     }

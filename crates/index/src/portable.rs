@@ -102,8 +102,6 @@ pub enum IndexBundleError {
     NotFresh,
     #[error("a recorded locator at height {height} does not resolve to its transaction id")]
     Locator { height: u32 },
-    #[error("bundle restore exceeds the aggregate locator position limit")]
-    RestoreTooLarge,
     #[error("bundle omits transactions at height {height}: expected {expected}, found {actual}")]
     Incomplete {
         height: u32,
@@ -181,8 +179,40 @@ pub(crate) fn run(
         IndexBundleDirective::Manifest(directives) => {
             let mut last = None;
             for directive in directives {
-                if let Some(outcome) = run(host, directive)? {
-                    last = Some(outcome);
+                let capability = match directive {
+                    IndexBundleDirective::AttachManifestArtifact(_) => {
+                        Some(IndexCapability::TxLookup)
+                    }
+                    IndexBundleDirective::AttachManifestScriptHistory(_) => {
+                        Some(IndexCapability::ScriptHistory)
+                    }
+                    IndexBundleDirective::AttachManifestCompactFilters(_) => {
+                        Some(IndexCapability::CompactFilters)
+                    }
+                    _ => None,
+                };
+                match run(host, directive) {
+                    Ok(Some(outcome)) => last = Some(outcome),
+                    Ok(None) => {}
+                    Err(IndexBundleError::Index(
+                        error @ IndexError::WatermarkMismatch {
+                            expected: None,
+                            actual: Some(_),
+                        },
+                    )) if capability.is_some() => {
+                        log::error!(
+                            "portable index attach refused a populated capability; sibling artifacts continue: error={error}, capability={capability:?}"
+                        );
+                    }
+                    Err(IndexBundleError::Index(
+                        error @ (IndexError::ScriptHistoryPopulated
+                        | IndexError::CompactFiltersPopulated),
+                    )) if capability.is_some() => {
+                        log::error!(
+                            "portable index attach refused a populated capability; sibling artifacts continue: error={error}, capability={capability:?}"
+                        );
+                    }
+                    Err(error) => return Err(error),
                 }
             }
             Ok(last)
@@ -401,6 +431,8 @@ pub(crate) enum TestError {
     TryFromInt(#[from] std::num::TryFromIntError),
     #[error(transparent)]
     Chain(#[from] bitcoin_rs_chain::chain::ChainError),
+    #[error(transparent)]
+    RegtestFixture(#[from] bitcoin_rs_chain::chain::regtest_fixture::RegtestFixtureError),
     #[error(transparent)]
     Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
     #[error(transparent)]

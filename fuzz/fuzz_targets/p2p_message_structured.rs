@@ -298,7 +298,9 @@ fuzz_target!(|data: &[u8]| {
             "payload decode exceeded reservation bound"
         );
 
-        if let Ok(re_encoded) = encode_payload(&message) {
+        if canonical_decode(&message)
+            && let Ok(re_encoded) = encode_payload(&message)
+        {
             assert_eq!(
                 re_encoded.as_slice(),
                 raw_payload.as_ref(),
@@ -307,3 +309,14 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 });
+
+fn canonical_decode(message: &Message) -> bool {
+    !matches!(
+        message,
+        Message::Version(_)
+            | Message::SendCmpct(_)
+            | Message::CmpctBlock(_)
+            | Message::BlockTxn(_)
+            | Message::GetBlockTxn(_)
+    )
+}

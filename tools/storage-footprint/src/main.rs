@@ -17,6 +17,7 @@ fn main() -> std::process::ExitCode {
 
 #[derive(Debug)]
 enum FootprintError {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Usage,
     Io(std::io::Error),
     Json(sonic_rs::Error),

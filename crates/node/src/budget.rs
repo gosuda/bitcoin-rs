@@ -57,15 +57,47 @@ impl BudgetCaps {
     }
 
     #[must_use]
+    pub const fn receive_cap(self) -> u64 {
+        let ceiling = 64 * 1024 * 1024;
+        let proportional = self.staged_images / 8;
+        if proportional < ceiling {
+            proportional
+        } else {
+            ceiling
+        }
+    }
+
+    #[must_use]
+    pub const fn image_cap(self) -> u64 {
+        self.staged_images - self.receive_cap()
+    }
+
+    #[must_use]
+    pub const fn image_foreground_reserve(self) -> u64 {
+        let ceiling = self.image_cap() - self.receive_cap();
+        if self.foreground_reserve < ceiling {
+            self.foreground_reserve
+        } else {
+            ceiling
+        }
+    }
+
+    #[must_use]
+    pub const fn image_ingress_cap(self) -> u64 {
+        self.image_cap() - self.image_foreground_reserve()
+    }
+
+    #[must_use]
     pub const fn owner_cap(self, owner: BudgetOwner) -> u64 {
         match owner {
             BudgetOwner::CoinCache => self.coin_cache,
             BudgetOwner::EngineCache => self.engine_cache,
             BudgetOwner::FactsQueue => self.facts_queue,
             BudgetOwner::IndexBuilder => self.index_builder,
-            BudgetOwner::StagedImages => self.staged_images,
+            BudgetOwner::StagedImages => self.image_cap(),
             BudgetOwner::QueryViews => self.query_views,
             BudgetOwner::PeerOutbound => self.peer_outbound,
+            BudgetOwner::PeerReceive => self.receive_cap(),
         }
     }
 
@@ -83,9 +115,17 @@ impl BudgetCaps {
 
 #[derive(Default)]
 struct Ledger {
-    charges: [u64; 7],
-    reserved: [u64; 7],
+    charges: [u64; 8],
+    reserved: [u64; 8],
     ingress_refused: bool,
+}
+
+#[derive(Clone, Copy)]
+enum BudgetPressure {
+    RequestTooLarge,
+    Owner(BudgetOwner),
+    Background,
+    Total,
 }
 
 type EngineCacheSource = Box<dyn Fn() -> u64 + Send + Sync>;
@@ -101,7 +141,7 @@ pub struct NodeBudget {
     released: Condvar,
     is_mdbx: AtomicBool,
     engine_cache_source: RwLock<Option<EngineCacheSource>>,
-    reclaimers: RwLock<Vec<Arc<dyn BudgetReclaimer>>>,
+    reclaimers: RwLock<Vec<(BudgetOwner, Arc<dyn BudgetReclaimer>)>>,
     cpu: Arc<CpuShares>,
 }
 
@@ -176,8 +216,9 @@ impl NodeBudget {
         *self.engine_cache_source.write() = source;
     }
 
-    pub fn add_reclaimer(&self, reclaimer: Arc<dyn BudgetReclaimer>) {
-        self.reclaimers.write().push(reclaimer);
+    /// The callback must release only charges owned by `owner`.
+    pub fn add_reclaimer(&self, owner: BudgetOwner, reclaimer: Arc<dyn BudgetReclaimer>) {
+        self.reclaimers.write().push((owner, reclaimer));
     }
 
     #[must_use]
@@ -272,10 +313,7 @@ impl NodeBudget {
         let owner = BudgetOwner::StagedImages;
         let idx = owner.index();
         let committed = ledger.charges[idx].saturating_add(ledger.reserved[idx]);
-        let ceiling = self
-            .caps
-            .staged_images
-            .saturating_sub(self.caps.foreground_reserve);
+        let ceiling = self.caps.image_ingress_cap();
         if bytes > ceiling.saturating_sub(committed) {
             ledger.ingress_refused = true;
             return Err(BudgetError::BudgetExhausted);
@@ -286,13 +324,70 @@ impl NodeBudget {
     /// `BUD-07`: reclaim from optional owners, then reserve, then refuse.
     pub fn ensure_available(&self, owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
         self.sample_engine_cache();
-        if self.reserve(owner, bytes).is_ok() {
-            return Ok(());
+        match self.reserve(owner, bytes) {
+            Ok(()) => return Ok(()),
+            Err(BudgetError::BudgetExhausted) => {}
+            Err(error) => return Err(error),
         }
-        for reclaimer in self.reclaimers.read().iter() {
-            reclaimer.reclaim(bytes);
-        }
+        self.reclaim_for_reservation(owner, bytes, self.caps.owner_cap(owner));
         self.reserve(owner, bytes)
+    }
+
+    fn reclaim_for_reservation(&self, owner: BudgetOwner, bytes: u64, owner_cap: u64) {
+        let pressure = {
+            let ledger = self.ledger.lock();
+            self.reservation_pressure(&ledger, owner, bytes, owner_cap)
+        };
+        if let Some(pressure) = pressure {
+            self.reclaim(pressure, bytes);
+        }
+    }
+
+    fn reclaim(&self, pressure: BudgetPressure, bytes: u64) {
+        for (owner, reclaimer) in self.reclaimers.read().iter() {
+            let applicable = match pressure {
+                BudgetPressure::RequestTooLarge => false,
+                BudgetPressure::Owner(required) => *owner == required,
+                BudgetPressure::Background => owner.is_background(),
+                BudgetPressure::Total => true,
+            };
+            if applicable {
+                reclaimer.reclaim(bytes);
+            }
+        }
+    }
+    /// Move a receive charge into the staged-image lane without inflating
+    /// the total (`BUD-07`): attempt under one lock, then reclaim with the
+    /// ledger unlocked and retry once. A final refusal leaves the receive
+    /// charge untouched.
+    pub(crate) fn transfer_receive_to_image(&self, bytes: u64) -> bool {
+        match self.try_transfer_receive_to_image(bytes) {
+            Ok(()) => true,
+            Err(BudgetError::BudgetExhausted) if bytes <= self.caps.image_ingress_cap() => {
+                self.reclaim(BudgetPressure::Owner(BudgetOwner::StagedImages), bytes);
+                self.try_transfer_receive_to_image(bytes).is_ok()
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn try_transfer_receive_to_image(&self, bytes: u64) -> Result<(), BudgetError> {
+        let mut ledger = self.ledger.lock();
+        let image = BudgetOwner::StagedImages.index();
+        let receive = BudgetOwner::PeerReceive.index();
+        if ledger.charges[receive] < bytes {
+            return Err(BudgetError::InsufficientCharge);
+        }
+        let committed = ledger.charges[image].saturating_add(ledger.reserved[image]);
+        if bytes > self.caps.image_ingress_cap().saturating_sub(committed) {
+            ledger.ingress_refused = true;
+            return Err(BudgetError::BudgetExhausted);
+        }
+        ledger.charges[image] = ledger.charges[image].saturating_add(bytes);
+        ledger.charges[receive] -= bytes;
+        drop(ledger);
+        self.released.notify_all();
+        Ok(())
     }
 
     pub fn allocate(&self, owner: BudgetOwner, bytes: u64) -> Result<(), BudgetError> {
@@ -332,12 +427,18 @@ impl NodeBudget {
     pub fn is_safe(&self) -> bool {
         let ledger = self.ledger.lock();
         let engine_idx = BudgetOwner::EngineCache.index();
+        let image_idx = BudgetOwner::StagedImages.index();
+        let receive_idx = BudgetOwner::PeerReceive.index();
         let total = self.caps.total();
         total_charges(&ledger).saturating_add(total_reserved(&ledger)) <= total
             && background_committed_of(&ledger)
                 <= total.saturating_sub(self.caps.foreground_reserve)
             && ledger.charges[engine_idx].saturating_add(ledger.reserved[engine_idx])
                 <= self.caps.engine_cache
+            && ledger.charges[image_idx].saturating_add(ledger.reserved[image_idx])
+                <= self.caps.image_cap()
+            && ledger.charges[receive_idx].saturating_add(ledger.reserved[receive_idx])
+                <= self.caps.receive_cap()
             && (!self.is_mdbx.load(Ordering::Relaxed)
                 || (ledger.charges[engine_idx] == 0 && ledger.reserved[engine_idx] == 0))
     }
@@ -380,26 +481,44 @@ impl NodeBudget {
         if self.is_mdbx.load(Ordering::Relaxed) && owner == BudgetOwner::EngineCache {
             return Err(BudgetError::EngineCacheUnsupported);
         }
-        let total = self.caps.total();
-        let committed = total_charges(ledger).saturating_add(total_reserved(ledger));
-        let idx = owner.index();
-        let owner_committed = ledger.charges[idx].saturating_add(ledger.reserved[idx]);
-        if committed.saturating_add(bytes) > total
-            || bytes > self.caps.owner_cap(owner).saturating_sub(owner_committed)
+        if self
+            .reservation_pressure(ledger, owner, bytes, self.caps.owner_cap(owner))
+            .is_some()
         {
             if owner == BudgetOwner::StagedImages {
                 ledger.ingress_refused = true;
             }
             return Err(BudgetError::BudgetExhausted);
         }
-        if owner.is_background() {
-            let ceiling = total.saturating_sub(self.caps.foreground_reserve);
-            if background_committed_of(ledger).saturating_add(bytes) > ceiling {
-                return Err(BudgetError::BudgetExhausted);
-            }
-        }
+        let idx = owner.index();
         ledger.reserved[idx] = ledger.reserved[idx].saturating_add(bytes);
         Ok(())
+    }
+
+    fn reservation_pressure(
+        &self,
+        ledger: &Ledger,
+        owner: BudgetOwner,
+        bytes: u64,
+        owner_cap: u64,
+    ) -> Option<BudgetPressure> {
+        let total = self.caps.total();
+        let background_cap = total.saturating_sub(self.caps.foreground_reserve);
+        if bytes > owner_cap || (owner.is_background() && bytes > background_cap) {
+            return Some(BudgetPressure::RequestTooLarge);
+        }
+        let idx = owner.index();
+        let owner_committed = ledger.charges[idx].saturating_add(ledger.reserved[idx]);
+        if bytes > owner_cap.saturating_sub(owner_committed) {
+            return Some(BudgetPressure::Owner(owner));
+        }
+        if owner.is_background()
+            && background_committed_of(ledger).saturating_add(bytes) > background_cap
+        {
+            return Some(BudgetPressure::Background);
+        }
+        let committed = total_charges(ledger).saturating_add(total_reserved(ledger));
+        (committed.saturating_add(bytes) > total).then_some(BudgetPressure::Total)
     }
 }
 
@@ -434,26 +553,32 @@ impl BudgetedIngressLedger {
     pub fn new(budget: Arc<NodeBudget>) -> Self {
         Self { budget }
     }
-}
-
-impl bitcoin_rs_p2p::inbound::block_memory::IngressLedger for BudgetedIngressLedger {
-    fn capacity(&self) -> usize {
-        usize::try_from(
-            self.budget
-                .caps
-                .staged_images
-                .saturating_sub(self.budget.caps.foreground_reserve),
-        )
-        .unwrap_or(usize::MAX)
-    }
-
-    fn try_take(&self, bytes: usize) -> bool {
+    fn try_take_once(&self, bytes: usize) -> bool {
         let bytes_u64 = u64::try_from(bytes).unwrap_or(u64::MAX);
         self.budget.reserve_ingress(bytes_u64).is_ok()
             && self
                 .budget
                 .allocate(BudgetOwner::StagedImages, bytes_u64)
                 .is_ok()
+    }
+}
+
+impl bitcoin_rs_p2p::inbound::block_memory::IngressLedger for BudgetedIngressLedger {
+    fn capacity(&self) -> usize {
+        usize::try_from(self.budget.caps.image_ingress_cap()).unwrap_or(usize::MAX)
+    }
+
+    fn try_take(&self, bytes: usize) -> bool {
+        if self.try_take_once(bytes) {
+            return true;
+        }
+        let bytes_u64 = u64::try_from(bytes).unwrap_or(u64::MAX);
+        self.budget.reclaim_for_reservation(
+            BudgetOwner::StagedImages,
+            bytes_u64,
+            self.budget.caps.image_ingress_cap(),
+        );
+        self.try_take_once(bytes)
     }
 
     fn give_back(&self, bytes: usize) {
@@ -463,6 +588,36 @@ impl bitcoin_rs_p2p::inbound::block_memory::IngressLedger for BudgetedIngressLed
 
     fn wait_released(&self, timeout: Duration) {
         self.budget.wait_released(timeout);
+    }
+
+    fn receive_capacity(&self) -> usize {
+        usize::try_from(self.budget.caps.receive_cap()).unwrap_or(usize::MAX)
+    }
+
+    fn try_take_receive(&self, bytes: usize) -> bool {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let mut ledger = self.budget.ledger.lock();
+        if self
+            .budget
+            .reserve_locked(&mut ledger, BudgetOwner::PeerReceive, bytes)
+            .is_err()
+        {
+            return false;
+        }
+        let idx = BudgetOwner::PeerReceive.index();
+        ledger.reserved[idx] = ledger.reserved[idx].saturating_sub(bytes);
+        ledger.charges[idx] = ledger.charges[idx].saturating_add(bytes);
+        true
+    }
+
+    fn transfer_receive_to_image(&self, bytes: usize) -> bool {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        self.budget.transfer_receive_to_image(bytes)
+    }
+
+    fn give_back_receive(&self, bytes: usize) {
+        let bytes = u64::try_from(bytes).unwrap_or(0);
+        let _ = self.budget.release(BudgetOwner::PeerReceive, bytes);
     }
 }
 
@@ -584,10 +739,11 @@ mod tests {
             crate::budget_model::AllocationOwner::StagedImages => BudgetOwner::StagedImages,
             crate::budget_model::AllocationOwner::QueryViews => BudgetOwner::QueryViews,
             crate::budget_model::AllocationOwner::PeerOutbound => BudgetOwner::PeerOutbound,
+            crate::budget_model::AllocationOwner::PeerReceive => BudgetOwner::PeerReceive,
         }
     }
 
-    const ALL_OWNERS: [BudgetOwner; 7] = [
+    const ALL_OWNERS: [BudgetOwner; 8] = [
         BudgetOwner::CoinCache,
         BudgetOwner::EngineCache,
         BudgetOwner::FactsQueue,
@@ -595,9 +751,10 @@ mod tests {
         BudgetOwner::StagedImages,
         BudgetOwner::QueryViews,
         BudgetOwner::PeerOutbound,
+        BudgetOwner::PeerReceive,
     ];
 
-    fn ledger_of(budget: &NodeBudget) -> ([u64; 7], [u64; 7], bool) {
+    fn ledger_of(budget: &NodeBudget) -> ([u64; 8], [u64; 8], bool) {
         let charges = ALL_OWNERS.map(|owner| budget.charged_bytes(owner));
         let reserved = ALL_OWNERS.map(|owner| budget.available_of_reservations(owner));
         (charges, reserved, budget.ingress_refused())
@@ -633,7 +790,7 @@ mod tests {
     }
 
     fn random_action(rng: &mut XorShift, background: bool) -> Action {
-        let pick = rng.next() % 17;
+        let pick = rng.next() % 20;
         let amount = rng.amount();
         match pick {
             0 => Action::ReserveIngress(amount),
@@ -663,6 +820,9 @@ mod tests {
             13 => Action::ReserveEngineCache(amount),
             14 => Action::AllocateEngineCache(amount),
             15 => Action::ReleaseEngineCache(amount),
+            16 => Action::ReservePeerReceive(amount),
+            17 => Action::AllocatePeerReceive(amount),
+            18 => Action::ReleasePeerReceive(amount),
             _ if background => Action::Stutter,
             _ => match rng.next() % 2 {
                 0 => Action::Stutter,
@@ -674,7 +834,7 @@ mod tests {
     fn apply_action(budget: &NodeBudget, action: &Action) {
         match *action {
             Action::ReserveIngress(amount) => {
-                reserve(budget, BudgetOwner::StagedImages, amount);
+                let _ = budget.reserve_ingress(u64::from(amount));
             }
             Action::RefuseIngress(amount) => {
                 budget.note_ingress_refusal_when_exhausted(u64::from(amount));
@@ -723,6 +883,15 @@ mod tests {
             Action::ReleasePeerOutbound(amount) => {
                 release(budget, BudgetOwner::PeerOutbound, amount);
             }
+            Action::ReservePeerReceive(amount) => {
+                reserve(budget, BudgetOwner::PeerReceive, amount);
+            }
+            Action::AllocatePeerReceive(amount) => {
+                allocate(budget, BudgetOwner::PeerReceive, amount);
+            }
+            Action::ReleasePeerReceive(amount) => {
+                release(budget, BudgetOwner::PeerReceive, amount);
+            }
             Action::Stutter => {}
         }
     }
@@ -754,7 +923,9 @@ mod tests {
         } else {
             budget_model::BudgetState::init(MODEL_TOTAL, MODEL_FOREGROUND)
         };
-        state.owner_caps = [AMOUNT_CAP; 7];
+        state.owner_caps = ALL_OWNERS
+            .map(|owner| u32::try_from(budget.caps().owner_cap(owner)).unwrap_or(u32::MAX));
+        state.ingress_cap = u32::try_from(budget.caps().image_ingress_cap()).unwrap_or(u32::MAX);
         let mut rng = XorShift(seed);
         let mut trace: Vec<String> = Vec::new();
         for step in 0..DIFFERENTIAL_STEPS {
@@ -783,7 +954,9 @@ mod tests {
     fn every_action_variant_tracks_the_model() {
         let budget = NodeBudget::new(differential_caps(), 4);
         let mut state = budget_model::BudgetState::init(MODEL_TOTAL, MODEL_FOREGROUND);
-        state.owner_caps = [AMOUNT_CAP; 7];
+        state.owner_caps = ALL_OWNERS
+            .map(|owner| u32::try_from(budget.caps().owner_cap(owner)).unwrap_or(u32::MAX));
+        state.ingress_cap = u32::try_from(budget.caps().image_ingress_cap()).unwrap_or(u32::MAX);
         let mut variants = vec![
             Action::ReserveIngress(7),
             Action::RefuseIngress(7),
@@ -800,6 +973,9 @@ mod tests {
             Action::ReservePeerOutbound(7),
             Action::AllocatePeerOutbound(7),
             Action::ReleasePeerOutbound(7),
+            Action::ReservePeerReceive(7),
+            Action::AllocatePeerReceive(7),
+            Action::ReleasePeerReceive(7),
             Action::Stutter,
         ];
         for owner in [
@@ -915,7 +1091,7 @@ mod tests {
         );
         assert!(
             budget
-                .reserve(BudgetOwner::StagedImages, STAGED_IMAGE_BUDGET_BYTES - 1)
+                .reserve(BudgetOwner::StagedImages, budget.caps().image_cap() - 1)
                 .is_ok(),
             "reservation inside the staged cap must be granted"
         );
@@ -996,13 +1172,15 @@ mod tests {
     fn repeated_owner_requests_include_charges_and_reservations() {
         for owner in ALL_OWNERS {
             let budget = NodeBudget::new(differential_caps(), 4);
-            assert!(budget.reserve(owner, OWNER_CAP / 2).is_ok());
-            assert!(budget.allocate(owner, OWNER_CAP / 2).is_ok());
-            assert!(budget.reserve(owner, OWNER_CAP / 2).is_ok());
+            let cap = budget.caps().owner_cap(owner);
+            let first = cap / 2;
+            assert!(budget.reserve(owner, first).is_ok());
+            assert!(budget.allocate(owner, first).is_ok());
+            assert!(budget.reserve(owner, cap - first).is_ok());
             assert_eq!(budget.available(owner), 0);
             for _ in 0..4 {
                 assert_eq!(budget.reserve(owner, 1), Err(BudgetError::BudgetExhausted));
-                assert_eq!(budget.total_committed(), OWNER_CAP);
+                assert_eq!(budget.total_committed(), cap);
             }
             assert!(budget.is_safe());
         }
@@ -1023,7 +1201,7 @@ mod tests {
             query_views: 256,
             peer_outbound: 256,
         };
-        let ingress_ceiling = caps.staged_images - caps.foreground_reserve;
+        let ingress_ceiling = caps.image_ingress_cap();
         let budget = Arc::new(NodeBudget::new(caps, 4));
         let ingress = super::BudgetedIngressLedger::new(Arc::clone(&budget));
         let execution = ChargeHandle::new(budget.clone(), BudgetOwner::StagedImages);
@@ -1031,7 +1209,7 @@ mod tests {
         let held = ingress.capacity();
         assert_eq!(
             initial_limits.max_bytes,
-            usize::try_from(caps.staged_images)
+            usize::try_from(caps.image_cap())
                 .unwrap_or(usize::MAX)
                 .min(WindowLimits::durable_head_defaults().max_bytes)
         );
@@ -1039,7 +1217,7 @@ mod tests {
         assert!(!ingress.try_take(1));
 
         assert_eq!(
-            execution.charge(caps.foreground_reserve),
+            execution.charge(caps.image_foreground_reserve()),
             Ok(()),
             "download saturation must leave the declared foreground reserve for execution"
         );
@@ -1056,15 +1234,15 @@ mod tests {
                     <= caps.owner_cap(owner)
             );
         }
-        assert_eq!(budget.total_committed(), caps.staged_images);
+        assert_eq!(budget.total_committed(), caps.image_cap());
         assert!(budget.total_committed() <= caps.total());
         assert!(budget.is_safe());
 
-        execution.release(caps.foreground_reserve);
+        execution.release(caps.image_foreground_reserve());
         assert!(!ingress.try_take(1));
         assert_eq!(
             budget.window_limits().max_bytes,
-            usize::try_from(caps.foreground_reserve)
+            usize::try_from(caps.image_foreground_reserve())
                 .unwrap_or(usize::MAX)
                 .min(initial_limits.max_bytes)
         );
@@ -1089,7 +1267,7 @@ mod tests {
         ));
         let budget = Arc::new(NodeBudget::new(caps, 4));
         let ingress = super::BudgetedIngressLedger::new(Arc::clone(&budget));
-        let ingress_ceiling = caps.staged_images - caps.foreground_reserve;
+        let ingress_ceiling = caps.image_ingress_cap();
         assert_eq!(u64::try_from(ingress.capacity()), Ok(ingress_ceiling));
         let request = ingress.capacity() / 2;
         assert!(ingress.try_take(request));
@@ -1129,6 +1307,196 @@ mod tests {
         assert_eq!(budget.available(BudgetOwner::EngineCache), 0);
         assert!(!budget.ingress_refused());
         assert!(budget.reserve(BudgetOwner::StagedImages, 1).is_ok());
+        assert!(budget.is_safe());
+    }
+
+    // BUD-05
+    #[test]
+    fn receive_partition_preserves_total_for_default_small_and_zero_quotas() {
+        for (staged, foreground, expected) in [
+            (
+                536_870_912,
+                67_108_864,
+                (67_108_864, 469_762_048, 402_653_184),
+            ),
+            (4_096, 1_024, (512, 3_584, 2_560)),
+            (20_000, 64_000, (2_500, 17_500, 2_500)),
+            (8, 64, (1, 7, 1)),
+            (1, 64, (0, 1, 0)),
+            (0, 64, (0, 0, 0)),
+        ] {
+            let mut caps = differential_caps();
+            caps.staged_images = staged;
+            caps.foreground_reserve = foreground;
+            let original_total = caps.total();
+            let actual = (
+                caps.receive_cap(),
+                caps.image_cap(),
+                caps.image_ingress_cap(),
+            );
+            assert_eq!(actual, expected);
+            let model = budget_model::ingress_partition(
+                u32::try_from(staged).unwrap_or(u32::MAX),
+                u32::try_from(foreground).unwrap_or(u32::MAX),
+                64 * 1024 * 1024,
+            );
+            assert_eq!(
+                actual,
+                (u64::from(model.0), u64::from(model.1), u64::from(model.2))
+            );
+            assert_eq!(
+                ALL_OWNERS
+                    .map(|owner| caps.owner_cap(owner))
+                    .iter()
+                    .sum::<u64>(),
+                original_total
+            );
+            let budget = NodeBudget::new(caps, 4);
+            assert!(
+                budget
+                    .reserve(BudgetOwner::PeerReceive, caps.receive_cap() + 1)
+                    .is_err()
+            );
+            assert_eq!(budget.total_committed(), 0);
+            assert!(budget.is_safe());
+        }
+    }
+
+    // BUD-05
+    #[test]
+    fn saturated_image_and_other_owners_leave_the_bounded_receive_lane_available() {
+        use bitcoin_rs_p2p::inbound::block_memory::IngressLedger;
+
+        let caps = differential_caps();
+        let budget = Arc::new(NodeBudget::new(caps, 4));
+        let ingress = super::BudgetedIngressLedger::new(Arc::clone(&budget));
+        assert!(ingress.try_take(ingress.capacity()));
+        assert!(!ingress.try_take(1));
+        assert_eq!(
+            budget.available(BudgetOwner::StagedImages),
+            caps.image_foreground_reserve()
+        );
+        for owner in ALL_OWNERS {
+            if owner != BudgetOwner::PeerReceive {
+                let bytes = budget.available(owner);
+                assert!(budget.reserve(owner, bytes).is_ok());
+                assert!(budget.allocate(owner, bytes).is_ok());
+            }
+        }
+        assert_eq!(budget.total_committed(), caps.total() - caps.receive_cap());
+        let receive = ingress.receive_capacity();
+        assert!(ingress.try_take_receive(receive));
+        assert!(!ingress.try_take_receive(1));
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::PeerReceive),
+            caps.receive_cap()
+        );
+        assert_eq!(budget.total_committed(), caps.total());
+        assert!(budget.is_safe());
+        ingress.give_back_receive(receive);
+        assert_eq!(budget.charged_bytes(BudgetOwner::PeerReceive), 0);
+        assert!(ingress.try_take_receive(receive));
+        ingress.give_back_receive(receive);
+        for owner in ALL_OWNERS {
+            let charged = budget.charged_bytes(owner);
+            assert!(budget.release(owner, charged).is_ok());
+        }
+        assert_eq!(budget.total_committed(), 0);
+    }
+
+    // BUD-01, BUD-05
+    #[test]
+    fn default_image_lane_keeps_the_maximum_decoder_admission_floor() {
+        use bitcoin_rs_p2p::inbound::block_memory::IngressLedger;
+
+        let caps = BudgetCaps::from_chainstate_cache_budget(split_chainstate_cache_budget(
+            64 * 1024 * 1024,
+        ));
+        let budget = Arc::new(NodeBudget::new(caps, 4));
+        let ingress = super::BudgetedIngressLedger::new(Arc::clone(&budget));
+        let decoder = bitcoin_rs_consensus::primitives::layout::decode_reservation(
+            bitcoin_rs_p2p::wire::MAX_MESSAGE_PAYLOAD,
+        );
+        assert!(decoder <= ingress.capacity());
+        assert!(ingress.try_take(decoder));
+        assert!(ingress.try_take_receive(ingress.receive_capacity()));
+        assert!(budget.total_committed() <= caps.total());
+        assert!(budget.is_safe());
+        ingress.give_back_receive(ingress.receive_capacity());
+        ingress.give_back(decoder);
+        assert_eq!(budget.total_committed(), 0);
+    }
+    // BUD-07
+    #[test]
+    fn transfer_reclaims_staged_image_and_retries_once() {
+        use bitcoin_rs_p2p::inbound::block_memory::IngressLedger;
+        use bitcoin_rs_storage::budget::BudgetReclaimer;
+
+        struct ReleaseStaged {
+            budget: Arc<NodeBudget>,
+            bytes: u64,
+        }
+
+        impl BudgetReclaimer for ReleaseStaged {
+            fn reclaim(&self, bytes: u64) -> u64 {
+                let free = self.bytes.min(bytes);
+                if self.budget.release(BudgetOwner::StagedImages, free).is_ok() {
+                    free
+                } else {
+                    0
+                }
+            }
+        }
+
+        let caps = BudgetCaps::from_chainstate_cache_budget(split_chainstate_cache_budget(
+            64 * 1024 * 1024,
+        ));
+
+        let image_ceiling = caps.image_ingress_cap();
+        let transfer = 4 * 1024 * 1024usize;
+        let budget = Arc::new(NodeBudget::new(caps, 4));
+        let ingress = super::BudgetedIngressLedger::new(Arc::clone(&budget));
+        assert!(ingress.try_take(usize::try_from(image_ceiling).unwrap_or(usize::MAX)));
+        assert!(ingress.try_take_receive(transfer));
+        assert!(!ingress.transfer_receive_to_image(transfer));
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::PeerReceive),
+            u64::try_from(transfer).unwrap_or(u64::MAX)
+        );
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::StagedImages),
+            image_ceiling
+        );
+
+        budget.add_reclaimer(
+            BudgetOwner::StagedImages,
+            Arc::new(ReleaseStaged {
+                budget: Arc::clone(&budget),
+                bytes: 8 * 1024 * 1024,
+            }),
+        );
+        assert!(!ingress.try_take(usize::try_from(image_ceiling + 1).unwrap_or(usize::MAX)));
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::StagedImages),
+            image_ceiling,
+            "an oversized ingress request must retain staged images"
+        );
+        assert_eq!(
+            budget.ensure_available(BudgetOwner::StagedImages, caps.image_cap() + 1),
+            Err(BudgetError::BudgetExhausted)
+        );
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::StagedImages),
+            image_ceiling,
+            "an oversized execution request must retain staged images"
+        );
+        assert!(ingress.transfer_receive_to_image(transfer));
+        assert_eq!(budget.charged_bytes(BudgetOwner::PeerReceive), 0);
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::StagedImages),
+            image_ceiling
+        );
+        assert!(budget.ingress_refused());
         assert!(budget.is_safe());
     }
 }

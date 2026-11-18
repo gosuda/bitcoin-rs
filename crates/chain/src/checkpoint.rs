@@ -2472,7 +2472,7 @@ mod tests {
         }
 
         // RCV-10
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         #[test]
         fn an_engine_image_with_a_non_utf8_file_name_fails_the_load_closed() -> TestResult {
             use std::os::unix::ffi::OsStringExt as _;

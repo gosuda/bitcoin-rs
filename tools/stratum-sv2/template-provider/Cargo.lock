@@ -282,6 +282,7 @@ dependencies = [
  "cap-std",
  "crossbeam-channel",
  "hashbrown 0.17.1",
+ "log",
  "metrics",
  "parking_lot 0.13.0",
  "quanta 0.13.0",
@@ -359,6 +360,7 @@ dependencies = [
  "compact_str",
  "crossbeam-channel",
  "hashbrown 0.17.1",
+ "log",
  "metrics",
  "parking_lot 0.13.0",
  "rayon",
@@ -423,6 +425,7 @@ dependencies = [
  "sonic-rs",
  "thiserror",
  "tracing",
+ "windows-sys 0.61.2",
  "zerocopy",
 ]
 

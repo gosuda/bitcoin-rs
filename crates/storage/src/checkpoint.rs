@@ -701,7 +701,8 @@ mod tests {
         target_vendor = "apple",
         target_os = "linux",
         target_os = "android",
-        target_os = "redox"
+        target_os = "redox",
+        windows
     ))]
     #[test]
     fn rename_noreplace_refuses_escape_but_keeps_same_dir_renames() -> TestResult {
@@ -911,7 +912,8 @@ mod tests {
         target_vendor = "apple",
         target_os = "linux",
         target_os = "android",
-        target_os = "redox"
+        target_os = "redox",
+        windows
     ))]
     #[test]
     fn rename_noreplace_refuses_an_existing_destination_and_keeps_both_files() -> TestResult {
@@ -1235,7 +1237,8 @@ pub(crate) struct GenerationPaths {
         target_vendor = "apple",
         target_os = "linux",
         target_os = "android",
-        target_os = "redox"
+        target_os = "redox",
+        windows
     ))]
     pub staging: String,
     pub final_dir: String,

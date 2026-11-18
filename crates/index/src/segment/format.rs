@@ -15,7 +15,8 @@ pub const SCRIPT_DICT_VALUE_LEN: usize = 4;
 pub const SCRIPT_POST_KEY_LEN: usize = 16;
 pub const SCRIPT_POST_CHUNK_MAX_BYTES: usize = 4096;
 
-pub const SPEND_DIR_KEY_LEN: usize = 15;
+pub const SPEND_DIR_OUTPOINT_PREFIX_LEN: usize = 44;
+pub const SPEND_DIR_KEY_LEN: usize = 48;
 pub const SPEND_DIR_VALUE_LEN: usize = 4;
 
 pub const SCRIPT_STATS_KEY_LEN: usize = 12;
@@ -400,28 +401,43 @@ pub fn decode_posting_items(mut bytes: &[u8]) -> Option<Vec<PostingItem>> {
 }
 
 #[must_use]
+pub fn spend_dir_outpoint_prefix(
+    gen_id: u64,
+    txid: &[u8; 32],
+    vout: u32,
+) -> [u8; SPEND_DIR_OUTPOINT_PREFIX_LEN] {
+    let mut prefix = [0u8; SPEND_DIR_OUTPOINT_PREFIX_LEN];
+    prefix[..8].copy_from_slice(&gen_id.to_be_bytes());
+    prefix[8..40].copy_from_slice(txid);
+    prefix[40..44].copy_from_slice(&vout.to_be_bytes());
+    prefix
+}
+
+#[must_use]
 pub fn encode_spend_dir_key(
     gen_id: u64,
-    creation_ordinal: u32,
+    txid: &[u8; 32],
     vout: u32,
+    spending_height: u32,
 ) -> [u8; SPEND_DIR_KEY_LEN] {
     let mut key = [0u8; SPEND_DIR_KEY_LEN];
-    key[0..8].copy_from_slice(&gen_id.to_be_bytes());
-    key[8..12].copy_from_slice(&creation_ordinal.to_be_bytes());
-    let vout_bytes = vout.to_be_bytes();
-    key[12..15].copy_from_slice(&vout_bytes[1..4]);
+    key[..SPEND_DIR_OUTPOINT_PREFIX_LEN]
+        .copy_from_slice(&spend_dir_outpoint_prefix(gen_id, txid, vout));
+    key[SPEND_DIR_OUTPOINT_PREFIX_LEN..].copy_from_slice(&spending_height.to_be_bytes());
     key
 }
 
 #[must_use]
-pub fn decode_spend_dir_key(key: &[u8]) -> Option<(u64, u32, u32)> {
-    if key.len() < SPEND_DIR_KEY_LEN {
+pub fn decode_spend_dir_key(key: &[u8]) -> Option<(u64, [u8; 32], u32, u32)> {
+    if key.len() != SPEND_DIR_KEY_LEN {
         return None;
     }
-    let gen_id = u64::from_be_bytes(key[0..8].try_into().ok()?);
-    let creation_ordinal = u32::from_be_bytes(key[8..12].try_into().ok()?);
-    let vout = u32::from_be_bytes([0, key[12], key[13], key[14]]);
-    Some((gen_id, creation_ordinal, vout))
+    Some((
+        u64::from_be_bytes(key[..8].try_into().ok()?),
+        key[8..40].try_into().ok()?,
+        u32::from_be_bytes(key[40..44].try_into().ok()?),
+        u32::from_be_bytes(key[44..48].try_into().ok()?),
+    ))
 }
 
 #[must_use]
@@ -431,7 +447,7 @@ pub fn encode_spend_dir_value(spending_ordinal: u32) -> [u8; SPEND_DIR_VALUE_LEN
 
 #[must_use]
 pub fn decode_spend_dir_value(val: &[u8]) -> Option<u32> {
-    if val.len() < SPEND_DIR_VALUE_LEN {
+    if val.len() != SPEND_DIR_VALUE_LEN {
         return None;
     }
     Some(u32::from_be_bytes(val[0..4].try_into().ok()?))

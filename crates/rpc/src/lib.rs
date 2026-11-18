@@ -19,6 +19,7 @@ pub(crate) mod registry;
 mod render;
 pub mod rest;
 mod server;
+mod tx_decode;
 mod tx_render;
 pub mod zmq;
 

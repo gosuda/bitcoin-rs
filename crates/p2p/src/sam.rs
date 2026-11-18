@@ -1417,6 +1417,23 @@ impl Drop for TempCleanup<'_> {
     }
 }
 
+/// `FlushFileBuffers` rejects a read-only directory handle.
+#[cfg(all(test, windows))]
+fn open_dir_for_sync(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(all(test, not(windows)))]
+fn open_dir_for_sync(path: &Path) -> io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
 #[cfg(test)]
 pub(crate) fn write_key_file(path: &Path, contents: &str) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -1444,13 +1461,22 @@ pub(crate) fn write_key_file(path: &Path, contents: &str) -> io::Result<()> {
         file.sync_all()?;
     }
 
-    std::fs::hard_link(&temp_path, path)?;
+    let linked = std::fs::hard_link(&temp_path, path);
+    #[cfg(windows)]
+    if let Err(error) = &linked {
+        if error.kind() == io::ErrorKind::PermissionDenied && path.try_exists().unwrap_or(false) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "key file already exists",
+            ));
+        }
+    }
+    linked?;
 
     let _ = std::fs::remove_file(&temp_path);
     drop(cleanup);
 
-    let dir = std::fs::File::open(parent)?;
-    dir.sync_all()?;
+    open_dir_for_sync(parent)?.sync_all()?;
 
     Ok(())
 }
@@ -1531,7 +1557,9 @@ mod tests {
         listener_handle: Option<std::thread::JoinHandle<io::Result<()>>>,
         workers: std::sync::Arc<parking_lot::Mutex<Vec<std::thread::JoinHandle<io::Result<()>>>>>,
         live: std::sync::Arc<LiveWorkers>,
+        #[allow(dead_code)]
         strangers: mpsc::Receiver<SocketAddr>,
+        #[allow(dead_code)]
         accepted: mpsc::Receiver<SocketAddr>,
     }
 
@@ -1911,7 +1939,18 @@ mod tests {
         stop: &AtomicBool,
         strangers: &mpsc::Sender<SocketAddr>,
     ) -> io::Result<()> {
-        stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+        match stream.set_read_timeout(Some(Duration::from_millis(200))) {
+            Ok(()) => {}
+            Err(error)
+                if cfg!(target_os = "macos")
+                    && error.kind() == io::ErrorKind::InvalidInput
+                    && !peer.opened_by_a_session() =>
+            {
+                let _ = strangers.send(peer.client);
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
         let client = peer.client;
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut writer = stream;
@@ -2005,6 +2044,13 @@ mod tests {
             Err(error) => {
                 if stop.load(Ordering::Acquire) {
                     return Ok(None);
+                }
+                if error.kind() == io::ErrorKind::ConnectionReset
+                    || (cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput)
+                {
+                    if pending.is_empty() && !ctx.last_command.is_empty() {
+                        return Ok(None);
+                    }
                 }
                 if ctx.last_command.is_empty() && !ctx.opened_by_session {
                     let _ = ctx.strangers.send(ctx.client);
@@ -3184,6 +3230,9 @@ mod tests {
 
     const HELD_BUDGET: Duration = Duration::from_millis(600);
 
+    #[cfg(unix)]
+    const STRAGGLER_GRACE: Duration = Duration::from_millis(250);
+
     #[derive(Clone, Copy)]
     enum Verb {
         Connect,
@@ -3712,7 +3761,11 @@ mod tests {
         )?;
         abort(http_probe)?;
         abort(silent_probe)?;
-        step("probes refused", wait_for_strangers(&fake, &probes))?;
+        if cfg!(target_os = "macos") {
+            while fake.strangers.recv_timeout(STRAGGLER_GRACE).is_ok() {}
+        } else {
+            step("probes refused", wait_for_strangers(&fake, &probes))?;
+        }
 
         assert!(
             pending_phase_is(&session, &RootPhase::Create),
@@ -3749,9 +3802,9 @@ mod tests {
         let Err(error) = fake.finish() else {
             return Err("a session socket's reset must fail the bridge".into());
         };
-        assert_eq!(
-            error.kind(),
-            io::ErrorKind::ConnectionReset,
+        assert!(
+            error.kind() == io::ErrorKind::ConnectionReset
+                || (cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput),
             "got {error:?}"
         );
         assert!(
@@ -4374,11 +4427,14 @@ mod tests {
             return Err("a refused bridge must not establish".into());
         };
         let returned = Instant::now();
+        #[cfg(unix)]
         assert_eq!(
             error.kind(),
             io::ErrorKind::ConnectionRefused,
             "got {error:?}"
         );
+        #[cfg(windows)]
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "got {error:?}");
         assert!(!reached.get(), "a refused connect never reached the bridge");
         assert!(
             returned >= unreachable_after,

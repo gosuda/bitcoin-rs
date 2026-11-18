@@ -308,6 +308,11 @@ impl UtxoReader {
         self.set.scan.abort()
     }
 
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn arm_scan_walk_gate(&self) -> Arc<crate::utxo::scan::ScanWalkGate> {
+        self.set.scan.arm_walk_gate()
+    }
+
     #[must_use]
     pub fn with_coin_store(set: Arc<UtxoSet>, coin_store: Arc<crate::CoinStore>) -> Self {
         Self { set, coin_store }

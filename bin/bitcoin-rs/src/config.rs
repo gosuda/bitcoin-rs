@@ -746,6 +746,7 @@ noscripthash-limit=0
 }
 
 #[cfg(test)]
+#[allow(clippy::result_large_err)]
 mod compat_tests {
     use super::user_config_from_bitcoin_conf;
     #[derive(Debug, thiserror::Error)]
@@ -1045,6 +1046,7 @@ assumevalid=0000000000000000000000000000000000000000000000000000000000000000
 
 #[cfg(test)]
 #[expect(clippy::expect_used)]
+#[allow(clippy::result_large_err)]
 mod feature_option_tests {
     use std::ffi::OsString;
     use std::path::Path;

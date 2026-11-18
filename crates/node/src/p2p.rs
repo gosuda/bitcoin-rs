@@ -211,6 +211,7 @@ mod block_forward_tests {
         headers_rx: crossbeam_channel::Receiver<bitcoin_rs_p2p::InboundHeaders>,
         blocks_rx: crossbeam_channel::Receiver<bitcoin_rs_p2p::InboundBlock>,
         shared: ConnectionShared,
+        _outbound: [bitcoin_rs_p2p::test_support::MessageReceiver; 2],
     }
 
     fn test_sync_with_applied_chain(
@@ -232,11 +233,11 @@ mod block_forward_tests {
             crate::p2p::sync::syncing_ibd_latch(),
         ));
         let addr = test_addr(9782, 0)?;
-        let _outbound = connect_peer(peers, synthetic_peer(addr, 3));
+        let outbound = connect_peer(peers, synthetic_peer(addr, 3));
         let lease = peers.lease(addr).ok_or("peer must be registered")?;
         let source = lease.source(addr.endpoint());
         let other_addr = test_addr(9783, 0)?;
-        let _other = connect_peer(peers, synthetic_peer(other_addr, 3));
+        let other = connect_peer(peers, synthetic_peer(other_addr, 3));
         let other_source = peers
             .lease(other_addr)
             .ok_or("second peer must be registered")?
@@ -256,6 +257,7 @@ mod block_forward_tests {
             headers_rx,
             blocks_rx,
             shared,
+            _outbound: [outbound, other],
         })
     }
 
@@ -283,7 +285,6 @@ mod block_forward_tests {
             &sink,
             addr,
             shared,
-            None,
         );
         Ok(())
     }
@@ -366,6 +367,157 @@ mod block_forward_tests {
 
         deliver(&extending)?;
         assert_reconstructed(2, 2, "a repeat never rescans the mempool");
+        Ok(())
+    }
+    // BUD-01, BUD-06
+    #[test]
+    fn wire_and_compact_receipts_keep_their_accounting_through_staging() -> TestResult {
+        use bitcoin_rs_consensus::primitives::BlockImage;
+        use bitcoin_rs_p2p::inbound::block_memory::BlockMemory;
+        use bitcoin_rs_storage::budget::BudgetOwner;
+
+        for compact in [false, true] {
+            let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
+            let mut fixture = test_sync_with_applied_chain(&peers)?;
+            let tip = fixture.blocks.last().ok_or("chain has a tip")?;
+            let block = regtest_fixture::mined_block_with_prev_hash(
+                tip.block_hash(),
+                3,
+                vec![regtest_fixture::coinbase(3)],
+            )?;
+            let encoded = bytes::Bytes::from(consensus_bytes(&block));
+            let expected_image = BlockImage::from_raw(encoded.clone())?;
+            let encoded_bytes = expected_image.bytes().len();
+            let decoded_bytes = expected_image.retained_heap_bytes();
+            let hash = Hash256::from(expected_image.block_hash());
+            drop(expected_image);
+            let budget = Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(64 * 1024 * 1024),
+                4,
+            ));
+            let memory = Arc::new(BlockMemory::new(Arc::new(
+                crate::budget::BudgetedIngressLedger::new(Arc::clone(&budget)),
+            )));
+            let held = memory.reserve(37, || false)?;
+            let prior_image = budget.charged_bytes(BudgetOwner::StagedImages);
+            let prior_receive = budget.charged_bytes(BudgetOwner::PeerReceive);
+            let prior_total = budget.total_committed();
+            fixture.shared = ConnectionShared::new(
+                Arc::clone(&peers),
+                bitcoin_rs_p2p::BannedReader::fixture_empty(),
+                Arc::clone(&fixture.shared.activity),
+                fixture.shared.session_cancel.clone(),
+                None,
+                fixture.shared.magic,
+                fixture.shared.headers_tx.clone(),
+                fixture.shared.blocks_tx.clone(),
+                None,
+                None,
+                bitcoin_rs_p2p::listener::ListenerExtras {
+                    block_sync: fixture.shared.block_sync.clone(),
+                    block_memory: Some(memory),
+                    ..Default::default()
+                },
+            );
+
+            if compact {
+                deliver_compact_block(
+                    &block,
+                    &mut bitcoin_rs_p2p::compact_blocks::Reconstruction::new(),
+                    &ScanCounter(AtomicUsize::new(0)),
+                    &fixture.lease,
+                    fixture.addr,
+                    &fixture.shared,
+                )?;
+            } else {
+                let mut frame = Vec::new();
+                bitcoin_rs_p2p::wire::write_message(
+                    &mut frame,
+                    fixture.shared.magic,
+                    &bitcoin_rs_p2p::Message::BlockBytes(encoded),
+                )?;
+                let stream = std::io::Cursor::new(frame);
+                let mut peer = bitcoin_rs_p2p::Peer::new(stream, fixture.shared.magic);
+                peer.state = bitcoin_rs_p2p::PeerState::Ready;
+                match bitcoin_rs_p2p::listener::run_message_loop(
+                    &mut peer,
+                    fixture.addr,
+                    &fixture.lease,
+                    &fixture.shared,
+                    None,
+                ) {
+                    Err(bitcoin_rs_p2p::PeerError::Io(error))
+                        if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
+                    Err(error) => return Err(error.into()),
+                    Ok(()) => {
+                        return Err(TestError::ExpectationFailed("wire fixture must reach EOF"));
+                    }
+                }
+            }
+            let mut inbound = fixture.blocks_rx.try_recv()?;
+            assert_eq!(inbound.payload().block_hash().0, hash);
+            assert_eq!(inbound.source, Some(fixture.source));
+            assert_eq!(fixture.headers_rx.try_recv()?.headers, vec![block.header]);
+            let raw_charge = budget.charged_bytes(BudgetOwner::PeerReceive) - prior_receive;
+            assert_eq!(raw_charge, 0);
+            let expected_receipt = encoded_bytes + decoded_bytes;
+            let expected_charge = u64::try_from(expected_receipt)?;
+            assert_eq!(
+                budget.charged_bytes(BudgetOwner::StagedImages),
+                prior_image + expected_charge
+            );
+            assert_eq!(
+                budget.total_committed(),
+                prior_total + raw_charge + expected_charge
+            );
+            let credit = inbound.memory_credit.take().ok_or("wire image receipt")?;
+            let payload = inbound.into_payload();
+            let mut stager = crate::p2p::block_stager::BlockStager::new(
+                crate::p2p::download_window::policy::default_sync_budget(
+                    bitcoin_rs_consensus::primitives::Network::Regtest,
+                ),
+            );
+            let staged = stager.insert_with_credit(
+                hash,
+                Some(hash),
+                payload,
+                Some(fixture.source),
+                std::time::Instant::now(),
+                Some(credit),
+            );
+            assert!(matches!(
+                staged,
+                crate::p2p::block_stager::StagedBlock::Memory { bytes, ref dropped }
+                    if bytes == encoded_bytes && dropped.is_empty()
+            ));
+            assert!(stager.contains(&hash));
+            assert_eq!(stager.received_bytes(), encoded_bytes);
+            assert_eq!(stager.decoded_bytes(), decoded_bytes);
+            assert_eq!(
+                budget.charged_bytes(BudgetOwner::StagedImages),
+                prior_image + expected_charge
+            );
+            assert_eq!(
+                budget.charged_bytes(BudgetOwner::PeerReceive),
+                prior_receive + raw_charge
+            );
+            assert_eq!(
+                budget.total_committed(),
+                prior_total + raw_charge + expected_charge
+            );
+            assert!(stager.discard(&hash));
+            assert_eq!(stager.received_len(), 0);
+            assert_eq!(stager.received_bytes(), 0);
+            assert_eq!(stager.decoded_bytes(), 0);
+            assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), prior_image);
+            assert_eq!(
+                budget.charged_bytes(BudgetOwner::PeerReceive),
+                prior_receive
+            );
+            assert_eq!(budget.total_committed(), prior_total);
+            drop(held);
+            assert_eq!(budget.total_committed(), 0);
+        }
         Ok(())
     }
 }

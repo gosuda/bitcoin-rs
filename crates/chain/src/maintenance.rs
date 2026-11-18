@@ -60,16 +60,20 @@ fn maintenance_step(publisher: &CheckpointPublisher, elapsed: Duration) -> bool 
         return false;
     }
     match publisher.settle_disconnect_debt() {
-        Ok(true) => return true,
+        Ok(true) => {
+            log::info!("maintenance settled completed disconnect debt with a checkpoint");
+            return true;
+        }
         Ok(false) => {}
         Err(CheckpointError::DisconnectInFlight { hash, height }) => {
-            tracing::debug!(%hash, height, "maintenance publication deferred: disconnect in flight");
+            log::debug!(
+                "maintenance publication deferred: disconnect in flight at {hash} height {height}"
+            );
             return true;
         }
         Err(error) => {
-            tracing::warn!(
-                ?error,
-                "maintenance disconnect settlement failed; will retry on a later cadence tick"
+            log::warn!(
+                "maintenance disconnect settlement failed; will retry on a later cadence tick: {error}"
             );
             return true;
         }
@@ -84,21 +88,21 @@ fn maintenance_step(publisher: &CheckpointPublisher, elapsed: Duration) -> bool 
         return false;
     }
     match publisher.publish() {
-        Ok(CheckpointWrite::Published { reference }) => tracing::info!(
-            generation = reference.generation,
-            applied_height,
-            "maintenance published a chainstate checkpoint"
+        Ok(CheckpointWrite::Published { reference }) => log::info!(
+            "maintenance published a chainstate checkpoint generation {} at applied height {applied_height}",
+            reference.generation
         ),
         Ok(CheckpointWrite::SkippedNoAppliedTip) => {
-            tracing::debug!("maintenance publication skipped: no applied tip");
+            log::debug!("maintenance publication skipped: no applied tip");
         }
         Err(CheckpointError::DisconnectInFlight { hash, height }) => {
-            tracing::debug!(%hash, height, "maintenance publication deferred: disconnect in flight");
+            log::debug!(
+                "maintenance publication deferred: disconnect in flight at {hash} height {height}"
+            );
         }
         Err(error) => {
-            tracing::warn!(
-                ?error,
-                "maintenance publication failed; will retry on a later cadence tick"
+            log::warn!(
+                "maintenance publication failed; will retry on a later cadence tick: {error}"
             );
         }
     }

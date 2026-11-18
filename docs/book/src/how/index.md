@@ -44,13 +44,13 @@ Each capability stores its rows plus a watermark that pins them to an active-cha
 
 A coverage floor is a per-capability row that states the lowest height from which that capability's history is provable. `TxLookup` stores its floor under one key and `ScriptHistory` under another. A floor of zero means genesis; a positive floor means the history starts above genesis, from pruning or a seeded import. Historical prefix queries use these floors to refuse claims they cannot support.
 
-Row format has a version marker, currently row-format 9. `ScriptLive` rows have 43-byte keys: an 8-byte script-hash prefix followed by the outpoint. Each row value carries the full script hash and the coin's value, height, and coinbase flag in compact varint form, so readers exact-check the script without another store read: a prefix collision cannot return another script's output.
+Row format has a version marker, currently row-format 10. `ScriptLive` rows have 43-byte keys: an 8-byte script-hash prefix followed by the outpoint. Each row value carries the full script hash and the coin's value, height, and coinbase flag in compact varint form, so readers exact-check the script without another store read: a prefix collision cannot return another script's output.
 
 ## Strict reads and prefix reads
 
 Two read shapes exist and they do not mix:
 
-- `ScriptLive` reads are self-contained and lock-free (format 9, PRJ-11); they read stored coin payloads directly without acquiring a chain-transition lock or consulting the authoritative UTXO set.
+- `ScriptLive` reads are self-contained and lock-free (format 10, PRJ-11); they read stored coin payloads directly without acquiring a chain-transition lock or consulting the authoritative UTXO set.
 - Historical prefix reads are the three synchronous `Node` calls `transaction_at_prefix`, `script_history_at_prefix`, and `spender_at_prefix`. They take no live-UTXO or transition lock and return `Answer<T>` with a server-selected `CoveredPrefix { floor, height, hash }`.
 
 A historical query pins its serving view epoch and declared capability coverage once. Queries inside coverage return immutable answers regardless of concurrent chain extension or reorg (QRY-03). Queries outside declared coverage return `Unavailable(OutsideCoverage)` (QRY-05). Full history requires floor 0; a standalone spend lookup may return a scoped `None` (`IDX-12`).

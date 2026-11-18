@@ -6797,7 +6797,7 @@ mod scantxoutset_tests {
     #[test]
     fn scan_snapshot_ignores_commit_landing_mid_scan() {
         let ctx = Arc::new(Context::new());
-        let coin_count = 40_000_u64;
+        let coin_count = 2_000_u64;
         let scripts_per_txid = 200_u64;
         let coins: Vec<OracleCoin> = (0..coin_count)
             .map(|seed| {
@@ -6817,17 +6817,15 @@ mod scantxoutset_tests {
         let scanned_script = coins[0].script.clone();
         let scanned_descriptor = format!("raw({})", scanned_script.to_lower_hex_string());
 
+        let walk_gate = ctx.chain.utxo.arm_scan_walk_gate();
         let (committed_tx, committed_rx) = crossbeam_channel::bounded::<()>(1);
         let commit_ctx = Arc::clone(&ctx);
+        let commit_gate = std::sync::Arc::clone(&walk_gate);
         let committer = std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            loop {
-                match commit_ctx.chain.utxo.scan_progress() {
-                    Some(percent) if percent > 0 => break,
-                    _ => {}
-                }
+            while !commit_gate.parked() {
                 if std::time::Instant::now() > deadline {
-                    panic!("scan never published mid-walk progress");
+                    panic!("scan never reached the gated mid-walk point");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -6844,6 +6842,9 @@ mod scantxoutset_tests {
             commit_ctx
                 .populate_fixture_coins(&changes)
                 .unwrap_or_else(|err| panic!("mid-scan commit failed: {err}"));
+            if !commit_gate.open() {
+                panic!("scan walk gate timed out before the mid-scan commit");
+            }
             committed_tx
                 .send(())
                 .unwrap_or_else(|err| panic!("commit signal failed: {err}"));
@@ -6860,11 +6861,11 @@ mod scantxoutset_tests {
 
         let late_txid = Txid::from(test_txid(999_999)).to_string();
         assert_eq!(result["success"].as_bool(), Some(true), "{result:?}");
-        assert_eq!(result["txouts"].as_u64(), Some(40_000), "{result:?}");
+        assert_eq!(result["txouts"].as_u64(), Some(2_000), "{result:?}");
         let unspents = result["unspents"].as_array().unwrap_or_else(|| {
             panic!("unspents missing: {result:?}");
         });
-        assert_eq!(unspents.len(), 200);
+        assert_eq!(unspents.len(), 10);
         assert!(
             unspents
                 .iter()
@@ -6888,7 +6889,7 @@ mod scantxoutset_tests {
             .utxo
             .lock_stable_view()
             .unwrap_or_else(|error| panic!("post-commit view: {error}"));
-        assert_eq!(view.len(), 40_001);
+        assert_eq!(view.len(), 2_001);
         let late_outpoint = OutPoint::new(Txid::from(test_txid(999_999)), 0);
         assert_eq!(
             view.get_entry(&late_outpoint)

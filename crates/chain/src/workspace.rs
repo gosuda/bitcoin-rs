@@ -1534,10 +1534,32 @@ mod tests {
         }
     }
 
+    #[derive(Debug, thiserror::Error)]
+    enum Bip30OverwriteError {
+        #[error(transparent)]
+        Decode(#[from] bitcoin_rs_consensus::primitives::DecodeError),
+        #[error(transparent)]
+        Read(#[from] super::WindowReadError),
+        #[error(transparent)]
+        Workspace(#[from] super::WindowWorkspaceError),
+        #[error(transparent)]
+        Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
+        #[error(transparent)]
+        Storage(#[from] bitcoin_rs_storage::StorageError),
+        #[error("{0}")]
+        Missing(&'static str),
+    }
+
+    impl From<&'static str> for Bip30OverwriteError {
+        fn from(message: &'static str) -> Self {
+            Self::Missing(message)
+        }
+    }
+
     // WIN-07
     #[test]
     fn bip30_exception_block_stays_an_explicit_overwrite_of_the_engine_coin()
-    -> Result<(), Box<dyn std::error::Error>> {
+    -> Result<(), Bip30OverwriteError> {
         use super::CoinStore;
         use bitcoin_rs_consensus::bip30::BIP30_DUPLICATE_TXID_EXCEPTIONS;
         use bitcoin_rs_consensus::primitives::{Block, OutPoint, Tx, deserialize};

@@ -30,3 +30,8 @@ fuzz/corpus/** -text
 # The corpus manifest is generated JSON — text that must stay LF even
 # though the directory above it is pinned binary.
 fuzz/corpus/manifest.json text eol=lf
+
+# RocksDB datadir fixtures must check out byte-identically: CURRENT and
+# MANIFEST-* are parsed raw, and autocrlf's CR byte corrupts the image on
+# Windows checkouts only.
+tools/storage-convert/tests/fixtures/** -text

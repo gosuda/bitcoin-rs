@@ -41,6 +41,7 @@ zerocopy.workspace = true
 serde.workspace = true
 sonic-rs.workspace = true
 metrics.workspace = true
+log.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
@@ -62,3 +63,8 @@ path = "tests.rs"
 [[test]]
 name = "parse_once"
 path = "parse_once_tests.rs"
+
+[[test]]
+name = "bulk_script_allocation"
+path = "bulk_script_allocation_tests.rs"
+harness = false
