@@ -6821,17 +6821,15 @@ mod scantxoutset_tests {
         let scanned_script = coins[0].script.clone();
         let scanned_descriptor = format!("raw({})", scanned_script.to_lower_hex_string());
 
+        let walk_gate = ctx.chain.utxo.arm_scan_walk_gate();
         let (committed_tx, committed_rx) = crossbeam_channel::bounded::<()>(1);
         let commit_ctx = Arc::clone(&ctx);
+        let commit_gate = std::sync::Arc::clone(&walk_gate);
         let committer = std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            loop {
-                match commit_ctx.chain.utxo.scan_progress() {
-                    Some(percent) if percent > 0 => break,
-                    _ => {}
-                }
+            while !commit_gate.parked() {
                 if std::time::Instant::now() > deadline {
-                    panic!("scan never published mid-walk progress");
+                    panic!("scan never reached the gated mid-walk point");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -6848,6 +6846,7 @@ mod scantxoutset_tests {
             commit_ctx
                 .populate_fixture_coins(&changes)
                 .unwrap_or_else(|err| panic!("mid-scan commit failed: {err}"));
+            commit_gate.open();
             committed_tx
                 .send(())
                 .unwrap_or_else(|err| panic!("commit signal failed: {err}"));
