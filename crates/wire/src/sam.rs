@@ -3230,6 +3230,7 @@ mod tests {
 
     const HELD_BUDGET: Duration = Duration::from_millis(600);
 
+    #[cfg(unix)]
     const STRAGGLER_GRACE: Duration = Duration::from_millis(250);
 
     #[derive(Clone, Copy)]

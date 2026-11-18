@@ -32,6 +32,30 @@ fn read_history(path: &Path) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+#[cfg(unix)]
+pub(crate) fn sync_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::File::open(dir).and_then(|handle| handle.sync_all())
+}
+
+/// `FlushFileBuffers` needs write access, and opening a directory handle needs
+/// `FILE_FLAG_BACKUP_SEMANTICS`.
+#[cfg(windows)]
+pub(crate) fn sync_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)
+        .and_then(|handle| handle.sync_all())
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn sync_dir(_dir: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 pub fn load(data_dir: &Path, mempool: &RwLock<Mempool>) {
     let path = data_dir.join(HISTORY_FILE);
     let bytes = match read_history(&path) {
@@ -128,28 +152,6 @@ pub fn save(data_dir: &Path, history_bytes: &[u8]) {
             "failed to save fee-estimator history; the node still shuts down cleanly"
         ),
     }
-}
-
-#[cfg(windows)]
-pub(crate) fn sync_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(dir)
-        .and_then(|handle| handle.sync_all())
-}
-
-#[cfg(unix)]
-pub(crate) fn sync_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    std::fs::File::open(dir).and_then(|handle| handle.sync_all())
-}
-
-#[cfg(not(any(unix, windows)))]
-pub(crate) fn sync_dir(_dir: &std::path::Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
