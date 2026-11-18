@@ -140,6 +140,7 @@ impl ScanState {
             while !state.open && Instant::now() < deadline {
                 let _ = gate.cvar.wait_for(&mut state, Duration::from_secs(1));
             }
+            state.open = true;
         }
     }
 }
