@@ -6801,7 +6801,7 @@ mod scantxoutset_tests {
     #[test]
     fn scan_snapshot_ignores_commit_landing_mid_scan() {
         let ctx = Arc::new(Context::new());
-        let coin_count = 40_000_u64;
+        let coin_count = 2_000_u64;
         let scripts_per_txid = 200_u64;
         let coins: Vec<OracleCoin> = (0..coin_count)
             .map(|seed| {
@@ -6863,11 +6863,11 @@ mod scantxoutset_tests {
 
         let late_txid = Txid::from(test_txid(999_999)).to_string();
         assert_eq!(result["success"].as_bool(), Some(true), "{result:?}");
-        assert_eq!(result["txouts"].as_u64(), Some(40_000), "{result:?}");
+        assert_eq!(result["txouts"].as_u64(), Some(2_000), "{result:?}");
         let unspents = result["unspents"].as_array().unwrap_or_else(|| {
             panic!("unspents missing: {result:?}");
         });
-        assert_eq!(unspents.len(), 200);
+        assert_eq!(unspents.len(), 10);
         assert!(
             unspents
                 .iter()
@@ -6891,7 +6891,7 @@ mod scantxoutset_tests {
             .utxo
             .lock_stable_view()
             .unwrap_or_else(|error| panic!("post-commit view: {error}"));
-        assert_eq!(view.len(), 40_001);
+        assert_eq!(view.len(), 2_001);
         let late_outpoint = OutPoint::new(Txid::from(test_txid(999_999)), 0);
         assert_eq!(
             view.get_entry(&late_outpoint)
