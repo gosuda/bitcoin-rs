@@ -34,22 +34,45 @@ jobs:
 
   # Path-gated on pull requests (all paths on manual runs), as the old fuzz-build,
   # fuzz-lockfile and template-provider-lockfile workflows were.
-  drift:
+  fuzz:
     if: env.LATCHKEY_CI_EVENT_CLASS == 'pr_update' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch'
-    runs-on: medium
-    timeout-minutes: 30
+    runs-on: large
+    timeout-minutes: 60
     steps:
-      - name: Fuzz lockfile drift
+      - name: Lockfile drift
         run: |
           bash .latchkey/setup.sh changed '^(crates/[^/]+/Cargo\.toml|fuzz/|Cargo\.toml$)' || exit 0
           bash .latchkey/setup.sh nightly
           cargo +nightly metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml >/dev/null
+      - uses: latchkey/cache-restore@1.1.0
+        with:
+          key: fuzz-target
+          version: v1
+          hash-files: fuzz/Cargo.lock
       - name: Fuzz targets build
         run: |
           bash .latchkey/setup.sh changed '^(fuzz/|Cargo\.toml$)' || exit 0
           bash .latchkey/setup.sh apt nightly fuzz
           cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
-      - name: Template provider
+      - uses: latchkey/cache-save@1.1.0
+        with:
+          key: fuzz-target
+          version: v1
+          hash-files: fuzz/Cargo.lock
+          path: fuzz/target
+
+  template-provider:
+    if: env.LATCHKEY_CI_EVENT_CLASS == 'pr_update' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch'
+    runs-on: medium
+    timeout-minutes: 45
+    steps:
+      - uses: latchkey/cache-restore@1.1.0
+        with:
+          key: template-provider
+          version: v1
+          hash-files: tools/stratum-sv2/template-provider/Cargo.lock
+          into: tools/stratum-sv2/template-provider
+      - name: Lockfile, tests and clippy
         run: |
           bash .latchkey/setup.sh changed '^(tools/stratum-sv2/template-provider/|crates/|Cargo\.(toml|lock)$)' || exit 0
           bash .latchkey/setup.sh apt
@@ -57,6 +80,13 @@ jobs:
           cargo metadata --locked --format-version 1 --manifest-path "$m" >/dev/null
           cargo test --locked --manifest-path "$m"
           cargo clippy --locked --manifest-path "$m" --all-targets -- -D warnings
+      - uses: latchkey/cache-save@1.1.0
+        with:
+          key: template-provider
+          version: v1
+          hash-files: tools/stratum-sv2/template-provider/Cargo.lock
+          from: tools/stratum-sv2/template-provider
+          path: target
 
   lane:
     runs-on: medium
