@@ -78,15 +78,7 @@ pub(super) fn get(ctx: &Context, path: &str) -> Response {
             |h| blocks(&ctx, Some(h)),
         ),
         ["mempool"] => mempool(&ctx),
-        ["mempool", "txids"] => json_ok(
-            ctx.mempool
-                .gateway
-                .read()
-                .iter_txids()
-                .into_iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>(),
-        ),
+        ["mempool", "txids"] => mempool_txids(&ctx),
         ["mempool", "recent"] => mempool_recent(&ctx),
         ["fee-estimates"] => fee_estimates(ctx),
         ["scripthash", hash] => summary(&ctx, hash, None),
@@ -615,6 +607,20 @@ fn mempool(ctx: &Context) -> Response {
             .collect(),
     })
 }
+fn mempool_txids(ctx: &Context) -> Response {
+    let txids = {
+        ctx.mempool
+            .gateway
+            .read()
+            .iter_txids()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+    };
+    #[cfg(test)]
+    crate::esplora::tests::gate_pure_mempool_read_for_tests();
+    json_ok(&txids)
+}
 fn mempool_recent(ctx: &Context) -> Response {
     const RECENT: usize = 10;
     let latest = {
@@ -640,6 +646,8 @@ fn mempool_recent(ctx: &Context) -> Response {
             })
             .collect::<Vec<_>>()
     };
+    #[cfg(test)]
+    crate::esplora::tests::gate_pure_mempool_read_for_tests();
     json_ok(
         latest
             .into_iter()
@@ -662,6 +670,8 @@ fn fee_estimates(ctx: &Context) -> Response {
             .filter_map(|target| pool.estimate_fee_rate(target).map(|rate| (target, rate)))
             .collect::<Vec<_>>()
     };
+    #[cfg(test)]
+    crate::esplora::tests::gate_pure_mempool_read_for_tests();
     let mut values = sonic_rs::Object::new();
     for (target, rate) in estimates {
         let fee = fee_rate_sat_per_vbyte(convert::sat_to_btc(rate.as_sat_per_kvb()));
