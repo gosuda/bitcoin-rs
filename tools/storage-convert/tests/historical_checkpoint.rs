@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use bitcoin_rs_chain::{AssumeUtxoManager, HistoricalCheckpointRef};
 use bitcoin_rs_consensus::primitives::{Hash256, Network, OutPoint, Txid};
-use bitcoin_rs_execution::{AssumeUtxoManager, HistoricalCheckpointRef};
 use bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus;
 use bitcoin_rs_storage::checkpoint::{
     COINSTATS_FILE, CURRENT_FILE, CheckpointManifestV1, CheckpointReference, CurrentV1,
@@ -474,9 +474,9 @@ fn streaming_tree_digest(root: &Path) -> TestResult<[u8; 32]> {
 
 #[test]
 fn equal_head_epoch3_conversion_preserves_canonical_headers_over_64_mib() -> TestResult {
+    use bitcoin_rs_chain::chain::compact_is_met_by;
     use bitcoin_rs_consensus::primitives::hex::hex_encode;
     use bitcoin_rs_consensus::primitives::{Header, deserialize};
-    use bitcoin_rs_execution::chain::compact_is_met_by;
     use bitcoin_rs_storage::checkpoint::{CHECKPOINT_ROOT, CURRENT_FILE, CurrentV1};
     use std::io::{BufWriter, Read, Write};
 
@@ -558,7 +558,7 @@ fn equal_head_epoch3_conversion_preserves_canonical_headers_over_64_mib() -> Tes
     assert_eq!(head.height, manifest.applied_tip.height);
     assert_eq!(head.tip.to_string_be(), manifest.applied_tip.hash);
     let dir = bitcoin_rs_storage::checkpoint::open_data_dir(&generation)?;
-    bitcoin_rs_execution::recovery::validate_conversion_checkpoint_artifacts(
+    bitcoin_rs_chain::recovery::validate_conversion_checkpoint_artifacts(
         &dir,
         &reference,
         Network::Regtest,

@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
 
+use bitcoin_rs_chain::recovery::{ResumeSource, prepare_initial_state_with_engine};
 use bitcoin_rs_consensus::primitives::{Header, Network, consensus_bytes, deserialize};
-use bitcoin_rs_execution::recovery::{ResumeSource, prepare_initial_state_with_engine};
 use bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus;
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::utxo::core_snapshot::{SnapshotLimits, read_and_verify};

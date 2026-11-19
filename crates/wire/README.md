@@ -1,20 +1,62 @@
 # bitcoin-rs-wire
 
-This crate owns the Bitcoin peer-to-peer surface. It covers the wire codec, the peer lifecycle and handshaking, inbound dispatch, connection management, and block-download policy (`DownloadWindow` and `BlockStager`).
+This crate provides the synchronous, Bitcoin Core-compatible JSON-RPC and REST surface. It covers method dispatch, HTTP Basic and cookie authentication, and a wallet-free method surface. Every RPC that needs private key material is absent.
 
-Each `Peer` owns one connection's stream and handshake state. Live connections carry a `ConnectionId` and clean up through a `PeerLease`. They publish ready metadata in the shared `PeerTable`. Accept and connect share one socket policy in `socket::configure_peer_stream` (`TCP_NODELAY`, blocking I/O, handshake/poll timeouts). `P2pService` owns workers and the session store. `BlockSync` owns the only production download window. The node supplies chain queries and coordinates chain application. Connections negotiate version/verack in `handshake`, then run the peer machine in `fsm`. The `wire` module is the protocol codec. The per-connection writer coalesces a ready burst through `write_ready_burst`'s vectored write pass. Blocks and transactions stay one frame. Inbound traffic reaches the host through `dispatch_inbound_full`. That function streams getdata responses behind the outbound budget's pre-load production headroom gate, and it reads the chain through the `ChainQuery` trait. Every queued message is a `QueuedFrame`. Each frame carries its own charge against the connection budget and the strict 64 MiB aggregate of queued outbound bytes. The frame returns that charge when it drops. Aggregate refusal is backpressure. It defers requests and parks unserved work, but it never cancels a lease (see [P2P compatibility](../../docs/policies/p2p-compatibility.md)). Served block bodies are the stored consensus bytes (`Message::BlockBytes`). They are never decoded and re-encoded. `inbound` hands over `InboundBlock` and `InboundHeaders` with wire bytes preserved. Manual bans exclude whole subnets as an in-memory `BannedSubnet` built from an `IpSubnet`. `wire` decodes BIP155 `addrv2` messages. BIP339 wtxid-relay state lives in `wtxid`.
+`RpcServer::bind` binds a TCP listener. `serve_with_shutdown` runs the blocking accept loop under a shared shutdown flag. It hands each connection to a bounded worker thread with a per-connection idle timeout. Sockets go through `prepare_http_socket` (`TCP_NODELAY`). JSON and REST responses emit headers plus bodies through one vectored write. `Auth` authenticates each request. `Handler::dispatch` then matches the request and reads shared node state through the injected `Context`. That context holds `ChainControl` consensus operations, `PruneService`, `DerivedIndexQuery`, `NetworkHandles` (peer table, P2P service control, local services), and the live `ZmqPublisher`. Failures map to JSON-RPC codes through `RpcError`. Core-compatible REST endpoints (`rest`) are served on the same listener when enabled. RPCs that would reveal, import, create, or use private keys are unimplemented. They answer `method not found`. PSBT combination and finalization stay available, because external signers drive them and this process holds no key material.
 
-`PeerTable` is the single authoritative owner of live peer sessions (`PeerSession`), connection control leases (`PeerLease`), and post-handshake metadata (`PeerInfo`). A connected TCP stream enters only through `CountingStream::from_connected`. That constructor owns `TCP_NODELAY`, and it forwards vectored writes so `wire::write_message` stays one `writev` on the socket. Invariants:
+## Capability boundary
 
-- One live session per remote `SocketAddr`.
-- Registering a new lease at an existing address atomically cancels and replaces the predecessor.
-- Removal (`remove_current`, `disconnect_source`, `disconnect_connection`) verifies `ConnectionId`, so a stale handle cannot evict or cancel a newer session.
-- Post-handshake `PeerInfo` publication succeeds only if the publishing connection remains the active session for that address.
+`ContextHandles` groups node-owned handles by capability (`chain`, `mempool`, `indexes`, `network`, `mining`); `Context::from_handles` is the single composition point. RPC consumes capabilities through these groups, never names a storage backend or engine type, and the crate exposes no backend cargo feature (`g17_dependency_direction` proves both from `cargo metadata`).
 
-All consumers observe and mutate live connections exclusively through `PeerTable`. The consumers are the inbound `listener`, the outbound connection threads, the block-download scheduler, outbound transaction relay, and the RPC methods `getpeerinfo`, `getnetworkinfo`, and `disconnectnode`.
+## Interface architecture and implementation guidance
 
-Transaction inventory, parent requests, and outbound relay consume the shared transaction lifecycle. [ARCH-05](../../docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary) defines the ownership split. [P2P compatibility](../../docs/policies/p2p-compatibility.md) defines the peer-visible inventory and relay behavior.
+### 1. Protocol demuxing and authentication
 
-`P2pService` owns DNS seed configuration and bootstraps outbound addresses in its bootstrap worker. The `listener` module has one entry point per role. `bind_listener` binds a local address, `serve` runs the accept loop until shutdown, and `spawn_outbound_connection` dials one peer. `serve` and `spawn_outbound_connection` read one cloneable `ConnectionShared` wiring value per start epoch. That value also owns the header, block, and transaction sinks. `wire` decodes `Message` values and reports `PeerError`. `dispatch_inbound_full` filters transaction inventory through the `TxInventory` trait. It receives the chain-owned initial-block-download gate that the `listener` supplies through its `tx_relay_open` callback. While the gate is closed, the dispatcher never requests transaction-typed `inv` vectors. It drops `tx` bodies before ingress (Core 31.1 `net_processing.cpp`, `:4713-4716`). `inbound` hands over `InboundBlock`, `InboundHeaders`, and `InboundTx` with their delivering peer stamped.
+- Private free function `classify` (`crates/wire/src/server.rs`) is the listener directory table. `serve_connection` dispatches that table before authentication. The wallet-facing Esplora routing contract is [`WF-02`](../../docs/contracts/wallet-facing.md#wf-02-operations-a-wallet-actually-issues). The parser preserves HTTP framing while letting valid unsupported methods reach the demux for a 404:
+  - `GET /rest/*` goes to Core REST (`rest::route`).
+  - `GET` or `POST` under `/api` or `/esplora` goes to Esplora. `classify` strips the directory prefix and passes `Surface` plus the rest; `esplora::route` / `route_post` dispatch only inside that directory. Unknown paths 404 and never become JSON-RPC. `/api` is public electrs; `/esplora` is the mempool-backend superset. Wallet broadcast is `POST /api/tx`.
+  - Other `POST` goes to JSON-RPC. `Auth::validate_header` (`crates/wire/src/auth.rs`) guards this path only.
+  - Any other method, or GET outside `/rest/`, `/api`, `/esplora`, 404s at the demux. Unprefixed electrs paths and `HEAD`/`PUT`/`DELETE` enter neither Esplora nor JSON-RPC. The parser accepts those methods so `classify` can 404 them instead of answering JSON-RPC 400.
+- `JsonRpcVersion` (`crates/wire/src/server.rs`) governs wire framing:
+  - `"jsonrpc": "2.0"` requests use JSON-RPC 2.0 (`JsonRpcVersion::V2`): success emits `{"jsonrpc":"2.0","result":...,"id":...}` (HTTP 200), dispatch errors emit `{"jsonrpc":"2.0","error":...,"id":...}` (HTTP 200), and requests omitting `id` are notifications returning HTTP 204. An envelope refusal (`-32600` while validating the envelope itself) answers HTTP 400 in either dialect; only the reply envelope follows how far parsing got.
+  - Other requests use JSON-RPC 1.1 / legacy (`JsonRpcVersion::Legacy`). Success emits `{"result":...,"error":null,"id":...}` (HTTP 200). Errors emit `{"result":null,"error":...,"id":...}` with Core's status mapping (`-32600` to 400, `-32601` to 404, every other code to 500); missing `id` defaults to `null`. A top-level JSON scalar is `-32700` at HTTP 500 with null id. A batch with at least one reply answers 200; an empty batch answers 200 with `[]`; an all-notification batch answers 204 with no body.
+- The node ships no wallet. Methods needing private keys (funding, signing, key import/export) are unimplemented and return `RpcError::MethodNotFound`. PSBT combination and finalization, descriptor utilities, and `scantxoutset` stay available because external signers drive them.
 
-Part of [`bitcoin-rs`](../../README.md). See [`CONCEPTS.md`](../../CONCEPTS.md) for the project vocabulary.
+### 2. Deep module separation and system owners
+
+- Handlers, REST routes, and Esplora projections sit at the transport seam as pure wire adapters. They translate payloads into deep module interfaces (`Context`, `BlockTree`, `DerivedIndexQuery`, `applied_tip`). They use domain-local concurrency and storage without leaking locks, indexing, or consensus logic into serialization.
+- System owners:
+  - Routing and demux: `classify` in `crates/wire/src/server.rs` owns the listener directory table; routing rules are under [protocol demuxing and authentication](#1-protocol-demuxing-and-authentication).
+  - Authentication: `Auth::validate_header` in `crates/wire/src/auth.rs` guards JSON-RPC; `serve_connection` in `crates/wire/src/server.rs` is the routing callsite. REST and Esplora stay unauthenticated.
+  - Error codes: failures map through `RpcError` in `crates/wire/src/error.rs`. Current mappings cover standard codes (`-32700`, `-32600` to `-32603`) and Core codes `-3` (invalid type), `-5` (not found), `-8` (invalid parameter). Handlers also emit `-1` (misc), `-22` (deserialization), `-25` (verify), and `-26` (verify-rejected) where implemented; `-27` stays a method-specific obligation when its behavior is implemented.
+  - Read consistency and tip fencing: joined Esplora reads combine chain or index data with mempool data in one response. They use two-phase optimistic fencing (`capture_chain_view` / `ensure_chain_view` in `crates/wire/src/esplora/projection.rs`, selected by `needs_tip_fence` in `crates/wire/src/esplora.rs`). Transaction lookups fence only `Joined` answers that consulted the mempool. REST reads can use active-tip ancestry verification against `BlockTree` (`crates/wire/src/rest.rs`). Composed HTTP responses require a stable applied-tip publication. This includes public address and scripthash `txs/mempool` routes, which also read confirmed prevouts or unspent index state. If the publication changes during execution, these responses return `503 Service Unavailable`. This rule includes chain extension, replacement, and ABA republication. Immutable historical owner reads remain valid across ordinary chain extension. Confirmed-only transaction answers retain their captured occurrence identity. True mempool-only routes remain unfenced.
+  - Status reads versus live scans: published-status reads (`getblockchaininfo`, `getchaintxstats`, typed `Context::sync_progress`) project from one `AppliedView` capture of the last complete applied publication. They never take the node's `StableRead` transition role, so a mid-transition block cannot stall an explorer or monitoring client. Reads needing a mutable chainstate as one piece (`scantxoutset` tip-plus-UTXO scan, `gettxoutsetinfo`, REST `getutxos`) run inside `Context::with_stable_chainstate`, which holds that exclusion across the whole read. Mempool admission is not one of them. `sendrawtransaction` and Esplora broadcasts submit through `MempoolGateway::submit_local_transaction` under the mempool's optimistic `AdmissionFence::Stable` version fence, retrying on a mid-check transition instead of excluding one. That exclusion is mutable-chainstate exclusion, not status synchronization.
+  - Index query budgets: statistical and script index queries must be bounded by `QueryBudget` (`crates/index/src/runtime/query.rs`) against memory exhaustion and disk query starvation.
+  - Multi-format rendering: multi-representation REST routes (such as `/rest/headers/...` in `crates/wire/src/rest.rs`) implement `.json`, `.hex`, and `.bin` with explicit `Content-Type` headers (`application/json`, `text/plain`, `application/octet-stream`); single-representation routes (such as `/rest/chaininfo.json`) stay JSON-only.
+
+### 3. Caching and pagination rules
+
+- HTTP caching (RFC 9111):
+  - Confirmed blocks, headers, immutable transactions: `Cache-Control: public, immutable, max-age=86400`.
+  - Volatile tips, mempool, unconfirmed transactions: `Cache-Control: no-store`.
+  - REST endpoints must ignore unrecognized query parameters to preserve downstream cache efficiency.
+- Cursor pagination: use immutable hash cursors (`last_seen_txid`, block hashes), never integer offsets, for volatile datasets.
+
+### 4. Non-blocking event notifications
+
+- ZMQ framing: notifications (`ZmqPublisher` in `crates/wire/src/zmq.rs`) emit 3-part multipart frames of topic, body, and 4-byte LE sequence.
+- Non-blocking delivery: socket writes must use non-blocking sends (`zmq::DONTWAIT`). Buffer saturation at the high-water mark drops messages instead of stalling block validation or consensus.
+- Reorg sequencing and order: rollback and admission orchestration in `crates/node/src/chain_effects.rs` guarantees disconnect events (`D`, published during rollback) emit before connect events (`C`, published by `on_connect`).
+
+### 5. Architectural guardrails
+
+- No generic middleware: no heavy async web framework stacks (Axum, Actix, Tower) in `RpcServer`.
+- No speculative traits: no universal query abstractions across distinct wire protocols.
+- No URL versioning: no `/v1/` or `/v2/` prefixes on Core-compatible endpoints.
+
+## Features
+
+- `silent-payments`: experimental `getblocktweaks` extension, separately enabled at runtime with `--silent-payments`. See [usage and limits](../../docs/silent-payments.md).
+- `zmq`: gates ZMQ notification methods in the JSON-RPC registry. The crate defines and forwards no storage-backend features (`ARCH-04`).
+
+Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the project vocabulary.

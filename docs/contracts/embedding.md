@@ -37,10 +37,10 @@ The typed in-process surface provides `Node::start`, gateway broadcast, and cons
   - Embedders MUST use operation-oriented `Node` methods only.
 - **EMB-04: Typed reads mirror the RPC facts.**
   - `snapshot()` returns the coherent `ChainSnapshot`.
-  - `sync_progress()` runs the identical `getblockchaininfo` projection via `ChainHandles::sync_progress` (`crates/serving/src/context.rs`) over `ChainProgressReader` (`crates/execution/src/chain/progress.rs`).
-  - `capabilities()` returns `CapabilitySnapshot` (`crates/projection/src/capabilities.rs`).
+  - `sync_progress()` runs the identical `getblockchaininfo` projection via `ChainHandles::sync_progress` (`crates/wire/src/context.rs`) over `ChainProgressReader` (`crates/chain/src/chain/progress.rs`).
+  - `capabilities()` returns `CapabilitySnapshot` (`crates/index/src/capabilities.rs`).
 - **EMB-05: Broadcast is the shared admission.**
-  - `Node::broadcast`, `sendrawtransaction` (`crates/serving/src/handlers/tx.rs`), and Esplora broadcasts all call `MempoolGateway::submit_local_transaction`.
+  - `Node::broadcast`, `sendrawtransaction` (`crates/wire/src/handlers/tx.rs`), and Esplora broadcasts all call `MempoolGateway::submit_local_transaction`.
   - `Node::broadcast` passes the default fee-rate cap of `sendrawtransaction`.
   - Calls run under the node's one write-lock interval.
   - Block-connect eviction (`remove_for_block`) commits through the same gateway.
@@ -62,7 +62,7 @@ The typed in-process surface provides `Node::start`, gateway broadcast, and cons
   - Each store carries the `.lock` guard.
   - That lock reports as typed `DataDirLockError::InUse`, mapped to `NodeError::Startup`.
 - **EMB-08: Mutations wake the template coordinator.**
-  - The node-constructed `MiningGenerationSignal` (`crates/serving/src/mining/generation_signal.rs`) fires on every committed gateway mutation.
+  - The node-constructed `MiningGenerationSignal` (`crates/wire/src/mining/generation_signal.rs`) fires on every committed gateway mutation.
   - It fires on every applied-tip connect/disconnect to the attached coordinator.
   - Before attach it is a no-op.
 - **EMB-09: Shutdown wake cannot block teardown.**
@@ -101,7 +101,7 @@ impl Node {
     pub fn spender_at_prefix(&self, outpoint: OutPoint) -> Result<Answer<Option<SpendingRecord>>, TxQueryError>;
 }
 ```
-`Answer<T>` carries `coverage.floor`, `coverage.height`, `coverage.hash`, `height`, `block_hash`, `verification_state`, plus `value` (`Some((height, tx))` with `floor <= height <= coverage.height`, `ScriptIndexSnapshot`, or `Some(record)`). Types are `bitcoin_rs_projection::query_api` (already public, not re-exported). `Txid`/`Tx`/`OutPoint` keep `bitcoin_rs_consensus::primitives` paths, the rest keep projection paths. Calls are synchronous bounded blocking reads on the calling thread (place on a blocking worker; the existing `async` reads are not a pattern). `transaction_at_prefix` needs `TxLookup` only (tx-only nodes OK). The script operations need `ScriptHistory`. Each call returns its own prefix (compare prefixes, never assume one anchor). Absence is scoped to `[coverage.floor, coverage.height]` on `chain(coverage.hash)` (never global absence, unspentness, or existence; no mempool is merged in). A positive floor refuses full history with `Unavailable(HistoryUnproven { floor })` while a standalone spend lookup may return scoped `None`. Ordinary chain extension never produces `Retry` for historical queries (QRY-03); the view epoch is pinned. `Unavailable` names the gap (`OutsideCoverage` or shared budget/body/capability cause; match the variant, never the string). `Storage` reports a durable read failure. `ScriptLive` reads are self-contained and lock-free (format 8, PRJ-11). Core RPC behavior is unchanged.
+`Answer<T>` carries `coverage.floor`, `coverage.height`, `coverage.hash`, `height`, `block_hash`, `verification_state`, plus `value` (`Some((height, tx))` with `floor <= height <= coverage.height`, `ScriptIndexSnapshot`, or `Some(record)`). Types are `bitcoin_rs_index::query_api` (already public, not re-exported). `Txid`/`Tx`/`OutPoint` keep `bitcoin_rs_consensus::primitives` paths, the rest keep projection paths. Calls are synchronous bounded blocking reads on the calling thread (place on a blocking worker; the existing `async` reads are not a pattern). `transaction_at_prefix` needs `TxLookup` only (tx-only nodes OK). The script operations need `ScriptHistory`. Each call returns its own prefix (compare prefixes, never assume one anchor). Absence is scoped to `[coverage.floor, coverage.height]` on `chain(coverage.hash)` (never global absence, unspentness, or existence; no mempool is merged in). A positive floor refuses full history with `Unavailable(HistoryUnproven { floor })` while a standalone spend lookup may return scoped `None`. Ordinary chain extension never produces `Retry` for historical queries (QRY-03); the view epoch is pinned. `Unavailable` names the gap (`OutsideCoverage` or shared budget/body/capability cause; match the variant, never the string). `Storage` reports a durable read failure. `ScriptLive` reads are self-contained and lock-free (format 8, PRJ-11). Core RPC behavior is unchanged.
 
 ## Error behavior
 

@@ -18,14 +18,14 @@ use crate::source::{SourceNamespace, detect_engine};
 use crate::target::{
     BatchWriter, FamilyDigest, compute_destination_digest, open_destination_store,
 };
+use bitcoin_rs_chain::recovery::{
+    ConvertedCheckpoint, publish_converted_checkpoint, publish_snapshot_base_checkpoint,
+    snapshot_base_checkpoint_compatible,
+};
 use bitcoin_rs_consensus::bip30::{BIP30_DUPLICATE_TXID_EXCEPTIONS, is_bip30_exception};
 use bitcoin_rs_consensus::primitives::{
     Amount, AssumeUtxoData, Block, BlockImage, ConsensusDecode, Hash256, Header, Network, OutPoint,
     Script, TxOut, Txid, deserialize, hex::hex_encode,
-};
-use bitcoin_rs_execution::recovery::{
-    ConvertedCheckpoint, publish_converted_checkpoint, publish_snapshot_base_checkpoint,
-    snapshot_base_checkpoint_compatible,
 };
 use bitcoin_rs_storage::checkpoint::{
     CHECKPOINT_ROOT, COINSTATS_FILE, CURRENT_FILE, CURRENT_FORMAT, CURRENT_VERSION,
@@ -2417,7 +2417,7 @@ fn run_step_3_to_4(
         durable_head.height == checkpoint_height && durable_head.tip == checkpoint_hash;
     let engine = open_destination_store(&cs_dst_path, target_engine)?;
     if equal_head {
-        bitcoin_rs_execution::recovery::validate_conversion_checkpoint_artifacts(
+        bitcoin_rs_chain::recovery::validate_conversion_checkpoint_artifacts(
             &checkpoint_dir,
             &_reference,
             checkpoint_network(&manifest.network)?,

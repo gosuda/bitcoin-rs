@@ -54,23 +54,23 @@ cargo_test() {
 clippy_lane_services() {
   profile "clippy: services and tools (kernel-free)" \
     cargo clippy --locked --workspace --all-targets \
-      --features bitcoin-rs-serving/silent-payments,bitcoin-rs-serving/zmq \
+      --features bitcoin-rs-wire/silent-payments,bitcoin-rs-wire/zmq \
       --exclude bitcoin-rs --exclude bitcoin-rs-node \
-      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-execution \
-      --exclude bitcoin-rs-e2e --exclude bitcoin-rs-wire \
+      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chain \
+      --exclude bitcoin-rs-e2e --exclude bitcoin-rs-p2p \
       -- -D warnings
 }
 
 clippy_lane_node_runtime() {
-  profile "clippy: node runtime and wire" \
-    cargo clippy --locked -p bitcoin-rs -p bitcoin-rs-e2e -p bitcoin-rs-wire \
-      --features bitcoin-rs/silent-payments,bitcoin-rs-wire/test-seam \
+  profile "clippy: node runtime and p2p" \
+    cargo clippy --locked -p bitcoin-rs -p bitcoin-rs-e2e -p bitcoin-rs-p2p \
+      --features bitcoin-rs/silent-payments,bitcoin-rs-p2p/test-seam \
       --all-targets -- -D warnings
   profile "clippy: bitcoin-rs-consensus (native)" \
     cargo clippy --locked -p bitcoin-rs-consensus \
       --no-default-features --all-targets -- -D warnings
-  profile "clippy: bitcoin-rs-execution (native)" \
-    cargo clippy --locked -p bitcoin-rs-execution \
+  profile "clippy: bitcoin-rs-chain (native)" \
+    cargo clippy --locked -p bitcoin-rs-chain \
       --all-targets -- -D warnings
   profile "clippy: bitcoin-rs-node (zmq,silent-payments)" \
     cargo clippy --locked -p bitcoin-rs-node \
@@ -103,14 +103,14 @@ clippy_profiles() {
 }
 
 test_crates_silent_payments() {
-  profile "test: bitcoin-rs-serving (silent-payments adapter)" \
-    cargo_test -p bitcoin-rs-serving --features silent-payments --lib handlers::silent_payments
+  profile "test: bitcoin-rs-wire (silent-payments adapter)" \
+    cargo_test -p bitcoin-rs-wire --features silent-payments --lib handlers::silent_payments
   profile "test: bitcoin-rs (silent-payments process)" \
     cargo_test -p bitcoin-rs --no-default-features --features silent-payments --test suite silent_payments::
   profile "test: bitcoin-rs (certified inputs process)" \
     cargo_test -p bitcoin-rs --no-default-features --features silent-payments --test suite block_inputs::
-  profile "test: bitcoin-rs-projection (silent-payments codec)" \
-    cargo_test -p bitcoin-rs-projection --features silent-payments --test suite silent_payments::
+  profile "test: bitcoin-rs-index (silent-payments codec)" \
+    cargo_test -p bitcoin-rs-index --features silent-payments --test suite silent_payments::
 }
 
 test_crates_storage() {
@@ -124,15 +124,15 @@ test_crates_storage() {
     cargo_test -p bitcoin-rs-storage --features surrealkv,mdbx --test mdbx_bounded_read_allocation
   profile "test: bitcoin-rs-storage utxo_query_lifetime" \
     cargo_test -p bitcoin-rs-storage --test utxo_query_lifetime
-  profile "test: bitcoin-rs-projection (namespace recovery)" \
-    cargo_test -p bitcoin-rs-projection --features surrealkv,mdbx --lib runtime::startup::tests::namespace_reset::
-  profile "test: bitcoin-rs-projection (populated namespace recreation)" \
-    cargo_test -p bitcoin-rs-projection --features surrealkv,mdbx --lib incompatible_populated_index_reopens_without_writing_obsolete_rows
-  profile "test: bitcoin-rs-projection (worker failure isolation)" \
-    cargo_test -p bitcoin-rs-projection --features surrealkv,mdbx --lib unusable_worker_makes_queries_unavailable
+  profile "test: bitcoin-rs-index (namespace recovery)" \
+    cargo_test -p bitcoin-rs-index --features surrealkv,mdbx --lib runtime::startup::tests::namespace_reset::
+  profile "test: bitcoin-rs-index (populated namespace recreation)" \
+    cargo_test -p bitcoin-rs-index --features surrealkv,mdbx --lib incompatible_populated_index_reopens_without_writing_obsolete_rows
+  profile "test: bitcoin-rs-index (worker failure isolation)" \
+    cargo_test -p bitcoin-rs-index --features surrealkv,mdbx --lib unusable_worker_makes_queries_unavailable
 }
 
-test_crates_consensus_execution() {
+test_crates_consensus_chain() {
   # Per-crate profiles may use checked-in fixtures but need no pinned Core
   # daemon. Tests launching that daemon run in the workspace lane below.
   # Smallest first.
@@ -143,21 +143,21 @@ test_crates_consensus_execution() {
   # The offline CLI uses the checked-in Core snapshot, not a running daemon.
   profile "test: bitcoin-rs-snapshot" \
     cargo_test -p bitcoin-rs-snapshot
-  profile "test: bitcoin-rs-execution (native)" \
-    cargo_test -p bitcoin-rs-execution
-  profile "test: bitcoin-rs-wire" \
-    cargo_test -p bitcoin-rs-wire
+  profile "test: bitcoin-rs-chain (native)" \
+    cargo_test -p bitcoin-rs-chain
+  profile "test: bitcoin-rs-p2p" \
+    cargo_test -p bitcoin-rs-p2p
 }
 
-test_crates_node_serving() {
+test_crates_node_wire() {
   profile "test: bitcoin-rs-node (zmq)" \
     cargo_test -p bitcoin-rs-node \
       --no-default-features --features zmq
   # Isolated so node's default zmq feature cannot unify this package on.
-  profile "test: bitcoin-rs-serving (no default features)" \
-    cargo_test -p bitcoin-rs-serving --no-default-features
-  profile "test: bitcoin-rs-serving (pool, pool-sv2)" \
-    cargo_test -p bitcoin-rs-serving --features pool,pool-sv2
+  profile "test: bitcoin-rs-wire (no default features)" \
+    cargo_test -p bitcoin-rs-wire --no-default-features
+  profile "test: bitcoin-rs-wire (pool, pool-sv2)" \
+    cargo_test -p bitcoin-rs-wire --features pool,pool-sv2
 }
 
 test_crates_profiles() {
@@ -166,8 +166,8 @@ test_crates_profiles() {
     all)
       test_crates_silent_payments
       test_crates_storage
-      test_crates_consensus_execution
-      test_crates_node_serving
+      test_crates_consensus_chain
+      test_crates_node_wire
       ;;
     silent-payments)
       test_crates_silent_payments
@@ -175,11 +175,11 @@ test_crates_profiles() {
     storage)
       test_crates_storage
       ;;
-    consensus-execution)
-      test_crates_consensus_execution
+    consensus-chain)
+      test_crates_consensus_chain
       ;;
-    node-serving)
-      test_crates_node_serving
+    node-wire)
+      test_crates_node_wire
       ;;
     *)
       echo "unknown test-crates lane: $lane" >&2
@@ -200,14 +200,14 @@ test_workspace_profiles() {
   # including the process-harness suite that launches the pinned bitcoind.
   profile "test: workspace (kernel-free)" \
     cargo_test --workspace \
-      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-execution \
-      --exclude bitcoin-rs-wire \
-      --exclude bitcoin-rs-node --exclude bitcoin-rs-serving \
+      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chain \
+      --exclude bitcoin-rs-p2p \
+      --exclude bitcoin-rs-node --exclude bitcoin-rs-wire \
       --exclude bitcoin-rs-snapshot
   # The serving package owns libzmq. Its feature-gated process subscriber must
   # run explicitly so feature resolution cannot turn it into a zero-test
   # binary. Build and identify the daemon with the same default zmq profile.
-  profile "test: bitcoin-rs-serving (zmq, process notifications)" test_rpc_reorg_notifications
+  profile "test: bitcoin-rs-wire (zmq, process notifications)" test_rpc_reorg_notifications
 }
 
 test_rpc_reorg_notifications() {
@@ -217,7 +217,7 @@ test_rpc_reorg_notifications() {
     target_dir="$PWD/$target_dir"
   fi
   BITCOIN_RS_NODE="$target_dir/debug/bitcoin-rs" \
-    cargo_test -p bitcoin-rs-serving --features zmq
+    cargo_test -p bitcoin-rs-wire --features zmq
 }
 
 # Proof lanes. `all` does not call this stage: CI runners carry no Kani,

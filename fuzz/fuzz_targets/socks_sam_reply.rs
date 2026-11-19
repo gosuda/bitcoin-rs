@@ -2,11 +2,11 @@
 
 use std::io::Cursor;
 
-use bitcoin_rs_wire::DialFailure;
-use bitcoin_rs_wire::sam::{
+use bitcoin_rs_p2p::DialFailure;
+use bitcoin_rs_p2p::sam::{
     check_hello, destination_identity_len, i2p_base64_decode, parse_fields, require_ok,
 };
-use bitcoin_rs_wire::socks::{
+use bitcoin_rs_p2p::socks::{
     parse_auth_reply, parse_connect_reply, parse_isolated_greeting, parse_no_auth_greeting,
 };
 use libfuzzer_sys::fuzz_target;
@@ -32,10 +32,7 @@ fn destination(cert_type: u8, payload: &[u8]) -> Vec<u8> {
 
 fn socks_vectors() {
     assert!(matches!(parse_no_auth_greeting([0x05, 0x00]), Ok(0x00)));
-    assert!(matches!(
-        parse_isolated_greeting([0x05, 0x02]),
-        Ok(0x02)
-    ));
+    assert!(matches!(parse_isolated_greeting([0x05, 0x02]), Ok(0x02)));
     assert!(matches!(
         parse_no_auth_greeting([0x05, 0x02]),
         Err(DialFailure::Transport(_))
@@ -98,11 +95,9 @@ fn sam_vectors() {
     let hello = "HELLO REPLY RESULT=OK VERSION=3.3";
     assert!(check_hello(hello).is_ok());
     let fields = parse_fields(hello, "HELLO REPLY");
-    assert!(
-        matches!(&fields, Ok(fields) if fields.len() == 2
+    assert!(matches!(&fields, Ok(fields) if fields.len() == 2
             && fields.iter().any(|(key, value)| key == "RESULT" && value == "OK")
-            && fields.iter().any(|(key, value)| key == "VERSION" && value == "3.3"))
-    );
+            && fields.iter().any(|(key, value)| key == "VERSION" && value == "3.3")));
     assert!(matches!(
         parse_fields("HELLO REPLY", "HELLO REPLY"),
         Ok(fields) if fields.is_empty()
@@ -174,8 +169,14 @@ fuzz_target!(|data: &[u8]| {
 
     let reported = destination_identity_len(data);
     if let Some(total) = reported {
-        assert!(total <= data.len(), "a destination length must fit its input");
-        assert!(total >= 387, "a destination must carry both public keys and a cert");
+        assert!(
+            total <= data.len(),
+            "a destination length must fit its input"
+        );
+        assert!(
+            total >= 387,
+            "a destination must carry both public keys and a cert"
+        );
     }
 
     if let Ok(text) = std::str::from_utf8(data) {
@@ -198,7 +199,10 @@ fuzz_target!(|data: &[u8]| {
     let mut reply = socks5_connect(
         data.first().copied().unwrap_or_default() % 5,
         data,
-        [data.get(1).copied().unwrap_or(0), data.get(2).copied().unwrap_or(0)],
+        [
+            data.get(1).copied().unwrap_or(0),
+            data.get(2).copied().unwrap_or(0),
+        ],
     );
     reply[1] = data.get(3).copied().unwrap_or_default() % 9;
     let _ = parse_connect_reply(&mut Cursor::new(reply));

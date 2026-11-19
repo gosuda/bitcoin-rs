@@ -1,10 +1,10 @@
 # Header sync and block download
 
-The node learns about new blocks in two stages. Headers flow through a peer-by-peer pipeline that refuses cheap fake chains, then bodies download through a budgeted window and get applied in order. This page covers the header pipeline (`crates/execution/src/chain/header_sync.rs`, `crates/node/src/p2p/sync/headers_presync.rs`), difficulty and deployment state (`crates/execution/src/chain/deployment.rs`, `progress.rs`), the download window and stager (`crates/node/src/p2p/download_window.rs`, `block_stager.rs`), stale tips and peer eviction (`crates/node/src/p2p/sync/stale_tips.rs`, `staletip.rs`, `eviction.rs`), historical sync for assumeutxo (`crates/node/src/p2p/sync/historical.rs`), and the frontier that drives all of it (`crates/node/src/p2p/sync/frontier.rs`). [how/p2p.md](p2p.md) covers the wire protocol; [run/sync-and-recovery.md](../run/sync-and-recovery.md) covers operator-facing behavior. Contract clauses: `P2P-10` in `docs/contracts/p2p-wire.md`, `SYNC-01`, `SYNC-02`, `SYNC-06` in `docs/contracts/synchronization.md`.
+The node learns about new blocks in two stages. Headers flow through a peer-by-peer pipeline that refuses cheap fake chains, then bodies download through a budgeted window and get applied in order. This page covers the header pipeline (`crates/chain/src/chain/header_sync.rs`, `crates/node/src/p2p/sync/headers_presync.rs`), difficulty and deployment state (`crates/chain/src/chain/deployment.rs`, `progress.rs`), the download window and stager (`crates/node/src/p2p/download_window.rs`, `block_stager.rs`), stale tips and peer eviction (`crates/node/src/p2p/sync/stale_tips.rs`, `staletip.rs`, `eviction.rs`), historical sync for assumeutxo (`crates/node/src/p2p/sync/historical.rs`), and the frontier that drives all of it (`crates/node/src/p2p/sync/frontier.rs`). [how/p2p.md](p2p.md) covers the wire protocol; [run/sync-and-recovery.md](../run/sync-and-recovery.md) covers operator-facing behavior. Contract clauses: `P2P-10` in `docs/contracts/p2p-wire.md`, `SYNC-01`, `SYNC-02`, `SYNC-06` in `docs/contracts/synchronization.md`.
 
 ## Header admission
 
-`accept_headers` (`crates/execution/src/chain/header_sync.rs:74`) admits each header in wire order:
+`accept_headers` (`crates/chain/src/chain/header_sync.rs:74`) admits each header in wire order:
 
 ```
 already known -> reuse node id; Invalid parent chain -> KnownInvalidHeader
@@ -41,9 +41,9 @@ test sync::tests::headers_presync::sufficient_work_chain_syncs_presync_then_redo
 
 `next_work_required` (`header_sync.rs:202`) computes retarget bits on interval boundaries and `expected_non_retarget_bits` otherwise; the algorithm is pinned by clause `DAA-01` of `docs/contracts/validation-default.md` ("Bitcoin Core 31.1 difficulty adjustment"). Forks inherit their own retarget path, exercised by `crates/node/src/p2p/sync.rs`.
 
-Deployment state comes from `softfork_state` (`crates/execution/src/chain/deployment.rs:88`): CSV and segwit are evaluated per block tree via `deployment_active`, falling back to the static network schedule when signalling data is unavailable. `signalling_deployments` (`deployment.rs:118`) reports which named deployments (`csv`, `segwit`, `deployment.rs:114`) are `Started` or `LockedIn` at a height. The connect path reads this per block to pick witness rules and version gates (`validation_contexts`, `crates/execution/src/connect.rs:179`).
+Deployment state comes from `softfork_state` (`crates/chain/src/chain/deployment.rs:88`): CSV and segwit are evaluated per block tree via `deployment_active`, falling back to the static network schedule when signalling data is unavailable. `signalling_deployments` (`deployment.rs:118`) reports which named deployments (`csv`, `segwit`, `deployment.rs:114`) are `Started` or `LockedIn` at a height. The connect path reads this per block to pick witness rules and version gates (`validation_contexts`, `crates/chain/src/connect.rs:179`).
 
-`ChainProgressReader` (`crates/execution/src/chain/progress.rs:24`) is what `getblockchaininfo` serves: blocks and headers heights, bits, median time, `verification_progress`, and `chain_work`. `InitialBlockDownload` (`crates/execution/src/chain/ibd.rs:8`) latches exit from IBD: once the applied tip's chainwork reaches `network.minimum_chain_work` and its header time is within `MAX_TIP_AGE_SECONDS = 24h` (`ibd.rs:6`), the latch closes and never reopens (`ibd.rs:34`). Relayers use the latch to delay announcements; see `with_ibd` wiring at `crates/node/src/lifecycle.rs`.
+`ChainProgressReader` (`crates/chain/src/chain/progress.rs:24`) is what `getblockchaininfo` serves: blocks and headers heights, bits, median time, `verification_progress`, and `chain_work`. `InitialBlockDownload` (`crates/chain/src/chain/ibd.rs:8`) latches exit from IBD: once the applied tip's chainwork reaches `network.minimum_chain_work` and its header time is within `MAX_TIP_AGE_SECONDS = 24h` (`ibd.rs:6`), the latch closes and never reopens (`ibd.rs:34`). Relayers use the latch to delay announcements; see `with_ibd` wiring at `crates/node/src/lifecycle.rs`.
 
 ## The download window and stager
 
@@ -76,7 +76,7 @@ Retained tips are also relayed. `staletip.rs` defines a compact custom message: 
 
 ## Eviction
 
-When inbound slots are exhausted, `select_inbound_to_evict` (`crates/wire/src/eviction.rs:19`) picks the victim with Core-style protection passes, each pass protecting the last k candidates by some criterion:
+When inbound slots are exhausted, `select_inbound_to_evict` (`crates/p2p/src/eviction.rs:19`) picks the victim with Core-style protection passes, each pass protecting the last k candidates by some criterion:
 
 1. 4 by keyed netgroup diversity (`eviction.rs:23`)
 2. 4 by recent transaction relay time (`eviction.rs:24`)
@@ -85,7 +85,7 @@ When inbound slots are exhausted, `select_inbound_to_evict` (`crates/wire/src/ev
 5. half the remaining candidates, with a quota for local peers (`protect_by_ratio`, `eviction.rs:94`)
 6. the newest peer in the largest netgroup evicted (`newest_in_largest_netgroup`, `eviction.rs:113`)
 
-The peer table (`crates/wire/src/peer_table.rs`) feeds this: `try_register_inbound` (`peer_table.rs:202`) enforces slot limits, and the `note_*` family (`peer_table.rs:555` onward) records the announcement, usefulness, and compact-relay facts the eviction criteria read.
+The peer table (`crates/p2p/src/peer_table.rs`) feeds this: `try_register_inbound` (`peer_table.rs:202`) enforces slot limits, and the `note_*` family (`peer_table.rs:555` onward) records the announcement, usefulness, and compact-relay facts the eviction criteria read.
 
 ## Historical sync for assumeutxo
 
@@ -99,8 +99,8 @@ After a snapshot load, the node must backfill and fully validate the block range
 | Low-work chains never reach the block tree | `low_work_headers_do_not_reach_block_tree` | `crates/node/src/p2p/sync.rs` |
 | A substituted redownload header disconnects | `a_substituted_redownload_header_disconnects_the_connection` | `crates/node/src/p2p/sync.rs` |
 | Continuity break spends the sync state | `a_midbatch_continuity_break_spends_the_sync` | `crates/node/src/p2p/sync.rs` |
-| Stale-tip behavior | `tests` modules | `crates/node/src/p2p/sync/stale_tips.rs`, `crates/wire/src/staletip.rs` |
-| Eviction selection | `tests` module | `crates/wire/src/eviction.rs` |
+| Stale-tip behavior | `tests` modules | `crates/node/src/p2p/sync/stale_tips.rs`, `crates/p2p/src/staletip.rs` |
+| Eviction selection | `tests` module | `crates/p2p/src/eviction.rs` |
 
 ## Limits
 

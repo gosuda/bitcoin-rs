@@ -1,14 +1,14 @@
 mod budget {
-    use bitcoin_rs_execution::chain::NodeStatus;
+    use bitcoin_rs_chain::chain::NodeStatus;
     use bitcoin_rs_node::budget::{BudgetedIngressLedger, BudgetedOutboundLedger, NodeBudget};
     use bitcoin_rs_node::state::NodeState;
     use bitcoin_rs_node::{Network, NodeConfig};
+    use bitcoin_rs_p2p::connection::OutboundLedger;
+    use bitcoin_rs_p2p::inbound::block_memory::BlockMemory;
     use bitcoin_rs_storage::{
         budget::{BudgetError, BudgetOwner, BudgetRefusal},
         split_chainstate_cache_budget,
     };
-    use bitcoin_rs_wire::connection::OutboundLedger;
-    use bitcoin_rs_wire::inbound::block_memory::BlockMemory;
     use std::sync::Arc;
     #[expect(clippy::expect_used)]
     fn open_test_node() -> (NodeState, tempfile::TempDir) {
@@ -141,7 +141,7 @@ mod config_layered {
         NetworkSelection, NodeConfig, NotificationConfig, P2pOverrides, ScriptIndexMode,
         UserConfig, ValidationOverrides, ZmqEndpointConfig, resolve,
     };
-    use bitcoin_rs_serving::zmq::ZmqTopic;
+    use bitcoin_rs_wire::zmq::ZmqTopic;
 
     #[test]
     fn public_listener_is_opt_in_and_budgets_resolve_independently() -> Result<()> {
@@ -423,7 +423,7 @@ mod config_layered {
                 .indexes
                 .script_index
                 .enabled_capabilities(config.indexes.txindex),
-            bitcoin_rs_projection::IndexCapabilities::SCRIPT_LIVE
+            bitcoin_rs_index::IndexCapabilities::SCRIPT_LIVE
         );
         Ok(())
     }
@@ -668,7 +668,7 @@ mod config_layered {
             NodeConfig::default_for_network(Network::Regtest)
                 .p2p
                 .noban_subnets,
-            Vec::<bitcoin_rs_wire::IpSubnet>::new()
+            Vec::<bitcoin_rs_p2p::IpSubnet>::new()
         );
         let layer: UserConfig = toml::from_str(
             r#"network = "regtest"
@@ -691,7 +691,7 @@ p2p_noban = ["192.0.2.99/24", "::1"]
         environment.apply_env("BITCOIN_RS_P2P_NOBAN", std::ffi::OsStr::new(""))?;
         assert_eq!(
             resolve(&[&layer, &environment])?.p2p.noban_subnets,
-            Vec::<bitcoin_rs_wire::IpSubnet>::new()
+            Vec::<bitcoin_rs_p2p::IpSubnet>::new()
         );
         assert!(
             environment
@@ -878,18 +878,18 @@ mod embed {
 
     type Result<T, E = TestError> = core::result::Result<T, E>;
     use crate::support::{block_on, p2sh_true_output, p2sh_true_spend_script_sig};
+    use bitcoin_rs_chain::chain::regtest_fixture::{self, REGTEST_BITS};
     use bitcoin_rs_consensus::primitives::{
         Amount, Block, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn,
         TxOut, Txid, Witness, consensus_bytes,
     };
     use bitcoin_rs_consensus::script::push_int;
-    use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
+    use bitcoin_rs_index::ScriptHash;
+    use bitcoin_rs_index::query_api::{Answer, TxQueryError};
     use bitcoin_rs_mempool::MutationOutcome;
     use bitcoin_rs_node::ScriptIndexMode;
     use bitcoin_rs_node::state::NodeState;
     use bitcoin_rs_node::{Network, Node, NodeConfig, NodeError};
-    use bitcoin_rs_projection::ScriptHash;
-    use bitcoin_rs_projection::query_api::{Answer, TxQueryError};
 
     const SEED_BLOCKS: u32 = 100;
     const SEED_BASE_TIME: u32 = 1_296_688_603;
@@ -1395,12 +1395,12 @@ mod lease_registration_215 {
     use std::sync::Arc;
 
     use arc_swap::ArcSwapOption;
-    use bitcoin_rs_execution::Chainstate;
-    use bitcoin_rs_execution::chain::BlockTree;
+    use bitcoin_rs_chain::Chainstate;
+    use bitcoin_rs_chain::chain::BlockTree;
     use bitcoin_rs_node::{BlockSync, Network};
+    use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable, QueuedFrame};
     use bitcoin_rs_storage::utxo::UtxoSet;
     use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
-    use bitcoin_rs_wire::{PeerInfo, PeerLease, PeerTable, QueuedFrame};
     use crossbeam_channel::unbounded;
     use parking_lot::RwLock;
 
@@ -1420,9 +1420,7 @@ mod lease_registration_215 {
             block_tree,
             Arc::new(utxo),
             coin_stats,
-            Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
-                0,
-            )),
+            Arc::new(bitcoin_rs_chain::events::ChainEventPublisher::detached(0)),
         );
         let ibd = handles.ibd_latch();
         bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
@@ -1447,8 +1445,8 @@ mod lease_registration_215 {
             wtxid_relay: false,
             relay_transactions: true,
             compact_block_relay: false,
-            endpoint: Some(bitcoin_rs_wire::PeerEndpoint::Ip(addr)),
-            network: bitcoin_rs_wire::PeerEndpoint::Ip(addr).net(),
+            endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::Ip(addr)),
+            network: bitcoin_rs_p2p::PeerEndpoint::Ip(addr).net(),
             addr: addr.into(),
             send_headers: false,
             version: 70_016,
@@ -1457,11 +1455,11 @@ mod lease_registration_215 {
             start_height: 0,
             best_known_height: 0,
             conn_time: 0,
-            addr_bind: bitcoin_rs_wire::TransportRemote::new(addr),
+            addr_bind: bitcoin_rs_p2p::TransportRemote::new(addr),
             time_offset: 0,
-            counters: Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+            counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
             inbound: true,
-            transport: bitcoin_rs_wire::TransportProtocol::V1,
+            transport: bitcoin_rs_p2p::TransportProtocol::V1,
         }
     }
 
@@ -1471,15 +1469,15 @@ mod lease_registration_215 {
         let addr = SocketAddr::from(([127, 0, 0, 1], 18_447));
         let (old_tx, _old_rx) = unbounded::<QueuedFrame>();
         let old = PeerLease::new(old_tx);
-        assert!(!table.register(bitcoin_rs_wire::PeerEndpoint::Ip(addr), old.clone()));
-        assert!(table.publish_info(bitcoin_rs_wire::PeerEndpoint::Ip(addr), &old, info(addr)));
+        assert!(!table.register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr), old.clone()));
+        assert!(table.publish_info(bitcoin_rs_p2p::PeerEndpoint::Ip(addr), &old, info(addr)));
         assert!(!old.is_cancelled());
         assert_eq!(table.len(), 1);
         assert_eq!(table.infos().len(), 1);
 
         let (new_tx, _new_rx) = unbounded::<QueuedFrame>();
         let new = PeerLease::new(new_tx);
-        assert!(table.register(bitcoin_rs_wire::PeerEndpoint::Ip(addr), new.clone()));
+        assert!(table.register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr), new.clone()));
         assert!(old.is_cancelled());
         assert!(!new.is_cancelled());
         assert!(table.is_current(new.source_ip(addr)));
@@ -1501,21 +1499,21 @@ mod mining {
 
         type Result<T, E = TestError> = core::result::Result<T, E>;
         use bitcoin::hex::FromHex;
+        use bitcoin_rs_chain::chain::regtest_fixture::{self, REGTEST_BITS};
         use bitcoin_rs_consensus::primitives::{
             Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
             Sequence, Tx, TxIn, TxOut, Txid, Witness, deserialize as native_deserialize,
             encode::double_sha256,
         };
         use bitcoin_rs_consensus::script::push_int;
-        use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
         use bitcoin_rs_mempool::{AdmissionOrigin, BodyInterest, MempoolEntry, SubmitOutcome};
         use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
-        use bitcoin_rs_serving::mining::{
+        use bitcoin_rs_wire::mining::{
             BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
             BlockValidationResult, CoinbaseBudget, MempoolSequenceWake, MiningControl,
             MiningGenerationSignal, solve_block,
         };
-        use bitcoin_rs_serving::{
+        use bitcoin_rs_wire::{
             Handler,
             context::{
                 ChainAdmissionView, ChainHandles, Context, ContextHandles, IndexHandles,
@@ -1827,7 +1825,7 @@ mod mining {
 
         pub(crate) fn current_tip(
             state: &NodeState,
-        ) -> Result<bitcoin_rs_execution::chain::TipSnapshot> {
+        ) -> Result<bitcoin_rs_chain::chain::TipSnapshot> {
             let Some(tip) = state.chainstate().applied_tip_snapshot() else {
                 return Err(TestError::message("applied tip must exist"));
             };
@@ -2042,7 +2040,7 @@ mod mining {
                 },
                 indexes: IndexHandles::default(),
                 network: NetworkHandles {
-                    overlay: bitcoin_rs_wire::overlay::OverlayConfig::default(),
+                    overlay: bitcoin_rs_p2p::overlay::OverlayConfig::default(),
                     peer_table: state.peer_table(),
                     p2p: state.p2p(),
                     local_services: state.p2p().local_services().to_u64(),
@@ -2452,7 +2450,7 @@ mod mining {
             MiningCoordinator, MiningOverrides, Network, NetworkSelection, UserConfig, resolve,
             state::NodeState,
         };
-        use bitcoin_rs_serving::mining::{
+        use bitcoin_rs_wire::mining::{
             BlockTemplate, MempoolSequenceWake, MiningControl, MiningControlError,
         };
         use compact_str::CompactString;
@@ -2987,7 +2985,7 @@ mod mining {
                 Arc::ptr_eq(&first.candidate, &again.candidate),
                 "precondition: an unchanged generation is served from the cache"
             );
-            let ranked = |template: &bitcoin_rs_serving::mining::BlockTemplate| {
+            let ranked = |template: &bitcoin_rs_wire::mining::BlockTemplate| {
                 template
                     .candidate
                     .transactions
@@ -3529,7 +3527,7 @@ mod mining {
             Txid, Witness,
         };
         use bitcoin_rs_node::{MiningCoordinator, Network};
-        use bitcoin_rs_serving::mining::{
+        use bitcoin_rs_wire::mining::{
             BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MiningControl,
             MiningControlError,
         };
@@ -4384,12 +4382,12 @@ mod mining {
         use bitcoin_rs_node::test_support::TestError;
 
         type Result<T, E = TestError> = core::result::Result<T, E>;
+        use bitcoin_rs_chain::chain::regtest_fixture::{self, REGTEST_BITS};
         use bitcoin_rs_consensus::primitives::{
             Amount, Block, BlockBodyMetadata, BlockHash, CompactTarget, Hash256, Header, LockTime,
             OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, unix_time_secs,
         };
         use bitcoin_rs_consensus::script::push_int;
-        use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
         use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
         use bitcoin_rs_storage::block_body::{BlockBodyReader, BlockBodyStore};
         use bitcoin_rs_storage::{BlockFilePosition, BodyExtent, BoundedReadError, StorageError};
@@ -4826,14 +4824,14 @@ mod mining {
         use bitcoin_rs_node::test_support::TestError;
 
         type Result<T, E = TestError> = core::result::Result<T, E>;
+        use bitcoin_rs_chain::chain::regtest_fixture;
+        use bitcoin_rs_chain::chain::{NodeStatus, compact_is_met_by};
         use bitcoin_rs_consensus::primitives::{
             Amount, Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, LockTime,
             OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
         };
-        use bitcoin_rs_execution::chain::regtest_fixture;
-        use bitcoin_rs_execution::chain::{NodeStatus, compact_is_met_by};
         use bitcoin_rs_node::Network;
-        use bitcoin_rs_serving::mining::{
+        use bitcoin_rs_wire::mining::{
             BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult,
             MiningControl, MiningControlError,
         };
@@ -5351,7 +5349,7 @@ mod mining {
                 tree.insert_node(
                     Some(genesis_id),
                     invalid.header,
-                    bitcoin_rs_execution::chain::NodeStatus::Invalid,
+                    bitcoin_rs_chain::chain::NodeStatus::Invalid,
                 )?;
             }
 
@@ -5734,7 +5732,7 @@ mod mining {
                     .ok_or_else(|| TestError::message("missing genesis"))?;
                 tree.restore_chain_tx_count(
                     genesis_id,
-                    bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+                    bitcoin_rs_chain::chain::ChainTxCount::UNKNOWN,
                 )?;
             }
             assert_eq!(
@@ -5792,7 +5790,7 @@ mod mining {
         type Result<T, E = TestError> = core::result::Result<T, E>;
         use bitcoin_rs_consensus::primitives::Hash256;
         use bitcoin_rs_node::Network;
-        use bitcoin_rs_serving::mining::{
+        use bitcoin_rs_wire::mining::{
             BlockTemplateMode, BlockTemplateRequest, BlockValidationResult, CoinbaseBudget,
             MiningCapability, MiningControl, MiningControlError, TemplateId, solve_block,
         };
@@ -5912,7 +5910,7 @@ mod overhaul_durable_head {
 
     type Result<T, E = TestError> = core::result::Result<T, E>;
 
-    use bitcoin_rs_execution::chain::regtest_fixture;
+    use bitcoin_rs_chain::chain::regtest_fixture;
     use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
     use bitcoin_rs_consensus::primitives::{BlockHash, Hash256};
@@ -6326,17 +6324,17 @@ mod overhaul_fee_history {
     type Result<T, E = TestError> = core::result::Result<T, E>;
 
     use crate::support::{p2sh_true_output, p2sh_true_spend_script_sig, parent_txid};
+    use bitcoin_rs_chain::chain::regtest_fixture::{self, REGTEST_BITS};
     use bitcoin_rs_consensus::primitives::{
         Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
         TxOut, Txid, Witness, unix_time_secs,
     };
     use bitcoin_rs_consensus::script::push_int;
-    use bitcoin_rs_execution::chain::regtest_fixture::{self, REGTEST_BITS};
     use bitcoin_rs_mempool::{AdmissionOrigin, FeeEstimator, SubmitOutcome};
     use bitcoin_rs_node::state::NodeState;
     use bitcoin_rs_node::{Network, NodeConfig};
-    use bitcoin_rs_serving::context::ChainAdmissionView;
     use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
+    use bitcoin_rs_wire::context::ChainAdmissionView;
 
     const BASE_TIME: u32 = 1_296_688_603;
     const BLOCK_INTERVAL: u32 = 600;
@@ -6905,7 +6903,7 @@ mod reorg_durable_head {
 
     type Result<T, E = TestError> = core::result::Result<T, E>;
 
-    use bitcoin_rs_execution::chain::regtest_fixture;
+    use bitcoin_rs_chain::chain::regtest_fixture;
     use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
     use bitcoin_rs_consensus::primitives::{BlockHash, Hash256};
@@ -7587,11 +7585,11 @@ mod sync_smoke {
 
     use arc_swap::ArcSwapOption;
     use bitcoin::hex::FromHex;
+    use bitcoin_rs_chain::Chainstate;
+    use bitcoin_rs_chain::chain::{BlockTree, TipSnapshot, regtest_fixture};
     use bitcoin_rs_consensus::primitives::{
         Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, deserialize,
     };
-    use bitcoin_rs_execution::Chainstate;
-    use bitcoin_rs_execution::chain::{BlockTree, TipSnapshot, regtest_fixture};
     use bitcoin_rs_node::Network;
     use bitcoin_rs_node::test_support::TestError;
     use bitcoin_rs_storage::utxo::UtxoSet;
@@ -7611,10 +7609,10 @@ mod sync_smoke {
         let block_tree = Arc::new(RwLock::new(BlockTree::new()));
         let chain_tip = block_tree.write().tip_handle();
         let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
-        let peer_table = Arc::new(bitcoin_rs_wire::PeerTable::new());
+        let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
         let (inbound_headers_tx, inbound_headers_rx) =
-            unbounded::<bitcoin_rs_wire::InboundHeaders>();
-        let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_wire::InboundBlock>();
+            unbounded::<bitcoin_rs_p2p::InboundHeaders>();
+        let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let (handles, coin_stats) = apply_handles_with_coin_stats(
             Network::Regtest,
             Arc::clone(&chain_tip),
@@ -7640,17 +7638,17 @@ mod sync_smoke {
         });
 
         inbound_headers_tx
-            .send(bitcoin_rs_wire::InboundHeaders {
+            .send(bitcoin_rs_p2p::InboundHeaders {
                 headers: vec![genesis.header, block_one.header, block_two.header],
                 source: None,
                 wire_response: true,
             })
             .map_err(|_| TestError::message("send headers failed"))?;
         inbound_blocks_tx
-            .send(bitcoin_rs_wire::InboundBlock::from_local(block_two.clone()))
+            .send(bitcoin_rs_p2p::InboundBlock::from_local(block_two.clone()))
             .map_err(|_| TestError::message("send block failed"))?;
         inbound_blocks_tx
-            .send(bitcoin_rs_wire::InboundBlock::from_local(block_one.clone()))
+            .send(bitcoin_rs_p2p::InboundBlock::from_local(block_one.clone()))
             .map_err(|_| TestError::message("send block failed"))?;
 
         sync.tick();
@@ -7694,7 +7692,7 @@ mod sync_smoke {
         let sync = bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
             handles: Arc::clone(&handles),
             followers,
-            peer_table: Arc::new(bitcoin_rs_wire::PeerTable::new()),
+            peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
             inbound_headers_rx,
             inbound_blocks_rx,
             ibd: handles.ibd_latch(),
@@ -7715,7 +7713,7 @@ mod sync_smoke {
         let genesis_stats = expected_coin_stats(&[&genesis])?;
 
         inbound_headers_tx
-            .send(bitcoin_rs_wire::InboundHeaders {
+            .send(bitcoin_rs_p2p::InboundHeaders {
                 headers: vec![block_one.header, block_two.header],
                 source: None,
                 wire_response: true,
@@ -7724,7 +7722,7 @@ mod sync_smoke {
         for bodies in [vec![], vec![malformed, block_two.clone()]] {
             for block in bodies {
                 inbound_blocks_tx
-                    .send(bitcoin_rs_wire::InboundBlock::from_local(block))
+                    .send(bitcoin_rs_p2p::InboundBlock::from_local(block))
                     .map_err(|_| TestError::message("send block failed"))?;
             }
             sync.tick();
@@ -7760,13 +7758,13 @@ mod sync_smoke {
                     .ok_or_else(|| TestError::message("missing admitted header"))?;
                 assert_ne!(
                     tree.node(id)?.status,
-                    bitcoin_rs_execution::chain::NodeStatus::Invalid
+                    bitcoin_rs_chain::chain::NodeStatus::Invalid
                 );
             }
         }
 
         inbound_blocks_tx
-            .send(bitcoin_rs_wire::InboundBlock::from_local(block_one.clone()))
+            .send(bitcoin_rs_p2p::InboundBlock::from_local(block_one.clone()))
             .map_err(|_| TestError::message("send block failed"))?;
         for _ in 0..16 {
             sync.tick();
@@ -7825,10 +7823,10 @@ mod sync_smoke {
         let block_tree = Arc::new(RwLock::new(BlockTree::new()));
         let chain_tip = block_tree.write().tip_handle();
         let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
-        let peer_table = Arc::new(bitcoin_rs_wire::PeerTable::new());
+        let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
         let (inbound_headers_tx, inbound_headers_rx) =
-            unbounded::<bitcoin_rs_wire::InboundHeaders>();
-        let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_wire::InboundBlock>();
+            unbounded::<bitcoin_rs_p2p::InboundHeaders>();
+        let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let (handles, coin_stats, _utxo) = apply_handles_with_coin_stats_and_utxo(
             Network::Regtest,
             Arc::clone(&chain_tip),
@@ -7854,7 +7852,7 @@ mod sync_smoke {
         });
 
         inbound_headers_tx
-            .send(bitcoin_rs_wire::InboundHeaders {
+            .send(bitcoin_rs_p2p::InboundHeaders {
                 headers: fixture.blocks.iter().map(|block| block.header).collect(),
                 source: None,
                 wire_response: true,
@@ -7862,7 +7860,7 @@ mod sync_smoke {
             .map_err(|_| TestError::message("send headers failed"))?;
         for block in fixture.blocks.iter().skip(1) {
             inbound_blocks_tx
-                .send(bitcoin_rs_wire::InboundBlock::from_local(block.clone()))
+                .send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
                 .map_err(|_| TestError::message("send block failed"))?;
         }
 
@@ -8066,7 +8064,7 @@ mod sync_smoke {
         let mut utxo = UtxoSet::new();
         utxo.track_coin_stats((*coin_stats).clone());
         let utxo = Arc::new(utxo);
-        let chain_events = bitcoin_rs_execution::events::ChainEventPublisher::detached(0);
+        let chain_events = bitcoin_rs_chain::events::ChainEventPublisher::detached(0);
         let handles = Chainstate::new(
             network,
             chain_tip,
@@ -8177,16 +8175,16 @@ mod tx_ingress_e2e {
     use bitcoin_rs_node::state::NodeState;
     use bitcoin_rs_node::tx_ingress::spawn_tx_ingress_consumer;
     use bitcoin_rs_node::{Network, NodeConfig};
-    use bitcoin_rs_serving::mining::{
+    use bitcoin_rs_p2p::PeerRole;
+    use bitcoin_rs_p2p::dispatch::dispatch_inbound_full;
+    use bitcoin_rs_p2p::handshake::{run_inbound_handshake, version_message};
+    use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
+    use bitcoin_rs_p2p::{InboundTx, Message, Peer, PeerLease};
+    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
+    use bitcoin_rs_wire::mining::{
         BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, FakeMiningControl,
         MiningControl, MiningControlError, MiningInfo,
     };
-    use bitcoin_rs_storage::utxo::contract::{BlockChanges, UtxoAdd};
-    use bitcoin_rs_wire::PeerRole;
-    use bitcoin_rs_wire::dispatch::dispatch_inbound_full;
-    use bitcoin_rs_wire::handshake::{run_inbound_handshake, version_message};
-    use bitcoin_rs_wire::wire::{PeerError, read_message, write_message};
-    use bitcoin_rs_wire::{InboundTx, Message, Peer, PeerLease};
     use crossbeam_channel::Sender;
 
     const READ_POLL: Duration = Duration::from_millis(200);
@@ -8320,8 +8318,8 @@ mod tx_ingress_e2e {
 
         fn generate(
             &self,
-            _request: bitcoin_rs_serving::mining::GenerateRequest,
-        ) -> Result<Vec<bitcoin_rs_serving::mining::GeneratedBlock>, MiningControlError> {
+            _request: bitcoin_rs_wire::mining::GenerateRequest,
+        ) -> Result<Vec<bitcoin_rs_wire::mining::GeneratedBlock>, MiningControlError> {
             Err(MiningControlError::Failed(
                 "not implemented".to_owned().into(),
             ))
@@ -8341,7 +8339,7 @@ mod tx_ingress_e2e {
     #[derive(Clone)]
     struct PeerWiring {
         magic: Magic,
-        peer_table: Arc<bitcoin_rs_wire::PeerTable>,
+        peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
         tx_policy: Arc<bitcoin_rs_node::p2p::NodeTxPolicy>,
         ingress_tx: Sender<InboundBody>,
         stop: Arc<AtomicBool>,
@@ -8349,7 +8347,7 @@ mod tx_ingress_e2e {
 
     struct LoopbackPeer {
         dialer: TcpStream,
-        peer_table: Arc<bitcoin_rs_wire::PeerTable>,
+        peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
         peer_addr: SocketAddr,
         lease: PeerLease,
         pump: Option<std::thread::JoinHandle<()>>,
@@ -8361,7 +8359,7 @@ mod tx_ingress_e2e {
             self.lease.cancel();
             let _ = self.dialer.shutdown(Shutdown::Both);
             self.peer_table.remove_current(
-                bitcoin_rs_wire::PeerEndpoint::Ip(self.peer_addr),
+                bitcoin_rs_p2p::PeerEndpoint::Ip(self.peer_addr),
                 &self.lease,
             );
             let service_ok = self
@@ -8392,7 +8390,7 @@ mod tx_ingress_e2e {
         let (accepted, peer_addr) = listener.accept()?;
 
         let (outbound_tx, outbound_rx) =
-            crossbeam_channel::unbounded::<bitcoin_rs_wire::QueuedFrame>();
+            crossbeam_channel::unbounded::<bitcoin_rs_p2p::QueuedFrame>();
         let lease = PeerLease::new_inbound(outbound_tx);
         let mut wire_out = accepted.try_clone().map_err(|error| {
             TestError::message(format!("accepted stream clone failed: {error}"))
@@ -8410,7 +8408,7 @@ mod tx_ingress_e2e {
         };
         wiring
             .peer_table
-            .register(bitcoin_rs_wire::PeerEndpoint::Ip(peer_addr), lease.clone());
+            .register(bitcoin_rs_p2p::PeerEndpoint::Ip(peer_addr), lease.clone());
         let pump_lease = lease.clone();
         peer.pump = Some(
             std::thread::Builder::new()
@@ -8475,20 +8473,19 @@ mod tx_ingress_e2e {
         let Ok(addr_bind) = peer.stream.local_addr() else {
             return;
         };
-        let mut info = bitcoin_rs_wire::PeerInfo::inbound_from_version(
+        let mut info = bitcoin_rs_p2p::PeerInfo::inbound_from_version(
             peer_addr,
             addr_bind,
             version,
             0,
             0,
-            Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+            Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
         );
         info.wtxid_relay = peer.wtxid_relay.peer_supported();
-        if !wiring.peer_table.publish_info(
-            bitcoin_rs_wire::PeerEndpoint::Ip(peer_addr),
-            lease,
-            info,
-        ) {
+        if !wiring
+            .peer_table
+            .publish_info(bitcoin_rs_p2p::PeerEndpoint::Ip(peer_addr), lease, info)
+        {
             return;
         }
         let _ = peer.stream.set_read_timeout(Some(READ_POLL));
@@ -8734,11 +8731,11 @@ mod tx_ingress_e2e {
             wait_until(OBSERVE_TIMEOUT, || {
                 wiring
                     .peer_table
-                    .ready_source(bitcoin_rs_wire::PeerEndpoint::Ip(source.peer_addr))
+                    .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(source.peer_addr))
                     .is_some()
                     && wiring
                         .peer_table
-                        .ready_source(bitcoin_rs_wire::PeerEndpoint::Ip(bystander.peer_addr))
+                        .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(bystander.peer_addr))
                         .is_some()
             })?;
 
@@ -8790,7 +8787,7 @@ mod tx_ingress_e2e {
             wait_until(OBSERVE_TIMEOUT, || {
                 wiring
                     .peer_table
-                    .ready_source(bitcoin_rs_wire::PeerEndpoint::Ip(peer.peer_addr))
+                    .ready_source(bitcoin_rs_p2p::PeerEndpoint::Ip(peer.peer_addr))
                     .is_some()
             })?;
             Ok(peer)

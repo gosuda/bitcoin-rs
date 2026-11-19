@@ -2,11 +2,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bitcoin::p2p::ServiceFlags;
+use bitcoin_rs_chain::chain::TipSnapshot;
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_execution::chain::TipSnapshot;
 
-use bitcoin_rs_wire::PeerInfo;
-use bitcoin_rs_wire::connection::PeerSource;
+use bitcoin_rs_p2p::PeerInfo;
+use bitcoin_rs_p2p::connection::PeerSource;
 
 use super::HeaderRequest;
 
@@ -38,7 +38,7 @@ pub(crate) struct UsablePeer {
     pub demonstrated_tips: Vec<Hash256>,
     pub active_height: Option<u32>,
     pub headers_horizon: Option<u32>,
-    pub role: bitcoin_rs_wire::peer_info::PeerRole,
+    pub role: bitcoin_rs_p2p::peer_info::PeerRole,
     pub manual: bool,
     pub connected_at: Instant,
 }
@@ -234,11 +234,11 @@ mod tests {
     use super::super::HeaderRequestKind;
     use super::super::HeaderRequestState;
     use super::*;
-    use bitcoin_rs_wire::connection::PeerSource;
+    use bitcoin_rs_p2p::connection::PeerSource;
     use std::net::{IpAddr, Ipv4Addr};
 
-    fn addr(port: u16) -> bitcoin_rs_wire::PeerRemote {
-        bitcoin_rs_wire::PeerRemote::Endpoint(bitcoin_rs_wire::PeerEndpoint::new(
+    fn addr(port: u16) -> bitcoin_rs_p2p::PeerRemote {
+        bitcoin_rs_p2p::PeerRemote::Endpoint(bitcoin_rs_p2p::PeerEndpoint::new(
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             port,
         ))
@@ -247,11 +247,11 @@ mod tests {
     fn usable(source: PeerSource) -> UsablePeer {
         UsablePeer {
             source,
-            info: bitcoin_rs_wire::test_support::synthetic_peer(addr(9001), 100),
+            info: bitcoin_rs_p2p::test_support::synthetic_peer(addr(9001), 100),
             demonstrated_tips: Vec::new(),
             active_height: None,
             headers_horizon: None,
-            role: bitcoin_rs_wire::peer_info::PeerRole::FullRelay,
+            role: bitcoin_rs_p2p::peer_info::PeerRole::FullRelay,
             manual: false,
             connected_at: Instant::now(),
         }
@@ -259,8 +259,8 @@ mod tests {
 
     fn snap(tip_id: u32, height: u32, hash_byte: u8) -> std::sync::Arc<TipSnapshot> {
         std::sync::Arc::new(TipSnapshot {
-            tip_id: bitcoin_rs_execution::chain::NodeId::new(tip_id),
-            chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+            tip_id: bitcoin_rs_chain::chain::NodeId::new(tip_id),
+            chain_tx_count: bitcoin_rs_chain::chain::ChainTxCount::UNKNOWN,
             height,
             chainwork: bitcoin_rs_consensus::header_rules::ChainWork::from(u64::from(height) + 1),
             hash: Hash256::from_le_bytes(&[hash_byte; 32]),

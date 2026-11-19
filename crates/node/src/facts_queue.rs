@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn image_and_permanent_refusals_do_not_reclaim_queued_facts() {
         use crate::budget::BudgetedIngressLedger;
-        use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
+        use bitcoin_rs_p2p::inbound::block_memory::IngressLedger;
 
         #[derive(Clone, Copy, Debug)]
         enum Request {

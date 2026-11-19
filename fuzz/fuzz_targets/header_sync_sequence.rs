@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use bitcoin_rs_execution::chain::regtest_fixture::{REGTEST_BITS, genesis_time};
-use bitcoin_rs_execution::chain::{
+use bitcoin_rs_chain::chain::regtest_fixture::{REGTEST_BITS, genesis_time};
+use bitcoin_rs_chain::chain::{
     BlockTree, HeaderValidationMode, NodeId, accept_headers, plan_reorg,
 };
 use bitcoin_rs_consensus::header_rules::ChainWork;
@@ -65,7 +65,10 @@ fn work_for_bits(bits: u32) -> ChainWork {
 
 fn mine(header: &mut Header) {
     loop {
-        if bitcoin_rs_execution::chain::compact_is_met_by(header.bits, Hash256::from(header.compute_hash())) {
+        if bitcoin_rs_chain::chain::compact_is_met_by(
+            header.bits,
+            Hash256::from(header.compute_hash()),
+        ) {
             return;
         }
         header.nonce = header.nonce.wrapping_add(1);
@@ -89,7 +92,10 @@ fn record(
                 let slot = *by_hash
                     .get(&parent_hash)
                     .expect("accepted parent must be tracked");
-                (tracked[slot].work + work_for_bits(node.header.bits.to_consensus()), Some(slot))
+                (
+                    tracked[slot].work + work_for_bits(node.header.bits.to_consensus()),
+                    Some(slot),
+                )
             }
             None => (work_for_bits(node.header.bits.to_consensus()), None),
         };
@@ -155,12 +161,18 @@ fn check_plan(tree: &BlockTree, old: NodeId, new: NodeId) {
             "connect path must start at the common ancestor"
         );
     } else {
-        assert_eq!(ancestor, new, "empty connect path must mean the new tip is the ancestor");
+        assert_eq!(
+            ancestor, new,
+            "empty connect path must mean the new tip is the ancestor"
+        );
     }
     if let Some(first) = plan.disconnect.first() {
         assert_eq!(*first, old, "disconnect path must start at the old tip");
     } else {
-        assert_eq!(ancestor, old, "empty disconnect path must mean the old tip is the ancestor");
+        assert_eq!(
+            ancestor, old,
+            "empty disconnect path must mean the old tip is the ancestor"
+        );
     }
     for pair in plan.connect.windows(2) {
         assert_eq!(
@@ -187,9 +199,18 @@ fn verify(tree: &BlockTree, tracked: &[Tracked]) {
     match expected_tip(tracked) {
         Some(expected) => {
             let tip = tree.tip().expect("tracked headers must publish a tip");
-            assert_eq!(tip.hash, expected.hash, "tip must be the maximum-work header");
-            assert_eq!(tip.tip_id, expected.id, "tip node must match the tracked id");
-            assert_eq!(tip.chainwork, expected.work, "tip work must match the tracked work");
+            assert_eq!(
+                tip.hash, expected.hash,
+                "tip must be the maximum-work header"
+            );
+            assert_eq!(
+                tip.tip_id, expected.id,
+                "tip node must match the tracked id"
+            );
+            assert_eq!(
+                tip.chainwork, expected.work,
+                "tip work must match the tracked work"
+            );
         }
         None => assert!(tree.tip().is_none(), "empty tree must have no tip"),
     }
@@ -216,7 +237,7 @@ fn mined_header(tree: &BlockTree, parent: &Tracked, delta: u32, nonce: u32) -> H
 fn submit(
     tree: &mut BlockTree,
     headers: &[Header],
-) -> Result<Vec<NodeId>, bitcoin_rs_execution::chain::ChainError> {
+) -> Result<Vec<NodeId>, bitcoin_rs_chain::chain::ChainError> {
     accept_headers(
         tree,
         headers,
@@ -260,9 +281,12 @@ fn mined_op(
     let slot = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
         .checked_rem(u32::try_from(tracked.len()).expect("nonempty"))
         .expect("modulo") as usize;
-    let header = mined_header(tree, &tracked[slot], delta, u32::from_le_bytes([
-        chunk[76], chunk[77], chunk[78], chunk[79],
-    ]));
+    let header = mined_header(
+        tree,
+        &tracked[slot],
+        delta,
+        u32::from_le_bytes([chunk[76], chunk[77], chunk[78], chunk[79]]),
+    );
     let ids = submit(tree, &[header]).expect("mined header must be accepted");
     assert_eq!(ids.len(), 1, "a single-header batch accepts one header");
     record(tree, &ids, tracked, by_hash);

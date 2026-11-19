@@ -2,19 +2,19 @@ use crate::NodeConfig;
 use crate::config::ConfigError;
 use crate::run::RunError;
 #[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_execution::chain::TipSnapshot;
-use bitcoin_rs_execution::events::ChainEventPublisher;
+use bitcoin_rs_chain::chain::TipSnapshot;
+use bitcoin_rs_chain::events::ChainEventPublisher;
 #[cfg(test)]
-pub(crate) use bitcoin_rs_execution::recovery::ResumeSource;
+pub(crate) use bitcoin_rs_chain::recovery::ResumeSource;
+use bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS;
+use bitcoin_rs_index::runtime::OpenDerivedIndex;
+use bitcoin_rs_index::runtime::open_derived_index_store_with_scratch;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::Mempool;
-use bitcoin_rs_projection::runtime::DEFAULT_BATCH_LIMITS;
-use bitcoin_rs_projection::runtime::OpenDerivedIndex;
-use bitcoin_rs_projection::runtime::open_derived_index_store_with_scratch;
-use bitcoin_rs_serving::context::PruneService;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
 use bitcoin_rs_storage::block_body::BlockBodySource;
+use bitcoin_rs_wire::context::PruneService;
 use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
@@ -45,10 +45,10 @@ pub use index::IndexWorkerError;
 
 struct IndexChainCursorSource(Arc<ChainEventPublisher>);
 
-impl bitcoin_rs_projection::reconcile::ChainCursorSource for IndexChainCursorSource {
-    fn cursor(&self) -> bitcoin_rs_projection::reconcile::ConsumerCursor {
+impl bitcoin_rs_index::reconcile::ChainCursorSource for IndexChainCursorSource {
+    fn cursor(&self) -> bitcoin_rs_index::reconcile::ConsumerCursor {
         let snapshot = self.0.snapshot();
-        bitcoin_rs_projection::reconcile::ConsumerCursor {
+        bitcoin_rs_index::reconcile::ConsumerCursor {
             epoch: snapshot.epoch,
             sequence: snapshot.sequence,
             height: snapshot.tip_height,
@@ -83,13 +83,13 @@ pub struct NodeState {
     derived_index: index::DerivedIndexHost,
     prune_service: Option<Arc<dyn PruneService>>,
     mempool_gateway: Arc<bitcoin_rs_mempool::MempoolGateway>,
-    p2p: Arc<bitcoin_rs_wire::P2pService>,
+    p2p: Arc<bitcoin_rs_p2p::P2pService>,
     inbound_tx_tx: Sender<crate::p2p::tx_policy::ingress::InboundBody>,
     inbound_tx_rx: Mutex<Option<Receiver<crate::p2p::tx_policy::ingress::InboundBody>>>,
     package_capacity: crate::p2p::tx_policy::ingress::PackageCapacity,
     pub tx_policy: Arc<crate::p2p::tx_policy::NodeTxPolicy>,
-    transition: bitcoin_rs_execution::chain::TransitionDomain,
-    chainstate: Arc<bitcoin_rs_execution::Chainstate>,
+    transition: bitcoin_rs_chain::chain::TransitionDomain,
+    chainstate: Arc<bitcoin_rs_chain::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
     sync: Arc<crate::p2p::sync::BlockSync>,
     recovery_reporter: Arc<storage::RecoveryReporter>,
@@ -97,7 +97,7 @@ pub struct NodeState {
     block_announce_rx: Mutex<Option<crate::p2p::block_announce::BlockAnnounceReceiver>>,
     shutdown: Arc<bitcoin_rs_consensus::latch::LatchWriter>,
     _p2p_shutdown_guard: bitcoin_rs_consensus::latch::HookGuard,
-    block_memory: Arc<bitcoin_rs_wire::inbound::block_memory::BlockMemory>,
+    block_memory: Arc<bitcoin_rs_p2p::inbound::block_memory::BlockMemory>,
     #[cfg(any(test, feature = "test-seam"))]
     budget: Arc<crate::budget::NodeBudget>,
 }
@@ -133,7 +133,7 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn block_memory(&self) -> Arc<bitcoin_rs_wire::inbound::block_memory::BlockMemory> {
+    pub fn block_memory(&self) -> Arc<bitcoin_rs_p2p::inbound::block_memory::BlockMemory> {
         Arc::clone(&self.block_memory)
     }
 
@@ -157,7 +157,7 @@ impl NodeState {
     #[cfg(any(test, feature = "test-seam"))]
     #[doc(hidden)]
     #[must_use]
-    pub fn undo_store(&self) -> Arc<dyn bitcoin_rs_execution::UndoStore> {
+    pub fn undo_store(&self) -> Arc<dyn bitcoin_rs_chain::UndoStore> {
         self.storage.undo_store()
     }
 
@@ -209,14 +209,14 @@ impl NodeState {
     #[cfg(any(test, feature = "test-seam"))]
     pub fn attach_mining_coordinator(&self, coordinator: &Arc<crate::MiningCoordinator>) {
         let signal = self.mining_generation_signal();
-        let control: Arc<dyn bitcoin_rs_serving::mining::MiningControl> = coordinator.clone();
+        let control: Arc<dyn bitcoin_rs_wire::mining::MiningControl> = coordinator.clone();
         signal.attach(&control);
-        let wake: Arc<dyn bitcoin_rs_serving::mining::MempoolSequenceWake> = coordinator.clone();
+        let wake: Arc<dyn bitcoin_rs_wire::mining::MempoolSequenceWake> = coordinator.clone();
         signal.attach_sequence_wake(&wake);
     }
 
     #[must_use]
-    pub fn block_log_reader(&self) -> bitcoin_rs_projection::BlockLogReader {
+    pub fn block_log_reader(&self) -> bitcoin_rs_index::BlockLogReader {
         self.followers.block_log_reader()
     }
 
@@ -231,17 +231,17 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn p2p(&self) -> Arc<bitcoin_rs_wire::P2pService> {
+    pub fn p2p(&self) -> Arc<bitcoin_rs_p2p::P2pService> {
         Arc::clone(&self.p2p)
     }
 
     #[must_use]
-    pub fn peer_table(&self) -> Arc<bitcoin_rs_wire::PeerTable> {
+    pub fn peer_table(&self) -> Arc<bitcoin_rs_p2p::PeerTable> {
         self.p2p.table()
     }
 
     #[cfg(any(test, feature = "test-seam"))]
-    pub fn inbound_blocks_sender(&self) -> Sender<bitcoin_rs_wire::InboundBlock> {
+    pub fn inbound_blocks_sender(&self) -> Sender<bitcoin_rs_p2p::InboundBlock> {
         self.p2p.inbound_blocks_sender()
     }
 
@@ -279,7 +279,7 @@ impl NodeState {
     }
 
     #[must_use]
-    pub(crate) fn ibd(&self) -> Arc<bitcoin_rs_execution::chain::InitialBlockDownload> {
+    pub(crate) fn ibd(&self) -> Arc<bitcoin_rs_chain::chain::InitialBlockDownload> {
         self.chainstate.ibd_latch()
     }
 
@@ -299,12 +299,12 @@ impl NodeState {
     }
 
     #[must_use]
-    pub fn chainstate(&self) -> Arc<bitcoin_rs_execution::Chainstate> {
+    pub fn chainstate(&self) -> Arc<bitcoin_rs_chain::Chainstate> {
         Arc::clone(&self.chainstate)
     }
 
     #[must_use]
-    pub fn stable_read(&self) -> bitcoin_rs_execution::chain::StableRead {
+    pub fn stable_read(&self) -> bitcoin_rs_chain::chain::StableRead {
         self.transition.stable_read()
     }
 
@@ -324,21 +324,19 @@ impl NodeState {
 
     pub fn publish_checkpoint(
         &self,
-    ) -> core::result::Result<Option<u64>, bitcoin_rs_execution::CheckpointError> {
+    ) -> core::result::Result<Option<u64>, bitcoin_rs_chain::CheckpointError> {
         self.chainstate.publish_checkpoint()
     }
 
     pub fn start_chainstate_maintenance(
         &self,
-    ) -> core::result::Result<std::thread::JoinHandle<()>, bitcoin_rs_execution::MaintenanceError>
-    {
+    ) -> core::result::Result<std::thread::JoinHandle<()>, bitcoin_rs_chain::MaintenanceError> {
         self.chainstate.start_maintenance()
     }
 
     pub fn chainstates_summary(
         &self,
-    ) -> Result<bitcoin_rs_execution::ChainstatesSummary, bitcoin_rs_execution::AssumeUtxoError>
-    {
+    ) -> Result<bitcoin_rs_chain::ChainstatesSummary, bitcoin_rs_chain::AssumeUtxoError> {
         self.snapshots.manager.chainstates_summary()
     }
 
@@ -354,7 +352,7 @@ impl NodeState {
         &self,
     ) -> core::result::Result<
         crate::snapshot::ThreePositions,
-        bitcoin_rs_serving::context::SnapshotControlError,
+        bitcoin_rs_wire::context::SnapshotControlError,
     > {
         self.snapshots.three_positions()
     }
@@ -362,7 +360,7 @@ impl NodeState {
     #[must_use]
     pub fn derived_index_query(
         &self,
-    ) -> Option<Arc<dyn bitcoin_rs_serving::context::DerivedIndexQuery>> {
+    ) -> Option<Arc<dyn bitcoin_rs_wire::context::DerivedIndexQuery>> {
         if !self.config.indexes.txindex {
             return None;
         }
@@ -372,28 +370,26 @@ impl NodeState {
     #[must_use]
     pub(crate) fn esplora_derived_index_query(
         &self,
-    ) -> Option<Arc<dyn bitcoin_rs_serving::context::DerivedIndexQuery>> {
+    ) -> Option<Arc<dyn bitcoin_rs_wire::context::DerivedIndexQuery>> {
         self.derived_index.adapter().map(|adapter| {
-            let q: Arc<dyn bitcoin_rs_serving::context::DerivedIndexQuery> = adapter.clone();
+            let q: Arc<dyn bitcoin_rs_wire::context::DerivedIndexQuery> = adapter.clone();
             q
         })
     }
 
     pub(crate) fn historical_index_adapter(
         &self,
-    ) -> Option<Arc<bitcoin_rs_projection::runtime::DerivedIndexQueryAdapter>> {
+    ) -> Option<Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>> {
         self.derived_index.adapter().cloned()
     }
 
     #[must_use]
-    pub fn compact_filter_query(
-        &self,
-    ) -> Option<Arc<dyn bitcoin_rs_projection::CompactFilterQuery>> {
+    pub fn compact_filter_query(&self) -> Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>> {
         if !self.config.indexes.blockfilterindex {
             return None;
         }
         self.derived_index.adapter().map(|adapter| {
-            let query: Arc<dyn bitcoin_rs_projection::CompactFilterQuery> = adapter.clone();
+            let query: Arc<dyn bitcoin_rs_index::CompactFilterQuery> = adapter.clone();
             query
         })
     }
@@ -401,12 +397,12 @@ impl NodeState {
     #[must_use]
     pub fn script_index_query(
         &self,
-    ) -> Option<Arc<dyn bitcoin_rs_serving::context::ScriptIndexQuery>> {
+    ) -> Option<Arc<dyn bitcoin_rs_wire::context::ScriptIndexQuery>> {
         if !self.config.indexes.script_index.is_enabled() {
             return None;
         }
         self.derived_index.adapter().map(|adapter| {
-            let q: Arc<dyn bitcoin_rs_serving::context::ScriptIndexQuery> = adapter.clone();
+            let q: Arc<dyn bitcoin_rs_wire::context::ScriptIndexQuery> = adapter.clone();
             q
         })
     }
@@ -418,25 +414,21 @@ impl NodeState {
             manager
                 .status()
                 .map(|status| match status {
-                    bitcoin_rs_execution::AssumeUtxoDiskStatus::Validating {
+                    bitcoin_rs_chain::AssumeUtxoDiskStatus::Validating {
                         historical_height,
                         historical_hash,
                         ..
                     } => Some((historical_height, historical_hash)),
                     _ => None,
                 })
-                .map_err(|error| {
-                    bitcoin_rs_projection::TxQueryError::Storage(error.to_string().into())
-                })
+                .map_err(|error| bitcoin_rs_index::TxQueryError::Storage(error.to_string().into()))
         });
         self.derived_index
             .start(&self.chainstate, history, historical_verified)
     }
 
     #[must_use]
-    pub fn derived_index_status(
-        &self,
-    ) -> Arc<dyn bitcoin_rs_projection::DerivedIndexCapabilitySource> {
+    pub fn derived_index_status(&self) -> Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> {
         self.derived_index.status()
     }
 
@@ -453,7 +445,7 @@ impl NodeState {
     }
 }
 
-fn derived_index_capabilities(config: &NodeConfig) -> bitcoin_rs_projection::IndexCapabilities {
+fn derived_index_capabilities(config: &NodeConfig) -> bitcoin_rs_index::IndexCapabilities {
     config
         .indexes
         .script_index
@@ -467,8 +459,7 @@ fn build_derived_index_open_spec(
     epoch: u64,
     guard: &bitcoin_rs_storage::StoreGuard,
     budget: &Arc<crate::budget::NodeBudget>,
-) -> core::result::Result<Option<bitcoin_rs_projection::runtime::DerivedIndexOpenSpec>, ConfigError>
-{
+) -> core::result::Result<Option<bitcoin_rs_index::runtime::DerivedIndexOpenSpec>, ConfigError> {
     let enabled = derived_index_capabilities(config);
     if enabled.is_empty() {
         return Ok(None);
@@ -484,14 +475,14 @@ fn build_derived_index_open_spec(
     let cache_bytes = txindex_cache_bytes;
     let guard = Arc::clone(guard);
     let seal_scratch = config.data_dir.join("seal-scratch");
-    Ok(Some(bitcoin_rs_projection::runtime::DerivedIndexOpenSpec {
+    Ok(Some(bitcoin_rs_index::runtime::DerivedIndexOpenSpec {
         scripthash_limit: config.indexes.scripthash_limit,
         data_dir: config.data_dir.clone(),
         namespace: TXINDEX_NAMESPACE,
         storage_backend: config.storage.backend,
         epoch,
         enabled,
-        rollback_rebuild_cutover: bitcoin_rs_projection::runtime::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
+        rollback_rebuild_cutover: bitcoin_rs_index::runtime::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
         canonical_data_root,
         open_store: Arc::new(move |dir| {
             crate::storage_backend::open_txindex(
@@ -520,8 +511,8 @@ fn build_derived_index_open_spec(
 
 fn index_bundle_directive(
     config: &NodeConfig,
-) -> core::result::Result<bitcoin_rs_projection::portable::IndexBundleDirective, ConfigError> {
-    use bitcoin_rs_projection::portable::{IndexBundleDirective, IndexBundleRequest};
+) -> core::result::Result<bitcoin_rs_index::portable::IndexBundleDirective, ConfigError> {
+    use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
     let request = |dir: &std::path::PathBuf| IndexBundleRequest {
         dir: dir.clone(),
         network: config.network,
@@ -546,12 +537,12 @@ fn index_bundle_directive(
 fn manifest_attach_directive(
     manifest_path: &std::path::Path,
     network: bitcoin_rs_consensus::primitives::Network,
-    enabled: bitcoin_rs_projection::IndexCapabilities,
-) -> bitcoin_rs_projection::portable::IndexBundleDirective {
+    enabled: bitcoin_rs_index::IndexCapabilities,
+) -> bitcoin_rs_index::portable::IndexBundleDirective {
+    use bitcoin_rs_chain::manifest::CapabilityTrust;
     use bitcoin_rs_consensus::primitives::IndexArtifactCapability;
-    use bitcoin_rs_execution::manifest::CapabilityTrust;
-    use bitcoin_rs_projection::IndexCapability;
-    use bitcoin_rs_projection::portable::{IndexBundleDirective, ManifestArtifactTarget};
+    use bitcoin_rs_index::IndexCapability;
+    use bitcoin_rs_index::portable::{IndexBundleDirective, ManifestArtifactTarget};
     let bytes = match crate::snapshot::read_bounded_manifest(manifest_path) {
         Ok(b) => b,
         Err(err) => {
@@ -559,14 +550,14 @@ fn manifest_attach_directive(
             return IndexBundleDirective::None;
         }
     };
-    let manifest = match bitcoin_rs_execution::manifest::SnapshotManifest::parse(&bytes) {
+    let manifest = match bitcoin_rs_chain::manifest::SnapshotManifest::parse(&bytes) {
         Ok(m) => m,
         Err(err) => {
             tracing::debug!(path = %manifest_path.display(), %err, "could not parse manifest for index directive");
             return IndexBundleDirective::None;
         }
     };
-    if manifest.schema != bitcoin_rs_projection::index_format_version() {
+    if manifest.schema != bitcoin_rs_index::index_format_version() {
         tracing::debug!(
             path = %manifest_path.display(),
             manifest_schema = manifest.schema,
@@ -634,7 +625,7 @@ struct DerivedIndexComposer {
 
 impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
     type Output = OpenDerivedIndex;
-    type Error = bitcoin_rs_projection::runtime::DerivedIndexWorkerError;
+    type Error = bitcoin_rs_index::runtime::DerivedIndexWorkerError;
 
     fn consume<S>(self, store: Arc<S>) -> Result<Self::Output, Self::Error>
     where
@@ -647,8 +638,8 @@ impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
 }
 
 struct TxIndexSpawn {
-    spec: bitcoin_rs_projection::runtime::DerivedIndexOpenSpec,
-    generation: bitcoin_rs_projection::runtime::Generation,
+    spec: bitcoin_rs_index::runtime::DerivedIndexOpenSpec,
+    generation: bitcoin_rs_index::runtime::Generation,
     body_source: Arc<dyn BlockBodySource>,
     wake_rx: Receiver<()>,
     recovery_reporter: Arc<storage::RecoveryReporter>,
@@ -674,7 +665,7 @@ mod tests {
                 let state = NodeState::open(config.clone(), None)?;
                 assert_eq!(
                     applied_chain_tx_count(&state),
-                    bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+                    bitcoin_rs_chain::chain::ChainTxCount::UNKNOWN,
                     "a node that has applied nothing cannot know the count"
                 );
 
@@ -684,7 +675,7 @@ mod tests {
                 let counted = applied_chain_tx_count(&state);
                 assert_eq!(
                     counted,
-                    bitcoin_rs_execution::chain::ChainTxCount::established(genesis_tx_count),
+                    bitcoin_rs_chain::chain::ChainTxCount::established(genesis_tx_count),
                     "genesis establishes the count"
                 );
 
@@ -1006,19 +997,19 @@ mod tests {
             config.data_dir = dir.path().join("node");
             config.p2p.listen.clear();
             config.notifications.zmq = vec![
-                bitcoin_rs_serving::zmq::ZmqEndpointConfig {
+                bitcoin_rs_wire::zmq::ZmqEndpointConfig {
                     endpoint: "inproc://state-zmq-block".to_owned(),
                     topics: vec![
-                        bitcoin_rs_serving::zmq::ZmqTopic::HashBlock,
-                        bitcoin_rs_serving::zmq::ZmqTopic::RawBlock,
+                        bitcoin_rs_wire::zmq::ZmqTopic::HashBlock,
+                        bitcoin_rs_wire::zmq::ZmqTopic::RawBlock,
                     ],
                     hwm: Some(17),
                 },
-                bitcoin_rs_serving::zmq::ZmqEndpointConfig {
+                bitcoin_rs_wire::zmq::ZmqEndpointConfig {
                     endpoint: "inproc://state-zmq-tx".to_owned(),
                     topics: vec![
-                        bitcoin_rs_serving::zmq::ZmqTopic::HashTx,
-                        bitcoin_rs_serving::zmq::ZmqTopic::RawTx,
+                        bitcoin_rs_wire::zmq::ZmqTopic::HashTx,
+                        bitcoin_rs_wire::zmq::ZmqTopic::RawTx,
                     ],
                     hwm: Some(20),
                 },
@@ -1052,10 +1043,10 @@ mod tests {
             let tx = state.inbound_blocks_sender();
             let block = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block();
             for _ in 0..super::INBOUND_BLOCK_CHANNEL_LIMIT {
-                tx.try_send(bitcoin_rs_wire::InboundBlock::from_local(block.clone()))
+                tx.try_send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
                     .unwrap_or_else(|e| panic!("send within the bound must succeed: {e}"));
             }
-            let overflow = tx.try_send(bitcoin_rs_wire::InboundBlock::from_local(block));
+            let overflow = tx.try_send(bitcoin_rs_p2p::InboundBlock::from_local(block));
             assert!(
                 matches!(overflow, Err(crossbeam_channel::TrySendError::Full(_))),
                 "channel must reject blocks past INBOUND_BLOCK_CHANNEL_LIMIT, got {overflow:?}",
@@ -1072,7 +1063,7 @@ mod tests {
             let state = NodeState::open(config, None)?;
             let sender = state.inbound_tx_sender();
             let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
-            let lease = bitcoin_rs_wire::PeerLease::new(lease_tx);
+            let lease = bitcoin_rs_p2p::PeerLease::new(lease_tx);
             let source = lease.source_ip(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
             let tx = bitcoin_rs_consensus::primitives::Tx {
                 version: 1,
@@ -1083,12 +1074,12 @@ mod tests {
             for _ in 0..super::INBOUND_TX_CHANNEL_LIMIT {
                 sender
                     .try_send(crate::p2p::InboundBody::from(
-                        bitcoin_rs_wire::InboundTx::new(tx.clone(), source),
+                        bitcoin_rs_p2p::InboundTx::new(tx.clone(), source),
                     ))
                     .unwrap_or_else(|error| panic!("send within the bound must succeed: {error}"));
             }
             let overflow = sender.try_send(crate::p2p::InboundBody::from(
-                bitcoin_rs_wire::InboundTx::new(tx, source),
+                bitcoin_rs_p2p::InboundTx::new(tx, source),
             ));
             assert!(
                 matches!(overflow, Err(crossbeam_channel::TrySendError::Full(_))),
@@ -1131,7 +1122,7 @@ mod tests {
 
             let data_dir = config.data_dir.clone();
             let Err(NodeOpenError::DataDir(
-                bitcoin_rs_execution::events::DataDirError::ValidateSchema { source, .. },
+                bitcoin_rs_chain::events::DataDirError::ValidateSchema { source, .. },
             )) = NodeState::open(config, None)
             else {
                 return Err(TestError::ExpectationFailed(
@@ -1199,7 +1190,7 @@ mod tests {
 
             let data_dir = config.data_dir.clone();
             let Err(NodeOpenError::DataDir(
-                bitcoin_rs_execution::events::DataDirError::ValidateSchema { source, .. },
+                bitcoin_rs_chain::events::DataDirError::ValidateSchema { source, .. },
             )) = NodeState::open(config, None)
             else {
                 return Err(TestError::ExpectationFailed(
@@ -1438,7 +1429,7 @@ mod tests {
                 .services
                 .as_ref()
                 .ok_or(TestError::Missing("node services"))?
-                .rpc_address(bitcoin_rs_serving::RpcSurface::Shared)
+                .rpc_address(bitcoin_rs_wire::RpcSurface::Shared)
                 .ok_or(TestError::Missing("shared rpc address"))?;
             let client = idle_keepalive_rpc_connection(address)?;
 
@@ -1982,7 +1973,7 @@ mod tests {
             config.p2p.listen.clear();
 
             let Err(crate::NodeOpenError::DataDir(
-                bitcoin_rs_execution::events::DataDirError::LockNotRegularFile,
+                bitcoin_rs_chain::events::DataDirError::LockNotRegularFile,
             )) = NodeState::open(config, None)
             else {
                 return Err(TestError::message(
@@ -2122,7 +2113,7 @@ mod tests {
 
         #[test]
         fn derived_index_status_answers_when_disabled() -> Result<(), TestError> {
-            use bitcoin_rs_projection::CapabilityState;
+            use bitcoin_rs_index::CapabilityState;
 
             let dir = tempfile::tempdir()?;
             let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -2212,8 +2203,8 @@ mod tests {
 
         #[test]
         fn script_index_modes_give_concrete_unspent_outputs_answers() -> Result<(), TestError> {
-            use bitcoin_rs_projection::{IndexCapability, ScriptHash};
-            use bitcoin_rs_serving::context::{TxQueryError, TxUnavailableCause};
+            use bitcoin_rs_index::{IndexCapability, ScriptHash};
+            use bitcoin_rs_wire::context::{TxQueryError, TxUnavailableCause};
 
             let scripthash = ScriptHash::from_script_bytes(&[0x51, 0x01]);
 
@@ -2717,10 +2708,10 @@ mod tests {
 
         #[test]
         fn prune_to_height_advances_published_height() -> Result<(), TestError> {
-            use bitcoin_rs_serving::context::PruneService;
             use bitcoin_rs_storage::FlatFileBlockStore;
             use bitcoin_rs_storage::KvStore;
             use bitcoin_rs_storage::pruning::load_pruneheight;
+            use bitcoin_rs_wire::context::PruneService;
             use std::sync::atomic::AtomicU32;
 
             let dir = tempfile::tempdir()?;
@@ -2780,8 +2771,8 @@ mod tests {
         #[test]
         fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height()
         -> Result<(), TestError> {
+            use bitcoin_rs_chain::AssumeUtxoManager;
             use bitcoin_rs_consensus::primitives::Network;
-            use bitcoin_rs_execution::AssumeUtxoManager;
             use bitcoin_rs_storage::FlatFileBlockStore;
             use std::sync::atomic::AtomicU32;
 
@@ -2801,7 +2792,7 @@ mod tests {
             let pinned = Network::Regtest
                 .assume_utxo_for_height(110)
                 .ok_or_else(|| TestError::message("pinned 110 missing"))?;
-            let status = bitcoin_rs_execution::AssumeUtxoDiskStatus::Validating {
+            let status = bitcoin_rs_chain::AssumeUtxoDiskStatus::Validating {
                 base_height: pinned.height,
                 base_hash: pinned.block_hash,
                 expected_hash_serialized: pinned.hash_serialized,
@@ -3123,7 +3114,7 @@ mod tests {
                 &state.chainstate(),
                 genesis_id,
                 replacement.header,
-                bitcoin_rs_execution::chain::node::NodeStatus::HeaderValid,
+                bitcoin_rs_chain::chain::node::NodeStatus::HeaderValid,
             )?;
 
             let result = crate::reorg::invalidate_block(
@@ -3193,7 +3184,7 @@ mod tests {
                     &state.chainstate(),
                     parent,
                     block.header,
-                    bitcoin_rs_execution::chain::node::NodeStatus::HeaderValid,
+                    bitcoin_rs_chain::chain::node::NodeStatus::HeaderValid,
                 )?;
                 fork_bodies.insert(
                     Hash256::from(block.block_hash()),
@@ -3322,7 +3313,7 @@ mod tests {
         type ForkFixture = (
             tempfile::TempDir,
             NodeState,
-            bitcoin_rs_execution::chain::NodeId,
+            bitcoin_rs_chain::chain::NodeId,
             HashMap<
                 bitcoin_rs_consensus::primitives::Hash256,
                 bitcoin_rs_consensus::primitives::BlockImage,
@@ -3370,7 +3361,7 @@ mod tests {
                     &state.chainstate(),
                     parent,
                     block.header,
-                    bitcoin_rs_execution::chain::node::NodeStatus::HeaderValid,
+                    bitcoin_rs_chain::chain::node::NodeStatus::HeaderValid,
                 )?;
                 fork_bodies.insert(
                     Hash256::from(block.block_hash()),
@@ -3497,7 +3488,7 @@ mod tests {
                     NodeOpenError::Recovery(source)
                         if matches!(
                             source.as_ref(),
-                            bitcoin_rs_execution::recovery::RecoveryError::CheckpointEngineImageMissing
+                            bitcoin_rs_chain::recovery::RecoveryError::CheckpointEngineImageMissing
                         )
                 ),
                 "unexpected missing-image refusal: {error:#}"
@@ -3571,7 +3562,7 @@ mod tests {
 
         #[test]
         fn startup_verification_refuses_a_corrupt_tip_body() -> Result<(), TestError> {
-            use bitcoin_rs_execution::verify::VerifyError;
+            use bitcoin_rs_chain::verify::VerifyError;
 
             let (_dir, state, config) = applied_regtest_chain(2, 2)?;
             drop(state);
@@ -3719,7 +3710,7 @@ mod tests {
         }
 
         type ForkPlan = (
-            bitcoin_rs_execution::chain::NodeId,
+            bitcoin_rs_chain::chain::NodeId,
             HashMap<
                 bitcoin_rs_consensus::primitives::Hash256,
                 bitcoin_rs_consensus::primitives::BlockImage,
@@ -3756,7 +3747,7 @@ mod tests {
                     &state.chainstate(),
                     parent,
                     block.header,
-                    bitcoin_rs_execution::chain::node::NodeStatus::HeaderValid,
+                    bitcoin_rs_chain::chain::node::NodeStatus::HeaderValid,
                 )?;
                 bodies.insert(
                     hash,
@@ -3966,17 +3957,17 @@ mod tests {
 
     use crate::test_support::TestError;
 
-    use bitcoin_rs_execution::chain::{TipSnapshot, regtest_fixture};
+    use bitcoin_rs_chain::chain::{TipSnapshot, regtest_fixture};
 
     use bitcoin_rs_consensus::primitives::{Hash256, chain_constants::CORE_REORG_SAFETY_MARGIN};
 
-    use bitcoin_rs_serving::context::PruneServiceError;
+    use bitcoin_rs_wire::context::PruneServiceError;
 
     use core::mem::size_of;
 
     use hashbrown::HashMap;
 
-    use bitcoin_rs_execution::{events::*, recovery::*};
+    use bitcoin_rs_chain::{events::*, recovery::*};
 
     use std::{
         sync::{Arc, atomic::Ordering},
@@ -3986,17 +3977,17 @@ mod tests {
     use super::*;
     use bitcoin_rs_consensus::primitives::LockTime;
 
-    fn applied_chain_tx_count(state: &NodeState) -> bitcoin_rs_execution::chain::ChainTxCount {
+    fn applied_chain_tx_count(state: &NodeState) -> bitcoin_rs_chain::chain::ChainTxCount {
         state
             .chainstate()
             .applied_tip_reader()
             .load_full()
-            .map_or(bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN, |tip| {
+            .map_or(bitcoin_rs_chain::chain::ChainTxCount::UNKNOWN, |tip| {
                 tip.chain_tx_count
             })
     }
 
-    use bitcoin_rs_projection::IndexCapabilities;
+    use bitcoin_rs_index::IndexCapabilities;
 
     use bitcoin_rs_consensus::primitives::BlockHash;
 
@@ -4007,11 +3998,11 @@ mod tests {
             .chainstate()
             .applied_tip()
             .store(Some(Arc::new(TipSnapshot {
-                tip_id: bitcoin_rs_execution::chain::node::NodeId::new(height),
+                tip_id: bitcoin_rs_chain::chain::node::NodeId::new(height),
                 height,
                 chainwork: bitcoin_rs_consensus::header_rules::ChainWork::ZERO,
                 hash: bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&hash),
-                chain_tx_count: bitcoin_rs_execution::chain::ChainTxCount::UNKNOWN,
+                chain_tx_count: bitcoin_rs_chain::chain::ChainTxCount::UNKNOWN,
             })));
     }
 

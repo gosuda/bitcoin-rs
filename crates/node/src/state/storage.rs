@@ -1,6 +1,5 @@
 use crate::NodeConfig;
 use bitcoin_rs_consensus::primitives::BlockBodyMetadata;
-use bitcoin_rs_serving::context::{PruneResult, PruneService, PruneServiceError, PruneStatus};
 use bitcoin_rs_storage::DurableHeadStore as _;
 use bitcoin_rs_storage::FlatFileBlockStore;
 use bitcoin_rs_storage::KvStore;
@@ -10,6 +9,7 @@ use bitcoin_rs_storage::StoreGuard;
 use bitcoin_rs_storage::block_body::BlockBodySource;
 use bitcoin_rs_storage::pruning::PruneError;
 use bitcoin_rs_storage::recovery_evidence::RecoveryEvidencePublisher;
+use bitcoin_rs_wire::context::{PruneResult, PruneService, PruneServiceError, PruneStatus};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -18,7 +18,7 @@ use super::open::NodeOpenError;
 
 pub(super) struct NodeStorage {
     backend: StorageBackend,
-    undo_store: Arc<dyn bitcoin_rs_execution::UndoStore>,
+    undo_store: Arc<dyn bitcoin_rs_chain::UndoStore>,
     durable_head: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
@@ -90,7 +90,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
         });
         let storage = NodeStorage {
             backend: self.backend,
-            undo_store: Arc::new(bitcoin_rs_execution::KvUndoStore::new(Arc::clone(&store))),
+            undo_store: Arc::new(bitcoin_rs_chain::KvUndoStore::new(Arc::clone(&store))),
             durable_head,
             block_body_store: Arc::new(bitcoin_rs_storage::block_body::IndexedBlockBodyStore::new(
                 Arc::clone(&store),
@@ -158,7 +158,7 @@ impl NodeStorage {
         Arc::clone(&self.block_body_store)
     }
 
-    pub(super) fn undo_store(&self) -> Arc<dyn bitcoin_rs_execution::UndoStore> {
+    pub(super) fn undo_store(&self) -> Arc<dyn bitcoin_rs_chain::UndoStore> {
         Arc::clone(&self.undo_store)
     }
 
@@ -196,7 +196,7 @@ pub(super) trait DeferredChainstateServices: Send + Sync {
     fn prune_service(
         &self,
         block_files: Arc<FlatFileBlockStore>,
-        authority: bitcoin_rs_execution::PruneAuthority,
+        authority: bitcoin_rs_chain::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> Result<Arc<dyn PruneService>, NodeOpenError>;
@@ -210,7 +210,7 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
     fn prune_service(
         &self,
         block_files: Arc<FlatFileBlockStore>,
-        authority: bitcoin_rs_execution::PruneAuthority,
+        authority: bitcoin_rs_chain::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> Result<Arc<dyn PruneService>, NodeOpenError> {
@@ -294,7 +294,7 @@ impl BlockBodySource for StoredBlockBodySource {
 pub(super) struct NodePruneService<S: KvStore> {
     store: Arc<S>,
     block_files: Arc<FlatFileBlockStore>,
-    authority: bitcoin_rs_execution::PruneAuthority,
+    authority: bitcoin_rs_chain::PruneAuthority,
     pruneheight: Mutex<Option<u32>>,
     durable_tip_height: Arc<AtomicU32>,
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
@@ -304,7 +304,7 @@ impl<S: KvStore> NodePruneService<S> {
     pub(super) fn new(
         store: Arc<S>,
         block_files: Arc<FlatFileBlockStore>,
-        authority: bitcoin_rs_execution::PruneAuthority,
+        authority: bitcoin_rs_chain::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> Result<Self, NodeOpenError> {
@@ -375,7 +375,7 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
 
 pub(crate) struct RecoveryReporter(pub(crate) RecoveryEvidencePublisher);
 
-impl bitcoin_rs_projection::runtime::IndexAheadSink for RecoveryReporter {
+impl bitcoin_rs_index::runtime::IndexAheadSink for RecoveryReporter {
     fn report_index_ahead(
         &self,
         capability: &str,
@@ -385,7 +385,7 @@ impl bitcoin_rs_projection::runtime::IndexAheadSink for RecoveryReporter {
         index_hash_be: &str,
         depth: u32,
         unix_secs: u64,
-    ) -> Result<(), bitcoin_rs_projection::runtime::IndexAheadError> {
+    ) -> Result<(), bitcoin_rs_index::runtime::IndexAheadError> {
         self.0
             .publish_index_ahead(
                 capability,
@@ -400,7 +400,7 @@ impl bitcoin_rs_projection::runtime::IndexAheadSink for RecoveryReporter {
     }
 }
 
-impl bitcoin_rs_projection::RollbackWarningSource for RecoveryReporter {
+impl bitcoin_rs_index::RollbackWarningSource for RecoveryReporter {
     fn rollback_warnings(&self) -> Vec<String> {
         self.0.warnings()
     }

@@ -48,7 +48,7 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 
-use bitcoin_rs_execution::ValidationMode;
+use bitcoin_rs_chain::ValidationMode;
 use bitcoin_rs_node::{Auth, ConfigError, Network, ScriptIndexMode};
 
 #[derive(Debug, thiserror::Error)]
@@ -336,7 +336,7 @@ fn environment_parses_script_index() {
 fn esplora_query_limit_resolves_and_rejects_zero() -> Result<(), TestError> {
     assert_eq!(
         resolved(&["bitcoin-rs"], &[]).rpc.esplora_max_queries,
-        bitcoin_rs_serving::esplora::DEFAULT_MAX_QUERIES.get()
+        bitcoin_rs_wire::esplora::DEFAULT_MAX_QUERIES.get()
     );
     let config = load_file(
         "--config",

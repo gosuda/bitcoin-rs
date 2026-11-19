@@ -13,7 +13,7 @@ signer can drive a PSBT workflow without giving key custody to the node.
 ### Authentication before body
 The JSON-RPC listener checks the `Authorization` header as soon as it parses
 the request head. It does this before it reads any body byte
-(`crates/serving/src/server.rs`). A missing header gets Core's 401 tuple at once.
+(`crates/wire/src/server.rs`). A missing header gets Core's 401 tuple at once.
 Present but wrong credentials are slowed by 250 ms first. A 16 MiB declared
 body therefore costs the attacker the connection, not the server. Core differs.
 Core reads the whole body (up to 32 MiB) before it checks credentials, and it
@@ -80,7 +80,7 @@ event covers it, matching Core. Every event concludes with a topic-local
 little-endian `u32` sequence counter frame. Reorg disconnects are emitted
 tip-first before connects on the replacement branch. Each socket owns
 `DEFAULT_ZMQ_HWM = 1_000`.
-`bitcoin_rs_serving::zmq` owns the compatibility payload and transport;
+`bitcoin_rs_wire::zmq` owns the compatibility payload and transport;
 `ChainFollowers` owns emission timing relative to committed
 chain transitions.
 
@@ -115,7 +115,7 @@ The unserved remainder of one `getdata` that stopped because the session could n
 
 ### Authoritative peer table
 The single owner of live peer connections and their published handshake
-metadata (`bitcoin_rs_wire::PeerTable`). It enforces one connection per remote
+metadata (`bitcoin_rs_p2p::PeerTable`). It enforces one connection per remote
 address, cancels predecessors atomically on replacement, prevents stale
 connection handles from evicting newer sessions via connection-identity checks,
 and ties handshake metadata strictly to the live connection identity.
@@ -234,7 +234,7 @@ the two makes every network report difficulty `1.0` at its easiest target.
 Equal IEEE-754 values versus equal serialized spellings. Core's UniValue uses
 `%.16g`; the RPC path's sonic-rs serializer uses shortest round-trip. Compatibility
 means preserving value and operation order, not forcing JSON text to match.
-Owners: `crates/serving/tests.rs` (`support::compare`, bitwise numeric comparison) and `crates/serving/tests.rs` (`policy_contract`).
+Owners: `crates/wire/tests.rs` (`support::compare`, bitwise numeric comparison) and `crates/wire/tests.rs` (`policy_contract`).
 
 ### Provably unspendable outputs (UTXO admission)
 Outputs the UTXO set never admits: a `scriptPubKey` starting with `OP_RETURN`, or longer than `MAX_SCRIPT_SIZE`. Excluding them changes no consensus outcome, so the snapshot codec carries the version tag `bitcoin-rs-utxo-spendable-v1`; a change to admission semantics is a codec change.
@@ -298,7 +298,7 @@ Downstream consumers (ZMQ publisher, metrics) can therefore distinguish relay
 from reorg re-admission without inspecting call sites.
 
 ### Chainstate facade
-The in-process owner of applied-tip mutation (`bitcoin_rs_execution::Chainstate`).
+The in-process owner of applied-tip mutation (`bitcoin_rs_chain::Chainstate`).
 Callers copy a `ChainstateSnapshot` or obtain a `ChainTransition`; they do
 not hold the raw UTXO, tip, and lock cells and reproduce a partial
 transition. `chain` still plans the branch. Node-level reorg still sequences
@@ -306,7 +306,7 @@ disconnect then connect. UTXO, storage, and index still own their operations.
 
 ### Chain-change proof
 The type-level binding of a `TransitionLock` to the `TransitionGuard` that
-reserved the active odd generation (`crates/execution/src/lib.rs`). The
+reserved the active odd generation (`crates/chain/src/lib.rs`). The
 caller-facing mutation capability is `ChainTransition`, which promotion of
 the lock produces. Apply-path helpers accept `&ChainTransition`, not
 independent lock and guard arguments, so a call without an active odd
@@ -315,7 +315,7 @@ generation is fixed for the whole transition rather than read from a
 snapshot that may have moved.
 
 ### Count-and-byte bound
-A window sized by whichever of a count cap and a byte cap binds first, because item size varies by orders of magnitude across the chain. The script window (`window_len`, `crates/execution/src/lib.rs`) and the download window's pending and staging budgets (`SyncBudget` in `crates/node/src/p2p/download_window.rs`) both use it. In the script window one block larger than the whole byte cap still goes through alone rather than stalling the chain.
+A window sized by whichever of a count cap and a byte cap binds first, because item size varies by orders of magnitude across the chain. The script window (`window_len`, `crates/chain/src/lib.rs`) and the download window's pending and staging budgets (`SyncBudget` in `crates/node/src/p2p/download_window.rs`) both use it. In the script window one block larger than the whole byte cap still goes through alone rather than stalling the chain.
 
 ## Chain state and reorg
 
@@ -323,7 +323,7 @@ A window sized by whichever of a count cap and a byte cap binds first, because i
 Consensus-affecting RPCs never mutate the block tree directly; they delegate through the node-owned `ChainControl` so the same apply-admission and chain-transition locks protect RPC- and sync-triggered reorganizations. `invalidateblock` previews the replacement tip and loads every body the disconnect/connect plan needs. It then holds the chain-transition witness through header invalidation and branch switching; its disconnects emit the same `pubsequence` `D` events as an organic reorg. `PruneAuthority` takes the same locks before reading the applied tip.
 
 ### Commit point (multi-store mutation)
-The mutation that makes a multi-store operation visible; it does not make preceding mutations atomic. For an authoritative disconnect it is the durable head batch that carries the coin inverse and the parent head, applied after the coin-stats rewind. A failed batch leaves the prior head in place; an ambiguous batch outcome is fatal and resolved by recovery. `DisconnectError` (`crates/execution/src/error.rs`) splits `Refused` (nothing touched) from `Fatal` (partly rolled back) and `MarkerStuck` (rolled back cleanly, though uncleared in-flight marker forces recovery on next start). `Fatal` and `MarkerStuck` both close apply admission; `Fatal` shuts the process down.
+The mutation that makes a multi-store operation visible; it does not make preceding mutations atomic. For an authoritative disconnect it is the durable head batch that carries the coin inverse and the parent head, applied after the coin-stats rewind. A failed batch leaves the prior head in place; an ambiguous batch outcome is fatal and resolved by recovery. `DisconnectError` (`crates/chain/src/error.rs`) splits `Refused` (nothing touched) from `Fatal` (partly rolled back) and `MarkerStuck` (rolled back cleanly, though uncleared in-flight marker forces recovery on next start). `Fatal` and `MarkerStuck` both close apply admission; `Fatal` shuts the process down.
 
 ### Disconnect marker phase
 The durable record that an authoritative disconnect started and how far it got. Armed and flushed before the coin mutation, not on the error path, because a process that dies mid-rollback writes no error. `InFlight`: rollback started, completion unreported; an ordinary checkpoint must not clear it. `RolledBack`: coin set and applied tip moved together and need one clean checkpoint. Startup recovers automatically from either phase. It reconciles the certified durable-head chain with the restored state, rewinding a checkpoint the disconnect outran or replaying a gap that trails it. It warns with the mode chosen, publishes a clean checkpoint, and retires the marker only after that publication is durable; durable evidence the head chain cannot authenticate still fails closed.
@@ -337,7 +337,7 @@ State that connection writes and disconnection must account for. `coin_stats` ne
 ## Derived indexes
 
 ### TxIndex capability watermarks
-Versioned durable `(height, block hash)` cursors identifying the exact active-chain prefix each independently ready row family represents. `TxLookup` owns `TxConfirmed` (`--txindex`). `ScriptHistory` owns `Funding` and `Spending` (`--scriptindex=full`, which also builds internal `TxLookup` rows for Esplora without changing Core txindex advertisement). `ScriptLive` owns compact live-output locators (`--scriptindex=utxo` or `full`). It is rebuilt from the authoritative UTXO set rather than block history. `BlockHeaders` is shared rollback-integrity metadata. Its row order and count must never be read as the active chain. Equal cursors advance in one body scan and one atomic batch. A lagging cursor moves independently. Height alone cannot prove identity across a reorg. On startup the writer accepts the current row-format 6 marker. Startup recovery resets incompatible markers or unversioned cursorless tables for rebuild (`IndexWriter::open` in `crates/projection/src/index/write.rs`, `open_writer` in `crates/projection/src/runtime/startup.rs`). There is no in-place format upgrade. A crash-resumable reset marker makes restart finish deletion before the writer is exposed.
+Versioned durable `(height, block hash)` cursors identifying the exact active-chain prefix each independently ready row family represents. `TxLookup` owns `TxConfirmed` (`--txindex`). `ScriptHistory` owns `Funding` and `Spending` (`--scriptindex=full`, which also builds internal `TxLookup` rows for Esplora without changing Core txindex advertisement). `ScriptLive` owns compact live-output locators (`--scriptindex=utxo` or `full`). It is rebuilt from the authoritative UTXO set rather than block history. `BlockHeaders` is shared rollback-integrity metadata. Its row order and count must never be read as the active chain. Equal cursors advance in one body scan and one atomic batch. A lagging cursor moves independently. Height alone cannot prove identity across a reorg. On startup the writer accepts the current row-format 6 marker. Startup recovery resets incompatible markers or unversioned cursorless tables for rebuild (`IndexWriter::open` in `crates/index/src/index/write.rs`, `open_writer` in `crates/index/src/runtime/startup.rs`). There is no in-place format upgrade. A crash-resumable reset marker makes restart finish deletion before the writer is exposed.
 
 ### Coalesced TxIndex wake
 The nonblocking hint published after a committed `applied_tip.store`: an atomic revision incremented with `Release` plus `try_send` on a capacity-one channel. Tokens may coalesce or drop; the worker checks the authoritative revision before sleeping and also wakes on a bounded timeout.
@@ -369,7 +369,7 @@ One logical record has exactly one byte string; `UtxoRecord` compares and hashes
 Asserting how much of an expensive operation a code path performs, instead of how long it takes. Counting the calls a path makes (for example, how many amounts `find_output` decompresses for a hit, a miss, and `max_vout`) states an algorithmic claim deterministically at any input size. The counterpart is the case a count cannot make: where the claim really is about elapsed time, the assertion belongs in a paired-arm benchmark, not a test.
 
 ### Chain snapshot
-The coherent, non-torn view of the applied tip the chain-event publisher keeps in one `RwLock`ed cell: `{ epoch, sequence, tip_hash, tip_height }` (`crates/execution/src/events.rs`). The single writer replaces the whole cell per commit, so a reader never mixes two commit points. `epoch` is a persisted, strictly monotonic per-data-dir counter that makes an old run's cursors stale; `sequence` advances once per committed connect or disconnect and starts at 1. The snapshot is live state, never persisted per-event; readers take `Chainstate::chain_snapshot()`.
+The coherent, non-torn view of the applied tip the chain-event publisher keeps in one `RwLock`ed cell: `{ epoch, sequence, tip_hash, tip_height }` (`crates/chain/src/events.rs`). The single writer replaces the whole cell per commit, so a reader never mixes two commit points. `epoch` is a persisted, strictly monotonic per-data-dir counter that makes an old run's cursors stale; `sequence` advances once per committed connect or disconnect and starts at 1. The snapshot is live state, never persisted per-event; readers take `Chainstate::chain_snapshot()`.
 
 ### Chain-event hint
 The bounded-channel wake-up `ChainEventPublisher::record` emits after replacing the snapshot cell: `{ kind, height, hash, epoch, sequence }`, one per committed connect or disconnect. Hints carry no payload to apply and a full channel drops them without blocking the commit path; recovery is always positional re-planning over the chain itself. Hints are not a recovery log.
@@ -400,7 +400,7 @@ filesystem apparent bytes, not a logical KV ledger.
 See [docs/contracts/storage-footprint.md](docs/contracts/storage-footprint.md).
 
 ### Consumer cursor
-The durable 52-byte record `{ epoch, sequence, height, hash }` naming the exact chain state a consumer's rows already mirror (`crates/projection/src/reconcile.rs`). Position (`height`, `hash`) anchors row truth; `epoch` and `sequence` are advisory identity that a restart or epoch bump invalidates without invalidating rows. It is written only when the publisher snapshot provably names the tip the rows reached, and always in the same atomic batch as the row mutations it describes.
+The durable 52-byte record `{ epoch, sequence, height, hash }` naming the exact chain state a consumer's rows already mirror (`crates/index/src/reconcile.rs`). Position (`height`, `hash`) anchors row truth; `epoch` and `sequence` are advisory identity that a restart or epoch bump invalidates without invalidating rows. It is written only when the publisher snapshot provably names the tip the rows reached, and always in the same atomic batch as the row mutations it describes.
 
 ### Capability status
 The node-owned status report for concrete services exposed by the RPC layer. It

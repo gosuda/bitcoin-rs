@@ -2,13 +2,13 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_serving::mining::pool::ledger as pool_ledger;
-use bitcoin_rs_serving::mining::pool::stratum::sv1::{
+use bitcoin_rs_storage::KvStore;
+use bitcoin_rs_wire::mining::pool::ledger as pool_ledger;
+use bitcoin_rs_wire::mining::pool::stratum::sv1::{
     ConnectionLimiter, DifficultyPolicy, Server, ServerConfig, ServerDeps,
 };
-use bitcoin_rs_serving::mining::pool::{ExtranonceLayout, JobBookConfig, PoolCore};
-use bitcoin_rs_serving::mining::{CoinbaseBudget, MiningControl};
-use bitcoin_rs_storage::KvStore;
+use bitcoin_rs_wire::mining::pool::{ExtranonceLayout, JobBookConfig, PoolCore};
+use bitcoin_rs_wire::mining::{CoinbaseBudget, MiningControl};
 
 use crate::run::RunError;
 
@@ -22,18 +22,18 @@ mod tests {
     use std::{path::Path, sync::Arc};
 
     use bitcoin_rs_consensus::primitives::{Block, BlockHash, Hash256, Header, Txid};
-    use bitcoin_rs_serving::context::PoolOperator;
-    use bitcoin_rs_serving::mining::pool::ledger as pool_ledger;
-    use bitcoin_rs_serving::mining::pool::ledger::{
+    use bitcoin_rs_storage::KvStore;
+    use bitcoin_rs_wire::context::PoolOperator;
+    use bitcoin_rs_wire::mining::pool::ledger as pool_ledger;
+    use bitcoin_rs_wire::mining::pool::ledger::{
         Balance, MinerId, PayoutPolicy, PoolConfig, RoundState, ShareCredit, ShareReceipt,
     };
-    use bitcoin_rs_serving::mining::pool::stratum::sv1::{AccountResolver, Password};
-    use bitcoin_rs_serving::mining::pool::{
+    use bitcoin_rs_wire::mining::pool::stratum::sv1::{AccountResolver, Password};
+    use bitcoin_rs_wire::mining::pool::{
         AcceptedShare, BlockReceipt, FoundBlock, JobId, LedgerUnavailable, RecordOutcome,
         SessionId, ShareClass, ShareLedger, ShareTarget, WorkerIdentity,
     };
-    use bitcoin_rs_serving::mining::{BlockValidationResult, MiningControlError};
-    use bitcoin_rs_storage::KvStore;
+    use bitcoin_rs_wire::mining::{BlockValidationResult, MiningControlError};
 
     use super::ledger::{Ledger, LedgerHost};
     use crate::run::RunError;
@@ -356,7 +356,7 @@ mod tests {
 
     fn durable_undetermined_keeps_reservation_until_waiter_removed(open: OpenStore) -> TestResult {
         use super::ledger::{BlockRecordOutcome, DeferredCharge};
-        use bitcoin_rs_serving::mining::pool::BlockStatus;
+        use bitcoin_rs_wire::mining::pool::BlockStatus;
 
         let directory = tempfile::tempdir()?;
         let host = Arc::new(registered_host(open, directory.path(), EPOCH)?);
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn protocol_admissions_share_total_capacity_and_release_it_on_drop() -> TestResult {
         let shared =
-            Arc::new(bitcoin_rs_serving::mining::pool::stratum::sv1::ConnectionLimiter::new(1, 1)?);
+            Arc::new(bitcoin_rs_wire::mining::pool::stratum::sv1::ConnectionLimiter::new(1, 1)?);
         let sv1 = Arc::clone(&shared);
         let sv2 = Arc::clone(&shared);
         let first = sv1
@@ -429,7 +429,7 @@ mod tests {
             .map_err(|_| TestError::ExpectationFailed("sv1 admits"))?;
         assert!(matches!(
             sv2.try_admit("192.0.2.2".parse()?),
-            Err(bitcoin_rs_serving::mining::pool::stratum::sv1::RefusalReason::ConnectionLimit)
+            Err(bitcoin_rs_wire::mining::pool::stratum::sv1::RefusalReason::ConnectionLimit)
         ));
         assert_eq!(shared.active(), 1);
         drop(first);
@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn protocol_admissions_share_per_ip_capacity_without_consuming_refused_slots() -> TestResult {
         let shared =
-            Arc::new(bitcoin_rs_serving::mining::pool::stratum::sv1::ConnectionLimiter::new(3, 1)?);
+            Arc::new(bitcoin_rs_wire::mining::pool::stratum::sv1::ConnectionLimiter::new(3, 1)?);
         let sv1 = Arc::clone(&shared);
         let sv2 = Arc::clone(&shared);
         let same_ip = "192.0.2.1".parse()?;
@@ -454,7 +454,7 @@ mod tests {
             .map_err(|_| TestError::ExpectationFailed("per-IP sv1 admits"))?;
         assert!(matches!(
             sv2.try_admit(same_ip),
-            Err(bitcoin_rs_serving::mining::pool::stratum::sv1::RefusalReason::PerIpLimit)
+            Err(bitcoin_rs_wire::mining::pool::stratum::sv1::RefusalReason::PerIpLimit)
         ));
         let other = sv2
             .try_admit("192.0.2.2".parse()?)
@@ -703,8 +703,9 @@ mod tests {
             max_connections: 128,
             max_connections_per_ip: 8,
             share_difficulty: "1".to_owned(),
-            share_target:
-                bitcoin_rs_serving::mining::pool::ShareTarget::from_pool_difficulty_decimal("1")?,
+            share_target: bitcoin_rs_wire::mining::pool::ShareTarget::from_pool_difficulty_decimal(
+                "1",
+            )?,
             window_work: 1_000,
             fee_bps: 0,
             reward_script: vec![0x51],
@@ -715,8 +716,8 @@ mod tests {
             max_payout_outputs: 10,
         });
         let state = crate::state::NodeState::open(config, None)?;
-        let control: Arc<dyn bitcoin_rs_serving::mining::MiningControl> =
-            Arc::new(bitcoin_rs_serving::mining::FakeMiningControl::default());
+        let control: Arc<dyn bitcoin_rs_wire::mining::MiningControl> =
+            Arc::new(bitcoin_rs_wire::mining::FakeMiningControl::default());
         let Some(service) = super::PoolService::prepare(&state, &control)? else {
             panic!("enabled pool must prepare a service");
         };
@@ -788,8 +789,8 @@ fn composed_core_config(max_connections: u32) -> Result<ComposedCore, RunError> 
             },
             extranonce: ExtranonceLayout::new(4, 4),
             coinbase_tag: b"/btcrs/".to_vec(),
-            version_mask: bitcoin_rs_serving::mining::pool::BIP320_VERSION_MASK,
-            ntime_forward_secs: bitcoin_rs_serving::mining::pool::MAX_NTIME_FORWARD_SECS,
+            version_mask: bitcoin_rs_wire::mining::pool::BIP320_VERSION_MASK,
+            ntime_forward_secs: bitcoin_rs_wire::mining::pool::MAX_NTIME_FORWARD_SECS,
             max_jobs: MAX_RETAINED_JOBS,
             max_sessions: sessions,
             max_shares_per_job: MAX_SHARES_PER_JOB,
@@ -855,8 +856,8 @@ impl PoolService {
         }))
     }
 
-    pub(crate) fn handles(&self) -> bitcoin_rs_serving::context::PoolHandles {
-        bitcoin_rs_serving::context::PoolHandles {
+    pub(crate) fn handles(&self) -> bitcoin_rs_wire::context::PoolHandles {
+        bitcoin_rs_wire::context::PoolHandles {
             operator: Some(self.host.clone()),
         }
     }

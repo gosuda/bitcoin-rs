@@ -16,7 +16,7 @@ The default build is kernel-free. `cargo build -p bitcoin-rs` uses the native Ru
 | :--- | :--- |
 | `fmt` | `cargo fmt --all -- --check` |
 | `clippy [lane]` | Kernel-free clippy profiles (`all`, `services`, `node-runtime`) plus production cargo check |
-| `test-crates [lane]` | Library test lanes (`all`, `silent-payments`, `storage`, `consensus-execution`, `node-serving`) |
+| `test-crates [lane]` | Library test lanes (`all`, `silent-payments`, `storage`, `consensus-chain`, `node-wire`) |
 | `test-binary` | Node binary test lane |
 | `test-workspace` | Workspace test lane |
 | `test` | `test-crates`, then `test-binary`, then `test-workspace` |

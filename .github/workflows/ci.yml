@@ -98,7 +98,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [silent-payments, storage, consensus-execution, node-serving]
+        lane: [silent-payments, storage, consensus-chain, node-wire]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       BITCOIN_RS_FUZZ_CORPUS: ${{ github.workspace }}/.fuzz-corpus/corpus

@@ -2,16 +2,16 @@
 
 use std::collections::HashMap;
 
-use bitcoin_rs_execution::chain::ChainTxCount;
-use bitcoin_rs_execution::chain::regtest_fixture::{
+use bitcoin_rs_chain::chain::ChainTxCount;
+use bitcoin_rs_chain::chain::regtest_fixture::{
     genesis_time, mined_block_with_prev_hash, mined_regtest_child_at_time, script_num_push,
 };
-use bitcoin_rs_execution::fuzzing::{FuzzChain, FuzzCheckpoint};
-use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, block_subsidy};
+use bitcoin_rs_chain::fuzzing::{FuzzChain, FuzzCheckpoint};
 use bitcoin_rs_consensus::primitives::{
     Amount, Block, BlockHash, Hash256, Header, LockTime, Network, OutPoint, Script, Sequence, Tx,
     TxIn, TxOut, Witness,
 };
+use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, block_subsidy};
 use libfuzzer_sys::fuzz_target;
 
 struct Cursor<'a> {
@@ -80,14 +80,16 @@ impl Model {
                 continue;
             }
             let vout = u32::try_from(vout).expect("output index fits");
-            self.coins
-                .insert(OutPoint::new(txid, vout), output.clone());
+            self.coins.insert(OutPoint::new(txid, vout), output.clone());
         }
         self.tx_count = self
             .tx_count
             .checked_add(u64::try_from(block.txs.len()).expect("tx count"))
             .expect("tx count does not overflow");
-        self.height = self.height.checked_add(1).expect("height does not overflow");
+        self.height = self
+            .height
+            .checked_add(1)
+            .expect("height does not overflow");
         self.tip = block.header;
         self.blocks.push(block.clone());
     }
@@ -106,7 +108,10 @@ impl Model {
             .tx_count
             .checked_sub(u64::try_from(block.txs.len()).expect("tx count"))
             .expect("tx count does not underflow");
-        self.height = self.height.checked_sub(1).expect("height does not underflow");
+        self.height = self
+            .height
+            .checked_sub(1)
+            .expect("height does not underflow");
         self.blocks.pop();
         self.tip = self
             .blocks
@@ -122,9 +127,18 @@ fn stored_output(output: &TxOut) -> bool {
 }
 
 fn assert_state(chain: &FuzzChain, model: &Model) {
-    let tip = chain.applied_tip().expect("an applied tip must be published");
-    assert_eq!(tip.height, model.height, "applied height must track the model");
-    assert_eq!(tip.hash, model.tip_hash(), "applied tip must track the model");
+    let tip = chain
+        .applied_tip()
+        .expect("an applied tip must be published");
+    assert_eq!(
+        tip.height, model.height,
+        "applied height must track the model"
+    );
+    assert_eq!(
+        tip.hash,
+        model.tip_hash(),
+        "applied tip must track the model"
+    );
     assert_eq!(
         tip.chain_tx_count,
         ChainTxCount::established(model.tx_count),
@@ -167,10 +181,7 @@ fn coinbase(height: u32, extra: &[u8], outputs: Vec<TxOut>) -> Tx {
 fn valid_block(model: &Model, cursor: &mut Cursor<'_>) -> Block {
     let height = model.height + 1;
     let output_count = 1 + usize::from(cursor.byte_or(0) % 3);
-    let subsidy = block_subsidy(
-        height,
-        Network::Regtest.subsidy_halving_interval(),
-    );
+    let subsidy = block_subsidy(height, Network::Regtest.subsidy_halving_interval());
     let share = subsidy / u64::try_from(output_count).expect("output count");
     let mut outputs = Vec::with_capacity(output_count);
     for index in 0..output_count {
@@ -224,20 +235,20 @@ fuzz_target!(|data: &[u8]| {
                 }
             }
             3 => {
-                let flushed = chain.flush().expect("a quiescent chain must flush its durable head");
+                let flushed = chain
+                    .flush()
+                    .expect("a quiescent chain must flush its durable head");
                 assert_eq!(flushed.tip().height, model.height, "flush tip height");
                 assert_eq!(flushed.tip().hash, model.tip_hash(), "flush tip hash");
-                assert_eq!(
-                    flushed.coin_count(),
-                    model.coins.len(),
-                    "flush coin count"
-                );
+                assert_eq!(flushed.coin_count(), model.coins.len(), "flush coin count");
                 checkpoint = Some(flushed);
                 can_reopen = true;
             }
             4 => {
                 if can_reopen && let Some(flushed) = checkpoint.take() {
-                    chain = chain.reopen(&flushed).expect("reopen must restore the durable head");
+                    chain = chain
+                        .reopen(&flushed)
+                        .expect("reopen must restore the durable head");
                 }
             }
             _ => {
