@@ -663,17 +663,19 @@ class ModelEvidenceTests(unittest.TestCase):
                 self.assertEqual(records["safety"]["native_rc"], native)
 
     def test_session_cleanup_on_timeout_and_signal(self) -> None:
-        body = (
-            "import os, subprocess, sys, time\n"
-            "child = subprocess.Popen(['sleep', '300'], start_new_session=False)\n"
-            "with open('tlc_child.pid', 'w') as f:\n"
-            "    f.write(str(child.pid))\n"
-            "time.sleep(30)\n"
+        java_cmd = self.home / "bin/mock_java"
+        java_cmd.write_text(
+            "#!/bin/sh\n"
+            "sleep 300 &\n"
+            "child=$!\n"
+            "echo $child > tlc_child.pid\n"
+            "sleep 15\n",
+            encoding="utf-8",
         )
-        java_cmd = self.write_tlc_tool(body)
+        java_cmd.chmod(0o755)
         module = dataclasses.replace(self.module(0), checker="tlc")
         with patch.dict(os.environ, {"JAVA": str(java_cmd)}):
-            records = check_models.run_tlc_module(self.root, self.toolchain, module, 1)
+            records = check_models.run_tlc_module(self.root, self.toolchain, module, 5)
         self.assertEqual(records["safety"]["evidence_rc"], 14)
         pid_file = next(self.root.glob("target/apalache/**/tlc_child.pid"))
         child_pid = int(pid_file.read_text())
