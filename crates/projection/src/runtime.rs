@@ -6306,6 +6306,8 @@ mod supervisor_tests {
             {
                 std::thread::sleep(Duration::from_millis(10));
             }
+            inputs.shutdown.trigger();
+            worker.join();
             let final_lifecycle = inputs.lifecycle.load_full();
             let serving = matches!(**inputs.lifecycle.load(), DerivedIndexLifecycle::Serving(_));
             let failure = match final_lifecycle.as_ref() {
@@ -6314,8 +6316,6 @@ mod supervisor_tests {
                 DerivedIndexLifecycle::ShutdownAbandoned => "shutdown abandoned",
                 DerivedIndexLifecycle::Serving(_) => "serving",
             };
-            inputs.shutdown.trigger();
-            worker.join();
             assert!(
                 serving,
                 "obsolete rows must not be deleted through durable writes: {failure}"

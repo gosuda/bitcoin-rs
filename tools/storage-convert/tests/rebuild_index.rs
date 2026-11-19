@@ -119,6 +119,7 @@ fn rebuild_index_resets_derived_rows_and_stamps_the_current_format() -> TestResu
     let output = rebuild(&datadir)?;
     let report = parse_rebuild_report(&output)?;
     assert_eq!(report.engine, "rocksdb");
+    assert_eq!(report.format_version, 10);
     assert_eq!(family_removed(&report, "script_live"), 3);
     assert_eq!(family_removed(&report, "funding"), 1);
     assert_eq!(family_removed(&report, "tx_confirmed"), 1);
@@ -226,7 +227,7 @@ fn rebuild_index_empty_txindex_follows_detected_chainstate_engine() -> TestResul
 
     let output = rebuild(&datadir)?;
     let report = parse_rebuild_report(&output)?;
-    assert_eq!(report.engine, "rocksdb");
+    assert_eq!(report.format_version, 10);
     let store = RocksDbStore::open(datadir.join("txindex"))?;
     let marker = store
         .get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?

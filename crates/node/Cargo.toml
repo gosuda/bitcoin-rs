@@ -71,6 +71,7 @@ compact_str.workspace = true
 signal-hook = { workspace = true, features = ["iterator"] }
 cap-fs-ext.workspace = true
 cap-std.workspace = true
+log.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 metrics.workspace = true

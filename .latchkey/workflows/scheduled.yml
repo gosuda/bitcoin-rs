@@ -75,7 +75,7 @@ jobs:
       - name: Install external backends
         run: |
           bash .latchkey/setup.sh apt
-          sudo apt-get update -qq && sudo apt-get install -y -qq tor
+          sudo apt-get update -qq && sudo apt-get install -y -qq tor golang-go
           git clone -q https://github.com/gosuda/IVNP.git /tmp/ivnp
           git -C /tmp/ivnp checkout "$(python3 scripts/overlay-interop.py --ivnp-revision)"
           (cd /tmp/ivnp && GOTOOLCHAIN=go1.27.0+auto go build -o /tmp/ivnpd ./cmd/ivnpd)

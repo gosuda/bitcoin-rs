@@ -41,7 +41,8 @@ jobs:
     steps:
       - name: Lockfile drift
         run: |
-          bash .latchkey/setup.sh changed '^(crates/[^/]+/Cargo\.toml|fuzz/|Cargo\.toml$)' || exit 0
+          changed_rc=0; bash .latchkey/setup.sh changed '^(crates/[^/]+/Cargo\.toml|fuzz/|Cargo\.toml$)' || changed_rc=$?
+          if [ "$changed_rc" -eq 1 ]; then exit 0; elif [ "$changed_rc" -ne 0 ]; then exit "$changed_rc"; fi
           bash .latchkey/setup.sh nightly
           cargo +nightly metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml >/dev/null
       - uses: latchkey/cache-restore@1.1.0
@@ -51,7 +52,8 @@ jobs:
           hash-files: fuzz/Cargo.lock
       - name: Fuzz targets build
         run: |
-          bash .latchkey/setup.sh changed '^(fuzz/|Cargo\.toml$)' || exit 0
+          changed_rc=0; bash .latchkey/setup.sh changed '^(fuzz/|Cargo\.toml$)' || changed_rc=$?
+          if [ "$changed_rc" -eq 1 ]; then exit 0; elif [ "$changed_rc" -ne 0 ]; then exit "$changed_rc"; fi
           bash .latchkey/setup.sh apt nightly fuzz
           cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
       - uses: latchkey/cache-save@1.1.0
@@ -74,7 +76,8 @@ jobs:
           into: tools/stratum-sv2/template-provider
       - name: Lockfile, tests and clippy
         run: |
-          bash .latchkey/setup.sh changed '^(tools/stratum-sv2/template-provider/|crates/|Cargo\.(toml|lock)$)' || exit 0
+          changed_rc=0; bash .latchkey/setup.sh changed '^(tools/stratum-sv2/template-provider/|crates/|Cargo\.(toml|lock)$)' || changed_rc=$?
+          if [ "$changed_rc" -eq 1 ]; then exit 0; elif [ "$changed_rc" -ne 0 ]; then exit "$changed_rc"; fi
           bash .latchkey/setup.sh apt
           m=tools/stratum-sv2/template-provider/Cargo.toml
           cargo metadata --locked --format-version 1 --manifest-path "$m" >/dev/null
@@ -95,6 +98,7 @@ jobs:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
     strategy:
+      fail-fast: false
       matrix:
         lane: [clippy-services, clippy-node-runtime, test-silent-payments, test-storage, test-consensus-execution, test-node-serving]
     steps:

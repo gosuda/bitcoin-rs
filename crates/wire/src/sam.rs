@@ -3762,11 +3762,19 @@ mod tests {
         abort(http_probe)?;
         abort(silent_probe)?;
         if cfg!(target_os = "macos") {
-            while fake.strangers.recv_timeout(STRAGGLER_GRACE).is_ok() {}
+            let mut seen = Vec::new();
+            while let Ok(refused) = fake.strangers.recv_timeout(STRAGGLER_GRACE) {
+                seen.push(refused);
+            }
+            for probe in &probes {
+                assert!(
+                    seen.contains(probe),
+                    "straggler drain missed probe {probe:?}; saw {seen:?}"
+                );
+            }
         } else {
             step("probes refused", wait_for_strangers(&fake, &probes))?;
         }
-
         assert!(
             pending_phase_is(&session, &RootPhase::Create),
             "the paused root survives the probes"

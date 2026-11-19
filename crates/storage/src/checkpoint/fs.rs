@@ -242,7 +242,7 @@ pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
     let name_offset = 2 * core::mem::size_of::<usize>() + 4;
     let mut info = vec![0_u8; name_offset + name.len() * 2];
     info[name_offset - 4..name_offset].copy_from_slice(
-        &u32::try_from(name.len() * 2)
+        &u32::try_from(name.len().saturating_sub(1) * 2)
             .unwrap_or(u32::MAX)
             .to_le_bytes(),
     );

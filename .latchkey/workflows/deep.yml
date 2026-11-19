@@ -54,8 +54,10 @@ jobs:
   kernel:
     runs-on: large
     timeout-minutes: 120
+    env:
+      BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
     steps:
-      - run: bash .latchkey/setup.sh apt nextest
+      - run: bash .latchkey/setup.sh apt nextest corpus
       - uses: latchkey/cache-restore@1.1.0
         with:
           key: deep-kernel

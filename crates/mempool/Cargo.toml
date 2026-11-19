@@ -27,6 +27,7 @@ metrics.workspace = true
 bytemuck.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
+log.workspace = true
 tracing.workspace = true
 tempfile.workspace = true
 

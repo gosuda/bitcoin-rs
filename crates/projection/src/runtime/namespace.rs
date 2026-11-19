@@ -25,6 +25,8 @@ impl NamespaceRegistry {
         if !matches!(components.next(), Some(std::path::Component::Normal(_)))
             || components.next().is_some()
             || path.file_name() != Some(std::ffi::OsStr::new(child))
+            || child.ends_with('.')
+            || child.ends_with(' ')
         {
             return Err(format!(
                 "namespace child {child:?} is not one directory name"
