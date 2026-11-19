@@ -592,7 +592,7 @@ wallet interoperability remain unverified.
 - A txid missing from the mempool returns `-5` (`Transaction {str} not in mempool.`, caller's string).
 - Anything else is Core `DecodeHexTx`.
 - Invalid hex or an incomplete transaction returns `-22` (`Transaction decode failed for {str}. Make sure the tx has at least one input.`).
-- Raw-transaction hex has no size gate at parse; Core `DecodeHexTx` decodes any hex and the block build owns validation.
+- Raw-transaction hex is admitted before parse: hex longer than twice `MAX_WIRE_BYTES` or an aggregate over `MAX_WIRE_BYTES` returns `-22` (`raw transaction hex exceeds the request size limit`); a busy decode budget returns the retry refusal (`raw transaction decode budget exhausted; retry`). The block build owns validation after admission.
 
 ### `API-28`: `getprioritisedtransactions` `modified_fee` is satoshis
 

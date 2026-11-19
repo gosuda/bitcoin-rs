@@ -25,6 +25,7 @@ jobs:
     env:
       BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
     strategy:
+      fail-fast: false
       matrix:
         lane: [test-binary, test-workspace]
     steps:
@@ -56,6 +57,8 @@ jobs:
     timeout-minutes: 120
     steps:
       - run: bash .latchkey/setup.sh apt nextest
+      - if: always() && (env.LATCHKEY_CI_EVENT_CLASS == 'branch_push' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch')
+        run: bash .latchkey/setup.sh corpus
       - uses: latchkey/cache-restore@1.1.0
         with:
           key: deep-kernel
@@ -72,6 +75,8 @@ jobs:
           cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- shared_sighash:: overhaul_parse_parity:: kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: core_vectors::
       - name: Kernel consensus tests incl. ignored vectors (main)
         if: always() && (env.LATCHKEY_CI_EVENT_CLASS == 'branch_push' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch')
+        env:
+          BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
         run: cargo test --locked -p bitcoin-rs-consensus --features kernel --no-fail-fast -- --include-ignored
       - name: Node kernel clippy (main)
         if: always() && (env.LATCHKEY_CI_EVENT_CLASS == 'branch_push' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch')
@@ -96,6 +101,7 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: "1.99.0"
     strategy:
+      fail-fast: false
       matrix:
         lane: [script, core-differential]
     steps:

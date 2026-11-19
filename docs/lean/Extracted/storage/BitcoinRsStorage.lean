@@ -147,7 +147,7 @@ def utxo.compress.MAX_COMPRESSIBLE_AMOUNT : Result Std.U64 := do
   bitcoin_rs_consensus.primitives.units.Amount.to_sat a
 
 /-- [bitcoin_rs_storage::utxo::scan::UtxoScanError]
-    Source: 'crates/storage/src/utxo/scan.rs', lines 20:0-29:1
+    Source: 'crates/storage/src/utxo/scan.rs', lines 25:0-34:1
     Visibility: public -/
 @[discriminant isize]
 inductive utxo.scan.UtxoScanError where

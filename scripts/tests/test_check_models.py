@@ -349,8 +349,9 @@ class ModelEvidenceTests(unittest.TestCase):
         record = self.run_check(timeout=1)
         self.assertIsNone(record["native_rc"])
         self.assertEqual(record["evidence_rc"], 14)
-        sessions = iter(sorted(self.root.glob("target/apalache/**/descendant.pid")))
-        for pid_file in (next(sessions), *sessions):
+        sessions = sorted(self.root.glob("target/apalache/**/descendant.pid"))
+        self.assertEqual(len(sessions), 4)
+        for pid_file in sessions:
             descendant = int(pid_file.read_text())
             result = json.loads((pid_file.parent / "result.json").read_text())
             self.assertEqual(
