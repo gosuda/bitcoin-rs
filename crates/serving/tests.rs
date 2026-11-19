@@ -13008,7 +13008,7 @@ mod mining_pool_sv2 {
 
     fn fresh_authority() -> AuthorityKeypair {
         let secp = secp256k1::Secp256k1::new();
-        let keypair = secp256k1::Keypair::new(&secp, &mut rand::thread_rng());
+        let keypair = secp256k1::Keypair::new(&secp, &mut secp256k1::rand::thread_rng());
         AuthorityKeypair::from_bytes(
             keypair.x_only_public_key().0.serialize(),
             Zeroizing::new(keypair.secret_bytes()),
