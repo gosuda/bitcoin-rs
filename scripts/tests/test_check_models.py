@@ -11,6 +11,7 @@ import signal
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -676,15 +677,21 @@ class ModelEvidenceTests(unittest.TestCase):
         self.assertEqual(records["safety"]["evidence_rc"], 14)
         pid_file = next(self.root.glob("target/apalache/**/tlc_child.pid"))
         child_pid = int(pid_file.read_text())
-        stat = None
-        try:
-            stat = Path(f"/proc/{child_pid}/stat").read_text(encoding="ascii")
-        except (ProcessLookupError, FileNotFoundError):
-            stat = None
-        if stat is not None:
-            state = stat[stat.rfind(")") + 1:].split(maxsplit=1)[0]
+        deadline = time.monotonic() + 5.0
+        state = None
+        reaped = False
+        while time.monotonic() < deadline:
+            try:
+                stat = Path(f"/proc/{child_pid}/stat").read_text(encoding="ascii")
+                state = stat[stat.rfind(")") + 1:].split(maxsplit=1)[0]
+            except (ProcessLookupError, FileNotFoundError):
+                reaped = True
+                break
+            if state == "Z":
+                break
+            time.sleep(0.01)
+        if not reaped:
             self.assertEqual(state, "Z")
-
         check_models.register_session(999999)
         self.assertIn(999999, check_models.LIVE_SESSIONS)
         check_models.cleanup_all_sessions(signal.SIGKILL)
