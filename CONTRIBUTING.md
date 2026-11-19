@@ -172,7 +172,7 @@ cargo +nightly fuzz run block_validate --target x86_64-unknown-linux-gnu -- -run
 ```
 
 [`ci.yml`](.latchkey/workflows/ci.yml) compiles every fuzz
-target on `fuzz/**` pull requests; the scheduled campaign is defined in
+target on pull requests that touch `fuzz/**` or any `Cargo.toml`; the scheduled campaign is defined in
 [`.github/workflows/daily-fuzz.yml`](.github/workflows/daily-fuzz.yml). See
 [`fuzz/README.md`](fuzz/README.md) for local fuzzing, the
 [shared corpus and local campaigns](fuzz/README.md#shared-corpus-and-local-campaigns),
