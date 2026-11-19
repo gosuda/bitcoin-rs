@@ -52,7 +52,7 @@ items_after_statements       = "allow"
 bitcoin = { version = ">=0.32.9, <0.33", default-features = false, features = ["std"] }
 bitcoin-rs-primitives = { path = "../../crates/primitives" }
 bitcoin-rs-utxo = { path = "../../crates/utxo" }
-rustix = { version = "=1.1.5", default-features = false, features = ["time"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["time"] }
 thiserror = { version = ">=2.0.18, <3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
