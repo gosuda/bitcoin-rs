@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+latchkey:
+  schema: 1
+
+jobs:
+  ci:
+    runs-on: small
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: "1"
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
+    steps:
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake libboost-dev libclang-dev mold
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version
+      - name: Install dependencies (cargo-nextest, fuzz corpus)
+        run: |
+          cargo fetch --locked
+          tmp="$(mktemp -d)"
+          curl -sSfL "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.151/cargo-nextest-0.9.151-x86_64-unknown-linux-gnu.tar.gz" -o "$tmp/nextest.tar.gz"
+          echo "1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4  $tmp/nextest.tar.gz" | sha256sum --check
+          tar xzf "$tmp/nextest.tar.gz" -C "$tmp"
+          mkdir -p "$HOME/.cargo/bin"
+          install -m 0755 "$tmp/cargo-nextest" "$HOME/.cargo/bin/cargo-nextest"
+          git clone --depth 1 https://github.com/gosuda/bitcoin-rs-fuzz-corpus.git /tmp/fuzz-corpus
+      - name: Lint (rustfmt)
+        run: ./scripts/ci-pr.sh fmt
+      - name: Lint (clippy)
+        run: ./scripts/ci-pr.sh clippy
+      - name: Lint (contracts)
+        run: ./scripts/ci-pr.sh contracts
+      - name: Test
+        run: ./scripts/ci-pr.sh test-crates
