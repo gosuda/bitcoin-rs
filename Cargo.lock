@@ -561,7 +561,7 @@ dependencies = [
  "proptest-state-machine",
  "ruint",
  "rustix",
- "secp256k1 0.28.2",
+ "secp256k1 0.33.1",
  "serde",
  "sha2",
  "sonic-rs",

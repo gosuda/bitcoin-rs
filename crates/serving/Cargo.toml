@@ -74,7 +74,7 @@ bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 tempfile.workspace = true
 proptest.workspace = true
 proptest-state-machine.workspace = true
-secp256k1 = { version = "=0.28.2", default-features = false, features = ["std", "rand-std"] }
+secp256k1.workspace = true
 [target.'cfg(unix)'.dev-dependencies]
 rustix.workspace = true
 
