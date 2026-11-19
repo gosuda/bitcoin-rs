@@ -2,7 +2,7 @@
 
 This crate provides the synchronous, Bitcoin Core-compatible JSON-RPC and REST surface. It covers method dispatch, HTTP Basic and cookie authentication, and a wallet-free method surface. Every RPC that needs private key material is absent.
 
-`RpcServer::bind` binds a TCP listener. `serve_with_shutdown` runs the blocking accept loop under a shared shutdown flag. It hands each connection to a bounded worker thread with a per-connection idle timeout. Sockets go through `prepare_http_socket` (`TCP_NODELAY`). JSON and REST responses emit headers plus bodies through one vectored write. `Auth` authenticates each request. `Handler::dispatch` then matches the request and reads shared node state through the injected `Context`. That context holds `ChainControl` consensus operations, `PruneService`, `DerivedIndexQuery`, `NetworkHandles` (peer table, P2P service control, local services), and the live `ZmqPublisher`. Failures map to JSON-RPC codes through `RpcError`. Core-compatible REST endpoints (`rest`) are served on the same listener when enabled. RPCs that would reveal, import, create, or use private keys are unimplemented. They answer `method not found`. PSBT combination and finalization stay available, because external signers drive them and this process holds no key material.
+`RpcServer::bind` binds a TCP listener. `serve_with_shutdown` runs the blocking accept loop under a shared shutdown flag. It hands each connection to a bounded worker thread with a per-connection idle timeout. Sockets go through `prepare_http_socket` (`TCP_NODELAY`). JSON and REST responses emit headers plus bodies through one vectored write. `Auth` authenticates JSON-RPC requests only. `Handler::dispatch` then matches the request and reads shared node state through the injected `Context`. That context holds `ChainControl` consensus operations, `PruneService`, `DerivedIndexQuery`, `NetworkHandles` (peer table, P2P service control, local services), and the live `ZmqPublisher`. Failures map to JSON-RPC codes through `RpcError`. Core-compatible REST endpoints (`rest`) are served on the same listener when enabled. RPCs that would reveal, import, create, or use private keys are unimplemented. They answer `method not found`. PSBT combination and finalization stay available, because external signers drive them and this process holds no key material.
 
 ## Capability boundary
 
@@ -13,10 +13,10 @@ This crate provides the synchronous, Bitcoin Core-compatible JSON-RPC and REST s
 ### 1. Protocol demuxing and authentication
 
 - Private free function `classify` (`crates/wire/src/server.rs`) is the listener directory table. `serve_connection` dispatches that table before authentication. The wallet-facing Esplora routing contract is [`WF-02`](../../docs/contracts/wallet-facing.md#wf-02-operations-a-wallet-actually-issues). The parser preserves HTTP framing while letting valid unsupported methods reach the demux for a 404:
-  - `GET /rest/*` goes to Core REST (`rest::route`).
+  - `GET /rest/*` goes to Core REST (`rest::route`); `POST` to a `/rest/` path with a `getutxos` suffix goes to Core REST as `RestPost` (`rest::getutxos_suffix`).
   - `GET` or `POST` under `/api` or `/esplora` goes to Esplora. `classify` strips the directory prefix and passes `Surface` plus the rest; `esplora::route` / `route_post` dispatch only inside that directory. Unknown paths 404 and never become JSON-RPC. `/api` is public electrs; `/esplora` is the mempool-backend superset. Wallet broadcast is `POST /api/tx`.
   - Other `POST` goes to JSON-RPC. `Auth::validate_header` (`crates/wire/src/auth.rs`) guards this path only.
-  - Any other method, or GET outside `/rest/`, `/api`, `/esplora`, 404s at the demux. Unprefixed electrs paths and `HEAD`/`PUT`/`DELETE` enter neither Esplora nor JSON-RPC. The parser accepts those methods so `classify` can 404 them instead of answering JSON-RPC 400.
+  - Any other method, or GET outside `/rest/`, `/api`, `/esplora`, 404s at the demux, except `OPTIONS` on the public Esplora surface, which answers a CORS preflight response. Unprefixed electrs paths and `HEAD`/`PUT`/`DELETE` enter neither Esplora nor JSON-RPC. The parser accepts those methods so `classify` can 404 them instead of answering JSON-RPC 400.
 - `JsonRpcVersion` (`crates/wire/src/server.rs`) governs wire framing:
   - `"jsonrpc": "2.0"` requests use JSON-RPC 2.0 (`JsonRpcVersion::V2`): success emits `{"jsonrpc":"2.0","result":...,"id":...}` (HTTP 200), dispatch errors emit `{"jsonrpc":"2.0","error":...,"id":...}` (HTTP 200), and requests omitting `id` are notifications returning HTTP 204. An envelope refusal (`-32600` while validating the envelope itself) answers HTTP 400 in either dialect; only the reply envelope follows how far parsing got.
   - Other requests use JSON-RPC 1.1 / legacy (`JsonRpcVersion::Legacy`). Success emits `{"result":...,"error":null,"id":...}` (HTTP 200). Errors emit `{"result":null,"error":...,"id":...}` with Core's status mapping (`-32600` to 400, `-32601` to 404, every other code to 500); missing `id` defaults to `null`. A top-level JSON scalar is `-32700` at HTTP 500 with null id. A batch with at least one reply answers 200; an empty batch answers 200 with `[]`; an all-notification batch answers 204 with no body.
@@ -36,7 +36,7 @@ This crate provides the synchronous, Bitcoin Core-compatible JSON-RPC and REST s
 
 ### 3. Caching and pagination rules
 
-- HTTP caching (RFC 9111):
+- HTTP caching target (RFC 9111; not emitted by the response builder yet):
   - Confirmed blocks, headers, immutable transactions: `Cache-Control: public, immutable, max-age=86400`.
   - Volatile tips, mempool, unconfirmed transactions: `Cache-Control: no-store`.
   - REST endpoints must ignore unrecognized query parameters to preserve downstream cache efficiency.

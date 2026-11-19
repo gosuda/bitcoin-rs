@@ -30,11 +30,11 @@ policy_line = min(pruner_tip, durable_tip_height) - retention_depth
 retention_depth = max(keep_below_tip, 288)
 ```
 
-`durable_tip_height` is not the applied tip. The node initializes it from the tip restored at open and updates it only when the node publishes a checkpoint (`crates/node/src/state/open.rs`, `crates/chain/src/checkpoint/publisher.rs:221-222`). The execution maintenance worker publishes a checkpoint at most once every ten minutes while the node runs, and only when the applied tip is above the checkpoint height (`crates/chain/src/maintenance.rs`). So the effective line never exceeds `checkpoint_height - 288`. A prune pass that asks for more records its request but deletes only what the checkpoint base already makes safe.
+`durable_tip_height` is not the applied tip. The node initializes it from the tip restored at open and updates it only when the node publishes a checkpoint (`crates/node/src/state/open.rs`, `crates/chain/src/checkpoint/publisher.rs:223-224`). The chainstate maintenance worker publishes a checkpoint at most once every ten minutes while the node runs, and only when the applied tip is above the checkpoint height (`crates/chain/src/maintenance.rs`). So the effective line never exceeds `checkpoint_height - 288`. A prune pass that asks for more records its request but deletes only what the checkpoint base already makes safe.
 
 That clamp is visible in the live trace and is the reason two height keys exist. On a cold datadir with 300 blocks and no checkpoint yet, `pruneblockchain 5` returned 5 and stored `node:pruneheight = 5`, but every block was still served because `durable_tip_height` was 0 and the policy line was 0. After a clean stop published checkpoint generation 1 at height 300, a restart made the same call delete heights 0 through 4.
 
-`retention.reserve(policy_line)` further lowers the line to the lowest active lease floor (`crates/storage/src/pruning/lease.rs:180-191`). Pruning takes the chain transition before it reads the applied tip, so a connect cannot move the tip under an in-flight prune (`crates/chain/src/lib.rs:224-250`). The history path used by block-spend reads carries a 288-block retention budget (`crates/node/src/state/storage.rs:185-190`); a request below the registry's refusal line returns `HistoryUnavailable::Pruned { below }` or `HistoryUnavailable::Reserved { below }`, never an empty success (`crates/storage/src/pruning/lease.rs:98-108`).
+`retention.reserve(policy_line)` further lowers the line to the lowest active lease floor (`crates/storage/src/pruning/lease.rs:180-191`). Pruning takes the chain transition before it reads the applied tip, so a connect cannot move the tip under an in-flight prune (`crates/chain/src/lib.rs:586-608`). The history path used by block-spend reads carries a 288-block retention budget (`crates/node/src/state/storage.rs:185-190`); a request below the registry's refusal line returns `HistoryUnavailable::Pruned { below }` or `HistoryUnavailable::Reserved { below }`, never an empty success (`crates/storage/src/pruning/lease.rs:98-108`).
 
 ## The three metadata keys
 
@@ -66,7 +66,7 @@ The retention reservation also blocks readers: while a prune pass holds its rese
 
 The node refuses two cases before any deletion:
 
-- A snapshot role with a base height. `PruneAuthority::begin` checks the chainstate role and returns `ApplyError::PruneDuringHistoricalValidation { base_height }`, displayed as `cannot prune while historical validation is required through assumeutxo base height {base_height}` (`crates/chain/src/lib.rs:232-240`). Both `AssumedActive` and `Historical` carry a base height, so prefix pruning is refused while either role exists (`crates/chain/src/assumeutxo.rs:56-89`).
+- A snapshot role with a base height. `PruneAuthority::begin` checks the chainstate role and returns `ApplyError::PruneDuringHistoricalValidation { base_height }`, displayed as `cannot prune while historical validation is required through assumeutxo base height {base_height}` (`crates/chain/src/lib.rs:586-597`). Both `AssumedActive` and `Historical` carry a base height, so prefix pruning is refused while either role exists (`crates/chain/src/assumeutxo.rs:56-89`).
 - A height at or above the safe line, as described above.
 
 ## What a pruned node advertises and refuses
