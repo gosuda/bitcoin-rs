@@ -1,45 +1,86 @@
 name: CI
 
+# PR checks; the same file also runs for merge-queue groups and main pushes.
+# Deep lanes: deep.yml. Nightly campaigns: scheduled.yml.
 on:
-  push:
   pull_request:
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 latchkey:
   schema: 1
 
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  RUST_BACKTRACE: "1"
+
 jobs:
-  ci:
+  lint:
     runs-on: small
-    timeout-minutes: 180
+    timeout-minutes: 20
+    steps:
+      - run: bash .latchkey/setup.sh deny
+      - run: ./scripts/ci-pr.sh fmt
+      - run: ./scripts/ci-pr.sh deny
+      - run: ./scripts/ci-pr.sh contracts
+      - name: Script tools
+        run: |
+          for f in fetch-golden import-qa-assets fuzz-policy run-fuzz-campaign validate-corpus-seeds; do bash -n "scripts/${f}.sh"; done
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
+  # Path-gated on pull requests (all paths on manual runs), as the old fuzz-build,
+  # fuzz-lockfile and template-provider-lockfile workflows were.
+  drift:
+    if: env.LATCHKEY_CI_EVENT_CLASS == 'pr_update' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch'
+    runs-on: medium
+    timeout-minutes: 30
+    steps:
+      - name: Fuzz lockfile drift
+        run: |
+          bash .latchkey/setup.sh changed '^(crates/[^/]+/Cargo\.toml|fuzz/|Cargo\.toml$)' || exit 0
+          bash .latchkey/setup.sh nightly
+          cargo +nightly metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml >/dev/null
+      - name: Fuzz targets build
+        run: |
+          bash .latchkey/setup.sh changed '^(fuzz/|Cargo\.toml$)' || exit 0
+          bash .latchkey/setup.sh apt nightly fuzz
+          cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
+      - name: Template provider
+        run: |
+          bash .latchkey/setup.sh changed '^(tools/stratum-sv2/template-provider/|crates/|Cargo\.(toml|lock)$)' || exit 0
+          bash .latchkey/setup.sh apt
+          m=tools/stratum-sv2/template-provider/Cargo.toml
+          cargo metadata --locked --format-version 1 --manifest-path "$m" >/dev/null
+          cargo test --locked --manifest-path "$m"
+          cargo clippy --locked --manifest-path "$m" --all-targets -- -D warnings
+
+  lane:
+    runs-on: medium
+    timeout-minutes: 60
     env:
-      CARGO_TERM_COLOR: never
-      RUST_BACKTRACE: "1"
-      CARGO_INCREMENTAL: "0"
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
+    strategy:
+      matrix:
+        lane: [clippy-services, clippy-node-runtime, test-silent-payments, test-storage, test-consensus-execution, test-node-serving]
     steps:
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake libboost-dev libclang-dev mold
-      - name: Install Rust toolchain
+      - run: bash .latchkey/setup.sh apt nextest corpus
+      - uses: latchkey/cache-restore@1.1.0
+        with:
+          key: "${{ matrix.lane }}"
+          version: v1
+          hash-files: Cargo.lock rust-toolchain.toml
+      - name: Run lane
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
-          rustc --version
-      - name: Install dependencies (cargo-nextest, fuzz corpus)
-        run: |
-          cargo fetch --locked
-          tmp="$(mktemp -d)"
-          curl -sSfL "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.151/cargo-nextest-0.9.151-x86_64-unknown-linux-gnu.tar.gz" -o "$tmp/nextest.tar.gz"
-          echo "1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4  $tmp/nextest.tar.gz" | sha256sum --check
-          tar xzf "$tmp/nextest.tar.gz" -C "$tmp"
-          mkdir -p "$HOME/.cargo/bin"
-          install -m 0755 "$tmp/cargo-nextest" "$HOME/.cargo/bin/cargo-nextest"
-          git clone --depth 1 https://github.com/gosuda/bitcoin-rs-fuzz-corpus.git /tmp/fuzz-corpus
-      - name: Lint (rustfmt)
-        run: ./scripts/ci-pr.sh fmt
-      - name: Lint (clippy)
-        run: ./scripts/ci-pr.sh clippy
-      - name: Lint (contracts)
-        run: ./scripts/ci-pr.sh contracts
-      - name: Test
-        run: ./scripts/ci-pr.sh test-crates
+          L=${{ matrix.lane }}
+          case "$L" in clippy-*) ./scripts/ci-pr.sh clippy "${L#*-}" ;; *) ./scripts/ci-pr.sh test-crates "${L#*-}" ;; esac
+      - uses: latchkey/cache-save@1.1.0
+        with:
+          key: "${{ matrix.lane }}"
+          version: v1
+          hash-files: Cargo.lock rust-toolchain.toml
+          path: target
