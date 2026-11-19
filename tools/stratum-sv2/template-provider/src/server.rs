@@ -1,9 +1,9 @@
 use crate::{Config, Hub, TEMPLATE_RETRY_DELAY, template::TemplateState};
-use bitcoin_rs_serving::mining::{
+use bitcoin_rs_consensus::primitives::BlockImage;
+use bitcoin_rs_node::Node;
+use bitcoin_rs_wire::mining::{
     BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, Candidate, CoinbaseBudget,
 };
-use bitcoin_rs_node::Node;
-use bitcoin_rs_consensus::primitives::BlockImage;
 use std::{
     sync::Arc,
     time::{Duration, Instant},

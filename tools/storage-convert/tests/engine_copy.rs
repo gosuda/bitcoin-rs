@@ -691,8 +691,8 @@ fn engine_copy_preserves_memory_checkpoint_for_historical_restore() -> TestResul
 }
 
 fn check_memory_checkpoint_for_historical_restore(epoch: u32) -> TestResult<()> {
+    use bitcoin_rs_chain::{AssumeUtxoManager, HistoricalCheckpointRef};
     use bitcoin_rs_consensus::primitives::{Hash256, Network};
-    use bitcoin_rs_execution::{AssumeUtxoManager, HistoricalCheckpointRef};
     use bitcoin_rs_storage::checkpoint::CheckpointReference;
     use bitcoin_rs_storage::memory_kv::{MEMORY_KV_FILE, MemoryKvStore};
     use bitcoin_rs_storage::utxo::record::{OwnedUtxoOut, UtxoRecord};
@@ -1658,10 +1658,10 @@ fn epoch5_nested_images_reopen_as_rocksdb_with_schema6_undo() -> TestResult<()> 
 }
 
 fn assert_root_marker_survives_conversion(source_epoch: u32) -> TestResult<()> {
-    use bitcoin_rs_consensus::primitives::Network;
-    use bitcoin_rs_execution::recovery::{
+    use bitcoin_rs_chain::recovery::{
         ResumeSource, prepare_initial_state_with_engine, requires_full_revalidation,
     };
+    use bitcoin_rs_consensus::primitives::Network;
     use bitcoin_rs_storage::recovery_evidence::FULL_REVALIDATION_MARKER;
 
     let source = tempdir()?;

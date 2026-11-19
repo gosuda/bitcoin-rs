@@ -34,7 +34,7 @@ unqualified.
 
 The pinned Core v31.1 fixture lives at
 `testdata/projection/data/blockfilters-core-31.1.json`. Run it with
-`cargo test -p bitcoin-rs-projection core_filter_vectors_read_back_through_the_segment_snapshot`.
+`cargo test -p bitcoin-rs-index core_filter_vectors_read_back_through_the_segment_snapshot`.
 
 Enable serving with `--blockfilterindex` (boolean; default false). Only basic
 filters on the active chain are supported. Catch-up/reconciliation refuses

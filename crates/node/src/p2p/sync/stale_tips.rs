@@ -2,14 +2,14 @@ use std::cmp::Reverse;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use bitcoin_rs_chain::chain::{BlockTree, BlockTreeNode, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_execution::chain::{BlockTree, BlockTreeNode, NodeId, NodeStatus, TipSnapshot};
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 
 use super::BlockSync;
-use bitcoin_rs_wire::PeerSource;
+use bitcoin_rs_p2p::PeerSource;
 
 pub(crate) const MAX_RETAINED_STALE_TIPS: usize = 64;
 
@@ -379,8 +379,8 @@ impl BlockSync {
 mod tests {
     use std::net::SocketAddr;
 
+    use bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_header;
     use bitcoin_rs_consensus::primitives::{BlockHash, Network};
-    use bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header;
 
     use super::*;
 

@@ -1,5 +1,5 @@
-use bitcoin_rs_serving::mining::pool::ledger::LedgerError;
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit, WriteCondition};
+use bitcoin_rs_wire::mining::pool::ledger::LedgerError;
 
 trait StorageResultExt<T> {
     fn map_storage_err(self) -> Result<T, LedgerError>;

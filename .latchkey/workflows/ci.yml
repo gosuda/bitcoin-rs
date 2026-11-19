@@ -100,7 +100,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [clippy-services, clippy-node-runtime, test-silent-payments, test-storage, test-consensus-execution, test-node-serving]
+        lane: [clippy-services, clippy-node-runtime, test-silent-payments, test-storage, test-consensus-chain, test-node-wire]
     steps:
       - run: bash .latchkey/setup.sh apt nextest corpus
       - uses: latchkey/cache-restore@1.1.0

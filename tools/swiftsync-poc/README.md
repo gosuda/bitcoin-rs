@@ -2,7 +2,7 @@
 
 Research record for SwiftSync-style synchronization hints, measured against a
 pinned regtest chain. The prototype is offline. It never enters a node build and
-it shares no code with `crates/wire`, `crates/execution`, or `crates/projection`.
+it shares no code with `crates/p2p`, `crates/chain`, or `crates/index`.
 
 The crate is an independent Cargo workspace, like `tools/ldk` and
 `tools/compact-filter-interop`. Root workspace commands do not build it. Use

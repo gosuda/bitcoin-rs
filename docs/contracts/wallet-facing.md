@@ -9,7 +9,7 @@ Wallet keys, coin selection, and signing stay in the external process.
 ### `WF-01`: Public transports only
 
 - An external wallet talks to a running node through native Esplora HTTP at `/api`.
-- It also uses the wallet-free JSON-RPC methods declared in `MANIFEST` (`crates/serving/src/manifest.rs`).
+- It also uses the wallet-free JSON-RPC methods declared in `MANIFEST` (`crates/wire/src/manifest.rs`).
 - The embeddable `Node` API (`crates/node/src/embed.rs`) is the in-process equivalent of the same facts, not a second surface.
 - The consumer gets no datadir access.
 - The consumer imports no `NodeState`, `UtxoSet`, index types, or other crate-internal handles.
@@ -28,8 +28,8 @@ Wallet keys, coin selection, and signing stay in the external process.
 - Key material never crosses to the node.
 - Signing MUST happen inside the consumer process.
 - Owners:
-  - Esplora router `crates/serving/src/esplora.rs`
-  - JSON-RPC dispatch `crates/serving/src/handlers.rs`
+  - Esplora router `crates/wire/src/esplora.rs`
+  - JSON-RPC dispatch `crates/wire/src/handlers.rs`
   - Embedding `crates/node/src/embed.rs`
 
 ### `WF-02`: Operations a wallet actually issues
@@ -54,7 +54,7 @@ Wallet keys, coin selection, and signing stay in the external process.
 - If that publication changes during the read, the response MUST return `503 Service Unavailable`, never a mixed-tip page.
 - This rule includes extension, replacement, and ABA republication.
 - Immutable transaction and block-owner reads retain their captured occurrence identity across ordinary extension. Composed history reads remain fenced. Public `/api` mempool-only reads remain unfenced.
-- Proof: `crates/serving/src/esplora.rs` (`composed_history_and_mempool_routes_refuse_reorg_and_aba_publications`) checks the composed fence on extension, replacement, and ABA republication.
+- Proof: `crates/wire/src/esplora.rs` (`composed_history_and_mempool_routes_refuse_reorg_and_aba_publications`) checks the composed fence on extension, replacement, and ABA republication.
 - Transaction rendering resolves a distinct parent at most once per response or bounded backend batch.
 - It retains only referenced outputs until that batch finishes.
 - Backend mempool GETs render at most 25 selected transactions at a time without limiting the response count.
@@ -78,7 +78,7 @@ Wallet keys, coin selection, and signing stay in the external process.
 - Proof:
   - `esplora::tests::backend_mempool_get_bounds_prevouts_without_limiting_rows`
   - `backend_mempool_get_keeps_captured_parents_across_batches`
-  - `crates/serving/src/esplora.rs` tests:
+  - `crates/wire/src/esplora.rs` tests:
     - `history_resolves_shared_parents_once_per_page`
     - `batch_reuses_selected_transactions_and_mempool_parents`
     - `block_page_reuses_parent_outside_the_selected_page`

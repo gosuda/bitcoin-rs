@@ -6,14 +6,14 @@ use bitcoin::{
 };
 use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Txid};
-use bitcoin_rs_projection::IndexCapabilities;
-use bitcoin_rs_projection::runtime::{DEFAULT_BATCH_LIMITS, open_derived_index_store_with_scratch};
-use bitcoin_rs_projection::segment::bulk_builder::BulkSegmentBuilder;
-use bitcoin_rs_projection::segment::{
+use bitcoin_rs_index::IndexCapabilities;
+use bitcoin_rs_index::runtime::{DEFAULT_BATCH_LIMITS, open_derived_index_store_with_scratch};
+use bitcoin_rs_index::segment::bulk_builder::BulkSegmentBuilder;
+use bitcoin_rs_index::segment::{
     Coverage, GenerationDescriptor, IndexGeneration, TailDescriptor, TailWriterState,
     append_tail_block, meta_gen_key, seal_tail_generation,
 };
-use bitcoin_rs_projection::{IndexCapability, IndexWatermark, IndexWriter};
+use bitcoin_rs_index::{IndexCapability, IndexWatermark, IndexWriter};
 use bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus;
 use bitcoin_rs_storage::committed_facts::{
     CommittedBlock, CreatedOutput, FactsScript, SpentPrevout, TxFacts,
@@ -66,12 +66,12 @@ fn seeded_datadir(root: &Path) -> TestResult<PathBuf> {
     fs::write(datadir.join("CURRENT_SCHEMA"), "6\n")?;
     let store = Arc::new(RocksDbStore::open(datadir.join("txindex"))?);
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    let scripthash = bitcoin_rs_projection::ScriptHash::from_script_bytes(&[0x51, 0x01]);
+    let scripthash = bitcoin_rs_index::ScriptHash::from_script_bytes(&[0x51, 0x01]);
     let coins = (0_u32..3)
         .map(|vout| {
             (
                 OutPoint::new(Txid(Hash256::from_le_bytes(&[0x11_u8; 32])), vout),
-                bitcoin_rs_projection::ScriptLiveCoin::new(scripthash, 1_000, 5, false),
+                bitcoin_rs_index::ScriptLiveCoin::new(scripthash, 1_000, 5, false),
             )
         })
         .collect::<Vec<_>>();
@@ -237,9 +237,7 @@ fn rebuild_index_empty_txindex_follows_detected_chainstate_engine() -> TestResul
     let desc = store
         .get(
             ColumnFamily::IdxMeta,
-            &bitcoin_rs_projection::segment::meta_gen_key(
-                bitcoin_rs_projection::IndexCapability::TxLookup,
-            ),
+            &bitcoin_rs_index::segment::meta_gen_key(bitcoin_rs_index::IndexCapability::TxLookup),
         )?
         .expect("generation descriptor in IdxMeta");
     assert!(!desc.is_empty());
@@ -1088,7 +1086,7 @@ fn pruned_rebuild_withholds_unanchored_compact_filters() -> TestResult {
         None
     );
     assert_eq!(count_rows(&store, ColumnFamily::Filters)?, 0);
-    use bitcoin_rs_projection::IndexReader as _;
+    use bitcoin_rs_index::IndexReader as _;
 
     let snapshot = writer.snapshot()?;
     assert!(!snapshot.capability_published(IndexCapability::CompactFilters)?);

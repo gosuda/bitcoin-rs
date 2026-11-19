@@ -1,12 +1,12 @@
 use std::time::{Duration, Instant};
 
+use bitcoin_rs_chain::chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_execution::chain::{BlockTree, TipSnapshot};
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
 
 use crate::p2p::BlockStager;
-use bitcoin_rs_wire::connection::PeerSource;
+use bitcoin_rs_p2p::connection::PeerSource;
 
 pub(crate) mod policy;
 
@@ -276,8 +276,8 @@ pub(crate) struct DownloadWindow {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum StallerKey {
-    Endpoint(bitcoin_rs_wire::PeerEndpoint),
-    Unidentified(bitcoin_rs_wire::ConnectionId),
+    Endpoint(bitcoin_rs_p2p::PeerEndpoint),
+    Unidentified(bitcoin_rs_p2p::ConnectionId),
 }
 
 impl From<PeerSource> for StallerKey {
@@ -726,7 +726,7 @@ impl DownloadWindow {
         Some((front.owner, *front_hash))
     }
 
-    pub(crate) fn stalling_peer(&self) -> Option<(Option<bitcoin_rs_wire::PeerEndpoint>, Instant)> {
+    pub(crate) fn stalling_peer(&self) -> Option<(Option<bitcoin_rs_p2p::PeerEndpoint>, Instant)> {
         self.stall
             .map(|episode| (episode.owner.endpoint, episode.since))
     }
@@ -1823,7 +1823,7 @@ impl DownloadWindow {
     }
 
     fn owner_address_count(&self) -> usize {
-        let mut owners: SmallVec<[Option<bitcoin_rs_wire::PeerEndpoint>; 16]> = SmallVec::new();
+        let mut owners: SmallVec<[Option<bitcoin_rs_p2p::PeerEndpoint>; 16]> = SmallVec::new();
         for pending in self.pending.values() {
             if !owners.contains(&pending.owner.endpoint) {
                 owners.push(pending.owner.endpoint);
@@ -1853,7 +1853,7 @@ fn non_empty_request(
 
 fn contiguous_request_entries(
     tree: &BlockTree,
-    tip_id: bitcoin_rs_execution::chain::NodeId,
+    tip_id: bitcoin_rs_chain::chain::NodeId,
     start_height: u32,
     end_height: u32,
 ) -> Option<Vec<PeerRequestEntry>> {
@@ -1892,7 +1892,7 @@ mod tests {
         FAST_BLOCKS_IN_TRANSIT_PER_PEER, FAST_MIN_PEERS_FOR_FANOUT, FAST_OUTBOUND_PEER_TARGET,
         PENDING_BUDGET, SyncBudget, fast_sync_budget,
     };
-    use bitcoin_rs_wire::connection::PeerSource;
+    use bitcoin_rs_p2p::connection::PeerSource;
 
     fn test_stager(window: &DownloadWindow) -> BlockStager {
         BlockStager::new(window.budget)
@@ -1916,14 +1916,14 @@ mod tests {
             .collect()
         });
 
-    fn test_tree() -> bitcoin_rs_execution::chain::BlockTree {
-        let mut tree = bitcoin_rs_execution::chain::BlockTree::new();
+    fn test_tree() -> bitcoin_rs_chain::chain::BlockTree {
+        let mut tree = bitcoin_rs_chain::chain::BlockTree::new();
         let mut parent = None;
         for header in TEST_CHAIN.iter() {
             let inserted = tree.insert_node(
                 parent,
                 *header,
-                bitcoin_rs_execution::chain::NodeStatus::HeaderValid,
+                bitcoin_rs_chain::chain::NodeStatus::HeaderValid,
             );
             parent = Some(inserted.unwrap_or_else(|error| panic!("test chain header: {error}")));
         }
@@ -1996,18 +1996,18 @@ mod tests {
         stager.retire_applied(hash);
     }
 
-    fn test_source(addr: bitcoin_rs_wire::PeerEndpoint) -> PeerSource {
+    fn test_source(addr: bitcoin_rs_p2p::PeerEndpoint) -> PeerSource {
         PeerSource::for_test_endpoint(addr)
     }
 
     fn stall_owner(
         window: &mut DownloadWindow,
         stager: &BlockStager,
-        tree: &bitcoin_rs_execution::chain::BlockTree,
+        tree: &bitcoin_rs_chain::chain::BlockTree,
         next_apply_height: u32,
         apply_side_busy: bool,
         now: Instant,
-    ) -> Option<bitcoin_rs_wire::PeerEndpoint> {
+    ) -> Option<bitcoin_rs_p2p::PeerEndpoint> {
         if apply_side_busy {
             assert_eq!(observe_apply_busy(window, now), BlockedDecision::None);
             return None;
@@ -2021,7 +2021,7 @@ mod tests {
         window: &mut DownloadWindow,
         apply_side_busy: bool,
         now: Instant,
-    ) -> Option<bitcoin_rs_wire::PeerEndpoint> {
+    ) -> Option<bitcoin_rs_p2p::PeerEndpoint> {
         if apply_side_busy {
             assert_eq!(observe_apply_busy(window, now), BlockedDecision::None);
             return None;
@@ -2037,7 +2037,7 @@ mod tests {
         next_apply_height: u32,
         apply_side_busy: bool,
         now: Instant,
-    ) -> Option<(bitcoin_rs_wire::PeerEndpoint, Hash256)> {
+    ) -> Option<(bitcoin_rs_p2p::PeerEndpoint, Hash256)> {
         if apply_side_busy {
             assert_eq!(observe_apply_busy(window, now), BlockedDecision::None);
             return None;
@@ -2086,7 +2086,7 @@ mod tests {
         });
         let stager = test_stager(&window);
         let now = Instant::now();
-        let owner = test_source(bitcoin_rs_wire::PeerEndpoint::Ip(
+        let owner = test_source(bitcoin_rs_p2p::PeerEndpoint::Ip(
             std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
         ));
         insert_pending(&mut window, owner, hash(1), 1, now);
@@ -2236,7 +2236,7 @@ mod tests {
         let mut window = DownloadWindow::new(test_budget());
         let stager = test_stager(&window);
         let now = Instant::now();
-        let owner = test_source(bitcoin_rs_wire::PeerEndpoint::Ip(
+        let owner = test_source(bitcoin_rs_p2p::PeerEndpoint::Ip(
             std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
         ));
         let front = hash(0xe5);
@@ -2292,7 +2292,7 @@ mod tests {
         let mut window = DownloadWindow::new(test_budget());
         let stager = test_stager(&window);
         let t0 = Instant::now();
-        let owner = test_source(bitcoin_rs_wire::PeerEndpoint::Ip(
+        let owner = test_source(bitcoin_rs_p2p::PeerEndpoint::Ip(
             std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
         ));
         let batch_a = super::non_empty_request(
@@ -2391,10 +2391,10 @@ mod tests {
             test_budget().with_pending_timeout_override(Duration::from_secs(10)),
         );
         let now = Instant::now();
-        let stale_owner = test_source(bitcoin_rs_wire::PeerEndpoint::Ip(
+        let stale_owner = test_source(bitcoin_rs_p2p::PeerEndpoint::Ip(
             std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
         ));
-        let live_owner = test_source(bitcoin_rs_wire::PeerEndpoint::Ip(
+        let live_owner = test_source(bitcoin_rs_p2p::PeerEndpoint::Ip(
             std::net::SocketAddr::from(([127, 0, 0, 2], 8333)),
         ));
         let stale_requested_at = now
@@ -2439,7 +2439,7 @@ mod tests {
         );
         let mut stager = test_stager(&window);
         let now = Instant::now();
-        let owner = test_source(bitcoin_rs_wire::PeerEndpoint::Ip(
+        let owner = test_source(bitcoin_rs_p2p::PeerEndpoint::Ip(
             std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
         ));
         let earliest = hash(0x91);
@@ -2495,7 +2495,7 @@ mod tests {
             pending_timeout_override: None,
             ..test_budget()
         });
-        let solo = test_source(bitcoin_rs_wire::PeerEndpoint::Ip(
+        let solo = test_source(bitcoin_rs_p2p::PeerEndpoint::Ip(
             std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
         ));
         insert_pending(&mut window, solo, hash(0xb1), 1, requested_at);
@@ -2525,7 +2525,7 @@ mod tests {
         });
         let owners: Vec<PeerSource> = (1..=3_u8)
             .map(|byte| {
-                let owner = test_source(bitcoin_rs_wire::PeerEndpoint::Ip(
+                let owner = test_source(bitcoin_rs_p2p::PeerEndpoint::Ip(
                     std::net::SocketAddr::from(([127, 0, 0, 20 + byte], 8333)),
                 ));
                 insert_pending(
@@ -2569,7 +2569,7 @@ mod tests {
             .with_pending_timeout_override(Duration::from_secs(5)),
         );
         let requested_at = Instant::now();
-        let owner = test_source(bitcoin_rs_wire::PeerEndpoint::Ip(
+        let owner = test_source(bitcoin_rs_p2p::PeerEndpoint::Ip(
             std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
         ));
         insert_pending(&mut window, owner, hash(0xd1), 1, requested_at);
@@ -2833,7 +2833,7 @@ mod tests {
 
     fn seed_front_cadence(
         window: &mut DownloadWindow,
-        peer: bitcoin_rs_wire::PeerEndpoint,
+        peer: bitcoin_rs_p2p::PeerEndpoint,
         t0: Instant,
         gap: Duration,
     ) -> Instant {
@@ -2849,8 +2849,8 @@ mod tests {
     }
 
     fn window_blocked_on_staller(
-        staller: bitcoin_rs_wire::PeerEndpoint,
-        healthy: bitcoin_rs_wire::PeerEndpoint,
+        staller: bitcoin_rs_p2p::PeerEndpoint,
+        healthy: bitcoin_rs_p2p::PeerEndpoint,
         t0: Instant,
     ) -> (DownloadWindow, BlockStager, Instant) {
         let mut window = DownloadWindow::new(stall_budget());
@@ -2865,12 +2865,12 @@ mod tests {
         (window, stager, t1)
     }
 
-    fn staller_addr() -> bitcoin_rs_wire::PeerEndpoint {
-        bitcoin_rs_wire::PeerEndpoint::Ip(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)))
+    fn staller_addr() -> bitcoin_rs_p2p::PeerEndpoint {
+        bitcoin_rs_p2p::PeerEndpoint::Ip(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)))
     }
 
-    fn healthy_addr() -> bitcoin_rs_wire::PeerEndpoint {
-        bitcoin_rs_wire::PeerEndpoint::Ip(std::net::SocketAddr::from(([127, 0, 0, 2], 8333)))
+    fn healthy_addr() -> bitcoin_rs_p2p::PeerEndpoint {
+        bitcoin_rs_p2p::PeerEndpoint::Ip(std::net::SocketAddr::from(([127, 0, 0, 2], 8333)))
     }
 
     #[test]
@@ -3691,8 +3691,8 @@ mod tests {
         );
     }
 
-    fn peer_addr(idx: u8) -> bitcoin_rs_wire::PeerEndpoint {
-        bitcoin_rs_wire::PeerEndpoint::Ip(std::net::SocketAddr::from(([10, 0, 0, idx], 8333)))
+    fn peer_addr(idx: u8) -> bitcoin_rs_p2p::PeerEndpoint {
+        bitcoin_rs_p2p::PeerEndpoint::Ip(std::net::SocketAddr::from(([10, 0, 0, idx], 8333)))
     }
 
     #[test]
@@ -4026,7 +4026,7 @@ mod tests {
         BlockStager,
         u8,
         Instant,
-        bitcoin_rs_wire::PeerEndpoint,
+        bitcoin_rs_p2p::PeerEndpoint,
     ) {
         let mut window = DownloadWindow::new(stall_budget());
         let healthy = test_source(healthy_addr());
@@ -5214,7 +5214,7 @@ mod tests {
 
     #[test]
     fn fanout_eligibility_requires_block_service_flags() {
-        use bitcoin_rs_wire::{PeerCounters, PeerEndpoint, PeerInfo, PeerRemote};
+        use bitcoin_rs_p2p::{PeerCounters, PeerEndpoint, PeerInfo, PeerRemote};
         use std::net::{IpAddr, Ipv4Addr};
 
         fn peer(services: u64, inbound: bool) -> PeerInfo {
@@ -5235,14 +5235,14 @@ mod tests {
                 best_known_height: 0,
                 conn_time: 0,
                 inbound,
-                addr_bind: bitcoin_rs_wire::TransportRemote::new(
+                addr_bind: bitcoin_rs_p2p::TransportRemote::new(
                     addr.endpoint()
-                        .and_then(bitcoin_rs_wire::PeerEndpoint::socket_addr)
+                        .and_then(bitcoin_rs_p2p::PeerEndpoint::socket_addr)
                         .unwrap_or_else(|| panic!("expected IP fixture")),
                 ),
                 time_offset: 0,
                 counters: std::sync::Arc::new(PeerCounters::default()),
-                transport: bitcoin_rs_wire::TransportProtocol::V1,
+                transport: bitcoin_rs_p2p::TransportProtocol::V1,
             }
         }
 

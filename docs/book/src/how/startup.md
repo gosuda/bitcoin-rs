@@ -21,11 +21,11 @@ The binary parses the CLI, resolves config, opens the data directory under a loc
 2. `initialize_data_dir` (`open.rs`) creates the process epoch used by recovery evidence.
 3. Clamp the dbcache budget to `[16 MiB, 1 TiB]`, then split it between chainstate and derived indexes: when any derived index is enabled, the index allowance receives 20%, floored to whole bytes, and chainstate receives the remainder. With all derived indexes disabled, chainstate receives the whole budget. Split the chainstate allowance equally between the storage engine and the `CoinStore` cache. Round the engine half down to whole bytes and give coins the remainder, including any odd byte. Use these shares as the node ledger's engine and coin owner caps, then call `NodeStorage::open` (`open.rs`). The startup log's `chainstate_cache_bytes` still reports the full chainstate allowance before this split. `txindex_cache_bytes` names the derived-index allowance, and `total_cache_bytes` retains its meaning. These allowances and the ledger's resident accounting are not a process RSS limit.
 4. Bind ZMQ publisher sockets from `[[notifications.zmq]]` TOML endpoints (`open.rs`; key form in [reference/config-keys.md](../reference/config-keys.md)).
-5. `require_full_script_attestation` then `prepare_initial_chainstate` (`open.rs`): restore from a live assumeutxo snapshot, restore from a checkpoint, or start cold. A live assumeutxo anchor enters `restore_snapshot_with_engine` (`crates/execution/src/recovery.rs`) before the checkpoint lookup. It loads a complete checkpoint and reuses it when the checkpoint is compatible with the pinned anchor. A hash disagreement at the anchor height fails with `PinnedCheckpointMismatch`. The same error covers a coin commitment or transaction count disagreement at the checkpoint tip, and that check runs only when the tip sits at the anchor height. A complete checkpoint whose engine image is missing fails with `CheckpointEngineImageMissing`. A pinned base with no checkpoint, meaning no checkpoint root or no `CURRENT` pointer, fails with `SnapshotBaseCheckpointMissing`. A selected checkpoint with incompatible metadata or with missing or corrupt artifacts fails earlier as a checkpoint load error, which `RecoveryError::Checkpoint` wraps. The cold path logs one line from `crates/execution/src/recovery.rs`; a checkpoint restore logs `restored chainstate checkpoint height=... hash=...` (`open.rs`):
+5. `require_full_script_attestation` then `prepare_initial_chainstate` (`open.rs`): restore from a live assumeutxo snapshot, restore from a checkpoint, or start cold. A live assumeutxo anchor enters `restore_snapshot_with_engine` (`crates/chain/src/recovery.rs`) before the checkpoint lookup. It loads a complete checkpoint and reuses it when the checkpoint is compatible with the pinned anchor. A hash disagreement at the anchor height fails with `PinnedCheckpointMismatch`. The same error covers a coin commitment or transaction count disagreement at the checkpoint tip, and that check runs only when the tip sits at the anchor height. A complete checkpoint whose engine image is missing fails with `CheckpointEngineImageMissing`. A pinned base with no checkpoint, meaning no checkpoint root or no `CURRENT` pointer, fails with `SnapshotBaseCheckpointMissing`. A selected checkpoint with incompatible metadata or with missing or corrupt artifacts fails earlier as a checkpoint load error, which `RecoveryError::Checkpoint` wraps. The cold path logs one line from `crates/chain/src/recovery.rs`; a checkpoint restore logs `restored chainstate checkpoint height=... hash=...` (`open.rs`):
 
    ```
    INFO bitcoin_rs_node::state::open: restored chainstate checkpoint height=5 hash=0ef5cd...
-   INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
+   INFO bitcoin_rs_chain::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
    ```
 
    The cold variant reconciles the durable head from canonical block bodies and undo records. A checkpoint fallback with a gap above `STALE_RESTORE_ERROR_THRESHOLD` logs the `stale checkpoint restore` error (`open.rs`).
@@ -34,12 +34,12 @@ The binary parses the CLI, resolves config, opens the data directory under a loc
 8. Install the tip-staged hook for mining, the mempool gateway, block-announce queue, and chain followers (`open.rs`).
 9. Configure checkpointing and clear any disconnect marker (`open.rs`); an unrecoverable durable-head gap returns `UnrecoverableDurableHeadGap` naming the three on-disk paths to fix or wipe.
 10. Restore the mempool snapshot (`open.rs`) with its `mempool snapshot revalidation finished` line, then open the assumeutxo manager and the block sync.
-11. `verify_startup_window` (`open.rs`) re-verifies the last `STARTUP_VERIFY_DEPTH = 6` blocks (`crates/execution/src/verify.rs:24`) at `CheckLevel::CheckUndoAndCommitments`, logging `startup verification passed blocks=5` (`open.rs`). Failure returns `StartupVerification` with the four paths to inspect.
+11. `verify_startup_window` (`open.rs`) re-verifies the last `STARTUP_VERIFY_DEPTH = 6` blocks (`crates/chain/src/verify.rs:24`) at `CheckLevel::CheckUndoAndCommitments`, logging `startup verification passed blocks=5` (`open.rs`). Failure returns `StartupVerification` with the four paths to inspect.
 
 One real cold start, trimmed (timestamps and LSM-tree table recovery removed; `$DATA` is the data directory):
 
 ```
-INFO bitcoin_rs_execution::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
+INFO bitcoin_rs_chain::recovery: chainstate restore selected restore_source="cold" reason="no_complete_checkpoint"
 INFO bitcoin_rs_node::state::open: no mempool snapshot; starting with an empty pool status="missing"
 INFO bitcoin_rs_node::state::open: opened storage backend with effective cache capacities backend="rocksdb" chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
 INFO bitcoin_rs_node::lifecycle: bitcoin-rs node booting config=NodeConfig { network: Regtest, data_dir: "$DATA", ... }
@@ -56,7 +56,7 @@ The bind order is:
    `INFO bitcoin_rs_node::lifecycle: rpc listener bound addr=127.0.0.1:46733 surface=Shared`
 2. Pool (feature-gated), after RPC.
 3. P2P: `P2pService::start` (`lifecycle.rs`) binds the listener:
-   `INFO bitcoin_rs_wire::service: p2p listener bound addr=127.0.0.1:0` (port `:0` on regtest; the log shows the requested value, the actual socket appears in `ss`/metrics).
+   `INFO bitcoin_rs_p2p::service: p2p listener bound addr=127.0.0.1:0` (port `:0` on regtest; the log shows the requested value, the actual socket appears in `ss`/metrics).
 4. Chainstate maintenance worker, then the event loop thread (`lifecycle.rs`).
 
 `bind 127.0.0.1:0` in the booting config line is what was requested; use the `rpc listener bound` line for the real RPC address, or `--rpc-bind 127.0.0.1:8332` style fixed ports to make it predictable.
@@ -78,7 +78,7 @@ The shutdown latch and chainstate shutdown request propagate to every service. `
 | Another process holds the datadir | `DataDirLock::acquire` (`open.rs`) | `DataDirLock` error from `NodeOpenError` |
 | Durable head gap that replay cannot close | `recover_disconnect_marker` (`open.rs`) | `UnrecoverableDurableHeadGap { chainstate, checkpoints, txindex, source }` |
 | Last 6 blocks fail undo/commitment checks | `verify_startup_window` (`open.rs`) | `StartupVerification` naming blocks, chainstate, checkpoints, txindex paths |
-| Stored chain was not fully script-validated | `require_full_script_attestation` (`open.rs`) | warning `the stored chain was not fully script-validated; rebuilding it with full validation` (`crates/execution/src/recovery.rs:135`) |
+| Stored chain was not fully script-validated | `require_full_script_attestation` (`open.rs`) | warning `the stored chain was not fully script-validated; rebuilding it with full validation` (`require_full_script_attestation` in `crates/chain/src/recovery.rs`) |
 | RPC port taken | `start_rpc_listeners` | `failed to bind RPC listener at {address}` (`run.rs:41`) |
 | Metrics evidence identity mismatch | `init_metrics_services` | `metrics recorder already serves a different evidence identity` (`run.rs:71`) |
 
@@ -87,7 +87,7 @@ The shutdown latch and chainstate shutdown request propagate to every service. `
 | Invariant | Test | Location |
 |---|---|---|
 | Event-loop progress uses elapsed time | `telemetry_uses_elapsed_time_not_wake_count` | `crates/node/src/event_loop.rs:105` |
-| Startup window depth and level | `STARTUP_VERIFY_DEPTH = 6`, `CheckLevel::CheckUndoAndCommitments` | `crates/execution/src/verify.rs:24`, `open.rs` |
+| Startup window depth and level | `STARTUP_VERIFY_DEPTH = 6`, `CheckLevel::CheckUndoAndCommitments` | `crates/chain/src/verify.rs:24`, `open.rs` |
 | Durable head recovery | `torn_disconnect_replays_parent_tip` | `crates/node/crash_recovery_tests.rs` |
 | Crash recovery end to end | crash-recovery suite | `crates/node/crash_recovery_tests.rs` (clause `SYNC-05` evidence) |
 

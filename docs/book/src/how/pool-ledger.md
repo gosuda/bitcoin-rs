@@ -30,7 +30,7 @@ job: (u64::from(run_epoch) << 32) | u64::from(share.job.get()),
 
 ## Share identity and idempotency
 
-A `ShareCredit` carries the header hash, the job, the account, the extranonce, the nonce, the header version, the header time, and the work (`crates/serving/src/mining/pool/ledger.rs`). Two keys decide what happens on a write:
+A `ShareCredit` carries the header hash, the job, the account, the extranonce, the nonce, the header version, the header time, and the work (`crates/wire/src/mining/pool/ledger.rs`). Two keys decide what happens on a write:
 
 - `header_hash` is the idempotency key. The same hash with the same work and the same tuple returns `ShareReceipt::Duplicate { seq }` and writes nothing.
 - `tuple_key()` is the identity key: `job BE || account BE || nonce BE || version BE || ntime BE || extranonce` (`ledger.rs`). The same tuple under a different header hash is `ShareIdentityConflict`.
@@ -144,14 +144,14 @@ All four live in `crates/node/pool_ledger_tests.rs`, compiled behind a single `m
 
 `POOL-05` makes job retirement synchronous with block acceptance, not with the pending-share count.
 
-`PoolCore::submit_block_to_node` calls the node mining control. On `BlockStatus::Applied` it immediately calls `self.invalidate_active()` before returning the receipt (`crates/serving/src/mining/pool/core.rs:454`). `invalidate_active` marks every active job `Stale(Invalidated)`, clears the published job, and returns the invalidated ids (`core.rs:383`, `crates/serving/src/mining/pool/job.rs`).
+`PoolCore::submit_block_to_node` calls the node mining control. On `BlockStatus::Applied` it immediately calls `self.invalidate_active()` before returning the receipt (`crates/wire/src/mining/pool/core.rs:454`). `invalidate_active` marks every active job `Stale(Invalidated)`, clears the published job, and returns the invalidated ids (`core.rs:383`, `crates/wire/src/mining/pool/job.rs`).
 
 Two consequences follow:
 
 - A job id that falls below the retained front is reported as `Stale { reason: Retired }` by `JobBook::locate` (`job.rs`).
 - `validate` checks the `seen` set before the stale check for a replayed header, so a byte-identical replay keeps duplicate identity: `Stale` for new work on the job, `Duplicate` for the exact share already accepted (`job.rs`).
 
-The wire mapping is fixed. SV1 uses code 21 `"Stale share"` and code 22 `"Duplicate share"` (`crates/serving/src/mining/pool/stratum/sv1.rs`). SV2 answers `stale-share` and `duplicate-share`; `applied_sv2_block_retires_the_common_job_before_a_sibling_reaches_the_node` asserts `stale-share` on sequence 2 after an Applied block and `duplicate-share` for the replay.
+The wire mapping is fixed. SV1 uses code 21 `"Stale share"` and code 22 `"Duplicate share"` (`crates/wire/src/mining/pool/stratum/sv1.rs`). SV2 answers `stale-share` and `duplicate-share`; `applied_sv2_block_retires_the_common_job_before_a_sibling_reaches_the_node` asserts `stale-share` on sequence 2 after an Applied block and `duplicate-share` for the replay.
 
 On the ledger side, the retired job's later records are refused with `JobRetired(job)` and its header hashes stay reserved as tombstones, so a cross-job replay is `ShareConflict`, not a new credit (`a_retired_header_hash_is_never_credited_again`).
 
@@ -175,7 +175,7 @@ That test records a share on job 7 and one on job 8, retires job 7, asserts the 
 
 ```sh
 $ env -u CARGO_BUILD_BUILD_DIR RUSTC_WRAPPER= \
-    cargo test --offline --locked -p bitcoin-rs-serving \
+    cargo test --offline --locked -p bitcoin-rs-wire \
     --features pool,test-seam --test suite \
     mining_pool_sv1::applied_block_retires_job -- --nocapture
 
@@ -237,8 +237,8 @@ Tests that pin the financial behavior, all in `crates/node/pool_ledger_tests.rs`
 | a reorged payout reverts then reconfirms | `a_reorged_out_confirmation_reverts_the_payout_and_a_new_block_reconfirms_it` |
 | fail is conclusive only for all txs | `a_batch_fails_only_when_every_signed_transaction_is_conclusively_double_spent` |
 | bounded pages advance by cursor | `bounded_pages_advance_via_cursor_without_rescanning_head` |
-| SV1 retirement and stale/duplicate codes | `mining_pool_sv1::applied_block_retires_job_and_second_submit_is_stale` in `crates/serving/tests.rs` |
-| job book stale and duplicate identity | `accepted_block_retirement_makes_second_same_job_nonce_stale` in `crates/serving/tests.rs` |
+| SV1 retirement and stale/duplicate codes | `mining_pool_sv1::applied_block_retires_job_and_second_submit_is_stale` in `crates/wire/tests.rs` |
+| job book stale and duplicate identity | `accepted_block_retirement_makes_second_same_job_nonce_stale` in `crates/wire/tests.rs` |
 
 ## What is not established
 

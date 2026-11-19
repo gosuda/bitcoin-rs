@@ -21,12 +21,12 @@ use super::{BlockSync, SchedulerState};
 use crate::p2p::download_window::SyncPeer;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
+use bitcoin_rs_chain::chain::{BlockTree, ChainError, NodeId, NodeStatus, validate_pow};
 use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Header;
-use bitcoin_rs_execution::chain::{BlockTree, ChainError, NodeId, NodeStatus, validate_pow};
-use bitcoin_rs_wire::peer_info::PeerInfo;
-use bitcoin_rs_wire::{InboundHeaders, Message, OutboundRefusal, PeerSource};
+use bitcoin_rs_p2p::peer_info::PeerInfo;
+use bitcoin_rs_p2p::{InboundHeaders, Message, OutboundRefusal, PeerSource};
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -37,7 +37,7 @@ const NEAR_TIP_WORK_BLOCKS: u64 = 144;
 pub(super) const MAX_HEADER_BATCHES_PER_TICK: usize = 32;
 /// Stop between whole batches, never in a download-twice response page.
 /// A final protocol-bounded batch can exceed this by at most 1,999 headers.
-pub(super) const MAX_HEADERS_PER_TICK: usize = 2 * bitcoin_rs_wire::wire::MAX_HEADERS_MESSAGE_COUNT;
+pub(super) const MAX_HEADERS_PER_TICK: usize = 2 * bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT;
 
 struct PresyncOutcome {
     failure: Option<HeaderSyncError>,
@@ -121,7 +121,7 @@ impl BlockSync {
                 continue;
             };
             if matches!(&admission, HeaderAdmission::Rejected(_)) {
-                let demoted = bitcoin_rs_execution::chain::header_sync::demoted_tip_after_rejection(
+                let demoted = bitcoin_rs_chain::chain::header_sync::demoted_tip_after_rejection(
                     &self.chain.block_tree(),
                     pre_tip,
                 );
@@ -319,7 +319,7 @@ impl BlockSync {
     fn request_ancestry_after_refusal(
         &self,
         source: Option<PeerSource>,
-        error: &bitcoin_rs_execution::chain::HeaderRefusal,
+        error: &bitcoin_rs_chain::chain::HeaderRefusal,
     ) {
         let now = Instant::now();
         let mut last = self.refused_rerequest_at.lock();
@@ -999,13 +999,13 @@ impl BlockSync {
         let hash = Hash256::from(header.compute_hash());
         validate_pow(header, hash, network)
             .and_then(|()| {
-                bitcoin_rs_execution::chain::validate_contextual_header(
+                bitcoin_rs_chain::chain::validate_contextual_header(
                     &tree,
                     parent_id,
                     header,
                     network,
-                    bitcoin_rs_execution::chain::current_unix_seconds(),
-                    bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
+                    bitcoin_rs_chain::chain::current_unix_seconds(),
+                    bitcoin_rs_chain::chain::HeaderValidationMode::LiveAdmission,
                 )
             })
             .is_err()
@@ -1037,13 +1037,13 @@ impl BlockSync {
         let hash = Hash256::from(headers[0].compute_hash());
         validate_pow(&headers[0], hash, network)
             .and_then(|()| {
-                bitcoin_rs_execution::chain::validate_contextual_header(
+                bitcoin_rs_chain::chain::validate_contextual_header(
                     &tree,
                     first_parent,
                     &headers[0],
                     network,
-                    bitcoin_rs_execution::chain::current_unix_seconds(),
-                    bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
+                    bitcoin_rs_chain::chain::current_unix_seconds(),
+                    bitcoin_rs_chain::chain::HeaderValidationMode::LiveAdmission,
                 )
             })
             .is_err()
@@ -1056,7 +1056,7 @@ impl BlockSync {
     ) -> PresyncOutcome {
         let (failure, request_more, ready_headers, finished) = match state.process(
             headers,
-            batch_len >= bitcoin_rs_wire::wire::MAX_HEADERS_MESSAGE_COUNT,
+            batch_len >= bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT,
         ) {
             Ok(result) => (
                 None,
@@ -1088,7 +1088,7 @@ impl BlockSync {
             );
             return minimum_work.max(tip.chainwork);
         };
-        let buffer = bitcoin_rs_execution::chain::block_work(&node.header)
+        let buffer = bitcoin_rs_chain::chain::block_work(&node.header)
             .saturating_mul(ChainWork::from(NEAR_TIP_WORK_BLOCKS));
         minimum_work.max(tip.chainwork.saturating_sub(buffer))
     }
@@ -1111,7 +1111,7 @@ impl BlockSync {
         });
         if page_self_valid {
             let claimed = headers.iter().fold(fork.chainwork, |sum, header| {
-                sum.saturating_add(bitcoin_rs_execution::chain::block_work(header))
+                sum.saturating_add(bitcoin_rs_chain::chain::block_work(header))
             });
             if claimed >= minimum_work {
                 return None;
@@ -1213,10 +1213,10 @@ mod stale_tip_routing_tests {
     use super::super::chain::SyncChain;
     use super::super::chain::SyncChainError;
     use super::super::chain::WindowCommitError;
+    use bitcoin_rs_chain::chain::TipSnapshot;
+    use bitcoin_rs_chain::chain::{BlockTree, NodeStatus};
     use bitcoin_rs_consensus::header_rules::ChainWork;
     use bitcoin_rs_consensus::primitives::{Hash256, Header, Network};
-    use bitcoin_rs_execution::chain::TipSnapshot;
-    use bitcoin_rs_execution::chain::{BlockTree, NodeStatus};
     use parking_lot::RwLockReadGuard;
     use std::sync::Arc;
 
@@ -1260,12 +1260,12 @@ mod stale_tip_routing_tests {
 
         fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission {
             let mut tree = self.tree.write();
-            match bitcoin_rs_execution::chain::accept_headers(
+            match bitcoin_rs_chain::chain::accept_headers(
                 &mut tree,
                 headers,
                 self.network,
-                bitcoin_rs_execution::chain::current_unix_seconds(),
-                bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
+                bitcoin_rs_chain::chain::current_unix_seconds(),
+                bitcoin_rs_chain::chain::HeaderValidationMode::LiveAdmission,
             ) {
                 Ok(admitted) => {
                     let announced_tip = admitted
@@ -1312,13 +1312,13 @@ mod stale_tip_routing_tests {
 
         fn switch_to_branch(
             &self,
-            _target: bitcoin_rs_execution::chain::NodeId,
+            _target: bitcoin_rs_chain::chain::NodeId,
             _staged_body: &mut dyn FnMut(
                 Hash256,
             )
                 -> Option<bitcoin_rs_consensus::primitives::BlockImage>,
             _connected_body: &mut dyn FnMut(Hash256),
-        ) -> Result<(), bitcoin_rs_execution::reorg::ReorgError> {
+        ) -> Result<(), bitcoin_rs_chain::reorg::ReorgError> {
             Ok(())
         }
     }
@@ -1328,10 +1328,10 @@ mod stale_tip_routing_tests {
         floor: ChainWork,
     ) -> (
         BlockSync,
-        Arc<bitcoin_rs_wire::PeerTable>,
-        crossbeam_channel::Sender<bitcoin_rs_wire::InboundHeaders>,
+        Arc<bitcoin_rs_p2p::PeerTable>,
+        crossbeam_channel::Sender<bitcoin_rs_p2p::InboundHeaders>,
     ) {
-        let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
+        let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
         let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
         let (_blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
         let chain: Arc<dyn SyncChain> = Arc::new(RoutingStubChain::with_floor(tree, floor));
@@ -1346,19 +1346,19 @@ mod stale_tip_routing_tests {
     }
 
     fn connected_peer(
-        peers: &Arc<bitcoin_rs_wire::PeerTable>,
+        peers: &Arc<bitcoin_rs_p2p::PeerTable>,
         port: u16,
         best_height: i32,
     ) -> (
-        bitcoin_rs_wire::PeerSource,
-        bitcoin_rs_wire::test_support::MessageReceiver,
+        bitcoin_rs_p2p::PeerSource,
+        bitcoin_rs_p2p::test_support::MessageReceiver,
     ) {
-        let (tx, rx) = bitcoin_rs_wire::test_support::message_channel();
-        let lease = bitcoin_rs_wire::PeerLease::new(tx);
+        let (tx, rx) = bitcoin_rs_p2p::test_support::message_channel();
+        let lease = bitcoin_rs_p2p::PeerLease::new(tx);
         let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
-        let endpoint = bitcoin_rs_wire::PeerEndpoint::Ip(addr);
+        let endpoint = bitcoin_rs_p2p::PeerEndpoint::Ip(addr);
         peers.register(endpoint, lease.clone());
-        let info = bitcoin_rs_wire::peer_info::PeerInfo {
+        let info = bitcoin_rs_p2p::peer_info::PeerInfo {
             addr: endpoint.into(),
             endpoint: Some(endpoint),
             network: endpoint.net(),
@@ -1374,10 +1374,10 @@ mod stale_tip_routing_tests {
             best_known_height: best_height,
             conn_time: 0,
             inbound: false,
-            addr_bind: bitcoin_rs_wire::TransportRemote::new(addr),
+            addr_bind: bitcoin_rs_p2p::TransportRemote::new(addr),
             time_offset: 0,
-            counters: Arc::new(bitcoin_rs_wire::PeerCounters::default()),
-            transport: bitcoin_rs_wire::TransportProtocol::V1,
+            counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+            transport: bitcoin_rs_p2p::TransportProtocol::V1,
         };
         peers.publish_info(endpoint, &lease, info);
         (lease.source_ip(addr), rx)
@@ -1394,7 +1394,7 @@ mod stale_tip_routing_tests {
             .unwrap_or_else(|| panic!("genesis indexed"));
         for height in 1..=2_u32 {
             let header =
-                bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(prev, height)
+                bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_header(prev, height)
                     .unwrap_or_else(|error| panic!("fixture mines: {error}"));
             prev = header.compute_hash();
             tip_id = tree
@@ -1411,9 +1411,9 @@ mod stale_tip_routing_tests {
         let (sync, _peers, _headers_tx) = routing_sync(tree, floor);
         let genesis_prev = Network::Regtest.genesis_block().block_hash();
         let first =
-            bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(genesis_prev, 101)
+            bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_header(genesis_prev, 101)
                 .unwrap_or_else(|error| panic!("fixture mines: {error}"));
-        let second = bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(
+        let second = bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_header(
             first.compute_hash(),
             102,
         )
@@ -1429,7 +1429,7 @@ mod stale_tip_routing_tests {
         );
         let mut broken = valid_page;
         broken[1].nonce = broken[1].nonce.wrapping_add(1).wrapping_mul(7919);
-        if bitcoin_rs_execution::chain::validate_pow(
+        if bitcoin_rs_chain::chain::validate_pow(
             &broken[1],
             Hash256::from(broken[1].compute_hash()),
             Network::Regtest,
@@ -1461,7 +1461,7 @@ mod stale_tip_routing_tests {
         let mut prev = genesis_prev;
         for height in [101_u32, 102, 103] {
             let header =
-                bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(prev, height)
+                bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_header(prev, height)
                     .unwrap_or_else(|error| panic!("fixture mines: {error}"));
             prev = header.compute_hash();
             batch.push(header);
@@ -1470,11 +1470,11 @@ mod stale_tip_routing_tests {
             bitcoin_rs_consensus::primitives::Hash256::from_le_bytes(&[0xFF_u8; 32]),
         );
         batch.push(
-            bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(garbage, 104)
+            bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_header(garbage, 104)
                 .unwrap_or_else(|error| panic!("fixture mines: {error}")),
         );
         headers_tx
-            .send(bitcoin_rs_wire::InboundHeaders {
+            .send(bitcoin_rs_p2p::InboundHeaders {
                 headers: batch,
                 source: Some(source),
                 wire_response: false,
@@ -1490,7 +1490,7 @@ mod stale_tip_routing_tests {
             moved, pre_tip,
             "the above-floor prefix must move the tip before the tail fails"
         );
-        let fresh = bitcoin_rs_wire::PeerSource::for_test(std::net::SocketAddr::from((
+        let fresh = bitcoin_rs_p2p::PeerSource::for_test(std::net::SocketAddr::from((
             [127, 0, 0, 1],
             18499,
         )));
@@ -1512,7 +1512,7 @@ mod stale_tip_routing_tests {
             .chain_tip()
             .unwrap_or_else(|| panic!("tree has a tip"));
         let prev = bitcoin_rs_consensus::primitives::BlockHash::from(tip.hash);
-        let header = bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(prev, 3)
+        let header = bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_header(prev, 3)
             .unwrap_or_else(|error| panic!("fixture mines: {error}"));
         let tip_hash = Hash256::from(header.compute_hash());
         assert!(
@@ -1520,7 +1520,7 @@ mod stale_tip_routing_tests {
             "the compact follow-up publishes ownership"
         );
         headers_tx
-            .send(bitcoin_rs_wire::InboundHeaders {
+            .send(bitcoin_rs_p2p::InboundHeaders {
                 headers: vec![header],
                 source: Some(source),
                 wire_response: true,
@@ -1548,10 +1548,10 @@ mod stale_tip_routing_tests {
             .unwrap_or_else(|| panic!("tree has a tip"));
         let prev = bitcoin_rs_consensus::primitives::BlockHash::from(tip.hash);
         let control_header =
-            bitcoin_rs_execution::chain::regtest_fixture::mined_regtest_header(prev, 4)
+            bitcoin_rs_chain::chain::regtest_fixture::mined_regtest_header(prev, 4)
                 .unwrap_or_else(|error| panic!("fixture mines: {error}"));
         headers_tx
-            .send(bitcoin_rs_wire::InboundHeaders {
+            .send(bitcoin_rs_p2p::InboundHeaders {
                 headers: vec![control_header],
                 source: Some(control_source),
                 wire_response: true,

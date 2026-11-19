@@ -26,11 +26,11 @@ mod block_forward_tests {
     use crate::p2p::sync::chain::SyncChain;
     use crate::p2p::sync::test_support::{TestChain, mined_chain};
     use crate::test_support::{TestError, TestResult};
-    use bitcoin_rs_execution::chain::regtest_fixture;
-    use bitcoin_rs_wire::PeerSource;
-    use bitcoin_rs_wire::connection::MAX_UNSOLICITED_BLOCK_FORWARDS;
-    use bitcoin_rs_wire::listener::{ConnectionShared, test_shared};
-    use bitcoin_rs_wire::test_support::{connect_peer, current_source, synthetic_peer, test_addr};
+    use bitcoin_rs_chain::chain::regtest_fixture;
+    use bitcoin_rs_p2p::PeerSource;
+    use bitcoin_rs_p2p::connection::MAX_UNSOLICITED_BLOCK_FORWARDS;
+    use bitcoin_rs_p2p::listener::{ConnectionShared, test_shared};
+    use bitcoin_rs_p2p::test_support::{connect_peer, current_source, synthetic_peer, test_addr};
 
     fn genesis_body() -> bitcoin_rs_consensus::primitives::Block {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -44,11 +44,11 @@ mod block_forward_tests {
     struct MinedSyncFixture {
         sync: Arc<BlockSync>,
         blocks: Vec<bitcoin_rs_consensus::primitives::Block>,
-        sync_headers_tx: crossbeam_channel::Sender<bitcoin_rs_wire::InboundHeaders>,
+        sync_headers_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundHeaders>,
     }
 
     fn test_sync_with_mined_chain(
-        peers: &Arc<bitcoin_rs_wire::PeerTable>,
+        peers: &Arc<bitcoin_rs_p2p::PeerTable>,
     ) -> Result<MinedSyncFixture, TestError> {
         let (mut tree, blocks) = mined_chain(1, 0)?;
         let chain_tip = tree.tip_handle();
@@ -67,7 +67,7 @@ mod block_forward_tests {
             sync_blocks_rx,
             crate::p2p::sync::syncing_ibd_latch(),
         ));
-        sync_blocks_tx.send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))?;
+        sync_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))?;
         sync.tick();
         Ok(MinedSyncFixture {
             sync,
@@ -78,7 +78,7 @@ mod block_forward_tests {
 
     #[test]
     fn unsolicited_block_flood_is_bounded_per_source() -> TestResult {
-        let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
+        let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
         let MinedSyncFixture {
             sync,
             blocks,
@@ -94,7 +94,7 @@ mod block_forward_tests {
             vec![regtest_fixture::coinbase(2)],
         )
         .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
-        sync_headers_tx.send(bitcoin_rs_wire::InboundHeaders {
+        sync_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
             headers: vec![block2.header],
             source: Some(source),
             wire_response: true,
@@ -109,7 +109,7 @@ mod block_forward_tests {
         let (blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
         let mut shared = test_shared(Arc::clone(&peers), headers_tx, blocks_tx);
         shared.block_sync =
-            Some(sync.clone() as Arc<dyn bitcoin_rs_wire::listener::BlockSyncObserver>);
+            Some(sync.clone() as Arc<dyn bitcoin_rs_p2p::listener::BlockSyncObserver>);
         let lease = peers
             .lease(flooded)
             .ok_or("flood connection must be registered")?;
@@ -141,7 +141,7 @@ mod block_forward_tests {
             "a delivery the window owns is never dropped for the unsolicited bound"
         );
 
-        let other: bitcoin_rs_wire::PeerRemote = test_addr(9781, 0)?;
+        let other: bitcoin_rs_p2p::PeerRemote = test_addr(9781, 0)?;
         let _other_rx = connect_peer(&peers, synthetic_peer(other, 3));
         let other_lease = peers
             .lease(other)
@@ -175,7 +175,7 @@ mod block_forward_tests {
 
     struct ScanCounter(std::sync::atomic::AtomicUsize);
 
-    impl bitcoin_rs_wire::compact_blocks::CompactBlockHints for ScanCounter {
+    impl bitcoin_rs_p2p::compact_blocks::CompactBlockHints for ScanCounter {
         fn for_each_identity(
             &self,
             _f: &mut dyn FnMut(
@@ -204,18 +204,18 @@ mod block_forward_tests {
     struct CompactTestFixture {
         sync: Arc<BlockSync>,
         blocks: Vec<bitcoin_rs_consensus::primitives::Block>,
-        addr: bitcoin_rs_wire::PeerRemote,
-        lease: bitcoin_rs_wire::PeerLease,
+        addr: bitcoin_rs_p2p::PeerRemote,
+        lease: bitcoin_rs_p2p::PeerLease,
         source: PeerSource,
         other_source: PeerSource,
-        headers_rx: crossbeam_channel::Receiver<bitcoin_rs_wire::InboundHeaders>,
-        blocks_rx: crossbeam_channel::Receiver<bitcoin_rs_wire::InboundBlock>,
+        headers_rx: crossbeam_channel::Receiver<bitcoin_rs_p2p::InboundHeaders>,
+        blocks_rx: crossbeam_channel::Receiver<bitcoin_rs_p2p::InboundBlock>,
         shared: ConnectionShared,
-        _outbound: [bitcoin_rs_wire::test_support::MessageReceiver; 2],
+        _outbound: [bitcoin_rs_p2p::test_support::MessageReceiver; 2],
     }
 
     fn test_sync_with_applied_chain(
-        peers: &Arc<bitcoin_rs_wire::PeerTable>,
+        peers: &Arc<bitcoin_rs_p2p::PeerTable>,
     ) -> Result<CompactTestFixture, TestError> {
         let (mut tree, blocks) = mined_chain(2, 0)?;
         let chain_tip = tree.tip_handle();
@@ -246,7 +246,7 @@ mod block_forward_tests {
         let (blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
         let mut shared = test_shared(Arc::clone(peers), headers_tx, blocks_tx);
         shared.block_sync =
-            Some(sync.clone() as Arc<dyn bitcoin_rs_wire::listener::BlockSyncObserver>);
+            Some(sync.clone() as Arc<dyn bitcoin_rs_p2p::listener::BlockSyncObserver>);
         Ok(CompactTestFixture {
             sync,
             blocks,
@@ -263,10 +263,10 @@ mod block_forward_tests {
 
     fn deliver_compact_block(
         block: &bitcoin_rs_consensus::primitives::Block,
-        reconstruction: &mut bitcoin_rs_wire::compact_blocks::Reconstruction,
+        reconstruction: &mut bitcoin_rs_p2p::compact_blocks::Reconstruction,
         hints: &ScanCounter,
-        lease: &bitcoin_rs_wire::PeerLease,
-        addr: bitcoin_rs_wire::PeerRemote,
+        lease: &bitcoin_rs_p2p::PeerLease,
+        addr: bitcoin_rs_p2p::PeerRemote,
         shared: &ConnectionShared,
     ) -> Result<(), TestError> {
         let block: bitcoin::Block =
@@ -274,10 +274,10 @@ mod block_forward_tests {
         let message = crate::p2p::Message::CmpctBlock(CmpctBlock {
             compact_block: HeaderAndShortIds::from_block(&block, 7, 2, &[]).expect("compact block"),
         });
-        let reply = bitcoin_rs_wire::listener::reply_bound(&message, false)
+        let reply = bitcoin_rs_p2p::listener::reply_bound(&message, false)
             .and_then(|bound| lease.try_reserve_reply(bound).ok());
-        let sink = bitcoin_rs_wire::listener::ProductionSink::new(lease, reply);
-        bitcoin_rs_wire::listener::process_compact_wire_message(
+        let sink = bitcoin_rs_p2p::listener::ProductionSink::new(lease, reply);
+        bitcoin_rs_p2p::listener::process_compact_wire_message(
             &message,
             reconstruction,
             Some(2),
@@ -291,7 +291,7 @@ mod block_forward_tests {
 
     #[test]
     fn compact_reconstruction_requires_an_earning_header() -> TestResult {
-        let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
+        let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
         let fixture = test_sync_with_applied_chain(&peers)?;
         let sync = fixture.sync;
         let blocks = fixture.blocks;
@@ -304,7 +304,7 @@ mod block_forward_tests {
         let shared = fixture.shared;
 
         let hints = ScanCounter(AtomicUsize::new(0));
-        let mut reconstruction = bitcoin_rs_wire::compact_blocks::Reconstruction::new();
+        let mut reconstruction = bitcoin_rs_p2p::compact_blocks::Reconstruction::new();
         let mut deliver = |block: &bitcoin_rs_consensus::primitives::Block| {
             deliver_compact_block(block, &mut reconstruction, &hints, &lease, addr, &shared)
         };
@@ -373,11 +373,11 @@ mod block_forward_tests {
     #[test]
     fn wire_and_compact_receipts_keep_their_accounting_through_staging() -> TestResult {
         use bitcoin_rs_consensus::primitives::BlockImage;
+        use bitcoin_rs_p2p::inbound::block_memory::BlockMemory;
         use bitcoin_rs_storage::budget::BudgetOwner;
-        use bitcoin_rs_wire::inbound::block_memory::BlockMemory;
 
         for compact in [false, true] {
-            let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
+            let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
             let mut fixture = test_sync_with_applied_chain(&peers)?;
             let tip = fixture.blocks.last().ok_or("chain has a tip")?;
             let block = regtest_fixture::mined_block_with_prev_hash(
@@ -404,7 +404,7 @@ mod block_forward_tests {
             let prior_total = budget.total_committed();
             fixture.shared = ConnectionShared::new(
                 Arc::clone(&peers),
-                bitcoin_rs_wire::BannedReader::fixture_empty(),
+                bitcoin_rs_p2p::BannedReader::fixture_empty(),
                 Arc::clone(&fixture.shared.activity),
                 fixture.shared.session_cancel.clone(),
                 None,
@@ -413,7 +413,7 @@ mod block_forward_tests {
                 fixture.shared.blocks_tx.clone(),
                 None,
                 None,
-                bitcoin_rs_wire::listener::ListenerExtras {
+                bitcoin_rs_p2p::listener::ListenerExtras {
                     block_sync: fixture.shared.block_sync.clone(),
                     block_memory: Some(memory),
                     ..Default::default()
@@ -423,7 +423,7 @@ mod block_forward_tests {
             if compact {
                 deliver_compact_block(
                     &block,
-                    &mut bitcoin_rs_wire::compact_blocks::Reconstruction::new(),
+                    &mut bitcoin_rs_p2p::compact_blocks::Reconstruction::new(),
                     &ScanCounter(AtomicUsize::new(0)),
                     &fixture.lease,
                     fixture.addr,
@@ -431,22 +431,22 @@ mod block_forward_tests {
                 )?;
             } else {
                 let mut frame = Vec::new();
-                bitcoin_rs_wire::wire::write_message(
+                bitcoin_rs_p2p::wire::write_message(
                     &mut frame,
                     fixture.shared.magic,
-                    &bitcoin_rs_wire::Message::BlockBytes(encoded),
+                    &bitcoin_rs_p2p::Message::BlockBytes(encoded),
                 )?;
                 let stream = std::io::Cursor::new(frame);
-                let mut peer = bitcoin_rs_wire::Peer::new(stream, fixture.shared.magic);
-                peer.state = bitcoin_rs_wire::PeerState::Ready;
-                match bitcoin_rs_wire::listener::run_message_loop(
+                let mut peer = bitcoin_rs_p2p::Peer::new(stream, fixture.shared.magic);
+                peer.state = bitcoin_rs_p2p::PeerState::Ready;
+                match bitcoin_rs_p2p::listener::run_message_loop(
                     &mut peer,
                     fixture.addr,
                     &fixture.lease,
                     &fixture.shared,
                     None,
                 ) {
-                    Err(bitcoin_rs_wire::PeerError::Io(error))
+                    Err(bitcoin_rs_p2p::PeerError::Io(error))
                         if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
                     Err(error) => return Err(error.into()),
                     Ok(()) => {
@@ -536,12 +536,12 @@ mod compact_blocks_tests {
         Amount, Block, BlockHash, Hash256, Header, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut,
         Txid, Witness, Wtxid, consensus_bytes, unix_time_secs,
     };
-    use bitcoin_rs_wire::compact_blocks::{
+    use bitcoin_rs_p2p::compact_blocks::{
         CompactBlockHints, MAX_BLOCK_TX_COUNT, MAX_PENDING_RETAINED_BYTES, Outcome,
         PENDING_DEADLINE, Reconstruction,
     };
-    use bitcoin_rs_wire::inv::wire_block_hash;
-    use bitcoin_rs_wire::peer::COMPACT_BLOCK_VERSION;
+    use bitcoin_rs_p2p::inv::wire_block_hash;
+    use bitcoin_rs_p2p::peer::COMPACT_BLOCK_VERSION;
 
     struct SetHints {
         txs: Vec<Tx>,
@@ -628,7 +628,7 @@ mod compact_blocks_tests {
                 merkle_root: Hash256::default(),
                 time: 7,
                 bits: bitcoin_rs_consensus::primitives::CompactTarget::from_consensus(
-                    bitcoin_rs_execution::chain::regtest_fixture::REGTEST_BITS,
+                    bitcoin_rs_chain::chain::regtest_fixture::REGTEST_BITS,
                 ),
                 nonce: 9,
             },
@@ -1256,11 +1256,9 @@ mod dispatch_tests {
         AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolEntry,
         MempoolGateway, MempoolLimits, PeerToken, SubmitOutcome,
     };
-    use bitcoin_rs_wire::dispatch::{
-        ChainQuery, TxInventory, dispatch_inbound_full, serve_getdata,
-    };
-    use bitcoin_rs_wire::peer::{Peer, PeerState};
-    use bitcoin_rs_wire::wire::{Message, PeerError};
+    use bitcoin_rs_p2p::dispatch::{ChainQuery, TxInventory, dispatch_inbound_full, serve_getdata};
+    use bitcoin_rs_p2p::peer::{Peer, PeerState};
+    use bitcoin_rs_p2p::wire::{Message, PeerError};
 
     use crate::p2p::RefTxInventory;
 
@@ -1589,7 +1587,7 @@ mod dispatch_tests {
 mod header_ingress_tests {
     use super::*;
     use crate::test_support::TestResult;
-    use bitcoin_rs_wire::listener::{ConnectionShared, test_shared};
+    use bitcoin_rs_p2p::listener::{ConnectionShared, test_shared};
     use std::time::{Duration, Instant};
 
     // P2P-07
@@ -1598,13 +1596,13 @@ mod header_ingress_tests {
         let (headers_tx, headers_rx) = crossbeam_channel::bounded(1);
         let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(1);
         let shared = test_shared(
-            Arc::new(bitcoin_rs_wire::PeerTable::new()),
+            Arc::new(bitcoin_rs_p2p::PeerTable::new()),
             headers_tx,
             blocks_tx,
         );
         let (tx, _rx) = crossbeam_channel::unbounded();
-        let lease = bitcoin_rs_wire::PeerLease::new(tx);
-        let addr = bitcoin_rs_wire::PeerEndpoint::from((std::net::Ipv4Addr::LOCALHOST, 18_450));
+        let lease = bitcoin_rs_p2p::PeerLease::new(tx);
+        let addr = bitcoin_rs_p2p::PeerEndpoint::from((std::net::Ipv4Addr::LOCALHOST, 18_450));
         let source = lease.source(Some(addr));
         shared.send_headers_response(&lease, source, Vec::new());
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -1644,14 +1642,14 @@ mod header_ingress_tests {
             let (headers_tx, headers_rx) = crossbeam_channel::bounded(1);
             let (blocks_tx, _blocks_rx) = crossbeam_channel::bounded(1);
             let mut shared = test_shared(
-                Arc::new(bitcoin_rs_wire::PeerTable::new()),
+                Arc::new(bitcoin_rs_p2p::PeerTable::new()),
                 headers_tx,
                 blocks_tx,
             );
             let session_cancel = bitcoin_rs_consensus::latch::LatchWriter::new();
             shared.session_cancel = session_cancel.reader();
             let (tx, _rx) = crossbeam_channel::unbounded();
-            let lease = bitcoin_rs_wire::PeerLease::new(tx);
+            let lease = bitcoin_rs_p2p::PeerLease::new(tx);
             let source = lease.source(None);
             shared.send_headers_response(&lease, source, Vec::new());
             let stop = lease.clone();
@@ -1680,12 +1678,12 @@ mod header_ingress_tests {
         let (headers_tx, headers_rx) = crossbeam_channel::bounded(1);
         let (blocks_tx, _blocks_rx) = crossbeam_channel::bounded(1);
         let shared = test_shared(
-            Arc::new(bitcoin_rs_wire::PeerTable::new()),
+            Arc::new(bitcoin_rs_p2p::PeerTable::new()),
             headers_tx,
             blocks_tx,
         );
         let (tx, _rx) = crossbeam_channel::unbounded();
-        let lease = bitcoin_rs_wire::PeerLease::new(tx);
+        let lease = bitcoin_rs_p2p::PeerLease::new(tx);
         let source = lease.source(None);
         shared.send_headers_response(&lease, source, Vec::new());
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
@@ -1719,7 +1717,7 @@ mod header_ingress_tests {
     fn run_sustained_ingress_case(delivery: HeaderDelivery) -> TestResult {
         use crate::p2p::sync::test_support::{TestChain, mined_chain};
         use arc_swap::ArcSwapOption;
-        use bitcoin_rs_wire::test_support::{connect_peer, synthetic_peer, test_addr};
+        use bitcoin_rs_p2p::test_support::{connect_peer, synthetic_peer, test_addr};
         use parking_lot::RwLock;
 
         const CAPACITY: usize = 64;
@@ -1728,7 +1726,7 @@ mod header_ingress_tests {
         let tip = tree.tip_handle();
         let tree = Arc::new(RwLock::new(tree));
         let applied = Arc::new(ArcSwapOption::empty());
-        let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
+        let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
         let (headers_tx, headers_rx) = crossbeam_channel::bounded(CAPACITY);
         let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(256);
         let sync = Arc::new(crate::p2p::sync::BlockSync::new(
@@ -1748,7 +1746,7 @@ mod header_ingress_tests {
             ))?;
         let mut shared = test_shared(peers, headers_tx, blocks_tx);
         shared.block_sync =
-            Some(sync.clone() as Arc<dyn bitcoin_rs_wire::listener::BlockSyncObserver>);
+            Some(sync.clone() as Arc<dyn bitcoin_rs_p2p::listener::BlockSyncObserver>);
         let stop = bitcoin_rs_consensus::latch::LatchWriter::new();
         shared.session_cancel = stop.reader();
         let (producer, filled_rx) =
@@ -1782,7 +1780,7 @@ mod header_ingress_tests {
             );
         }
         let headers_per_batch = if delivery == HeaderDelivery::WireResponse {
-            bitcoin_rs_wire::wire::MAX_HEADERS_MESSAGE_COUNT
+            bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT
         } else {
             1
         };
@@ -1808,8 +1806,8 @@ mod header_ingress_tests {
     fn drain_sustained_ingress(
         sync: &crate::p2p::sync::BlockSync,
         producer: std::thread::JoinHandle<()>,
-        headers_rx: &crossbeam_channel::Receiver<bitcoin_rs_wire::InboundHeaders>,
-        blocks_rx: &crossbeam_channel::Receiver<bitcoin_rs_wire::InboundBlock>,
+        headers_rx: &crossbeam_channel::Receiver<bitcoin_rs_p2p::InboundHeaders>,
+        blocks_rx: &crossbeam_channel::Receiver<bitcoin_rs_p2p::InboundBlock>,
         stop: &bitcoin_rs_consensus::latch::LatchWriter,
         started: Instant,
         initial_peak: usize,
@@ -1842,8 +1840,8 @@ mod header_ingress_tests {
         blocks: Vec<bitcoin_rs_consensus::primitives::Block>,
         delivery: HeaderDelivery,
         shared: ConnectionShared,
-        lease: bitcoin_rs_wire::PeerLease,
-        addr: bitcoin_rs_wire::PeerRemote,
+        lease: bitcoin_rs_p2p::PeerLease,
+        addr: bitcoin_rs_p2p::PeerRemote,
         sync: Arc<crate::p2p::sync::BlockSync>,
     ) -> (std::thread::JoinHandle<()>, crossbeam_channel::Receiver<()>) {
         let source = lease.source(addr.endpoint());
@@ -1854,7 +1852,7 @@ mod header_ingress_tests {
                     shared.send_headers_response(
                         &lease,
                         source,
-                        vec![block.header; bitcoin_rs_wire::wire::MAX_HEADERS_MESSAGE_COUNT],
+                        vec![block.header; bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT],
                     );
                 } else {
                     let hash = bitcoin_rs_consensus::primitives::Hash256::from(block.block_hash());
@@ -1886,9 +1884,9 @@ mod inv_tests {
     use bitcoin::p2p::message_blockdata::Inventory;
     use bitcoin_rs_consensus::primitives::{Hash256, Txid};
     use bitcoin_rs_mempool::PeerToken;
-    use bitcoin_rs_wire::connection::PeerLease;
-    use bitcoin_rs_wire::peer_table::PeerTable;
-    use bitcoin_rs_wire::wire::Message;
+    use bitcoin_rs_p2p::connection::PeerLease;
+    use bitcoin_rs_p2p::peer_table::PeerTable;
+    use bitcoin_rs_p2p::wire::Message;
 
     fn parent(byte: u8) -> Txid {
         Txid::from(Hash256::from_le_bytes(&[byte; 32]))
@@ -1926,7 +1924,7 @@ mod inv_tests {
             return false;
         }
         if witness {
-            bitcoin_rs_wire::inv::request_witness(&mut items);
+            bitcoin_rs_p2p::inv::request_witness(&mut items);
         }
         peers.send(connection, Message::GetData(items)).is_ok() && !lease.is_cancelled()
     }
@@ -1934,7 +1932,7 @@ mod inv_tests {
     #[test]
     fn missing_parents_use_txids_and_deduplicate_repeated_inputs() {
         let table = PeerTable::new();
-        let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(2);
+        let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(2);
         let lease = PeerLease::new(sender);
         let source = source(&lease);
         table.register(source.addr.expect("known destination"), lease.clone());
@@ -1962,14 +1960,14 @@ mod inv_tests {
         for witness in [false, true] {
             for wtxid_relay in [false, true] {
                 let table = PeerTable::new();
-                let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(1);
+                let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(1);
                 let lease = PeerLease::new(sender);
                 let source = source(&lease);
                 table.register(source.addr.expect("known destination"), lease.clone());
-                let mut version = bitcoin_rs_wire::handshake::version_message(
+                let mut version = bitcoin_rs_p2p::handshake::version_message(
                     1,
                     0,
-                    bitcoin_rs_wire::peer_info::PeerRole::FullRelay,
+                    bitcoin_rs_p2p::peer_info::PeerRole::FullRelay,
                     bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
                     bitcoin_rs_consensus::primitives::USER_AGENT,
                 );
@@ -1978,7 +1976,7 @@ mod inv_tests {
                 } else {
                     ServiceFlags::NETWORK
                 };
-                let mut info = bitcoin_rs_wire::PeerInfo::inbound_from_version(
+                let mut info = bitcoin_rs_p2p::PeerInfo::inbound_from_version(
                     source.addr.expect("known destination"),
                     source
                         .addr
@@ -1988,7 +1986,7 @@ mod inv_tests {
                     &version,
                     0,
                     0,
-                    Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+                    Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
                 );
                 info.wtxid_relay = wtxid_relay;
                 assert!(table.publish_info(source.addr.expect("known destination"), &lease, info,));
@@ -2017,11 +2015,11 @@ mod inv_tests {
     #[test]
     fn stale_missing_parent_source_cannot_send_to_or_cancel_replacement() {
         let table = PeerTable::new();
-        let (old_sender, old_receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(1);
+        let (old_sender, old_receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(1);
         let old = PeerLease::new(old_sender);
         let stale_source = source(&old);
         table.register(stale_source.addr.expect("known destination"), old);
-        let (new_sender, new_receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(1);
+        let (new_sender, new_receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(1);
         let current = PeerLease::new(new_sender);
         table.register(
             stale_source.addr.expect("known destination"),
@@ -2045,7 +2043,7 @@ mod inv_tests {
     #[test]
     fn missing_parent_request_keeps_outbound_saturation_policy() {
         let table = PeerTable::new();
-        let (sender, _receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(1);
+        let (sender, _receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(1);
         let lease = PeerLease::new(sender);
         let source = source(&lease);
         assert!(!request_missing_parents(&table, source, &[parent(1)]));
@@ -2059,7 +2057,7 @@ mod inv_tests {
     #[test]
     fn cancelled_missing_parent_source_does_not_enqueue_a_request() {
         let table = PeerTable::new();
-        let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(1);
+        let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(1);
         let lease = PeerLease::new(sender);
         let source = source(&lease);
         table.register(source.addr.expect("known destination"), lease.clone());
@@ -2072,13 +2070,13 @@ mod inv_tests {
     #[test]
     fn missing_parents_serve_unidentified_inbound_through_own_lease() {
         let table = PeerTable::new();
-        let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(2);
+        let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(2);
         let lease = PeerLease::new_inbound(sender);
         let source = crate::p2p::peer_token(lease.source(None));
         assert!(source.addr.is_none());
         table.register_unidentified(lease.clone());
         let (other_sender, other_receiver) =
-            bitcoin_rs_wire::test_support::message_channel_bounded(2);
+            bitcoin_rs_p2p::test_support::message_channel_bounded(2);
         let other = PeerLease::new_inbound(other_sender);
         let other_source = crate::p2p::peer_token(other.source(None));
         assert!(other_source.addr.is_none());
@@ -2105,7 +2103,7 @@ mod inv_tests {
     #[test]
     fn missing_parents_resolve_unidentified_sessions() {
         let table = PeerTable::new();
-        let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(2);
+        let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(2);
         let lease = PeerLease::new(sender);
         table.register_unidentified(lease.clone());
         let source = crate::p2p::peer_token(lease.source(None));
@@ -2140,11 +2138,11 @@ mod loopback_serving_tests {
     use bitcoin::blockdata::block::Block as RegistryBlock;
     use bitcoin::hashes::Hash as _;
     use bitcoin::p2p::message_blockdata::Inventory;
+    use bitcoin_rs_chain::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
     use bitcoin_rs_consensus::primitives::{
         Amount, Block, BlockHash, BlockImage, CompactTarget, Hash256, Header, LockTime, Network,
         OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
     };
-    use bitcoin_rs_execution::chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader};
     use bitcoin_rs_storage::{
         block_body::{BlockBodyReadError, BlockBodySource},
         split_chainstate_cache_budget,
@@ -2152,11 +2150,11 @@ mod loopback_serving_tests {
     use parking_lot::RwLock;
 
     use crate::p2p::chain_query::{ActiveChainQuery, RecentBlockSlot};
-    use bitcoin_rs_wire::listener::{
+    use bitcoin_rs_p2p::listener::{
         ListenerError, bind_listener, configure_peer_stream, run_outbound_handshake, serve,
         test_shared,
     };
-    use bitcoin_rs_wire::{
+    use bitcoin_rs_p2p::{
         ChainQuery, Message, Peer, PeerCounters, PeerError, PeerLease, PeerSession, PeerTable,
     };
 
@@ -2164,7 +2162,7 @@ mod loopback_serving_tests {
     const FAILSAFE: Duration = Duration::from_secs(20);
 
     fn wire_len_of(message: &Message) -> Result<usize, PeerError> {
-        bitcoin_rs_wire::wire::wire_len(message)
+        bitcoin_rs_p2p::wire::wire_len(message)
     }
 
     fn wait_until(what: &str, mut condition: impl FnMut() -> bool) -> Result<(), TestError> {
@@ -2177,10 +2175,10 @@ mod loopback_serving_tests {
         }
         Ok(())
     }
-    use bitcoin_rs_wire::connection::{
+    use bitcoin_rs_p2p::connection::{
         OUTBOUND_QUEUE_MAX_BYTES, Refusal, SHARED_OUTBOUND_QUEUE_MAX_BYTES, SharedOutboundBudget,
     };
-    use bitcoin_rs_wire::inv::{MAX_INV_PER_MSG, wire_block_hash};
+    use bitcoin_rs_p2p::inv::{MAX_INV_PER_MSG, wire_block_hash};
 
     #[derive(Debug, thiserror::Error)]
     enum TestError {
@@ -2191,7 +2189,7 @@ mod loopback_serving_tests {
         #[error(transparent)]
         TryFromInt(#[from] std::num::TryFromIntError),
         #[error(transparent)]
-        Chain(#[from] bitcoin_rs_execution::chain::ChainError),
+        Chain(#[from] bitcoin_rs_chain::chain::ChainError),
         #[error(transparent)]
         Primitives(#[from] bitcoin_rs_consensus::primitives::DecodeError),
         #[error(transparent)]
@@ -2281,7 +2279,7 @@ mod loopback_serving_tests {
                 merkle_root: Hash256::from_le_bytes(&root),
                 time: nonce,
                 bits: CompactTarget::from_consensus(
-                    bitcoin_rs_execution::chain::regtest_fixture::REGTEST_BITS,
+                    bitcoin_rs_chain::chain::regtest_fixture::REGTEST_BITS,
                 ),
                 nonce,
             },
@@ -2517,7 +2515,7 @@ mod loopback_serving_tests {
         let mut found = None;
         wait_until("the node to publish the client's session", || {
             found = node.table.sessions().into_iter().find(|session| {
-                session.addr == bitcoin_rs_wire::PeerRemote::Endpoint(client.local)
+                session.addr == bitcoin_rs_p2p::PeerRemote::Endpoint(client.local)
                     && session.info.is_some()
             });
             found.is_some()
@@ -2784,8 +2782,8 @@ mod loopback_serving_tests {
         )?;
         assert!(hog_messages > 1, "the aggregate holds several real frames");
 
-        let reserve = bitcoin_rs_wire::wire::HEADER_LEN
-            + bitcoin_rs_wire::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
+        let reserve = bitcoin_rs_p2p::wire::HEADER_LEN
+            + bitcoin_rs_p2p::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
         let bulk_limit = SHARED_OUTBOUND_QUEUE_MAX_BYTES - reserve;
         let refusal_point = bulk_limit - reserve;
         assert!(
@@ -2930,11 +2928,11 @@ mod writer_shutdown_tests {
     use bitcoin_rs_mempool::{
         AdmissionOrigin, Mempool, MempoolEntry, MempoolGateway, MempoolLimits,
     };
-    use bitcoin_rs_wire::connection::PeerLease;
-    use bitcoin_rs_wire::dispatch::TxInventory;
-    use bitcoin_rs_wire::listener::{run_message_loop, test_shared};
-    use bitcoin_rs_wire::peer::{Peer, PeerState};
-    use bitcoin_rs_wire::peer_table::PeerTable;
+    use bitcoin_rs_p2p::connection::PeerLease;
+    use bitcoin_rs_p2p::dispatch::TxInventory;
+    use bitcoin_rs_p2p::listener::{run_message_loop, test_shared};
+    use bitcoin_rs_p2p::peer::{Peer, PeerState};
+    use bitcoin_rs_p2p::peer_table::PeerTable;
 
     struct RelayDuringInventoryLookup {
         _table: Arc<PeerTable>,
@@ -2984,11 +2982,11 @@ mod writer_shutdown_tests {
         }
     }
 
-    fn peer_info(addr: PeerEndpoint, start_height: i32) -> bitcoin_rs_wire::PeerInfo {
-        bitcoin_rs_wire::PeerInfo {
+    fn peer_info(addr: PeerEndpoint, start_height: i32) -> bitcoin_rs_p2p::PeerInfo {
+        bitcoin_rs_p2p::PeerInfo {
             addr: addr.into(),
             endpoint: Some(addr),
-            network: bitcoin_rs_wire::PeerRemote::from(addr).network().into(),
+            network: bitcoin_rs_p2p::PeerRemote::from(addr).network().into(),
             version: 70_016,
             wtxid_relay: false,
             relay_transactions: true,
@@ -3000,12 +2998,12 @@ mod writer_shutdown_tests {
             best_known_height: start_height,
             conn_time: 0,
             inbound: false,
-            addr_bind: bitcoin_rs_wire::endpoint::TransportRemote::new(
+            addr_bind: bitcoin_rs_p2p::endpoint::TransportRemote::new(
                 addr.socket_addr().expect("valid IP fixture"),
             ),
             time_offset: 0,
-            counters: Arc::new(bitcoin_rs_wire::PeerCounters::default()),
-            transport: bitcoin_rs_wire::TransportProtocol::V1,
+            counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+            transport: bitcoin_rs_p2p::TransportProtocol::V1,
         }
     }
 
@@ -3090,10 +3088,10 @@ mod writer_shutdown_tests {
                 [9; 32]
             };
             let mut wire = Vec::new();
-            bitcoin_rs_wire::wire::write_message(
+            bitcoin_rs_p2p::wire::write_message(
                 &mut wire,
                 shared.magic,
-                &bitcoin_rs_wire::Message::Inv(vec![Inventory::Transaction(
+                &bitcoin_rs_p2p::Message::Inv(vec![Inventory::Transaction(
                     bitcoin::Txid::from_byte_array(announced),
                 )]),
             )
@@ -3109,7 +3107,7 @@ mod writer_shutdown_tests {
             assert_eq!(inventory.calls.load(Ordering::Relaxed), 1);
             let echoed = outbound_rx
                 .try_iter()
-                .any(|frame| matches!(frame.message(), bitcoin_rs_wire::Message::Inv(_)));
+                .any(|frame| matches!(frame.message(), bitcoin_rs_p2p::Message::Inv(_)));
             assert_eq!(
                 echoed, !announces_pending,
                 "only the announced identity suppresses the pending relay"
@@ -3138,14 +3136,14 @@ pub use tx_relay::{
 
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_consensus::primitives::{Hash256, Header, Network, Tx, Txid, Wtxid};
-use bitcoin_rs_wire::compact_blocks::CompactBlockHints;
-use bitcoin_rs_wire::connection::{PeerRemote, PeerSource};
-use bitcoin_rs_wire::dispatch::TxInventory;
-use bitcoin_rs_wire::inbound::{BlockMemoryCredit, InboundBlock};
-use bitcoin_rs_wire::listener::{
+use bitcoin_rs_p2p::compact_blocks::CompactBlockHints;
+use bitcoin_rs_p2p::connection::{PeerRemote, PeerSource};
+use bitcoin_rs_p2p::dispatch::TxInventory;
+use bitcoin_rs_p2p::inbound::{BlockMemoryCredit, InboundBlock};
+use bitcoin_rs_p2p::listener::{
     BlockAnnounceObserver, BlockSyncObserver, IbdState, TxIngressObserver, TxPolicyObserver,
 };
-use bitcoin_rs_wire::wire::{Message, PeerError};
+use bitcoin_rs_p2p::wire::{Message, PeerError};
 use crossbeam_channel::Sender;
 use std::sync::Arc;
 pub fn peer_token(source: PeerSource) -> bitcoin_rs_mempool::PeerToken {
@@ -3160,7 +3158,7 @@ pub fn peer_source(token: bitcoin_rs_mempool::PeerToken) -> PeerSource {
     PeerSource::from_raw(token.endpoint, token.connection_id)
 }
 
-pub struct NodeIbd(pub Arc<bitcoin_rs_execution::chain::InitialBlockDownload>);
+pub struct NodeIbd(pub Arc<bitcoin_rs_chain::chain::InitialBlockDownload>);
 
 impl IbdState for NodeIbd {
     fn is_ibd(&self, now: u64, network: Network) -> bool {
@@ -3279,7 +3277,7 @@ impl NodeTxIngress {
 impl TxIngressObserver for NodeTxIngress {
     fn on_inbound_tx(&self, source: PeerSource, tx: Tx, memory_credit: Option<BlockMemoryCredit>) {
         let body = InboundBody::from(
-            bitcoin_rs_wire::InboundTx::new(tx, source).with_memory_credit(memory_credit),
+            bitcoin_rs_p2p::InboundTx::new(tx, source).with_memory_credit(memory_credit),
         );
         if self.cancel.is_triggered() {
             return;

@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use crate::chain_effects::ChainFollowers;
+use bitcoin_rs_chain::chain::{InvalidationOutcome, NodeId};
+pub use bitcoin_rs_chain::reorg::ReorgError;
+use bitcoin_rs_chain::reorg::ReorgObserver;
+use bitcoin_rs_chain::{ApplyError, Chainstate, ConnectOutcome, DisconnectOutcome};
 use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Tx, Txid};
-use bitcoin_rs_execution::chain::{InvalidationOutcome, NodeId};
-pub use bitcoin_rs_execution::reorg::ReorgError;
-use bitcoin_rs_execution::reorg::ReorgObserver;
-use bitcoin_rs_execution::{ApplyError, Chainstate, ConnectOutcome, DisconnectOutcome};
 use hashbrown::HashSet;
 
 const MAX_DISCONNECTED_TX_BYTES: usize = 20_000_000;
@@ -111,7 +111,7 @@ fn settle_node_reorg(
             mempool_change.as_ref(),
             observer.followers.mempool_gateway(),
         ) {
-            let chain = bitcoin_rs_serving::context::ChainAdmissionView::new(
+            let chain = bitcoin_rs_wire::context::ChainAdmissionView::new(
                 handles.utxo_reader(),
                 handles.applied_tip_reader(),
                 handles.block_tree_reader(),
@@ -189,7 +189,7 @@ pub fn invalidate_block(
         .map_err(|source| ReorgError::Unavailable(Box::new(source)))?;
     let mut connected_body = |_| {};
     let mut observer = NodeReorgObserver::new(followers, &mut connected_body);
-    let outcome = bitcoin_rs_execution::reorg::invalidate_block(
+    let outcome = bitcoin_rs_chain::reorg::invalidate_block(
         handles,
         &mut observer,
         hash,
@@ -213,7 +213,7 @@ where
         .begin_mempool_change()
         .map_err(|source| ReorgError::Unavailable(Box::new(source)))?;
     let mut observer = NodeReorgObserver::new(followers, &mut connected_body);
-    let outcome = bitcoin_rs_execution::reorg::switch_to_branch(
+    let outcome = bitcoin_rs_chain::reorg::switch_to_branch(
         handles,
         target,
         &mut staged_body,

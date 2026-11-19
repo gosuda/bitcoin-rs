@@ -47,9 +47,9 @@ New features and refactors MUST preserve the guarantees here even when component
 | Header tip | Header admission inside the chainstate transition (`ARCH-07`) | `SyncChain::chain_tip` readers; P2P frontier planning | A newer admitted header supersedes it | Invalid header rejected per `P2P-10`; ancestry not admitted | `SYNC-01` / `P2P-10` |
 | Applied-tip commit | Chainstate transition owning mutation and durability (`EVT-02` steps 1 to 5) | `SyncChain::applied_tip`; status RPC snapshots; generation-fenced readers | A newer durable commit publishes | Commit failure publishes nothing; crash replays via `RCV-04` | `SYNC-02`, `SYNC-05` / `EVT-02`; `crates/node/crash_recovery_tests.rs` |
 | AssumeUTXO historical frontier | `AssumeUtxoManager` historical role (`ARCH-07b`) | `getchainstates` readers (`API-33`) | Historical validation advances or terminates | Terminal validation failure stops the role; never converts into success | `SYNC-01`, `SYNC-04` / `ARCH-07b` |
-| Reorg | Chainstate transition branch switch (`RCV-05`, `RCV-08`) | Chain tip and applied-tip readers observe the new best only after commit | A heavier valid branch commits | Invalid branch poisons the block and descendants; transient failures hand over | `SYNC-04` / `crates/execution/src/reorg.rs` |
+| Reorg | Chainstate transition branch switch (`RCV-05`, `RCV-08`) | Chain tip and applied-tip readers observe the new best only after commit | A heavier valid branch commits | Invalid branch poisons the block and descendants; transient failures hand over | `SYNC-04` / `crates/chain/src/reorg.rs` |
 | Post-commit followers | Committed chain effects in commit order (`EVT-02` step 7) | Index worker wakes; mining/announce; mempool followers | The next commit supersedes the prior outcome | Settlement failure closes admission for recovery; the committed outcome is retained | `SYNC-06` / `crates/node/src/chain_effects.rs` |
-| Index watermark/backfill | `IndexWriter` atomic commit paths (`IDX-01`–`IDX-10`) | Watermark-gated queries; RPC readiness projections | A new capability commit or rollback moves the watermark | Worker failure renders queries `Unavailable`; backfill resumes and never signals complete when disabled | `SYNC-01`, `SYNC-03`, `SYNC-05`, `SYNC-07` / `crates/projection/src/runtime.rs` |
+| Index watermark/backfill | `IndexWriter` atomic commit paths (`IDX-01`–`IDX-10`) | Watermark-gated queries; RPC readiness projections | A new capability commit or rollback moves the watermark | Worker failure renders queries `Unavailable`; backfill resumes and never signals complete when disabled | `SYNC-01`, `SYNC-03`, `SYNC-05`, `SYNC-07` / `crates/index/src/runtime.rs` |
 | Retained history | Retention/pruning authority (`ARCH-08`) with `RCV-07` rebuild | Sync, reorg, and historical-validation consumers requiring bodies/undo records | Explicitly permitted pruning; otherwise retained until consumed | A missing prerequisite is reported `Unavailable`/recoverable, never empty success | `SYNC-07` / `RCV-07` |
 | Settlement closure | Chainstate commit retains the outcome; `ConnectMutationError::CommittedButSettlementFailed` closes admission | Mining submission and admission callers observe the error, never a retry | Never stale within the process: the committed tip stands and retry is forbidden | No process-level settlement-injection scenario exists; recovery uses only the existing restart/replay lanes | `SYNC-04` / `crates/node/src/chain_effects.rs::committed_connect_settlement_failure_retains_outcome_and_forbids_retry` |
 
@@ -78,7 +78,7 @@ These contracts remain authoritative. This page adds no second source of truth f
 - Publication uses `commit_block` for selected capabilities, and `seed_script_live_stream` with bounded batch commits for `ScriptLive`.
 - Serving-visible readiness projections are RPC reads of those watermarks, not a second publication.
 - No consumer may derive "fully synchronized", "validated", or "ready" from a different frontier.
-- `sync_progress` reports blocks and headers separately for this reason (`crates/serving/src/context.rs`).
+- `sync_progress` reports blocks and headers separately for this reason (`crates/wire/src/context.rs`).
 - A `blocks == headers` projection is not validation progress when an AssumeUTXO historical role is still replaying.
 
 ### `SYNC-02`: Canonical applied progress; transient work is a hint
@@ -152,7 +152,7 @@ Distinguish, and never conflate:
 - Only the named execution evidence below discharges it.
 - Download/frontier work: the event-loop sync tick drives `BlockSync::tick` only (`crates/node/src/event_loop.rs::on_sync_tick` → `sync.tick()`).
 - The sync tick does not drive the index worker.
-- Index worker work: the worker has its own wake/timeout reconciliation loop (`crates/projection/src/runtime/reconciliation.rs`, with revision-coalesced quiet wait, 1 s `recv_timeout` tick, and `IDX-08`).
+- Index worker work: the worker has its own wake/timeout reconciliation loop (`crates/index/src/runtime/reconciliation.rs`, with revision-coalesced quiet wait, 1 s `recv_timeout` tick, and `IDX-08`).
 - Committed chain effects send its wakes (`crates/node/src/chain_effects.rs::wake_index`).
 - Sync tick and index wakes are separate drivers.
 - Post-commit mining/announce: committed chain effects drive them in commit order (`EVT-02` step 7).

@@ -13,13 +13,13 @@ use crate::p2p::download_window::configure_request_mode;
 use crate::p2p::download_window::{
     BlockDownloadPolicy, peer_can_serve_height, serves_requested_height, statically_fanout_eligible,
 };
+use bitcoin_rs_chain::chain::BlockTree;
+use bitcoin_rs_chain::chain::ChainError;
+use bitcoin_rs_chain::chain::NodeId;
 use bitcoin_rs_consensus::primitives::Hash256;
-use bitcoin_rs_execution::chain::BlockTree;
-use bitcoin_rs_execution::chain::ChainError;
-use bitcoin_rs_execution::chain::NodeId;
-use bitcoin_rs_wire::PeerInfo;
-use bitcoin_rs_wire::connection::PeerSource;
-use bitcoin_rs_wire::peer_info::PeerRole;
+use bitcoin_rs_p2p::PeerInfo;
+use bitcoin_rs_p2p::connection::PeerSource;
+use bitcoin_rs_p2p::peer_info::PeerRole;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -217,7 +217,7 @@ pub(super) fn consider_eviction(
 }
 
 impl BlockSync {
-    pub fn on_peer_ready(&self, source: bitcoin_rs_wire::PeerSource) {
+    pub fn on_peer_ready(&self, source: bitcoin_rs_p2p::PeerSource) {
         if !self.peer_table.is_current(source) {
             return;
         }
@@ -556,11 +556,11 @@ mod tests {
     use super::is_peer_fault;
     use crate::p2p::download_window::FanoutCandidate;
     use crate::p2p::download_window::SyncPeer;
-    use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
-    use bitcoin_rs_execution::chain::{
+    use bitcoin_rs_chain::chain::{
         BlockTree, ChainError, NodeId, NodeStatus, accept_headers, compact_is_met_by,
     };
-    use bitcoin_rs_wire::connection::PeerSource;
+    use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
+    use bitcoin_rs_p2p::connection::PeerSource;
     use std::net::SocketAddr;
     fn body_candidate_impl(port: u16, height: i32, soft_blocked: bool) -> FanoutCandidate {
         FanoutCandidate {
@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(mixed[0].best_known_height, 10);
         assert_eq!(
             mixed[0].source.endpoint,
-            Some(bitcoin_rs_wire::PeerEndpoint::Ip(SocketAddr::from((
+            Some(bitcoin_rs_p2p::PeerEndpoint::Ip(SocketAddr::from((
                 [127, 0, 0, 1],
                 9001
             )))),
@@ -686,7 +686,7 @@ mod tests {
             &[grandchild],
             Network::Regtest,
             901_800,
-            bitcoin_rs_execution::chain::HeaderValidationMode::LiveAdmission,
+            bitcoin_rs_chain::chain::HeaderValidationMode::LiveAdmission,
         )
         .err()
         .ok_or("a descendant of an invalidated block must be refused")?;

@@ -7,12 +7,12 @@ Applies to: `gosuda/bitcoin-rs`.
 Owners:
 - Block image and layout: `crates/consensus/`
 - Script and witness execution: `crates/consensus/src/script/`
-- Window execution: `crates/execution/`
+- Window execution: `crates/chain/`
 - Commit authority and coin storage: `crates/storage/`
-- Projections and generation segments: `crates/projection/`
-- Query views and serving: `crates/serving/`
+- Projections and generation segments: `crates/index/`
+- Query views and serving: `crates/wire/`
 - Resource budgets: `crates/node/`
-- Mempool and mining views: `crates/mempool/`, `crates/serving/src/mining/`
+- Mempool and mining views: `crates/mempool/`, `crates/wire/src/mining/`
 
 ## 1. Terms
 
@@ -484,7 +484,7 @@ Proof: `crates/node/src/budget.rs::saturated_ingress_preserves_execution_headroo
 
 The node-total fallback is defensive. `BudgetCaps::total` is the sum of the owner caps, including the receive/image partition in `BUD-05`. Every public ledger mutation preserves each owner's combined charge and reservation bound. `sample_engine_cache` also caps its charge at the owner cap minus live reservations. A request that fits its owner therefore fits the node total. If the configured total saturates, the final saturating sum cannot exceed `u64::MAX`. Total-only pressure has no public-API fixture under these invariants.
 
-Proof: `crates/wire/src/inbound/block_memory.rs::message_loop_refuses_receive_pressure_once_and_releases_partial_backing` checks terminal local receive refusal and released partial backing for both transports. `crates/wire/src/inbound/block_memory.rs::decode_admission_refuses_without_waiting_on_retained_raw_memory` checks terminal decoder refusal without waiting on retained raw memory. `crates/wire/src/inbound/block_memory.rs::cancellation_precedes_typed_decode_and_malformed_decode_releases_credit` checks cancellation before decoder admission and credit release after malformed decoding. `crates/node/src/p2p/block_stager.rs::reclaim_work_stays_bounded_when_admissions_replace_released_credit` checks the eviction work limit under replacement charges and zero requests. `crates/node/src/p2p/sync.rs::shared_staged_backing_bounds_reclaim_before_historical_eviction` and `crates/node/src/p2p/sync.rs::reclaimed_credit_preserves_historical_bodies_after_the_target_is_met` check historical preservation when either the work limit or actual release target is reached. `crates/node/src/budget.rs::transfer_reclaims_staged_image_and_retries_once` checks the authoritative transfer retry and conserved receive credit on refusal. `crates/node/src/facts_queue.rs::image_and_permanent_refusals_do_not_reclaim_queued_facts` checks that unrelated and permanent refusals preserve queued facts. `crates/node/src/facts_queue.rs::shared_background_pressure_reclaims_facts_for_another_owner` and `crates/node/src/facts_queue.rs::ensure_available_reclaims_queued_facts` check applicable shared and owner pressure.
+Proof: `crates/p2p/src/inbound/block_memory.rs::message_loop_refuses_receive_pressure_once_and_releases_partial_backing` checks terminal local receive refusal and released partial backing for both transports. `crates/p2p/src/inbound/block_memory.rs::decode_admission_refuses_without_waiting_on_retained_raw_memory` checks terminal decoder refusal without waiting on retained raw memory. `crates/p2p/src/inbound/block_memory.rs::cancellation_precedes_typed_decode_and_malformed_decode_releases_credit` checks cancellation before decoder admission and credit release after malformed decoding. `crates/node/src/p2p/block_stager.rs::reclaim_work_stays_bounded_when_admissions_replace_released_credit` checks the eviction work limit under replacement charges and zero requests. `crates/node/src/p2p/sync.rs::shared_staged_backing_bounds_reclaim_before_historical_eviction` and `crates/node/src/p2p/sync.rs::reclaimed_credit_preserves_historical_bodies_after_the_target_is_met` check historical preservation when either the work limit or actual release target is reached. `crates/node/src/budget.rs::transfer_reclaims_staged_image_and_retries_once` checks the authoritative transfer retry and conserved receive credit on refusal. `crates/node/src/facts_queue.rs::image_and_permanent_refusals_do_not_reclaim_queued_facts` checks that unrelated and permanent refusals preserve queued facts. `crates/node/src/facts_queue.rs::shared_background_pressure_reclaims_facts_for_another_owner` and `crates/node/src/facts_queue.rs::ensure_available_reclaims_queued_facts` check applicable shared and owner pressure.
 
 ### `MPS-01`: Mempool dependency graph and settlement
 
@@ -516,13 +516,13 @@ Proof: `crates/wire/src/inbound/block_memory.rs::message_loop_refuses_receive_pr
 ### `MOD-01`: Owner crates and exclusive responsibilities
 
 - Each node concern has one owner crate. The owner crate holds the exclusive responsibility for that concern.
-- `wire` owns transport framing, peer admission, and immutable byte ownership.
+- `p2p` owns transport framing, peer admission, and immutable byte ownership.
 - `consensus` owns validation rules, script execution, and cryptographic checks.
-- `execution` owns ordered resolution, window transitions, prefix selection, and the window delta.
+- `chain` owns ordered resolution, window transitions, prefix selection, and the window delta.
 - `storage` owns coin persistence, append streams, the commit authority, and checkpoint recovery.
-- `projection` owns index construction, generation publication, and coverage.
+- `index` owns index construction, generation publication, and coverage.
 - `mempool` owns policy admission, dependency state, and settlement.
-- `serving` owns snapshot-bound queries, mining views, and protocol serialization.
+- `wire` owns snapshot-bound queries, mining views, and protocol serialization.
 - `node` owns lifecycle, shared budgets, and composition.
 
 ### `MOD-02`: Ownership types encode pipeline stages

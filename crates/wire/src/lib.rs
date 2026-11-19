@@ -1,358 +1,118 @@
-#![doc = include_str!("../README.md")]
+//! Synchronous Bitcoin Core-compatible JSON-RPC surface for `bitcoin-rs`.
+
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-#[cfg(feature = "fuzzing")]
-pub mod addrman;
-#[cfg(not(feature = "fuzzing"))]
-pub(crate) mod addrman;
-#[cfg(feature = "fuzzing")]
-pub mod bip324;
-#[cfg(not(feature = "fuzzing"))]
-pub(crate) mod bip324;
-pub mod compact_blocks;
-pub mod compat;
-pub mod connection;
-pub mod counters;
-pub mod dispatch;
-pub mod endpoint;
-pub mod eviction;
-pub mod feature;
-pub mod fsm;
-pub mod handshake;
-pub mod inbound;
-pub use inbound::block_memory;
-pub mod inv;
-pub mod listener;
-pub mod netgroup;
-pub mod overlay;
-pub use overlay::OverlayNetworkState;
+extern crate alloc;
 
-mod net_trace;
+pub mod auth;
+mod base64;
+pub(crate) mod compressed_tx;
+pub mod context;
+pub(crate) mod convert;
+pub(crate) mod decimal;
+mod error;
+pub mod esplora;
+pub mod handlers;
+pub mod manifest;
+pub mod mining;
+pub(crate) mod registry;
+mod render;
+pub mod rest;
+mod server;
+mod tx_decode;
+mod tx_render;
+pub mod zmq;
 
-pub mod packages;
+pub use auth::Auth;
+pub use manifest::MANIFEST_TOML;
 
-pub mod peer;
-pub mod peer_info;
-pub mod peer_table;
-pub mod recv;
-#[cfg(feature = "fuzzing")]
-pub mod sam;
-#[cfg(not(feature = "fuzzing"))]
-pub(crate) mod sam;
-pub mod service;
-#[cfg(feature = "fuzzing")]
-pub mod socks;
-#[cfg(not(feature = "fuzzing"))]
-pub(crate) mod socks;
-pub mod staletip;
-pub mod subnet;
-pub mod transport;
-pub mod wire;
+pub use error::RpcError;
+pub use handlers::Handler;
+pub use server::{RpcServer, RpcSurface};
 
-#[cfg(any(test, verification))]
-pub(crate) mod lease_model;
+#[cfg(feature = "test-seam")]
+pub use server::{handle_json, read_http_request};
 
-#[cfg(any(test, feature = "test-seam"))]
-pub mod test_support {
-    use crate::{PeerInfo, PeerLease, PeerRemote, PeerSource, PeerTable};
-    use core::fmt::Display;
-    use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::Arc;
-
-    pub const REGTEST_BITS: u32 = 0x207f_ffff;
-
-    pub trait OrFail<T> {
-        #[track_caller]
-        fn or_fail(self, context: &str) -> T;
-    }
-
-    impl<T, E: Display> OrFail<T> for Result<T, E> {
-        fn or_fail(self, context: &str) -> T {
-            match self {
-                Ok(value) => value,
-                Err(error) => panic!("{context}: {error}"),
-            }
-        }
-    }
-
-    impl<T> OrFail<T> for Option<T> {
-        fn or_fail(self, context: &str) -> T {
-            match self {
-                Some(value) => value,
-                None => panic!("{context}"),
-            }
-        }
-    }
-
+#[cfg(test)]
+pub(crate) mod test_error {
     #[derive(Debug, thiserror::Error)]
-    pub enum TestError {
+    pub(crate) enum TestError {
         #[error(transparent)]
-        TryFromInt(#[from] std::num::TryFromIntError),
+        Rpc(#[from] crate::error::RpcError),
         #[error(transparent)]
         Io(#[from] std::io::Error),
         #[error(transparent)]
-        Peer(#[from] crate::PeerError),
+        Sonic(#[from] sonic_rs::Error),
         #[error(transparent)]
-        Listener(#[from] crate::listener::ListenerError),
-
+        Chain(#[from] bitcoin_rs_chain::chain::ChainError),
         #[error(transparent)]
-        Primitives(#[from] bitcoin_rs_consensus::primitives::DecodeError),
+        AddrParse(#[from] std::net::AddrParseError),
         #[error(transparent)]
-        Consensus(#[from] bitcoin::consensus::encode::Error),
+        AddressFromScript(#[from] bitcoin::address::FromScriptError),
         #[error(transparent)]
-        Recv(#[from] crossbeam_channel::RecvError),
+        Utxo(#[from] bitcoin_rs_storage::utxo::UtxoError),
         #[error(transparent)]
-        RecvTimeout(#[from] crossbeam_channel::RecvTimeoutError),
+        UtxoScan(#[from] bitcoin_rs_storage::utxo::scan::UtxoScanError),
         #[error(transparent)]
-        TryRecv(#[from] crossbeam_channel::TryRecvError),
-        #[error("channel send failed")]
-        ChannelSend,
-        #[error("commit failed: {0}")]
-        Commit(String),
-        #[error("unexpected: {0}")]
-        Unexpected(String),
-        #[error("liveness failed: {0}")]
-        Liveness(String),
-        #[error("missing: {0}")]
+        Storage(#[from] bitcoin_rs_storage::StorageError),
+        #[error(transparent)]
+        Mempool(#[from] bitcoin_rs_mempool::MempoolError),
+        #[error(transparent)]
+        Submit(#[from] bitcoin_rs_mempool::SubmitError),
+        #[cfg(feature = "zmq")]
+        #[error(transparent)]
+        ZmqBind(#[from] crate::zmq::ZmqBindError),
+        #[cfg(feature = "zmq")]
+        #[error(transparent)]
+        Zmq(#[from] zmq::Error),
+        #[cfg(feature = "pool")]
+        #[error(transparent)]
+        PoolLedger(#[from] crate::mining::pool::ledger::LedgerError),
+        #[error(transparent)]
+        TryFromInt(#[from] std::num::TryFromIntError),
+        #[error(transparent)]
+        TryFromSlice(#[from] std::array::TryFromSliceError),
+        #[error("missing {0}")]
         Missing(&'static str),
-        #[error("panic: {0}")]
-        Panicked(&'static str),
+        #[error("{0}")]
+        Message(String),
     }
 
     impl From<&'static str> for TestError {
-        fn from(msg: &'static str) -> Self {
-            Self::Missing(msg)
+        fn from(s: &'static str) -> Self {
+            Self::Missing(s)
         }
     }
 
-    impl<T> From<crossbeam_channel::SendError<T>> for TestError {
-        fn from(_: crossbeam_channel::SendError<T>) -> Self {
-            Self::ChannelSend
+    impl From<String> for TestError {
+        fn from(s: String) -> Self {
+            Self::Message(s)
         }
-    }
-
-    pub type TestResult = Result<(), TestError>;
-
-    pub trait QueuedMessages {
-        fn try_message(&self) -> Result<crate::Message, crossbeam_channel::TryRecvError>;
-
-        fn drain_messages(&self) -> Vec<crate::Message> {
-            std::iter::from_fn(|| self.try_message().ok()).collect()
-        }
-    }
-
-    impl QueuedMessages for crossbeam_channel::Receiver<crate::QueuedFrame> {
-        fn try_message(&self) -> Result<crate::Message, crossbeam_channel::TryRecvError> {
-            self.try_recv().map(crate::QueuedFrame::into_message)
-        }
-    }
-
-    pub struct MessageReceiver(pub crossbeam_channel::Receiver<crate::QueuedFrame>);
-
-    impl MessageReceiver {
-        pub fn try_recv(&self) -> Result<crate::Message, crossbeam_channel::TryRecvError> {
-            self.0.try_message()
-        }
-
-        pub fn try_iter(&self) -> impl Iterator<Item = crate::Message> {
-            self.0.try_iter().map(crate::QueuedFrame::into_message)
-        }
-
-        pub fn is_empty(&self) -> bool {
-            self.0.is_empty()
-        }
-    }
-
-    pub fn message_channel() -> (
-        crossbeam_channel::Sender<crate::QueuedFrame>,
-        MessageReceiver,
-    ) {
-        let (sender, receiver) = crossbeam_channel::unbounded();
-        (sender, MessageReceiver(receiver))
-    }
-
-    pub fn hog(
-        aggregate: &std::sync::Arc<crate::connection::SharedOutboundBudget>,
-        bytes: usize,
-    ) -> crate::connection::OutboundCredit {
-        let (queue, _receiver) = message_channel();
-        let other = crate::PeerLease::new(queue).with_shared_budget(aggregate);
-        match other.try_reserve_reply(bytes) {
-            Ok(credit) => credit,
-            Err(refusal) => panic!("the hog's charge was refused: {refusal:?}"),
-        }
-    }
-
-    pub struct ReadRequests<R> {
-        pub reader: R,
-        pub lengths: Vec<usize>,
-    }
-
-    impl<R: std::io::Read> std::io::Read for ReadRequests<R> {
-        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-            self.lengths.push(buffer.len());
-            self.reader.read(buffer)
-        }
-    }
-
-    pub fn message_channel_bounded(
-        capacity: usize,
-    ) -> (
-        crossbeam_channel::Sender<crate::QueuedFrame>,
-        MessageReceiver,
-    ) {
-        let (sender, receiver) = crossbeam_channel::bounded(capacity);
-        (sender, MessageReceiver(receiver))
-    }
-
-    pub enum Inbound {
-        Bytes(Vec<u8>),
-        Stall(std::io::ErrorKind),
-    }
-
-    pub struct StallingStream {
-        script: std::collections::VecDeque<Inbound>,
-        pub(crate) written: Vec<u8>,
-    }
-
-    impl StallingStream {
-        pub fn new(script: impl IntoIterator<Item = Inbound>) -> Self {
-            Self {
-                script: script.into_iter().collect(),
-                written: Vec::new(),
-            }
-        }
-    }
-
-    impl std::io::Read for StallingStream {
-        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-            if buffer.is_empty() {
-                return Ok(0);
-            }
-            match self.script.pop_front() {
-                None => Ok(0),
-                Some(Inbound::Stall(kind)) => Err(kind.into()),
-                Some(Inbound::Bytes(mut bytes)) => {
-                    let take = bytes.len().min(buffer.len());
-                    buffer[..take].copy_from_slice(&bytes[..take]);
-                    if take < bytes.len() {
-                        self.script
-                            .push_front(Inbound::Bytes(bytes.split_off(take)));
-                    }
-                    Ok(take)
-                }
-            }
-        }
-    }
-
-    impl std::io::Write for StallingStream {
-        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-            self.written.extend_from_slice(buffer);
-            Ok(buffer.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    pub fn current_source(peer_table: &Arc<PeerTable>, addr: PeerRemote) -> PeerSource {
-        peer_table.lease(addr).map_or_else(
-            || panic!("test peer {addr} must be connected"),
-            |lease| lease.source(addr.endpoint()),
-        )
-    }
-
-    pub fn synthetic_peer(addr: PeerRemote, start_height: i32) -> PeerInfo {
-        PeerInfo {
-            addr,
-            endpoint: addr.endpoint(),
-            network: addr.network().into(),
-            version: 70_016,
-            wtxid_relay: false,
-            relay_transactions: true,
-            compact_block_relay: false,
-            send_headers: false,
-            services: bitcoin::p2p::ServiceFlags::NETWORK.to_u64()
-                | bitcoin::p2p::ServiceFlags::WITNESS.to_u64(),
-            user_agent: String::from("/test/"),
-            start_height,
-            best_known_height: start_height,
-            conn_time: 0,
-            inbound: false,
-            addr_bind: crate::TransportRemote::new(
-                addr.endpoint()
-                    .and_then(crate::PeerEndpoint::socket_addr)
-                    .unwrap_or_else(|| panic!("expected IP fixture")),
-            ),
-            time_offset: 0,
-            counters: std::sync::Arc::new(crate::PeerCounters::default()),
-            transport: crate::TransportProtocol::V1,
-        }
-    }
-
-    pub fn test_addr(
-        base_port: usize,
-        idx: usize,
-    ) -> Result<PeerRemote, std::num::TryFromIntError> {
-        Ok(PeerRemote::Endpoint(crate::PeerEndpoint::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            u16::try_from(base_port + idx)?,
-        )))
-    }
-
-    pub fn connect_peer(
-        peer_table: &Arc<PeerTable>,
-        info: PeerInfo,
-    ) -> crate::test_support::MessageReceiver {
-        let (tx, rx) = crate::test_support::message_channel();
-        let lease = PeerLease::new(tx);
-        let Some(endpoint) = info.endpoint else {
-            panic!("identified peer endpoint");
-        };
-        peer_table.register(endpoint, lease.clone());
-        peer_table.publish_info(endpoint, &lease, info);
-        rx
     }
 }
 
-pub use bitcoin_rs_consensus::primitives::{
-    EndpointHost, NetworkLabel, PeerAddress, PeerEndpoint, PeerNetwork,
-};
+#[cfg(test)]
+pub(crate) mod test_coins {
+    use std::sync::Arc;
 
-pub use compact_blocks::{CompactBlockHints, Reconstruction};
-pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, PINNED_CORE_VERSION};
-pub use connection::{
-    ConnectionId, OutboundRefusal, PeerLease, PeerRemote, PeerSource, QueuedFrame,
-};
-pub use counters::{CountingStream, PeerCounters};
-pub use dispatch::{
-    ChainQuery, FilterRequest, FilterServing, InventoryServing, StaleTipHeaders, TxInventory,
-};
-pub use endpoint::{
-    DialFailure, DialRoutes, RouteDenial, RouteTable, TransportRemote, accepted_ip_identity,
-    addrv2_gossip_enabled, connect_peer_stream, dialed_ip_identity, endpoint_from_addrv2,
-    endpoint_to_addrv2, format_endpoint, parse_endpoint,
-};
-pub use feature::{
-    FEATURE_COMMAND, FEATURE_V2_SHORT_ID, FEATURE_VERSION, FeatureAnnouncement, FeatureError,
-    FeatureId,
-};
-pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
+    use bitcoin_rs_consensus::primitives::Hash256;
+    use bitcoin_rs_storage::utxo::UtxoReader;
+    use bitcoin_rs_storage::{
+        CoinKey, CoinStore, ColumnFamily, KvStore, MemoryKvStore, StorageError,
+    };
 
-pub use listener::{ListenerExtras, RelayOffers};
-pub use peer::{
-    CompactBlockNegotiation, NetworkActivity, Peer, PeerCapabilities, PeerState, WtxidRelayState,
-};
-pub use peer_info::{PeerInfo, PeerRole, service_flag_names};
-pub use peer_table::{PeerSession, PeerTable};
-pub use service::{
-    BannedReader, OutboundDial, P2pControlError, P2pJoinError, P2pService, P2pServiceConfig,
-    P2pServiceError,
-};
-pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
-pub use transport::{TransportFailure, TransportProtocol};
-
-pub use wire::{Message, PeerError};
-
-pub mod discouragement;
+    pub(crate) fn utxo_reader_with_undecodable_coin(
+        txid: &Hash256,
+    ) -> Result<UtxoReader, StorageError> {
+        let store = Arc::new(MemoryKvStore::new());
+        store.put(
+            ColumnFamily::Coins,
+            CoinKey(txid.to_le_bytes()).as_bytes(),
+            &[0xff; 3],
+        )?;
+        Ok(UtxoReader::from_coin_store(Arc::new(CoinStore::open(
+            store,
+            1024 * 1024,
+        ))))
+    }
+}

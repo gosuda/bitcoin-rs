@@ -6,8 +6,8 @@ use std::sync::Arc;
 #[cfg(feature = "test-seam")]
 use std::sync::Mutex;
 
-use bitcoin_rs_serving::mining::pool::ledger::codec::{Dec, Enc};
-use bitcoin_rs_serving::mining::pool::ledger::{
+use bitcoin_rs_wire::mining::pool::ledger::codec::{Dec, Enc};
+use bitcoin_rs_wire::mining::pool::ledger::{
     AuditKind, AuditRecord, Balance, BatchState, BatchTransition, BlockFound, BlockRecorded,
     CancelBasis, ChainView, Closure, Confirmation, ExternalSigner, Hash32, LedgerError,
     MAX_BATCH_OUTPUTS, MAX_MONEY_SAT, MAX_PAYOUT_OUTPUT_WEIGHT_WU, MAX_SCRIPT_LEN,

@@ -19,10 +19,10 @@ workspace = true
 # Exposes the internal `NodeState` composition root to integration tests and
 # benchmarks. Production embedders use the typed `Node` surface instead.
 test-seam = [
-    "bitcoin-rs-execution/test-seam",
+    "bitcoin-rs-chain/test-seam",
     "bitcoin-rs-mempool/test-seam",
-    "bitcoin-rs-projection/test-seam",
-    "bitcoin-rs-serving/test-seam",
+    "bitcoin-rs-index/test-seam",
+    "bitcoin-rs-wire/test-seam",
     "dep:toml",
 ]
 
@@ -32,20 +32,20 @@ test-seam = [
 default = ["zmq"]
 # chainstate's kernel feature is the kernel-capability propagator for the
 # chain stack and already forwards to `bitcoin-rs-consensus/kernel`.
-kernel = ["bitcoin-rs-execution/kernel"]
-zmq = ["bitcoin-rs-serving/zmq"]
-silent-payments = ["bitcoin-rs-serving/silent-payments"]
-pool = ["bitcoin-rs-serving/pool"]
-pool-sv2 = ["pool", "bitcoin-rs-serving/pool-sv2", "dep:zeroize"]
+kernel = ["bitcoin-rs-chain/kernel"]
+zmq = ["bitcoin-rs-wire/zmq"]
+silent-payments = ["bitcoin-rs-wire/silent-payments"]
+pool = ["bitcoin-rs-wire/pool"]
+pool-sv2 = ["pool", "bitcoin-rs-wire/pool-sv2", "dep:zeroize"]
 surrealkv = [
     "bitcoin-rs-storage/surrealkv",
-    "bitcoin-rs-execution/surrealkv",
-    "bitcoin-rs-projection/surrealkv",
+    "bitcoin-rs-chain/surrealkv",
+    "bitcoin-rs-index/surrealkv",
 ]
 mdbx = [
     "bitcoin-rs-storage/mdbx",
-    "bitcoin-rs-execution/mdbx",
-    "bitcoin-rs-projection/mdbx",
+    "bitcoin-rs-chain/mdbx",
+    "bitcoin-rs-index/mdbx",
 ]
 
 [dependencies]
@@ -53,12 +53,12 @@ hashbrown.workspace = true
 bitcoin-rs-consensus.workspace = true
 smallvec.workspace = true
 bitcoin-rs-storage.workspace = true
-bitcoin-rs-execution.workspace = true
-bitcoin-rs-projection.workspace = true
-bitcoin-rs-wire.workspace = true
+bitcoin-rs-chain.workspace = true
+bitcoin-rs-index.workspace = true
+bitcoin-rs-p2p.workspace = true
 
 bitcoin-rs-mempool.workspace = true
-bitcoin-rs-serving.workspace = true
+bitcoin-rs-wire.workspace = true
 zeroize = { workspace = true, optional = true }
 
 bitcoin.workspace = true
@@ -88,14 +88,14 @@ rustix.workspace = true
 
 [dev-dependencies]
 bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-serving = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-wire = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
 tempfile.workspace = true
 proptest.workspace = true
 # Own integration tests are separate crates, so they opt into the same
 # explicit seam used by the subsystem crates below.
 bitcoin-rs-node = { workspace = true, default-features = false, features = ["test-seam"] }
-bitcoin-rs-execution = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 sonic-rs.workspace = true
 toml.workspace = true
 rustix.workspace = true

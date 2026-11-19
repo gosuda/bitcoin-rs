@@ -23,22 +23,22 @@ pub(crate) const ZMQ_CRATE: &str = "zmq";
 pub(crate) const STORAGE_CRATE: &str = "bitcoin-rs-storage";
 pub(crate) const CONVERTER_CRATE: &str = "bitcoin-rs-storage-convert";
 
-pub(crate) const SERVING_CRATE: &str = "bitcoin-rs-serving";
+pub(crate) const SERVING_CRATE: &str = "bitcoin-rs-wire";
 
 pub(crate) const NODE_CRATE: &str = "bitcoin-rs-node";
 
 pub(crate) const BIN_CRATE: &str = "bitcoin-rs";
 pub(crate) const MEMPOOL_CRATE: &str = "bitcoin-rs-mempool";
-pub(crate) const CHAINSTATE_CRATE: &str = "bitcoin-rs-execution";
+pub(crate) const CHAINSTATE_CRATE: &str = "bitcoin-rs-chain";
 
 pub(crate) const MEMPOOL_CONSUMER_CRATES: [&str; 4] =
-    ["bitcoin-rs-wire", SERVING_CRATE, NODE_CRATE, BIN_CRATE];
+    ["bitcoin-rs-p2p", SERVING_CRATE, NODE_CRATE, BIN_CRATE];
 
 pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
         "bitcoin-rs-consensus" => 0,
         STORAGE_CRATE => 1,
-        CHAINSTATE_CRATE | "bitcoin-rs-wire" | "bitcoin-rs-mempool" | "bitcoin-rs-projection" => 2,
+        CHAINSTATE_CRATE | "bitcoin-rs-p2p" | "bitcoin-rs-mempool" | "bitcoin-rs-index" => 2,
         SERVING_CRATE => 3,
         NODE_CRATE
         | BIN_CRATE
@@ -218,11 +218,11 @@ impl WorkspaceGraph {
             }
         }
 
-        let execution_present = self.normal_deps.contains_key("bitcoin-rs-execution")
+        let execution_present = self.normal_deps.contains_key("bitcoin-rs-chain")
             || self
                 .normal_deps
                 .values()
-                .any(|edges| edges.iter().any(|d| d == "bitcoin-rs-execution"));
+                .any(|edges| edges.iter().any(|d| d == "bitcoin-rs-chain"));
         if execution_present {
             for (name, edges) in &self.normal_deps {
                 let layer = approved_layer(name);
@@ -230,10 +230,10 @@ impl WorkspaceGraph {
                     let dep_layer = approved_layer(dep);
                     if dep_layer == layer
                         && layer < 4
-                        && !(name == "bitcoin-rs-projection" && dep == "bitcoin-rs-execution")
+                        && !(name == "bitcoin-rs-index" && dep == "bitcoin-rs-chain")
                     {
                         violations.push(format!(
-                            "same-layer edge violation: `{name}` (layer {layer}) depends on `{dep}` (layer {dep_layer}); only projection -> execution is permitted"
+                            "same-layer edge violation: `{name}` (layer {layer}) depends on `{dep}` (layer {dep_layer}); only index -> chain is permitted"
                         ));
                     }
                 }
@@ -327,11 +327,7 @@ impl WorkspaceGraph {
             .get(NODE_CRATE)
             .and_then(|feature_map| feature_map.get("zmq"));
         match node_zmq {
-            Some(implies)
-                if implies
-                    .iter()
-                    .any(|entry| entry == "bitcoin-rs-serving/zmq") =>
-            {
+            Some(implies) if implies.iter().any(|entry| entry == "bitcoin-rs-wire/zmq") => {
                 checked += 1;
             }
             _ => violations
@@ -374,7 +370,7 @@ impl WorkspaceGraph {
         const ALLOWED: [&str; 6] = [
             STORAGE_CRATE,
             CHAINSTATE_CRATE,
-            "bitcoin-rs-projection",
+            "bitcoin-rs-index",
             NODE_CRATE,
             BIN_CRATE,
             CONVERTER_CRATE,

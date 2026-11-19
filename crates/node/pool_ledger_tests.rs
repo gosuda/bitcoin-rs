@@ -7,8 +7,8 @@ mod rocksdb {
     use std::path::{Path, PathBuf};
 
     use bitcoin_rs_node::pool::ledger::*;
-    use bitcoin_rs_serving::mining::pool::ledger::*;
     use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore};
+    use bitcoin_rs_wire::mining::pool::ledger::*;
     use std::sync::Arc;
     use tempfile::TempDir;
 
