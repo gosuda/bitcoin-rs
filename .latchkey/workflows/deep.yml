@@ -17,12 +17,13 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   RUST_BACKTRACE: "1"
   RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-  BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
 
 jobs:
   tests:
     runs-on: medium
     timeout-minutes: 60
+    env:
+      BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
     strategy:
       matrix:
         lane: [test-binary, test-workspace]
@@ -54,7 +55,7 @@ jobs:
     runs-on: large
     timeout-minutes: 120
     steps:
-      - run: bash .latchkey/setup.sh apt nextest corpus
+      - run: bash .latchkey/setup.sh apt nextest
       - uses: latchkey/cache-restore@1.1.0
         with:
           key: deep-kernel
