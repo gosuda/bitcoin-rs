@@ -20,7 +20,7 @@ env:
 
 jobs:
   tests:
-    runs-on: medium
+    runs-on: large
     timeout-minutes: 120
     env:
       BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
