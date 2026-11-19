@@ -168,6 +168,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin-rs-chain"
+version = "0.15.0"
+dependencies = [
+ "arc-swap",
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-storage",
+ "bytes",
+ "cap-fs-ext",
+ "cap-std",
+ "crossbeam-channel",
+ "hashbrown 0.17.1",
+ "log",
+ "metrics",
+ "parking_lot 0.13.0",
+ "quanta 0.13.0",
+ "rayon",
+ "serde",
+ "sha2",
+ "slab",
+ "sonic-rs",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "bitcoin-rs-consensus"
 version = "0.15.0"
 dependencies = [
@@ -190,28 +215,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin-rs-execution"
+name = "bitcoin-rs-index"
 version = "0.15.0"
 dependencies = [
  "arc-swap",
+ "bitcoin",
+ "bitcoin-rs-chain",
  "bitcoin-rs-consensus",
  "bitcoin-rs-storage",
- "bytes",
- "cap-fs-ext",
- "cap-std",
+ "bitcoin_hashes 1.2.0",
+ "compact_str",
  "crossbeam-channel",
  "hashbrown 0.17.1",
  "log",
  "metrics",
  "parking_lot 0.13.0",
- "quanta 0.13.0",
  "rayon",
  "serde",
  "sha2",
- "slab",
  "sonic-rs",
+ "tempfile",
  "thiserror",
  "tracing",
+ "zerocopy",
 ]
 
 [[package]]
@@ -252,11 +278,11 @@ version = "0.15.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
+ "bitcoin-rs-chain",
  "bitcoin-rs-consensus",
- "bitcoin-rs-execution",
+ "bitcoin-rs-index",
  "bitcoin-rs-mempool",
- "bitcoin-rs-projection",
- "bitcoin-rs-serving",
+ "bitcoin-rs-p2p",
  "bitcoin-rs-storage",
  "bitcoin-rs-wire",
  "bytes",
@@ -282,54 +308,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin-rs-projection"
+name = "bitcoin-rs-p2p"
 version = "0.15.0"
 dependencies = [
  "arc-swap",
+ "base64 0.23.1",
  "bitcoin",
  "bitcoin-rs-consensus",
- "bitcoin-rs-execution",
  "bitcoin-rs-storage",
- "bitcoin_hashes 1.2.0",
- "compact_str",
- "crossbeam-channel",
- "hashbrown 0.17.1",
- "log",
- "metrics",
- "parking_lot 0.13.0",
- "rayon",
- "serde",
- "sha2",
- "sonic-rs",
- "tempfile",
- "thiserror",
- "tracing",
- "zerocopy",
-]
-
-[[package]]
-name = "bitcoin-rs-serving"
-version = "0.15.0"
-dependencies = [
- "arc-swap",
- "bitcoin",
- "bitcoin-rs-consensus",
- "bitcoin-rs-execution",
- "bitcoin-rs-mempool",
- "bitcoin-rs-projection",
- "bitcoin-rs-storage",
- "bitcoin-rs-wire",
  "bytes",
- "compact_str",
- "corepc-types",
+ "chacha20",
+ "chacha20poly1305",
  "crossbeam-channel",
  "hashbrown 0.17.1",
+ "hkdf",
  "metrics",
- "miniscript",
- "mio",
  "parking_lot 0.13.0",
+ "rustix",
  "serde",
  "sha2",
+ "smallvec",
  "sonic-rs",
  "thiserror",
  "tracing",
@@ -368,22 +366,24 @@ name = "bitcoin-rs-wire"
 version = "0.15.0"
 dependencies = [
  "arc-swap",
- "base64 0.23.1",
  "bitcoin",
+ "bitcoin-rs-chain",
  "bitcoin-rs-consensus",
+ "bitcoin-rs-index",
+ "bitcoin-rs-mempool",
+ "bitcoin-rs-p2p",
  "bitcoin-rs-storage",
  "bytes",
- "chacha20",
- "chacha20poly1305",
+ "compact_str",
+ "corepc-types",
  "crossbeam-channel",
  "hashbrown 0.17.1",
- "hkdf",
  "metrics",
+ "miniscript",
+ "mio",
  "parking_lot 0.13.0",
- "rustix",
  "serde",
  "sha2",
- "smallvec",
  "sonic-rs",
  "thiserror",
  "tracing",

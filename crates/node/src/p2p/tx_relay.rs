@@ -9,7 +9,7 @@ use bitcoin_rs_mempool::{
     AdmissionOrigin, MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome,
 };
 #[cfg(test)]
-use bitcoin_rs_wire::PeerLease;
+use bitcoin_rs_p2p::PeerLease;
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 
 pub const DEFAULT_TX_RELAY_QUEUE_CAPACITY: usize = 1024;
@@ -147,7 +147,7 @@ pub trait RelaySink: Send + Sync {
 pub struct PeerRelaySink {
     peers: Arc<crate::p2p::NodeTxPolicy>,
     ibd: Option<(
-        Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
+        Arc<bitcoin_rs_chain::chain::InitialBlockDownload>,
         bitcoin_rs_consensus::primitives::Network,
     )>,
 }
@@ -161,7 +161,7 @@ impl PeerRelaySink {
     #[must_use]
     pub fn with_ibd(
         mut self,
-        ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
+        ibd: Arc<bitcoin_rs_chain::chain::InitialBlockDownload>,
         network: bitcoin_rs_consensus::primitives::Network,
     ) -> Self {
         self.ibd = Some((ibd, network));
@@ -391,7 +391,7 @@ mod tests {
     }
 
     fn fresh_node_id() -> u64 {
-        let (tx, _rx) = bounded::<bitcoin_rs_wire::QueuedFrame>(1);
+        let (tx, _rx) = bounded::<bitcoin_rs_p2p::QueuedFrame>(1);
         PeerLease::new(tx).node_id()
     }
 
@@ -842,8 +842,8 @@ mod tests {
             (
                 3,
                 AdmissionOrigin::Peer(PeerToken {
-                    endpoint: Some(bitcoin_rs_wire::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
-                    addr: Some(bitcoin_rs_wire::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
+                    endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
+                    addr: Some(bitcoin_rs_p2p::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
                     connection_id: 7,
                 }),
                 false,
@@ -964,8 +964,8 @@ mod tests {
     }
     fn relay_identity_peer() -> AdmissionOrigin {
         AdmissionOrigin::Peer(bitcoin_rs_mempool::PeerToken {
-            endpoint: Some(bitcoin_rs_wire::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
-            addr: Some(bitcoin_rs_wire::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
+            endpoint: Some(bitcoin_rs_p2p::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
+            addr: Some(bitcoin_rs_p2p::PeerEndpoint::from(([127, 0, 0, 1], 8333))),
             connection_id: 7,
         })
     }

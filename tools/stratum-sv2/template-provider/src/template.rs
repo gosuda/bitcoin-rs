@@ -1,7 +1,7 @@
-use bitcoin_rs_serving::mining::Candidate;
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, Hash256, Header, Tx, consensus_bytes, deserialize, encode::double_sha256,
 };
+use bitcoin_rs_wire::mining::Candidate;
 use std::sync::Arc;
 use stratum_apps::stratum_core::binary_sv2::{B016MOwned, Seq064KOwned, Seq0255Owned, U256Owned};
 use stratum_apps::stratum_core::template_distribution_sv2::{

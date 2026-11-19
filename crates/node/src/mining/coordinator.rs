@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
+use bitcoin_rs_chain::chain::TipSnapshot;
+use bitcoin_rs_chain::chain::current_unix_seconds;
 use bitcoin_rs_consensus::latch::HookGuard;
 use bitcoin_rs_consensus::primitives::BlockImage;
 use bitcoin_rs_consensus::primitives::CompactTarget;
@@ -12,14 +14,12 @@ use bitcoin_rs_consensus::primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_consensus::script::VerifyFlags;
 use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_consensus::{MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SIGOPS_COST, MAX_BLOCK_WEIGHT};
-use bitcoin_rs_execution::chain::TipSnapshot;
-use bitcoin_rs_execution::chain::current_unix_seconds;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::MutationOutcome;
 use bitcoin_rs_mempool::MutationResult;
 use bitcoin_rs_mempool::RemovalReason;
 use bitcoin_rs_mempool::SnapshotEntry;
-use bitcoin_rs_serving::mining::{
+use bitcoin_rs_wire::mining::{
     AppliedTipSource, AvailableMiningRule, BlockTemplate, Candidate, CandidateContext,
     ChainContextSource, CoinbaseBudget, GenerateSelection, GenerateTx, LastCandidateInfo,
     MempoolSnapshotSource, MiningCapability, MiningControlError, MiningInfo, MiningRule,
@@ -941,7 +941,7 @@ impl MiningService {
         }
         .map_err(|error| match selection {
             GenerateSelection::Ordered(_) => {
-                bitcoin_rs_serving::mining::ordered_assembly_error(&error)
+                bitcoin_rs_wire::mining::ordered_assembly_error(&error)
             }
             GenerateSelection::Mempool => {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
@@ -1516,6 +1516,7 @@ fn signet_info(network: Network) -> Option<SignetMiningInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin_rs_chain::chain::{ChainError, ChainTxCount, NodeId};
     use bitcoin_rs_consensus::header_rules::ChainWork;
     use bitcoin_rs_consensus::primitives::Amount;
     use bitcoin_rs_consensus::primitives::BlockImage;
@@ -1523,13 +1524,12 @@ mod tests {
     use bitcoin_rs_consensus::primitives::Script;
     use bitcoin_rs_consensus::primitives::Tx;
     use bitcoin_rs_consensus::primitives::TxOut;
-    use bitcoin_rs_execution::chain::{ChainError, ChainTxCount, NodeId};
     use bitcoin_rs_mempool::Mempool;
     use bitcoin_rs_mempool::MempoolLimits;
     use bitcoin_rs_mempool::MutationChange;
     use bitcoin_rs_mempool::MutationOutcome;
     use bitcoin_rs_mempool::RemovalReason;
-    use bitcoin_rs_serving::mining::{
+    use bitcoin_rs_wire::mining::{
         BlockTemplate, Candidate, MiningCapability, MiningChainContext, MiningRule,
         PreparedTemplateBody, SelectedBody, SelectedTx, TemplateId, select_template_body,
         select_template_body_after,
@@ -1547,7 +1547,7 @@ mod tests {
         use super::*;
         use bitcoin_rs_consensus::primitives::{BlockImage, Sequence, TxIn, Witness};
         use bitcoin_rs_mempool::MempoolEntry;
-        use bitcoin_rs_serving::mining::{MiningError, SelectedBody, assemble_candidate};
+        use bitcoin_rs_wire::mining::{MiningError, SelectedBody, assemble_candidate};
         use std::thread::JoinHandle;
 
         type TestResult<T = ()> = Result<T, TestError>;
@@ -2257,11 +2257,11 @@ mod tests {
     }
     mod fee_revision {
         use super::*;
+        use bitcoin_rs_chain::chain::{BlockTree, ChainError, ChainTxCount, NodeStatus};
         use bitcoin_rs_consensus::latch::LatchReader;
         use bitcoin_rs_consensus::primitives::{BlockImage, Sequence, TxIn, Txid, Witness};
-        use bitcoin_rs_execution::chain::{BlockTree, ChainError, ChainTxCount, NodeStatus};
         use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
-        use bitcoin_rs_serving::mining::{
+        use bitcoin_rs_wire::mining::{
             MiningChainContext, SelectedBody, select_template_body, select_template_body_after,
         };
         use compact_str::CompactString;
@@ -2787,9 +2787,9 @@ mod tests {
             self.tip.lock().clone()
         }
 
-        fn applied_epoch(&self) -> Option<bitcoin_rs_execution::chain::AppliedEpoch> {
+        fn applied_epoch(&self) -> Option<bitcoin_rs_chain::chain::AppliedEpoch> {
             self.applied_tip()
-                .map(|tip| bitcoin_rs_execution::chain::AppliedEpoch::new(tip, *self.commit.lock()))
+                .map(|tip| bitcoin_rs_chain::chain::AppliedEpoch::new(tip, *self.commit.lock()))
         }
     }
 

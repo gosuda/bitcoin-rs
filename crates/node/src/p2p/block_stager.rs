@@ -7,8 +7,8 @@ use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Header};
 use hashbrown::{HashMap, hash_map::Entry};
 
 use crate::p2p::download_window::SyncBudget;
-use bitcoin_rs_wire::connection::PeerSource;
-use bitcoin_rs_wire::inbound::block_memory::BlockMemoryCredit;
+use bitcoin_rs_p2p::connection::PeerSource;
+use bitcoin_rs_p2p::inbound::block_memory::BlockMemoryCredit;
 
 #[derive(Debug)]
 pub(crate) struct BlockStager {
@@ -1530,7 +1530,7 @@ mod tests {
     // BUD-07, SYNC-03
     #[test]
     fn reclaim_work_stays_bounded_when_admissions_replace_released_credit() {
-        use bitcoin_rs_wire::test_support::OrFail;
+        use bitcoin_rs_p2p::test_support::OrFail;
         use std::cell::{Cell, RefCell};
 
         let payload = BlockImage::from_local(Network::Regtest.genesis_block());
@@ -1539,7 +1539,7 @@ mod tests {
             bitcoin_rs_storage::split_chainstate_cache_budget(64 * 1024 * 1024),
             4,
         ));
-        let memory = std::sync::Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
+        let memory = std::sync::Arc::new(bitcoin_rs_p2p::inbound::block_memory::BlockMemory::new(
             std::sync::Arc::new(crate::budget::BudgetedIngressLedger::new(budget.clone())),
         ));
         let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
@@ -1590,7 +1590,7 @@ mod tests {
     // BUD-07
     #[test]
     fn reclaim_eviction_protects_frontier_and_frees_retained() {
-        use bitcoin_rs_wire::test_support::OrFail;
+        use bitcoin_rs_p2p::test_support::OrFail;
         let block = Network::Regtest.genesis_block();
         let payload = BlockImage::from_local(block.clone());
         let retained_per_block = payload.bytes().len() + payload.retained_heap_bytes();
@@ -1598,7 +1598,7 @@ mod tests {
             bitcoin_rs_storage::split_chainstate_cache_budget(64 * 1024 * 1024),
             4,
         ));
-        let memory = std::sync::Arc::new(bitcoin_rs_wire::inbound::block_memory::BlockMemory::new(
+        let memory = std::sync::Arc::new(bitcoin_rs_p2p::inbound::block_memory::BlockMemory::new(
             std::sync::Arc::new(crate::budget::BudgetedIngressLedger::new(budget.clone())),
         ));
         let charged =

@@ -1,13 +1,13 @@
+pub use bitcoin_rs_chain::WindowApplyDisposition;
+pub use bitcoin_rs_chain::assumeutxo::HistoricalAdvance;
+use bitcoin_rs_chain::chain::BlockTree;
+pub use bitcoin_rs_chain::chain::HeaderAdmission;
+use bitcoin_rs_chain::chain::NodeId;
+use bitcoin_rs_chain::chain::TipSnapshot;
+pub use bitcoin_rs_chain::reorg::ReorgError;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Header;
 use bitcoin_rs_consensus::primitives::Network;
-pub use bitcoin_rs_execution::WindowApplyDisposition;
-pub use bitcoin_rs_execution::assumeutxo::HistoricalAdvance;
-use bitcoin_rs_execution::chain::BlockTree;
-pub use bitcoin_rs_execution::chain::HeaderAdmission;
-use bitcoin_rs_execution::chain::NodeId;
-use bitcoin_rs_execution::chain::TipSnapshot;
-pub use bitcoin_rs_execution::reorg::ReorgError;
 
 use bitcoin_rs_consensus::primitives::BlockImage;
 use parking_lot::RwLockReadGuard;
@@ -16,13 +16,13 @@ use std::sync::Arc;
 #[derive(Debug, thiserror::Error)]
 pub enum SyncChainError {
     #[error(transparent)]
-    Apply(#[from] bitcoin_rs_execution::ApplyError),
+    Apply(#[from] bitcoin_rs_chain::ApplyError),
     #[error(transparent)]
-    AssumeUtxo(#[from] bitcoin_rs_execution::assumeutxo::AssumeUtxoError),
+    AssumeUtxo(#[from] bitcoin_rs_chain::assumeutxo::AssumeUtxoError),
     #[error(transparent)]
     BodyBinding(#[from] bitcoin_rs_consensus::ConsensusError),
     #[error(transparent)]
-    Chain(#[from] bitcoin_rs_execution::chain::ChainError),
+    Chain(#[from] bitcoin_rs_chain::chain::ChainError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("{0}")]

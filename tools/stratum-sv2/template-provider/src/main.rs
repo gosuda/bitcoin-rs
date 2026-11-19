@@ -1,11 +1,11 @@
 mod server;
 mod template;
 
-use bitcoin_rs_serving::mining::{
+use bitcoin_rs_node::{Network, Node, NodeConfig, RuntimeInputs};
+use bitcoin_rs_wire::mining::{
     BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, Candidate, MiningControlError,
     TemplateId,
 };
-use bitcoin_rs_node::{Network, Node, NodeConfig, RuntimeInputs};
 use futures_executor::block_on;
 use secp256k1::SecretKey;
 use std::{

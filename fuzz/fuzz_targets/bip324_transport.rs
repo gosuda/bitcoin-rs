@@ -2,11 +2,11 @@
 
 use std::io::{self, Cursor, Read};
 
-use bitcoin::p2p::Magic;
 use bitcoin::hashes::Hash as _;
+use bitcoin::p2p::Magic;
 use bitcoin::secp256k1::rand::SeedableRng as _;
 use bitcoin::secp256k1::rand::rngs::StdRng;
-use bitcoin_rs_wire::bip324::{
+use bitcoin_rs_p2p::bip324::{
     Established, Handshake, PacketReader, RecvCipher, SendCipher, Step, TransportError,
     is_poll_timeout,
 };
@@ -87,11 +87,7 @@ fn drive(
     Some((initiator_established?, responder_established?))
 }
 
-fn exchange(
-    sender: &mut SendCipher,
-    receiver: &mut PacketReader,
-    packets: &[Vec<u8>],
-) {
+fn exchange(sender: &mut SendCipher, receiver: &mut PacketReader, packets: &[Vec<u8>]) {
     for contents in packets {
         let Ok(sealed) = sender.seal(contents, &[], false) else {
             return;
@@ -142,9 +138,7 @@ fuzz_target!(|data: &[u8]| {
     }
     let mut wrong_network = Handshake::responder(magic, &mut rng);
     assert!(matches!(
-        wrong_network.advance(&mut Cursor::new(v1_prefix(
-            Magic::BITCOIN.to_bytes()
-        ))),
+        wrong_network.advance(&mut Cursor::new(v1_prefix(Magic::BITCOIN.to_bytes()))),
         Err(TransportError::WrongNetworkV1)
     ));
 

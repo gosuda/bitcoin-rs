@@ -8,9 +8,9 @@ use std::time::SystemTime;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::hashes::sha256;
-use bitcoin_rs_wire::addrman::AddressBook;
-use bitcoin_rs_wire::subnet::{BannedSubnet, IpSubnet, is_banned};
 use bitcoin_rs_consensus::primitives::PeerEndpoint;
+use bitcoin_rs_p2p::addrman::AddressBook;
+use bitcoin_rs_p2p::subnet::{BannedSubnet, IpSubnet, is_banned};
 use libfuzzer_sys::arbitrary::Unstructured;
 use libfuzzer_sys::fuzz_target;
 
@@ -57,7 +57,7 @@ fn candidate(record: &Record) -> String {
     let buckets: Vec<String> = record.buckets.iter().map(u16::to_string).collect();
     format!(
         "{{\"addr\":\"{}\",\"services\":{},\"source\":{{\"ip\":\"11.0.0.1\"}},\"last_seen\":{},\"last_success\":{},\"failures\":{},\"tried\":{},\"new_buckets\":[{}]}}",
-        bitcoin_rs_wire::format_endpoint(endpoint),
+        bitcoin_rs_p2p::format_endpoint(endpoint),
         record.services,
         record.last_seen,
         record.last_success,
@@ -135,7 +135,11 @@ fuzz_target!(|data: &[u8]| {
             write_book(&scoped, &payload);
             let book = AddressBook::open(Some(base), MAGIC, false, None);
             if let Ok(after) = fs::read(&scoped) {
-                assert_eq!(after, sealed(&payload), "loading must not rewrite the address book");
+                assert_eq!(
+                    after,
+                    sealed(&payload),
+                    "loading must not rewrite the address book"
+                );
             }
             assert!(
                 book.is_empty() || book.is_writable(),
@@ -147,13 +151,20 @@ fuzz_target!(|data: &[u8]| {
             write_book(&scoped, &payload);
             let book = AddressBook::open(Some(base), MAGIC, false, None);
             if let Ok(after) = fs::read(&scoped) {
-                assert_eq!(after, sealed(&payload), "loading must not rewrite the address book");
+                assert_eq!(
+                    after,
+                    sealed(&payload),
+                    "loading must not rewrite the address book"
+                );
             }
             assert!(
                 book.is_writable(),
                 "an empty well-formed address book must load and stay writable"
             );
-            assert!(book.is_empty(), "the empty address book must load no records");
+            assert!(
+                book.is_empty(),
+                "the empty address book must load no records"
+            );
         }
         2 => {
             let records = records_from(&mut u);
@@ -161,7 +172,11 @@ fuzz_target!(|data: &[u8]| {
             write_book(&scoped, &payload);
             let book = AddressBook::open(Some(base), MAGIC, false, None);
             if let Ok(after) = fs::read(&scoped) {
-                assert_eq!(after, sealed(&payload), "loading must not rewrite the address book");
+                assert_eq!(
+                    after,
+                    sealed(&payload),
+                    "loading must not rewrite the address book"
+                );
             }
             if book.is_writable() {
                 assert_eq!(
@@ -177,7 +192,11 @@ fuzz_target!(|data: &[u8]| {
             write_book(&base, &payload);
             let book = AddressBook::open(Some(base.clone()), MAGIC, false, None);
             if let Ok(after) = fs::read(&base) {
-                assert_eq!(after, sealed(&payload), "loading must not rewrite the legacy book");
+                assert_eq!(
+                    after,
+                    sealed(&payload),
+                    "loading must not rewrite the legacy book"
+                );
             }
             assert!(
                 !scoped.exists(),
@@ -196,7 +215,10 @@ fuzz_target!(|data: &[u8]| {
                 !book.is_writable(),
                 "an address book with a bad checksum must disable writes"
             );
-            assert!(book.is_empty(), "a corrupt address book must load no records");
+            assert!(
+                book.is_empty(),
+                "a corrupt address book must load no records"
+            );
             if let Ok(after) = fs::read(&scoped) {
                 assert_eq!(
                     after, payload,

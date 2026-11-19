@@ -82,9 +82,9 @@ The lock file opens without following symlinks, and a non-regular `.lock` is ref
 
 ## Failure settlement
 
-A fatal storage or apply failure stops the node closed instead of leaving it partially usable. `ChainTransition` checks every apply result, and a fatal classification calls `Chainstate::fail_closed_for_recovery` in [`crates/execution/src/lib.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/lib.rs). That call closes admission permanently and requests chainstate shutdown. Because the node latch is a child of the chainstate latch, the whole node stops.
+A fatal storage or apply failure stops the node closed instead of leaving it partially usable. `ChainTransition` checks every apply result, and a fatal classification calls `Chainstate::fail_closed_for_recovery` in [`crates/chain/src/lib.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/src/lib.rs). That call closes admission permanently and requests chainstate shutdown. Because the node latch is a child of the chainstate latch, the whole node stops.
 
-Fatal cases include a failed coin commit, a durable-head commit or lineage failure, block-body or undo persistence failure, and recovery publication failure. These are examples, not a complete list. See `classify_apply_error` and the window flush and invalidation paths in [`crates/execution/src/window.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/window.rs), and `ChainTransition::disconnect` in [`crates/execution/src/lib.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/execution/src/lib.rs), which also stops the node for `DisconnectError::Fatal` and `DisconnectError::MarkerStuck`. Retryable failures return to the caller and leave the node running.
+Fatal cases include a failed coin commit, a durable-head commit or lineage failure, block-body or undo persistence failure, and recovery publication failure. These are examples, not a complete list. See `classify_apply_error` and the window flush and invalidation paths in [`crates/chain/src/window.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/src/window.rs), and `ChainTransition::disconnect` in [`crates/chain/src/lib.rs`](https://github.com/gosuda/bitcoin-rs/blob/main/crates/chain/src/lib.rs), which also stops the node for `DisconnectError::Fatal` and `DisconnectError::MarkerStuck`. Retryable failures return to the caller and leave the node running.
 
 Startup failures follow a different rule. `start_node` rolls back through `TeardownMode::StartupAbort`, which never publishes a clean checkpoint, so the next open runs recovery rather than trusting a half-started node.
 
@@ -93,7 +93,7 @@ An assumeutxo snapshot whose background validation fails is also settled closed:
 The daemon log for a clean regtest start and `SIGTERM` shows both ends of the lifecycle:
 
 ```text
-{"timestamp":"2026-11-01T16:44:24.414833Z","level":"INFO","fields":{"message":"chainstate restore selected","restore_source":"cold","reason":"no_complete_checkpoint"},"target":"bitcoin_rs_execution::recovery"}
+{"timestamp":"2026-11-01T16:44:24.414833Z","level":"INFO","fields":{"message":"chainstate restore selected","restore_source":"cold","reason":"no_complete_checkpoint"},"target":"bitcoin_rs_chain::recovery"}
 {"timestamp":"2026-11-01T16:44:24.418584Z","level":"INFO","fields":{"message":"rpc listener bound","addr":"127.0.0.1:44089","surface":"Shared"},"target":"bitcoin_rs_node::lifecycle"}
 {"timestamp":"2026-11-01T16:44:25.821454Z","level":"INFO","fields":{"message":"published clean chainstate checkpoint","generation":1},"target":"bitcoin_rs_node::lifecycle"}
 {"timestamp":"2026-11-01T16:44:25.822383Z","level":"INFO","fields":{"message":"bitcoin-rs node exited cleanly"},"target":"bitcoin_rs_node::lifecycle"}

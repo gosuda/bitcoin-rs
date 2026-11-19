@@ -9,7 +9,7 @@
 //! `bitcoin_rs_storage::budget` so projection,
 //! storage, and offline tools charge the same ledger.
 
-use bitcoin_rs_execution::WindowLimits;
+use bitcoin_rs_chain::WindowLimits;
 use bitcoin_rs_storage::ChainstateCacheBudget;
 use bitcoin_rs_storage::budget::{
     BudgetCharge, BudgetError, BudgetOwner, BudgetReclaimer, CpuShares,
@@ -563,7 +563,7 @@ impl BudgetedIngressLedger {
     }
 }
 
-impl bitcoin_rs_wire::inbound::block_memory::IngressLedger for BudgetedIngressLedger {
+impl bitcoin_rs_p2p::inbound::block_memory::IngressLedger for BudgetedIngressLedger {
     fn capacity(&self) -> usize {
         usize::try_from(self.budget.caps.image_ingress_cap()).unwrap_or(usize::MAX)
     }
@@ -633,7 +633,7 @@ impl BudgetedOutboundLedger {
     }
 }
 
-impl bitcoin_rs_wire::connection::OutboundLedger for BudgetedOutboundLedger {
+impl bitcoin_rs_p2p::connection::OutboundLedger for BudgetedOutboundLedger {
     fn try_take(&self, bytes: usize) -> bool {
         let bytes_u64 = u64::try_from(bytes).unwrap_or(u64::MAX);
         self.budget
@@ -686,7 +686,7 @@ fn limits_bytes(headroom: u64, ceiling: usize) -> usize {
 mod tests {
     use super::{BudgetCaps, NodeBudget, STAGED_IMAGE_BUDGET_BYTES};
     use crate::budget_model::{self, Action, AllocationOwner};
-    use bitcoin_rs_execution::WindowLimits;
+    use bitcoin_rs_chain::WindowLimits;
     use bitcoin_rs_storage::budget::{BudgetError, BudgetOwner, BudgetRefusal, ChargeHandle};
     use bitcoin_rs_storage::{
         CoinKey, CoinStore, MemoryKvStore, WindowDelta, split_chainstate_cache_budget,
@@ -1189,7 +1189,7 @@ mod tests {
     // BUD-01, BUD-02, BUD-05, BUD-06, BUD-07
     #[test]
     fn saturated_ingress_preserves_execution_headroom_and_recovers_after_release() {
-        use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
+        use bitcoin_rs_p2p::inbound::block_memory::IngressLedger;
 
         let caps = BudgetCaps {
             staged_images: 4_096,
@@ -1260,7 +1260,7 @@ mod tests {
 
     #[test]
     fn repeated_ingress_then_engine_sample_stays_within_total() {
-        use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
+        use bitcoin_rs_p2p::inbound::block_memory::IngressLedger;
 
         let caps = BudgetCaps::from_chainstate_cache_budget(split_chainstate_cache_budget(
             450 * 1024 * 1024,
@@ -1365,7 +1365,7 @@ mod tests {
     // BUD-05
     #[test]
     fn saturated_image_and_other_owners_leave_the_bounded_receive_lane_available() {
-        use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
+        use bitcoin_rs_p2p::inbound::block_memory::IngressLedger;
 
         let caps = differential_caps();
         let budget = Arc::new(NodeBudget::new(caps, 4));
@@ -1407,7 +1407,7 @@ mod tests {
     // BUD-01, BUD-05
     #[test]
     fn default_image_lane_keeps_the_maximum_decoder_admission_floor() {
-        use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
+        use bitcoin_rs_p2p::inbound::block_memory::IngressLedger;
 
         let caps = BudgetCaps::from_chainstate_cache_budget(split_chainstate_cache_budget(
             64 * 1024 * 1024,
@@ -1415,7 +1415,7 @@ mod tests {
         let budget = Arc::new(NodeBudget::new(caps, 4));
         let ingress = super::BudgetedIngressLedger::new(Arc::clone(&budget));
         let decoder = bitcoin_rs_consensus::primitives::layout::decode_reservation(
-            bitcoin_rs_wire::wire::MAX_MESSAGE_PAYLOAD,
+            bitcoin_rs_p2p::wire::MAX_MESSAGE_PAYLOAD,
         );
         assert!(decoder <= ingress.capacity());
         assert!(ingress.try_take(decoder));
@@ -1429,8 +1429,8 @@ mod tests {
     // BUD-07
     #[test]
     fn transfer_reclaims_staged_image_and_retries_once() {
+        use bitcoin_rs_p2p::inbound::block_memory::IngressLedger;
         use bitcoin_rs_storage::budget::BudgetReclaimer;
-        use bitcoin_rs_wire::inbound::block_memory::IngressLedger;
 
         struct ReleaseStaged {
             budget: Arc<NodeBudget>,

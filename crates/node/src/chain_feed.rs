@@ -1,6 +1,6 @@
+use bitcoin_rs_chain::chain::BlockTree;
+pub use bitcoin_rs_chain::events::ChainSnapshot;
 use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Header};
-use bitcoin_rs_execution::chain::BlockTree;
-pub use bitcoin_rs_execution::events::ChainSnapshot;
 
 use crate::{Node, NodeError};
 
@@ -18,7 +18,7 @@ pub struct ChainSubscription {
 #[derive(Clone, Debug)]
 pub struct ChainTarget {
     snapshot: ChainSnapshot,
-    source: std::sync::Weak<bitcoin_rs_execution::Chainstate>,
+    source: std::sync::Weak<bitcoin_rs_chain::Chainstate>,
 }
 
 impl ChainTarget {
@@ -236,8 +236,8 @@ impl Node {
 mod tests {
     use super::*;
     use crate::test_support::TestError;
+    use bitcoin_rs_chain::chain::regtest_fixture;
     use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network};
-    use bitcoin_rs_execution::chain::regtest_fixture;
     use std::{
         future::Future,
         task::{Context, Poll, Waker},

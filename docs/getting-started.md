@@ -310,7 +310,7 @@ management JSON-RPC only. The CLI option takes an explicit boolean; bare
 
 ### ZMQ
 
-ZMQ endpoint groups are configured with `[[notifications.zmq]]` (`endpoint`, `topics`, optional `hwm`). `getzmqnotifications` reports the live configuration. `bitcoin_rs_serving::zmq` owns topic framing and transport compatibility.
+ZMQ endpoint groups are configured with `[[notifications.zmq]]` (`endpoint`, `topics`, optional `hwm`). `getzmqnotifications` reports the live configuration. `bitcoin_rs_wire::zmq` owns topic framing and transport compatibility.
 
 ## Datadir compatibility
 
@@ -365,7 +365,7 @@ Direct `bitcoin-rs-consensus` library callers have no config file, environment, 
 ## Operator migration: validation engine
 
 - No change for `bin/bitcoin-rs` users who never set an engine: the binary's default was already kernel-free and remains `native`. Direct library users take the next bullet instead.
-- `crates/consensus`, `crates/execution`, and `crates/node` library builds changed behavior. Their defaults used to compile **and implicitly select** `kernel`. They now compile nothing kernel-related and default to `native`. A library user who relied on the old kernel default must enable the `kernel` feature and select `validation_engine = "kernel"` (binary config, env, or CLI). A direct `bitcoin-rs-consensus` caller instead passes `ValidationEngine::Kernel` to the verify/parse entries described above.
+- `crates/consensus`, `crates/chain`, and `crates/node` library builds changed behavior. Their defaults used to compile **and implicitly select** `kernel`. They now compile nothing kernel-related and default to `native`. A library user who relied on the old kernel default must enable the `kernel` feature and select `validation_engine = "kernel"` (binary config, env, or CLI). A direct `bitcoin-rs-consensus` caller instead passes `ValidationEngine::Kernel` to the verify/parse entries described above.
 - To use bitcoinkernel, do both: build with `--features kernel` and set `validation_engine = "kernel"` (TOML), `BITCOIN_RS_VALIDATION_ENGINE=kernel` (env), or `--validation-engine kernel` (CLI).
 - Setting `kernel` without the feature fails at startup with the unsupported-build error above.
 - Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`). Bare `docker run` therefore keeps today's kernel behavior. `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still overrides it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics, where `docker run IMAGE args` runs `bitcoin-rs args`. Going that route means repeating the whole argument list (`--config --data-dir --p2p-listen` included).
