@@ -103,7 +103,7 @@ The merge queue enforces the integration contract on the latest combined ref
   campaigns and reference verifications in [`deep.yml`](.latchkey/workflows/deep.yml).
 
 Required status checks in repository branch rulesets (`ci-gate`,
-`kernel-consensus`, `full-node-compile`) enforce this boundary, guaranteeing
+`kernel`) enforce this boundary, guaranteeing
 that heavy integration and production compilation checks have passed on the
 current base before `main` moves forward.
 
@@ -116,8 +116,11 @@ kernel oracle, and Core differential. Bench smoke
 includes the witness-activation kernel regression and the SegWit-v0 kernel
 oracle.
 Pull-request-triggered checks are defined in
-[`.latchkey/workflows/ci.yml`](.latchkey/workflows/ci.yml), whose `fuzz`
-and `template-provider` jobs run only when their own paths change.
+[`.latchkey/workflows/ci.yml`](.latchkey/workflows/ci.yml). The `fuzz`
+and `template-provider` jobs start on every pull request and on manual
+dispatch; on pull requests each validation step is path-gated and also
+covers shared workspace and crate manifests, while manual dispatch runs
+every step.
 
 ### Full-node feature set
 
