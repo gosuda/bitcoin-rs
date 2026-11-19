@@ -120,6 +120,7 @@ mod tests {
     #[test]
     fn namespace_registry_validates_child() {
         let root = Path::new("/tmp");
+        assert!(NamespaceRegistry::validate_child(root, "txindex").is_ok());
         assert!(NamespaceRegistry::validate_child(root, "").is_err());
         assert!(NamespaceRegistry::validate_child(root, ".").is_err());
         assert!(NamespaceRegistry::validate_child(root, "..").is_err());
