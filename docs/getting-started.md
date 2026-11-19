@@ -111,7 +111,7 @@ bindings. `getnetworkinfo` reports configured routes, effective restrictions,
 live reachability observations and active inbound service addresses. A live
 control service is not evidence of end-to-end Bitcoin interoperability, and
 fresh SOCKS credentials alone do not establish anonymity. The manually run
-[overlay interoperability workflow](../.github/workflows/overlay-interop.yml)
+[overlay interoperability workflow](../.latchkey/workflows/scheduled.yml)
 records external-backend Bitcoin exchange and restart evidence separately
 from deterministic local protocol fixtures.
 
