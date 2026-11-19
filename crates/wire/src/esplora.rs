@@ -1664,7 +1664,7 @@ mod tests {
         Ok(())
     }
 
-    // QRY-03
+    // QRY-03, WF-02
     #[test]
     fn confirmed_transaction_survives_an_ordinary_extension() -> Result<(), TestError> {
         use bitcoin_rs_consensus::primitives::Header;
@@ -2497,6 +2497,93 @@ mod tests {
                 entered.map_err(|_| "request did not capture its publication")?;
             }
         }
+        Ok(())
+    }
+
+    // WF-02
+    #[test]
+    fn pure_mempool_reads_stay_unfenced_across_ordinary_extension() -> Result<(), TestError> {
+        let block = fixture_genesis();
+        let context = Context::new();
+        context
+            .chain
+            .add_block(bitcoin_rs_index::block_log::BlockRecord::from_block(
+                0, &block,
+            ));
+        let (tip, extended, _) = extend_tip(&context, &block)?;
+        assert_ne!(
+            tip.hash, extended.hash,
+            "the extending read must observe a different tip"
+        );
+        assert_eq!(
+            extended.height,
+            tip.height + 1,
+            "the extension adds exactly one block"
+        );
+        context.chain.applied_tip.store(Some(tip));
+        let spend = paying_transaction(&[unconfirmed_outpoint(7)], &[(1_000, vec![0x51])]);
+        context
+            .mempool
+            .gateway
+            .pool()
+            .write()
+            .insert_entry(MempoolEntry::new(
+                Arc::new(spend.clone()),
+                100,
+                1_000,
+                0,
+                0,
+                0,
+            ))?;
+        let ctx = Arc::new(context);
+        let handler = Handler::new(Arc::clone(&ctx));
+        let spend_txid = spend.txid().to_string();
+        let stable = route(&handler, "/mempool", "");
+        assert_eq!(stable.status, 200);
+        let stable_body = stable.body.clone();
+        let summary: Value = sonic_rs::from_slice(&stable_body)?;
+        assert_eq!(
+            summary,
+            json!({
+                "count": 1,
+                "vsize": 100,
+                "total_fee": 1_000,
+                "fee_histogram": [[10.0, 100_u64]],
+            })
+        );
+        let (entered_send, entered_recv) = channel();
+        let (release_send, release_recv) = channel();
+        let request = std::thread::spawn({
+            let ctx = Arc::clone(&ctx);
+            move || {
+                arm_mempool_summary_gate(entered_send, release_recv);
+                let handler = Handler::new(ctx);
+                route(&handler, "/mempool", "")
+            }
+        });
+        let entered = entered_recv.recv_timeout(GATE_TIMEOUT);
+        ctx.chain.applied_tip.store(Some(extended));
+        let _ = release_send.send(());
+        let response = request.join().map_err(|_| "route thread failed")?;
+        assert_eq!(
+            response.status, 200,
+            "a pure mempool read must not observe the applied-tip publication"
+        );
+        assert_eq!(response.body, stable_body);
+        entered.map_err(|_| "request never reached summary encoding")?;
+        for path in ["/mempool/txids", "/mempool/recent", "/fee-estimates"] {
+            let reread = route(&handler, path, "");
+            assert_eq!(reread.status, 200, "unfenced route {path}");
+        }
+        let txids: Value = sonic_rs::from_slice(&route(&handler, "/mempool/txids", "").body)?;
+        assert_eq!(txids.as_array().map(|ids| ids.len()), Some(1));
+        assert_eq!(
+            txids
+                .as_array()
+                .and_then(|ids| ids.first())
+                .and_then(|id| id.as_str()),
+            Some(spend_txid.as_str())
+        );
         Ok(())
     }
 

@@ -54,7 +54,7 @@ Wallet keys, coin selection, and signing stay in the external process.
 - If that publication changes during the read, the response MUST return `503 Service Unavailable`, never a mixed-tip page.
 - This rule includes extension, replacement, and ABA republication.
 - Immutable transaction and block-owner reads retain their captured occurrence identity across ordinary extension. Composed history reads remain fenced. Public `/api` mempool-only reads remain unfenced.
-- Proof: `crates/wire/src/esplora.rs` (`composed_history_and_mempool_routes_refuse_reorg_and_aba_publications`) checks the composed fence on extension, replacement, and ABA republication.
+- Proof: `crates/wire/src/esplora.rs` (`composed_history_and_mempool_routes_refuse_reorg_and_aba_publications`) checks the composed fence on extension, replacement, and ABA republication. (`confirmed_transaction_survives_an_ordinary_extension`) checks that an unfenced transaction read keeps its captured occurrence identity when the tip advances mid-read. (`pure_mempool_reads_stay_unfenced_across_ordinary_extension`) checks that pure mempool reads stay 200 when the tip advances mid-read.
 - Transaction rendering resolves a distinct parent at most once per response or bounded backend batch.
 - It retains only referenced outputs until that batch finishes.
 - Backend mempool GETs render at most 25 selected transactions at a time without limiting the response count.
