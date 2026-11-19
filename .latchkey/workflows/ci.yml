@@ -52,7 +52,7 @@ jobs:
           hash-files: fuzz/Cargo.lock
       - name: Fuzz targets build
         run: |
-          changed_rc=0; bash .latchkey/setup.sh changed '^(fuzz/|Cargo\.toml$)' || changed_rc=$?
+          changed_rc=0; bash .latchkey/setup.sh changed '^(fuzz/|.*Cargo\.toml$)' || changed_rc=$?
           if [ "$changed_rc" -eq 1 ]; then exit 0; elif [ "$changed_rc" -ne 0 ]; then exit "$changed_rc"; fi
           bash .latchkey/setup.sh apt nightly fuzz
           cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
