@@ -288,9 +288,8 @@ fn finish_portable_bundle(
                 actual: Some(_),
             },
         )) => {
-            tracing::error!(
-                %error,
-                "portable index attach refused a populated capability; ordinary reconciliation proceeds"
+            log::error!(
+                "portable index attach refused a populated capability; ordinary reconciliation proceeds: {error}"
             );
             Ok(())
         }

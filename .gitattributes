@@ -35,3 +35,4 @@ fuzz/corpus/manifest.json text eol=lf
 # MANIFEST-* are parsed raw, and autocrlf's CR byte corrupts the image on
 # Windows checkouts only.
 tools/storage-convert/tests/fixtures/** -text
+tools/storage-convert/tests/fixtures/*.expected.json text eol=lf

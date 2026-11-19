@@ -3230,9 +3230,6 @@ mod tests {
 
     const HELD_BUDGET: Duration = Duration::from_millis(600);
 
-    #[cfg(unix)]
-    const STRAGGLER_GRACE: Duration = Duration::from_millis(250);
-
     #[derive(Clone, Copy)]
     enum Verb {
         Connect,
@@ -3761,12 +3758,7 @@ mod tests {
         )?;
         abort(http_probe)?;
         abort(silent_probe)?;
-        if cfg!(target_os = "macos") {
-            while fake.strangers.recv_timeout(STRAGGLER_GRACE).is_ok() {}
-        } else {
-            step("probes refused", wait_for_strangers(&fake, &probes))?;
-        }
-
+        step("probes refused", wait_for_strangers(&fake, &probes))?;
         assert!(
             pending_phase_is(&session, &RootPhase::Create),
             "the paused root survives the probes"

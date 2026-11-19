@@ -358,7 +358,9 @@ impl PreparedSnapshot {
         check_deadline(self.deadline)?;
         self.file.persist(&live).map_err(|error| error.error)?;
         if let Err(error) = crate::fee_history::sync_dir(&data_dir) {
-            tracing::warn!(%error, "mempool snapshot published but directory sync failed; crash durability is uncertain");
+            log::warn!(
+                "mempool snapshot published but directory sync failed; crash durability is uncertain: {error}"
+            );
         }
         Ok(())
     }

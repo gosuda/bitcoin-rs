@@ -25,6 +25,8 @@ impl NamespaceRegistry {
         if !matches!(components.next(), Some(std::path::Component::Normal(_)))
             || components.next().is_some()
             || path.file_name() != Some(std::ffi::OsStr::new(child))
+            || child.ends_with('.')
+            || child.ends_with(' ')
         {
             return Err(format!(
                 "namespace child {child:?} is not one directory name"
@@ -118,10 +120,11 @@ mod tests {
     #[test]
     fn namespace_registry_validates_child() {
         let root = Path::new("/tmp");
-        assert!(NamespaceRegistry::validate_child(root, "txindex").is_ok());
         assert!(NamespaceRegistry::validate_child(root, "").is_err());
         assert!(NamespaceRegistry::validate_child(root, ".").is_err());
         assert!(NamespaceRegistry::validate_child(root, "..").is_err());
+        assert!(NamespaceRegistry::validate_child(root, "foo.").is_err());
+        assert!(NamespaceRegistry::validate_child(root, "foo ").is_err());
         #[cfg(unix)]
         {
             assert!(NamespaceRegistry::validate_child(root, "foo/bar").is_err());

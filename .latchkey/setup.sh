@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# Latchkey CI bootstrap. Usage: bash .latchkey/setup.sh <apt|nextest|deny|mdbook|fuzz|corpus|nightly|msrv>...
-#                            bash .latchkey/setup.sh changed <ERE>   (exit 0 if this PR touches a matching path)
 set -euo pipefail
 
 if [ "$1" = changed ]; then
   [ "${LATCHKEY_CI_EVENT_CLASS:-}" = pr_update ] || exit 0
-  git fetch -q --depth=1 origin "$LATCHKEY_CI_BASE_REF" || exit 0
-  git diff --name-only FETCH_HEAD HEAD > /tmp/changed.txt
+  git fetch -q --depth=1 origin "$LATCHKEY_CI_BASE_REF" || exit 2
+  git diff --name-only FETCH_HEAD HEAD > /tmp/changed.txt || exit 2
   grep -Eq "$2" /tmp/changed.txt
   exit
 fi
 
 gh=https://github.com
-tool() { # <binary> <url> <sha256>
+tool() {
   local d; d="$(mktemp -d)"
   curl -fsSL --retry 3 -o "$d/t.tgz" "$2"
   echo "$3  $d/t.tgz" | sha256sum --check --strict -

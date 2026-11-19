@@ -1082,9 +1082,9 @@ impl BlockSync {
             return minimum_work;
         };
         let Ok(node) = tree.node(tip.tip_id) else {
-            tracing::error!(
-                tip_id = ?tip.tip_id,
-                "applied tip is missing from the block tree; fork headers need the full tip work",
+            log::error!(
+                "applied tip {:?} is missing from the block tree; fork headers need the full tip work",
+                tip.tip_id,
             );
             return minimum_work.max(tip.chainwork);
         };

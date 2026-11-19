@@ -16,7 +16,7 @@ One authority owns each invariant, mutation, and durable format. A split does no
 
 Owner-local behavior uses an inline `#[cfg(test)]` module inside its source owner file. Keep the module's name, configuration conditions, and visibility. File length alone does not justify a separate test module file.
 
-A crate-consumer boundary or an independent oracle uses the crate-root `tests.rs` file, registered as the `suite` integration target. Put behavior modules inside that file. Do not create one integration test file per case, and do not create test-only source directories under `crates/` — including `tests/`.
+A crate-consumer boundary or an independent oracle uses the crate-root `tests.rs` file, registered as the `suite` integration target. Put behavior modules inside that file. Do not create one integration test file per case, and do not create test-only source directories under `crates/`, including `tests/`.
 
 Keep a separate crate-root test executable only when a process, platform, allocator, global counter, or artifact boundary requires it; preserve each target name and its Cargo configuration. Daemon lifecycle, restart, or cross-process behavior uses the existing process harness at the owning package or `e2e` boundary, because that harness preserves real process and persistence evidence. A socket read or a store reopen alone does not need a separate executable.
 
