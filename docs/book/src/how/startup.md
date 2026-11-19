@@ -78,7 +78,7 @@ The shutdown latch and chainstate shutdown request propagate to every service. `
 | Another process holds the datadir | `DataDirLock::acquire` (`open.rs`) | `DataDirLock` error from `NodeOpenError` |
 | Durable head gap that replay cannot close | `recover_disconnect_marker` (`open.rs`) | `UnrecoverableDurableHeadGap { chainstate, checkpoints, txindex, source }` |
 | Last 6 blocks fail undo/commitment checks | `verify_startup_window` (`open.rs`) | `StartupVerification` naming blocks, chainstate, checkpoints, txindex paths |
-| Stored chain was not fully script-validated | `require_full_script_attestation` (`open.rs`) | warning `the stored chain was not fully script-validated; rebuilding it with full validation` (`crates/chain/src/recovery.rs:117`) |
+| Stored chain was not fully script-validated | `require_full_script_attestation` (`open.rs`) | warning `the stored chain was not fully script-validated; rebuilding it with full validation` (`require_full_script_attestation` in `crates/chain/src/recovery.rs`) |
 | RPC port taken | `start_rpc_listeners` | `failed to bind RPC listener at {address}` (`run.rs:41`) |
 | Metrics evidence identity mismatch | `init_metrics_services` | `metrics recorder already serves a different evidence identity` (`run.rs:71`) |
 

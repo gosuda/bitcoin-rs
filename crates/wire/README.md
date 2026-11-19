@@ -13,7 +13,7 @@ This crate provides the synchronous, Bitcoin Core-compatible JSON-RPC and REST s
 ### 1. Protocol demuxing and authentication
 
 - Private free function `classify` (`crates/wire/src/server.rs`) is the listener directory table. `serve_connection` dispatches that table before authentication. The wallet-facing Esplora routing contract is [`WF-02`](../../docs/contracts/wallet-facing.md#wf-02-operations-a-wallet-actually-issues). The parser preserves HTTP framing while letting valid unsupported methods reach the demux for a 404:
-  - `GET /rest/*` goes to Core REST (`rest::route`); `POST` to a `/rest/` path with a `getutxos` suffix goes to Core REST as `RestPost` (`rest::getutxos_suffix`).
+  - `GET /rest/*` goes to Core REST (`rest::route`); `POST /rest/getutxos` with an empty, `/`, or `.` continuation goes to Core REST as `RestPost` (`rest::getutxos_suffix`).
   - `GET` or `POST` under `/api` or `/esplora` goes to Esplora. `classify` strips the directory prefix and passes `Surface` plus the rest; `esplora::route` / `route_post` dispatch only inside that directory. Unknown paths 404 and never become JSON-RPC. `/api` is public electrs; `/esplora` is the mempool-backend superset. Wallet broadcast is `POST /api/tx`.
   - Other `POST` goes to JSON-RPC. `Auth::validate_header` (`crates/wire/src/auth.rs`) guards this path only.
   - Any other method, or GET outside `/rest/`, `/api`, `/esplora`, 404s at the demux, except `OPTIONS` on the public Esplora surface, which answers a CORS preflight response. Unprefixed electrs paths and `HEAD`/`PUT`/`DELETE` enter neither Esplora nor JSON-RPC. The parser accepts those methods so `classify` can 404 them instead of answering JSON-RPC 400.
