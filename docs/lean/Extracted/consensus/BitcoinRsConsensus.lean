@@ -161,20 +161,20 @@ structure primitives.layout.ByteSpan where
   len : Std.U32
 
 /-- [bitcoin_rs_consensus::primitives::layout::OutputLayout]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 275:0-278:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 303:0-306:1
     Visibility: public -/
 structure primitives.layout.OutputLayout where
   value : primitives.layout.ByteSpan
   script_pubkey : primitives.layout.ByteSpan
 
 /-- [bitcoin_rs_consensus::primitives::layout::WitnessItemLayout]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 192:0-194:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 220:0-222:1
     Visibility: public -/
 structure primitives.layout.WitnessItemLayout where
   item : primitives.layout.ByteSpan
 
 /-- [bitcoin_rs_consensus::primitives::layout::InputLayout]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 229:0-236:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 257:0-264:1
     Visibility: public -/
 structure primitives.layout.InputLayout where
   outpoint : primitives.layout.ByteSpan
@@ -185,7 +185,7 @@ structure primitives.layout.InputLayout where
   witness_item_count : Std.U32
 
 /-- [bitcoin_rs_consensus::primitives::layout::TxLayout]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 293:0-303:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 321:0-331:1
     Visibility: public -/
 structure primitives.layout.TxLayout where
   span : primitives.layout.ByteSpan
@@ -199,7 +199,7 @@ structure primitives.layout.TxLayout where
   segwit : Bool
 
 /-- [bitcoin_rs_consensus::primitives::layout::ParsedTransaction]
-    Source: 'crates/consensus/src/primitives/layout.rs', lines 678:0-681:1
+    Source: 'crates/consensus/src/primitives/layout.rs', lines 706:0-709:1
     Visibility: public -/
 structure primitives.layout.ParsedTransaction where
   bytes : Slice Std.U8
