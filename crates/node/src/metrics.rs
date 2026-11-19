@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use bitcoin_rs_projection::{CapabilityState, DerivedIndexCapabilitySource};
+use bitcoin_rs_index::{CapabilityState, DerivedIndexCapabilitySource};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use parking_lot::Mutex;
 
@@ -412,7 +412,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use bitcoin_rs_projection::{
+    use bitcoin_rs_index::{
         CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
     };
     use parking_lot::Mutex;

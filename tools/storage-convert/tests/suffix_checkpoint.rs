@@ -1,11 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
-use bitcoin_rs_execution::recovery::{
+use bitcoin_rs_chain::recovery::{
     ConvertedCheckpoint, ConvertedCheckpointError, ResumeSource, prepare_initial_state_with_engine,
     publish_converted_checkpoint,
 };
+use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_KEY, DurableHead};
 use bitcoin_rs_storage::utxo::record::UtxoRecord;
 use bitcoin_rs_storage::utxo::stats::CoinStatsAccumulator;

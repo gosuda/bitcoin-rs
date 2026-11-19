@@ -7,14 +7,14 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_consensus::primitives::BlockHash;
-use bitcoin_rs_serving::mining::MiningControl;
-use bitcoin_rs_serving::mining::pool::ledger::MinerId;
-use bitcoin_rs_serving::mining::pool::stratum::sv1::{ConnectionLimiter, ConnectionPermit};
-use bitcoin_rs_serving::mining::pool::stratum::sv2::{
+use bitcoin_rs_wire::mining::MiningControl;
+use bitcoin_rs_wire::mining::pool::ledger::MinerId;
+use bitcoin_rs_wire::mining::pool::stratum::sv1::{ConnectionLimiter, ConnectionPermit};
+use bitcoin_rs_wire::mining::pool::stratum::sv2::{
     AdmitError, AuthorityKeypair, BlockSubmission, Connection, ERROR_CODE_SHARE_NOT_RECORDED,
     ERROR_CODE_SUBMIT_SHARES_STALE_SHARE, Event, Limits, MAX_FEED_LEN, PendingBlock, ServerConfig,
 };
-use bitcoin_rs_serving::mining::pool::{BlockStatus, PoolCore, RecordOutcome, ShareTarget};
+use bitcoin_rs_wire::mining::pool::{BlockStatus, PoolCore, RecordOutcome, ShareTarget};
 
 use super::authority;
 use super::ledger::{BlockRecordOutcome, BlockRecordPermit, DeferredCharge, LedgerHost};
@@ -799,23 +799,23 @@ mod tests {
     use crate::pool::ledger::Ledger;
     use binary_sv2::{Encodable, GetSize, Str0255, U256};
     use bitcoin::secp256k1::{Keypair, Secp256k1};
+    use bitcoin_rs_chain::chain::compact_is_met_by;
     use bitcoin_rs_consensus::primitives::{BlockHash, CompactTarget, Hash256, Network};
-    use bitcoin_rs_execution::chain::compact_is_met_by;
     use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-    use bitcoin_rs_serving::context::PoolOperator as _;
-    use bitcoin_rs_serving::mining::pool::ledger::{MinerId, PayoutPolicy, PoolConfig};
-    use bitcoin_rs_serving::mining::pool::stratum::sv2::{
+    use bitcoin_rs_storage::KvStore;
+    use bitcoin_rs_wire::context::PoolOperator as _;
+    use bitcoin_rs_wire::mining::pool::ledger::{MinerId, PayoutPolicy, PoolConfig};
+    use bitcoin_rs_wire::mining::pool::stratum::sv2::{
         AdmitError, AuthorityKeypair, Connection, FLAG_REQUIRES_STANDARD_JOBS, Limits, ServerConfig,
     };
-    use bitcoin_rs_serving::mining::pool::{
+    use bitcoin_rs_wire::mining::pool::{
         BIP320_VERSION_MASK, Extranonce, ExtranonceLayout, Job, JobBookConfig,
         MAX_NTIME_FORWARD_SECS, PoolCore, ShareLedger, ShareTarget,
     };
-    use bitcoin_rs_serving::mining::{
+    use bitcoin_rs_wire::mining::{
         Candidate, CandidateContext, CoinbaseBudget, FakeMiningControl, MiningControl,
         assemble_candidate,
     };
-    use bitcoin_rs_storage::KvStore;
     use codec_sv2::{
         Decoded, Decrypted, Handshake, InitiatorSent, MessageFrame, NoiseDecoder, NoiseEncoder,
         TransportDecryptState, TransportEncryptState,
@@ -853,17 +853,17 @@ mod tests {
         #[error(transparent)]
         Storage(#[from] bitcoin_rs_storage::StorageError),
         #[error(transparent)]
-        Ledger(#[from] bitcoin_rs_serving::mining::pool::ledger::LedgerError),
+        Ledger(#[from] bitcoin_rs_wire::mining::pool::ledger::LedgerError),
         #[error(transparent)]
-        Mining(#[from] bitcoin_rs_serving::mining::MiningError),
+        Mining(#[from] bitcoin_rs_wire::mining::MiningError),
         #[error(transparent)]
-        Job(#[from] bitcoin_rs_serving::mining::pool::JobError),
+        Job(#[from] bitcoin_rs_wire::mining::pool::JobError),
         #[error(transparent)]
         Secp(#[from] bitcoin::secp256k1::Error),
         #[error(transparent)]
-        Sv2Config(#[from] bitcoin_rs_serving::mining::pool::stratum::sv2::ConfigError),
+        Sv2Config(#[from] bitcoin_rs_wire::mining::pool::stratum::sv2::ConfigError),
         #[error(transparent)]
-        Transport(#[from] bitcoin_rs_serving::mining::pool::stratum::sv2::Error),
+        Transport(#[from] bitcoin_rs_wire::mining::pool::stratum::sv2::Error),
         #[error(transparent)]
         Run(#[from] crate::run::RunError),
     }
@@ -1360,8 +1360,7 @@ mod tests {
             .pop()
             .ok_or(FixtureError::NonceSpace(1))?;
 
-        *host.control.submit.lock() =
-            bitcoin_rs_serving::mining::BlockValidationResult::Inconclusive;
+        *host.control.submit.lock() = bitcoin_rs_wire::mining::BlockValidationResult::Inconclusive;
         let pending = host.submit(&channel, 1, &job, winner)?;
         assert!(
             !has(&pending, MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS),
@@ -1372,7 +1371,7 @@ mod tests {
         assert_eq!(host.deferred.len(), 1, "Undetermined work is retained");
         assert_eq!(host.node_submissions(), 1);
 
-        *host.control.submit.lock() = bitcoin_rs_serving::mining::BlockValidationResult::Accepted;
+        *host.control.submit.lock() = bitcoin_rs_wire::mining::BlockValidationResult::Accepted;
         let entry = host
             .deferred
             .pop()

@@ -7,10 +7,10 @@ use bitcoin::bip152::{BlockTransactions, HeaderAndShortIds, PrefilledTransaction
 use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
-use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin::merkle_tree::calculate_root;
-use bitcoin_rs_wire::compact_blocks::{CompactBlockHints, Outcome, Reconstruction};
+use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin_rs_consensus::primitives::{BlockImage, Tx, Txid, Wtxid, deserialize};
+use bitcoin_rs_p2p::compact_blocks::{CompactBlockHints, Outcome, Reconstruction};
 use libfuzzer_sys::arbitrary::Unstructured;
 use libfuzzer_sys::fuzz_target;
 
@@ -91,7 +91,9 @@ fn assert_block_matches(block: &BlockImage, expected: &bitcoin::Block) {
         block.header().compute_hash().as_bytes(),
         expected.header.block_hash().to_byte_array().as_slice()
     );
-    let txids: Vec<[u8; 32]> = (0..block.tx_count()).map(|i| *block.identity(i).txid().as_bytes()).collect();
+    let txids: Vec<[u8; 32]> = (0..block.tx_count())
+        .map(|i| *block.identity(i).txid().as_bytes())
+        .collect();
     let expected_txids: Vec<[u8; 32]> = expected
         .txdata
         .iter()
@@ -116,12 +118,19 @@ fn block_of(txs: Vec<bitcoin::Transaction>) -> Option<bitcoin::Block> {
     let merkle_root = calculate_root(txs.iter().map(bitcoin::Transaction::compute_txid))?;
     let mut header = genesis_block(bitcoin::Network::Regtest).header;
     header.merkle_root = merkle_root.into();
-    Some(bitcoin::Block { header, txdata: txs })
+    Some(bitcoin::Block {
+        header,
+        txdata: txs,
+    })
 }
 
 fn finish(recon: &mut Reconstruction, now: Instant, start_budget: usize) {
     recon.prune(now + Duration::from_secs(120));
-    assert_eq!(recon.pending_len(), 0, "pending reconstructions must expire");
+    assert_eq!(
+        recon.pending_len(),
+        0,
+        "pending reconstructions must expire"
+    );
     assert_eq!(
         recon.retained_bytes(),
         start_budget,
@@ -195,12 +204,7 @@ fuzz_target!(|data: &[u8]| {
         Outcome::RequestMissing(request) => {
             assert!(!missing_positions.is_empty());
             if unique {
-                let requested: Vec<u64> = request
-                    .txs_request
-                    .indexes
-                    .iter()
-                    .copied()
-                    .collect();
+                let requested: Vec<u64> = request.txs_request.indexes.iter().copied().collect();
                 let expected: Vec<u64> = missing_positions
                     .iter()
                     .map(|index| u64::try_from(*index).unwrap_or(u64::MAX))

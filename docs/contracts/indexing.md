@@ -7,16 +7,16 @@ The normative contract for node-owned indexing runtimes, capability gating, and 
 Changes to capability, persistence or scheduling requirements must update the owning clause and its executable proof together.
 
 Owners:
-- `DerivedIndexRuntime` and worker state in `crates/projection/src/runtime.rs`:
+- `DerivedIndexRuntime` and worker state in `crates/index/src/runtime.rs`:
   - reconciliation, cursor commits, bounded preparation, and rollback in `reconciliation.rs`, `cursor.rs`, `catch_up.rs`, and `rollback.rs`.
-- `DerivedIndexQueryEngine` in `crates/projection/src/runtime/query.rs`:
+- `DerivedIndexQueryEngine` in `crates/index/src/runtime/query.rs`:
   - shared snapshot gate, public entrypoints, `query/transactions.rs` and `query/scripts.rs` ownership, and `QueryBudget` accounting.
 - Worker supervision and backend opening in `runtime/lifecycle.rs` and `runtime/startup.rs`.
-- Durable mutation `IndexWriter` (`crates/projection/src/index/write.rs`).
-- Snapshot reads `IndexReader` (`crates/projection/src/index/snapshot.rs`).
-- Capability and watermark representations (`crates/projection/src/index/capability.rs`).
-- Status mapping by `DerivedIndexLifecycle` onto wire types in `crates/projection/src/capabilities.rs` (no parallel status enum).
-- Portable bundles in `crates/projection/src/portable.rs` and `portable/` modules run by the worker in `runtime/startup.rs`.
+- Durable mutation `IndexWriter` (`crates/index/src/index/write.rs`).
+- Snapshot reads `IndexReader` (`crates/index/src/index/snapshot.rs`).
+- Capability and watermark representations (`crates/index/src/index/capability.rs`).
+- Status mapping by `DerivedIndexLifecycle` onto wire types in `crates/index/src/capabilities.rs` (no parallel status enum).
+- Portable bundles in `crates/index/src/portable.rs` and `portable/` modules run by the worker in `runtime/startup.rs`.
 - Node owns only the one-shot request:
   - option parsing in `crates/node/src/options.rs`, validation in `crates/node/src/config.rs`, directive in `crates/node/src/state.rs`.
 
@@ -69,14 +69,14 @@ Owners:
 - `getcapabilities` reports one compiled txindex row.
 - A missing worker is `enabled: false` / `Disabled`.
 - An attached worker supplies the row through `DerivedIndexCapabilitySource`.
-- Proof: `crates/projection/src/capabilities.rs` (`missing_source_is_the_disabled_txindex_row`, `attached_source_is_the_worker_row`).
+- Proof: `crates/index/src/capabilities.rs` (`missing_source_is_the_disabled_txindex_row`, `attached_source_is_the_worker_row`).
 - This row covers transaction and script capabilities only; filter-only operation leaves it disabled.
 - Filter progress, reconciliation, and local failures do not change that row.
 - `getindexinfo` and service flags report filter status.
 - Proof:
-  - `crates/projection/src/runtime.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
-  - `crates/serving/tests.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
-- `crates/wire/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
+  - `crates/index/src/runtime.rs` (`filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries`)
+  - `crates/wire/tests.rs` (`compact_filter_rpc_exposes_only_enabled_ready_data`)
+- `crates/p2p/src/listener.rs` (`unbacked_filter_service_bit_is_removed_from_handshake`)
 - `ScriptLive` is self-contained under format 10 (PRJ-11).
 - Its 43-byte key is `script-hash-prefix || full-outpoint`.
 - Its value stores `script_hash` followed by the compact varint coin payload `varint(compress_amount(value)) || varint((height << 1) | coinbase)` with Core's `CompressAmount` and minimal varints; decoding refuses truncated input, malformed varints, amount overflow, height overflow, and trailing bytes.
@@ -111,7 +111,7 @@ Owners:
 - An enabled `TxLookup` whose watermark is not at the applied tip refuses a cursor page with `Retry`.
 - An enabled `TxLookup` whose floor does not cover the page refuses a cursor page with a typed unavailable cause.
 - Without `TxLookup`, the page starts from the first page, as `API-09` defines for an unknown cursor.
-- Proof: `crates/projection/tests.rs` (`same_tx_fund_and_spend_keeps_both_posting_occurrences`) checks stored funding and spending events merge into one public occurrence with both flags; `crates/projection/src/index.rs` (`spend_event_codec_preserves_full_identity_and_rejects_noncanonical_lengths`) checks the format 10 spend-row layout; `crates/projection/tests.rs` (`spending_rows_carry_transaction_positions`) checks stored transaction positions.
+- Proof: `crates/index/tests.rs` (`same_tx_fund_and_spend_keeps_both_posting_occurrences`) checks stored funding and spending events merge into one public occurrence with both flags; `crates/index/src/index.rs` (`spend_event_codec_preserves_full_identity_and_rejects_noncanonical_lengths`) checks the format 10 spend-row layout; `crates/index/tests.rs` (`spending_rows_carry_transaction_positions`) checks stored transaction positions.
 
 ### `IDX-03`: Query gating and snapshot consistency
 
@@ -127,7 +127,7 @@ Owners:
 - Same-height ties, exclusive cursors, compact-prefix verification, and fallback reads retain their existing semantics.
 - This is not an O(page-size) history index.
 - Proof:
-  - `crates/projection/src/runtime/query/scripts.rs`:
+  - `crates/index/src/runtime/query/scripts.rs`:
     - `duplicated_txid_cursor_pages_cover_the_full_history`
     - `duplicated_txid_cursor_pages_terminate_for_every_limit`
 - Ready invariant: `ready` holds if and only if `cursor == applied_tip` on the active chain.
@@ -139,7 +139,7 @@ Owners:
 - The engine MUST never return stale, unconfirmed, or torn rows.
 - A body-store read failure is `TxQueryError::Storage`, not a missing body.
 - `unspent_outputs` consumes the `ScriptLive` watermark only.
-- The captured `ScriptLive` snapshot carries the coin payload directly and takes no live chain-transition lock or live UTXO read. The `script_live_takes_no_transition_lock` test proves that the listed coin value comes from the captured snapshot row payload and that no transition lock is acquired (`crates/projection/src/runtime.rs`).
+- The captured `ScriptLive` snapshot carries the coin payload directly and takes no live chain-transition lock or live UTXO read. The `script_live_takes_no_transition_lock` test proves that the listed coin value comes from the captured snapshot row payload and that no transition lock is acquired (`crates/index/src/runtime.rs`).
 - History, script-live, and tx-lookup queries take no chain-transition lock.
 - A missing locator under a ready matching watermark is unavailable.
 - Exact script checks filter compact-prefix collisions.
@@ -150,16 +150,16 @@ Owners:
 - An identity miss MUST evict the retained block before fetching another block.
 - Evicted identities are read and charged again.
 - Proof:
-  - `crates/projection/src/runtime/query.rs`: `block_memo_retains_only_the_latest_identity`
-  - `crates/projection/src/runtime.rs`:
+  - `crates/index/src/runtime/query.rs`: `block_memo_retains_only_the_latest_identity`
+  - `crates/index/src/runtime.rs`:
     - `history_limit_counts_occurrences_not_heights`
     - `confirmed_history_serves_stored_occurrences_without_block_bodies`
     - `history_summary_never_consults_spender_rows`
     - `script_live_takes_no_transition_lock`
-  - `crates/projection/src/runtime/query/scripts.rs`:
+  - `crates/index/src/runtime/query/scripts.rs`:
     - `first_page_scan_work_is_constant_at_100_1000_and_10000_entries`
     - `cursor_page_continues_without_skipping_or_repeating`
-  - `crates/serving/src/esplora/http.rs`: `script_work_limits_are_explicit_but_unavailable_indexes_remain_503`
+  - `crates/wire/src/esplora/http.rs`: `script_work_limits_are_explicit_but_unavailable_indexes_remain_503`
 
 ### `IDX-04`: Selective reset preserves sibling readiness
 
@@ -174,7 +174,7 @@ Owners:
 - Configured families never rebuild as a side effect.
 
 - Proof:
-  - `crates/projection/tests.rs`:
+  - `crates/index/tests.rs`:
     - `script_index_reset_preserves_tx_lookup_and_shared_identity`
     - `tx_lookup_reset_preserves_script_history_directories`
 
@@ -183,7 +183,7 @@ Owners:
 - The `data_dir/txindex` namespace maintains durable format versions and capability watermarks (`IndexWatermarks`, `ConsumerCursor`).
 - A stored schema or format version foreign to this build MUST reset and rebuild the store per `docs/policies/db-migration.md`.
 - The store MUST never perform an in-place migration.
-- `IndexWriter::open` (`crates/projection/src/index/write.rs`) accepts format 10 (`INDEX_FORMAT_VERSION_VALUE`) as the current durability marker only.
+- `IndexWriter::open` (`crates/index/src/index/write.rs`) accepts format 10 (`INDEX_FORMAT_VERSION_VALUE`) as the current durability marker only.
 - This format provides newest-first history-occurrence rows with inverted heights, 43-byte live rows, 6-byte positions, and outpoint spend events keyed by generation, funding outpoint, and spending height with a spending ordinal value.
 - The row format is owned by this clause; any format change requires a new durability marker.
 - Every older marker returns `IndexError::UnsupportedTxIndexFormatVersion`.
@@ -203,8 +203,8 @@ Owners:
 - No serving reader or writer can hold the replaced store.
 - Startup recreation writes no deletion batches to the rejected store.
 - Live capability resets retain the conditional purge and monotonic fences.
-- Proof: `crates/projection/src/runtime.rs` (`incompatible_populated_index_reopens_without_writing_obsolete_rows`, `surrealkv_incompatible_populated_index_reopens_without_writing_obsolete_rows`, `mdbx_incompatible_populated_index_reopens_without_writing_obsolete_rows`).
-- Proof: `crates/projection/src/runtime/startup.rs` (`pending_namespace_reset_completes_before_backend_open`, `unknown_namespace_reset_intent_preserves_files_and_refuses_open`, `namespace_reset_refuses_paths_outside_the_named_child`, `namespace_reset_refuses_a_link_to_another_directory`, `surrealkv_namespace_reset_refuses_a_link_to_another_directory`, `mdbx_namespace_reset_refuses_a_link_to_another_directory`, `backend_failure_does_not_authorize_namespace_reset`, `malformed_reset_claim_does_not_authorize_namespace_reset`, `cancelled_fresh_open_releases_store_and_retains_reset_intent`, `abandoned_open_cannot_start_a_late_namespace_reset`, `revoked_generation_cannot_authorize_namespace_reset`, `compatible_linked_namespace_opens_without_recreation`, `missing_reset_intent_after_fresh_open_is_refused`).
+- Proof: `crates/index/src/runtime.rs` (`incompatible_populated_index_reopens_without_writing_obsolete_rows`, `surrealkv_incompatible_populated_index_reopens_without_writing_obsolete_rows`, `mdbx_incompatible_populated_index_reopens_without_writing_obsolete_rows`).
+- Proof: `crates/index/src/runtime/startup.rs` (`pending_namespace_reset_completes_before_backend_open`, `unknown_namespace_reset_intent_preserves_files_and_refuses_open`, `namespace_reset_refuses_paths_outside_the_named_child`, `namespace_reset_refuses_a_link_to_another_directory`, `surrealkv_namespace_reset_refuses_a_link_to_another_directory`, `mdbx_namespace_reset_refuses_a_link_to_another_directory`, `backend_failure_does_not_authorize_namespace_reset`, `malformed_reset_claim_does_not_authorize_namespace_reset`, `cancelled_fresh_open_releases_store_and_retains_reset_intent`, `abandoned_open_cannot_start_a_late_namespace_reset`, `revoked_generation_cannot_authorize_namespace_reset`, `compatible_linked_namespace_opens_without_recreation`, `missing_reset_intent_after_fresh_open_is_refused`).
 - A compatible namespace MAY open through a link. Only recreation requires a direct directory.
 - With no pending intent, the configured backend can open a linked target to check its index format.
 - A foreign format, an unversioned populated index, or a full-capability reset claim MUST preserve the target rows and MUST NOT publish a reset intent through the link.
@@ -226,8 +226,8 @@ Owners:
 - Queries MUST reject empty values as corrupt derived state.
 - They emit a storage error that directs a rebuild of the derived index.
 - Other invalid or mismatched positions retain full-block verification for collision and correctness handling.
-- Proof: `empty_position_rows_are_refused_before_body_reads`, position-mismatch and full-block tests in `runtime.rs`, and `crates/projection/tests.rs`.
-- Proof: `crates/projection/tests.rs` (`wrong_format_version_refuses_open`) and `crates/projection/tests.rs` (`format_5_marker_refuses_and_rebuilds_the_derived_store`) check foreign-marker refusal and the owner-local rebuild; `tools/storage-convert/tests/rebuild_index.rs` (`rebuild_index_resets_derived_rows_and_stamps_the_current_format`) checks the rebuild stamps the current format marker.
+- Proof: `empty_position_rows_are_refused_before_body_reads`, position-mismatch and full-block tests in `runtime.rs`, and `crates/index/tests.rs`.
+- Proof: `crates/index/tests.rs` (`wrong_format_version_refuses_open`) and `crates/index/tests.rs` (`format_5_marker_refuses_and_rebuilds_the_derived_store`) check foreign-marker refusal and the owner-local rebuild; `tools/storage-convert/tests/rebuild_index.rs` (`rebuild_index_resets_derived_rows_and_stamps_the_current_format`) checks the rebuild stamps the current format marker.
 - On node startup, index workers read persisted watermarks and reconcile against `Chainstate::chain_snapshot()` through `NodeState::chainstate()`.
 - A watermark that is an ancestor of the restored tip connects forward.
 - A watermark on an abandoned branch rolls back to the common ancestor and connects forward to the active tip.
@@ -254,7 +254,7 @@ Owners:
 - It emits one transaction row per indexed transaction.
 - For `ScriptHistory`, it emits one occurrence per `(script, height, transaction)` without duplicate hash-prefix rows.
 - Script history includes an empty script; only an OP_RETURN script is excluded.
-- Pinned tests in `crates/projection/tests.rs` (`index_roundtrip` and `script_history_occurrences` modules) own these cardinalities.
+- Pinned tests in `crates/index/tests.rs` (`index_roundtrip` and `script_history_occurrences` modules) own these cardinalities.
 - `NodeState::open` restores the authenticated checkpoint.
 - It then replays the certified committed suffix from canonical block files and undo records (`docs/contracts/recovery.md`).
 - This replay finishes before `NodeState::start_index_workers()` spawns worker threads in `crates/node/src/run.rs`.
@@ -269,7 +269,7 @@ Owners:
 - Rollback depth is watermark height minus common ancestor height.
 - When rollback depth exceeds `txindex::DEFAULT_ROLLBACK_REBUILD_CUTOVER` (100,000 blocks), the worker routes to `reset_capabilities`.
 - It backfills forward instead of running a long block-by-block rollback.
-- Proof: `crates/projection/src/runtime.rs`:
+- Proof: `crates/index/src/runtime.rs`:
   - `index_ahead_of_restored_tip_is_reported_once_and_rewound`
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
 - Connect walk: the worker loads bodies from `BlockBodyStore`.
@@ -320,7 +320,7 @@ Owners:
 - Peak resident memory of these stages is unmeasured.
 - A window's bodies (at most 256, or 32 MiB plus one body), its in-flight anchors, prepared rows, and admitted batch are limited independently.
 - This contract claims no total resident bound and no bound that depends on script sizes.
-- Proof (all in `crates/projection/src/runtime.rs`):
+- Proof (all in `crates/index/src/runtime.rs`):
   - forward-group scheduling:
     - `absent_prefix_body_holds_back_only_its_own_group`
     - `shutdown_after_an_absent_body_does_not_run_a_higher_group`
@@ -370,19 +370,19 @@ Owners:
 - Block validation, UTXO commits, and chainstate progress continue without interruption.
 - The apply path MUST never depend on index writes.
 - Proof:
-  - `crates/projection/src/runtime.rs`:
+  - `crates/index/src/runtime.rs`:
     - `blocked_open_abandonment_detaches_and_poisons`
     - `shutdown_during_open_joins_helper_releases_lock_and_leaves_namespace_reusable`
     - `open_timeout_publishes_error_not_infinite_spin`
-  - `crates/projection/src/runtime.rs`:
+  - `crates/index/src/runtime.rs`:
     - `unusable_worker_makes_queries_unavailable`
-  - `crates/projection/src/runtime.rs`:
+  - `crates/index/src/runtime.rs`:
     - `undo_read_failure_is_not_a_missing_undo`
     - `missing_undo_pauses_the_tail_group_and_resumes_to_bulk`
     - `rollback_without_undo_preserves_script_history_and_rewinds_siblings`
     - the `IDX-06`/`IDX-07` anchor and reseed tests cited above
     - `unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark`
-  - `group_rollback_releases_identity_and_refuses_a_second_member` in `crates/projection/tests.rs`
+  - `group_rollback_releases_identity_and_refuses_a_second_member` in `crates/index/tests.rs`
 
 ### `IDX-11`: Portable index bundle
 
@@ -495,7 +495,7 @@ Owners:
   - Locator validation and row import MUST create the configured scratch root before they create temporary work directories.
   - Scratch creation failures return the existing I/O refusal with the failing path.
   - Each phase removes its temporary work directory when it finishes.
-  - Proof: `crates/projection/tests.rs` (`export_then_restore_serves_the_same_queries_as_backfill`) starts with no receiver scratch directory, checks restored queries against backfill, and checks that temporary directories are removed.
+  - Proof: `crates/index/tests.rs` (`export_then_restore_serves_the_same_queries_as_backfill`) starts with no receiver scratch directory, checks restored queries against backfill, and checks that temporary directories are removed.
   - The row stream writes the receiver's 80-byte header for every height from 0 to the base (from its block tree, not the bundle).
   - The stream then writes the `TxConfirmed` rows.
   - A batch commits after 65,536 rows (headers included) or 8 MiB.
@@ -538,7 +538,7 @@ That document gives consumer usage and defers to this clause for every consisten
   - `transaction_at_prefix(&self, txid: &Txid) -> Result<Answer<Option<(u32, Tx)>>, TxQueryError>`
   - `script_history_at_prefix(&self, script: ScriptHash) -> Result<Answer<ScriptIndexSnapshot>, TxQueryError>`
   - `spender_at_prefix(&self, outpoint: OutPoint) -> Result<Answer<Option<SpendingRecord>>, TxQueryError>`
-- New public types live in `bitcoin_rs_projection::query_api` (already public; no re-export is added):
+- New public types live in `bitcoin_rs_index::query_api` (already public; no re-export is added):
   - `CoveredPrefix { floor: u32, height: u32, hash: Hash256 }`
   - `Answer<T> { value: T, block_hash: Hash256, height: u32, coverage: CoveredPrefix, verification_state: VerificationState }`
   - `TxQueryError { Retry(RetryReason), Unavailable(TxUnavailableCause), ExpiredView, Storage(CompactString) }`
@@ -636,7 +636,7 @@ That document gives consumer usage and defers to this clause for every consisten
   | Row, scan, body-read, and body-byte budgets, truncated scans, `BlockBodyMissing`, disabled capability, worker failure/stop, missing authority, lifecycle causes | `Unavailable(...)` with the identical variant |
   | Snapshot-open and body-read storage failures | `Storage(...)` |
 
-Proof: `crates/projection/src/runtime/query/scripts.rs::spender_uses_indexed_creation_when_funding_body_is_pruned` checks both spender APIs, full transaction identity, canonical block hashes, and zero funding-body reads. `crates/projection/src/runtime.rs::spender_at_prefix_distinguishes_recreated_outpoints_with_pruned_creation_bodies` checks the current outpoint lifetime when creation bodies are pruned. `crates/projection/src/segment/read.rs::funding_transaction_rows_preserve_full_identity_and_bound_all_scopes` checks full identity, encoded-byte accounting, and aggregate row limits across scopes, including excluded rows.
+Proof: `crates/index/src/runtime/query/scripts.rs::spender_uses_indexed_creation_when_funding_body_is_pruned` checks both spender APIs, full transaction identity, canonical block hashes, and zero funding-body reads. `crates/index/src/runtime.rs::spender_at_prefix_distinguishes_recreated_outpoints_with_pruned_creation_bodies` checks the current outpoint lifetime when creation bodies are pruned. `crates/index/src/segment/read.rs::funding_transaction_rows_preserve_full_identity_and_bound_all_scopes` checks full identity, encoded-byte accounting, and aggregate row limits across scopes, including excluded rows.
 
 ### Compact-filter data and serving
 
@@ -694,7 +694,7 @@ Proof: `crates/projection/src/runtime/query/scripts.rs::spender_uses_indexed_cre
 
 - **Full-stack crash convergence**: the recovery model across chainstate, checkpoints, block bodies, and derived indexes is normative in [recovery.md](recovery.md) (`RCV-01` to `RCV-04`).
 - A `kill -9` gate that re-applies real block bodies through it is not yet exercised.
-- **Portable bundle cross-process scope**: `crates/projection/tests.rs` proves export/restore equality, damage refusal, existing-destination preservation, cancellation, missing-body withhold, restore-below-tip reconciliation, and reset over real RocksDB stores (`IDX-11`).
+- **Portable bundle cross-process scope**: `crates/index/tests.rs` proves export/restore equality, damage refusal, existing-destination preservation, cancellation, missing-body withhold, restore-below-tip reconciliation, and reset over real RocksDB stores (`IDX-11`).
 - The live Core200/C150/withheld receipts are private external runs, not a repository portable process suite.
 - One scoped live run (`.outline/evidence/snapshot-stage2-live/runs/20261026T200208Z-remaining-1850397/`, binary SHA-256 `9406226483c7ac4c29f822e133a1f36bea82cc2c1078b8f16388a4e5df2`, PASS 64/0, error null, survivors empty) covers four selected cases:
   - base-200 bundle into same-chain receiver at 202 restores and serves all 202 txid/blockhash/sample queries.

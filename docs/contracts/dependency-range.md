@@ -34,7 +34,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The direct `secp256k1 0.33.1` line coexists with Bitcoin's exact `secp256k1 0.29.1` and `secp256k1-sys 0.10.1` reference line; versioned native links keep the two libraries distinct.
 - The pool-only exception below remains approved.
 - The pinned SRI release family is `noise_sv2 2.1.0`.
-- The `pool-sv2` feature in `crates/serving/Cargo.toml` reaches this family.
+- The `pool-sv2` feature in `crates/wire/Cargo.toml` reaches this family.
 - This family carries its own audited `secp256k1 0.28.2` and `secp256k1-sys 0.9.2` authority-key line.
 - This family also carries its own `bitcoin_hashes 0.13.1` transport line.
 - `deny.toml` `[bans].skip` pins those exact versions with the `noise_sv2 2.1.0` reason.
@@ -46,7 +46,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - Lockfile review pins that cardinality.
 - For `base64`, only direct `0.23.1`, the Bitcoin dependency chain's `0.21.7`, and the metrics exporter's `0.22.1` may coexist.
 - These exact-version splits do not approve other `base64` versions.
-- The Noise-family dependencies in `crates/serving/Cargo.toml` are optional normal dependencies.
+- The Noise-family dependencies in `crates/wire/Cargo.toml` are optional normal dependencies.
 - The `pool-sv2` feature enables these dependencies.
 - Cargo forbids `optional` dev-dependencies.
 - Cargo does not honor `cfg(feature)` in target dev tables.

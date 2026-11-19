@@ -16,10 +16,10 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use hashbrown::{HashMap, HashSet};
 
 use bitcoin_rs_consensus::primitives::{Hash256, Txid, Wtxid};
-use bitcoin_rs_wire::packages::{
+use bitcoin_rs_p2p::packages::{
     GetPkgTxns, MAX_GETPKGTXNS, MSG_ANCPKGINFO, MSG_PKGTXNS, combined_package_hash,
 };
-use bitcoin_rs_wire::{Message, OutboundRefusal, PeerSource, TxInventory};
+use bitcoin_rs_p2p::{Message, OutboundRefusal, PeerSource, TxInventory};
 
 pub(crate) const MAX_PEER_ANNOUNCEMENTS: usize = 5_000;
 pub const MAX_PEER_IN_FLIGHT: usize = 100;
@@ -864,30 +864,30 @@ fn ready_candidate(
 
 #[derive(Clone)]
 pub struct NodeTxPolicy {
-    pub(crate) table: Arc<bitcoin_rs_wire::PeerTable>,
+    pub(crate) table: Arc<bitcoin_rs_p2p::PeerTable>,
     pub(crate) tx_policy: Arc<parking_lot::Mutex<TxPolicy>>,
 }
 
 impl Default for NodeTxPolicy {
     fn default() -> Self {
-        Self::with_table(Arc::new(bitcoin_rs_wire::PeerTable::new()))
+        Self::with_table(Arc::new(bitcoin_rs_p2p::PeerTable::new()))
     }
 }
 
 impl NodeTxPolicy {
     pub fn new(
-        table: Arc<bitcoin_rs_wire::PeerTable>,
+        table: Arc<bitcoin_rs_p2p::PeerTable>,
         tx_policy: Arc<parking_lot::Mutex<TxPolicy>>,
     ) -> Self {
         Self { table, tx_policy }
     }
-    pub fn with_table(table: Arc<bitcoin_rs_wire::PeerTable>) -> Self {
+    pub fn with_table(table: Arc<bitcoin_rs_p2p::PeerTable>) -> Self {
         Self::new(
             table,
             Arc::new(parking_lot::Mutex::new(TxPolicy::default())),
         )
     }
-    pub fn peer_table(&self) -> &Arc<bitcoin_rs_wire::PeerTable> {
+    pub fn peer_table(&self) -> &Arc<bitcoin_rs_p2p::PeerTable> {
         &self.table
     }
     pub fn announce_transactions(&self, source: PeerSource, items: &[Inventory]) {
@@ -1248,7 +1248,7 @@ impl NodeTxPolicy {
             return false;
         }
         if self.table.transaction_witness(source) {
-            bitcoin_rs_wire::inv::request_witness(&mut items);
+            bitcoin_rs_p2p::inv::request_witness(&mut items);
         }
         self.request_parent_transactions(source, &items)
     }
@@ -1258,7 +1258,7 @@ impl NodeTxPolicy {
 #[expect(clippy::unwrap_used, reason = "transaction owner test assertions")]
 mod tests {
     use super::*;
-    use bitcoin_rs_wire::PeerTable;
+    use bitcoin_rs_p2p::PeerTable;
 
     thread_local! {
         static POLL_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
@@ -1518,28 +1518,28 @@ mod tests {
             atomic::{AtomicBool, Ordering},
         };
         let table = Arc::new(NodeTxPolicy::default());
-        let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(4);
-        let lease = bitcoin_rs_wire::PeerLease::new(sender);
-        let addr: bitcoin_rs_wire::PeerEndpoint = ([127, 0, 0, 1], 8333).into();
+        let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(4);
+        let lease = bitcoin_rs_p2p::PeerLease::new(sender);
+        let addr: bitcoin_rs_p2p::PeerEndpoint = ([127, 0, 0, 1], 8333).into();
         table.peer_table().register(addr, lease.clone());
-        let version = bitcoin_rs_wire::handshake::version_message(
+        let version = bitcoin_rs_p2p::handshake::version_message(
             1,
             0,
-            bitcoin_rs_wire::PeerRole::FullRelay,
+            bitcoin_rs_p2p::PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
             bitcoin_rs_consensus::primitives::USER_AGENT,
         );
         table.peer_table().publish_info(
             addr,
             &lease,
-            bitcoin_rs_wire::PeerInfo::outbound_from_version(
+            bitcoin_rs_p2p::PeerInfo::outbound_from_version(
                 addr,
                 addr.socket_addr()
                     .unwrap_or_else(|| panic!("expected IP fixture")),
                 &version,
                 0,
                 0,
-                Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+                Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
             ),
         );
         let mut poll_now = Instant::now() + Duration::from_secs(1);
@@ -1563,9 +1563,9 @@ mod tests {
         assert!(receiver.try_recv().is_err());
         assert_eq!(table.tx_policy.lock().announcements, 0);
         let pending_table = Arc::clone(&table);
-        let (new_sender, new_receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(4);
-        let new_lease = bitcoin_rs_wire::PeerLease::new(new_sender);
-        let new_addr: bitcoin_rs_wire::PeerEndpoint = ([127, 0, 0, 1], 8334).into();
+        let (new_sender, new_receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(4);
+        let new_lease = bitcoin_rs_p2p::PeerLease::new(new_sender);
+        let new_addr: bitcoin_rs_p2p::PeerEndpoint = ([127, 0, 0, 1], 8334).into();
         POLL_HOOK.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
                 pending_table
@@ -1574,7 +1574,7 @@ mod tests {
                 pending_table.peer_table().publish_info(
                     new_addr,
                     &new_lease,
-                    bitcoin_rs_wire::PeerInfo::outbound_from_version(
+                    bitcoin_rs_p2p::PeerInfo::outbound_from_version(
                         new_addr,
                         new_addr
                             .socket_addr()
@@ -1582,7 +1582,7 @@ mod tests {
                         &version,
                         0,
                         0,
-                        Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+                        Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
                     ),
                 );
                 pending_table.announce_transactions(new_lease.source(Some(new_addr)), &[item(2)]);
@@ -1622,9 +1622,9 @@ mod tests {
     pub(super) fn registered_source(
         table: &impl AsPeerTable,
         port: u16,
-    ) -> (PeerSource, bitcoin_rs_wire::test_support::MessageReceiver) {
-        let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(32);
-        let lease = bitcoin_rs_wire::PeerLease::new(sender);
+    ) -> (PeerSource, bitcoin_rs_p2p::test_support::MessageReceiver) {
+        let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(32);
+        let lease = bitcoin_rs_p2p::PeerLease::new(sender);
         let source = register_ready(table, port, &lease);
         (source, receiver)
     }
@@ -1632,29 +1632,29 @@ mod tests {
     pub(super) fn register_ready(
         table: &impl AsPeerTable,
         port: u16,
-        lease: &bitcoin_rs_wire::PeerLease,
+        lease: &bitcoin_rs_p2p::PeerLease,
     ) -> PeerSource {
         let table = table.as_peer_table();
-        let addr: bitcoin_rs_wire::PeerEndpoint = ([127, 0, 0, 1], port).into();
+        let addr: bitcoin_rs_p2p::PeerEndpoint = ([127, 0, 0, 1], port).into();
         table.register(addr, lease.clone());
-        let version = bitcoin_rs_wire::handshake::version_message(
+        let version = bitcoin_rs_p2p::handshake::version_message(
             1,
             0,
-            bitcoin_rs_wire::PeerRole::FullRelay,
+            bitcoin_rs_p2p::PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
             bitcoin_rs_consensus::primitives::USER_AGENT,
         );
         table.publish_info(
             addr,
             lease,
-            bitcoin_rs_wire::PeerInfo::outbound_from_version(
+            bitcoin_rs_p2p::PeerInfo::outbound_from_version(
                 addr,
                 addr.socket_addr()
                     .unwrap_or_else(|| panic!("expected IP fixture")),
                 &version,
                 0,
                 0,
-                std::sync::Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+                std::sync::Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
             ),
         );
         lease.source(Some(addr))
@@ -3012,7 +3012,7 @@ mod tests {
     #[test]
     fn dropped_tx_body_releases_solicitation_for_repoll()
     -> Result<(), crate::test_support::TestError> {
-        use bitcoin_rs_wire::listener::TxIngressObserver;
+        use bitcoin_rs_p2p::listener::TxIngressObserver;
         let table = std::sync::Arc::new(NodeTxPolicy::default());
         let (owner, owner_rx) = registered_source(&table, 8333);
         let (alternate, alternate_rx) = registered_source(&table, 8334);
@@ -3076,7 +3076,7 @@ mod tests {
         let (sender, _receiver) = crossbeam_channel::bounded::<crate::p2p::InboundBody>(1);
         sender
             .try_send(crate::p2p::InboundBody::from(
-                bitcoin_rs_wire::InboundTx::new(tx.clone(), alternate),
+                bitcoin_rs_p2p::InboundTx::new(tx.clone(), alternate),
             ))
             .map_err(|_| "filler send succeeds")?;
         let gateway = std::sync::Arc::new(bitcoin_rs_mempool::MempoolGateway::new(
@@ -3529,11 +3529,11 @@ mod preferred_tests {
         for preferred in [true, false] {
             let table = NodeTxPolicy::default();
             let aggregate =
-                Arc::new(bitcoin_rs_wire::connection::SharedOutboundBudget::with_limits(128, 0));
-            let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel();
-            let lease = bitcoin_rs_wire::PeerLease::new(sender).with_shared_budget(&aggregate);
+                Arc::new(bitcoin_rs_p2p::connection::SharedOutboundBudget::with_limits(128, 0));
+            let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel();
+            let lease = bitcoin_rs_p2p::PeerLease::new(sender).with_shared_budget(&aggregate);
             let source = register_ready(&table, 7, &lease);
-            let hold = bitcoin_rs_wire::test_support::hog(&aggregate, 128);
+            let hold = bitcoin_rs_p2p::test_support::hog(&aggregate, 128);
             assert!(
                 table
                     .tx_policy
@@ -3572,30 +3572,30 @@ mod preferred_tests {
     fn registered_inbound(
         table: &impl super::tests::AsPeerTable,
         port: u16,
-    ) -> (PeerSource, bitcoin_rs_wire::test_support::MessageReceiver) {
+    ) -> (PeerSource, bitcoin_rs_p2p::test_support::MessageReceiver) {
         let table = table.as_peer_table();
-        let (sender, receiver) = bitcoin_rs_wire::test_support::message_channel_bounded(32);
-        let lease = bitcoin_rs_wire::PeerLease::new_inbound(sender);
-        let addr: bitcoin_rs_wire::PeerEndpoint = ([127, 0, 0, 1], port).into();
+        let (sender, receiver) = bitcoin_rs_p2p::test_support::message_channel_bounded(32);
+        let lease = bitcoin_rs_p2p::PeerLease::new_inbound(sender);
+        let addr: bitcoin_rs_p2p::PeerEndpoint = ([127, 0, 0, 1], port).into();
         table.register(addr, lease.clone());
-        let version = bitcoin_rs_wire::handshake::version_message(
+        let version = bitcoin_rs_p2p::handshake::version_message(
             1,
             0,
-            bitcoin_rs_wire::PeerRole::FullRelay,
+            bitcoin_rs_p2p::PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
             bitcoin_rs_consensus::primitives::USER_AGENT,
         );
         table.publish_info(
             addr,
             &lease,
-            bitcoin_rs_wire::PeerInfo::inbound_from_version(
+            bitcoin_rs_p2p::PeerInfo::inbound_from_version(
                 addr,
                 addr.socket_addr()
                     .unwrap_or_else(|| panic!("expected IP fixture")),
                 &version,
                 0,
                 0,
-                Arc::new(bitcoin_rs_wire::PeerCounters::default()),
+                Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
             ),
         );
         (lease.source(Some(addr)), receiver)

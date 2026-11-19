@@ -6,28 +6,28 @@ use crate::p2p::sync::chain::{
     WindowApplyDisposition, WindowCommitError,
 };
 use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Header, Network};
-use bitcoin_rs_wire::{InboundHeaders, PeerTable};
+use bitcoin_rs_p2p::{InboundHeaders, PeerTable};
 use crossbeam_channel::Receiver;
 
 pub use crate::p2p::sync::{BlockSync, default_sync_budget};
 
 struct NodeSyncChain {
-    assumeutxo: Option<Arc<bitcoin_rs_execution::AssumeUtxoManager>>,
-    handles: Arc<bitcoin_rs_execution::Chainstate>,
-    block_tree: bitcoin_rs_execution::chain::BlockTreeReader,
+    assumeutxo: Option<Arc<bitcoin_rs_chain::AssumeUtxoManager>>,
+    handles: Arc<bitcoin_rs_chain::Chainstate>,
+    block_tree: bitcoin_rs_chain::chain::BlockTreeReader,
     followers: crate::chain_effects::ChainFollowers,
     budget: Arc<crate::budget::NodeBudget>,
 }
 
 #[must_use]
 pub struct BlockSyncInputs {
-    pub handles: Arc<bitcoin_rs_execution::Chainstate>,
+    pub handles: Arc<bitcoin_rs_chain::Chainstate>,
     pub followers: crate::chain_effects::ChainFollowers,
     pub peer_table: Arc<PeerTable>,
     pub inbound_headers_rx: Receiver<InboundHeaders>,
-    pub inbound_blocks_rx: Receiver<bitcoin_rs_wire::InboundBlock>,
-    pub ibd: Arc<bitcoin_rs_execution::chain::InitialBlockDownload>,
-    pub assumeutxo: Option<Arc<bitcoin_rs_execution::AssumeUtxoManager>>,
+    pub inbound_blocks_rx: Receiver<bitcoin_rs_p2p::InboundBlock>,
+    pub ibd: Arc<bitcoin_rs_chain::chain::InitialBlockDownload>,
+    pub assumeutxo: Option<Arc<bitcoin_rs_chain::AssumeUtxoManager>>,
     pub budget: Arc<crate::budget::NodeBudget>,
 }
 
@@ -58,17 +58,17 @@ pub fn block_sync(inputs: BlockSyncInputs) -> BlockSync {
 }
 
 fn settle_window_failure(
-    transition: bitcoin_rs_execution::ChainTransition<'_>,
+    transition: bitcoin_rs_chain::ChainTransition<'_>,
     mempool_change: Option<bitcoin_rs_mempool::ChainChangeGuard>,
-    mut error: bitcoin_rs_execution::WindowApplyError,
-) -> bitcoin_rs_execution::WindowApplyError {
+    mut error: bitcoin_rs_chain::WindowApplyError,
+) -> bitcoin_rs_chain::WindowApplyError {
     let handles = transition.chainstate();
-    if error.disposition == bitcoin_rs_execution::WindowApplyDisposition::Fatal
-        || bitcoin_rs_execution::classify_apply_error(&error.source)
-            == bitcoin_rs_execution::WindowApplyDisposition::Fatal
+    if error.disposition == bitcoin_rs_chain::WindowApplyDisposition::Fatal
+        || bitcoin_rs_chain::classify_apply_error(&error.source)
+            == bitcoin_rs_chain::WindowApplyDisposition::Fatal
     {
         handles.fail_closed_for_recovery();
-        error.disposition = bitcoin_rs_execution::WindowApplyDisposition::Fatal;
+        error.disposition = bitcoin_rs_chain::WindowApplyDisposition::Fatal;
     } else if let Err(finish_source) =
         crate::chain_effects::ChainFollowers::finish_transition(handles, transition, mempool_change)
     {
@@ -78,13 +78,13 @@ fn settle_window_failure(
             "chain transition could not be settled after a window failure; \
              mempool admission stays closed until recovery or restart"
         );
-        error.disposition = bitcoin_rs_execution::WindowApplyDisposition::Fatal;
+        error.disposition = bitcoin_rs_chain::WindowApplyDisposition::Fatal;
     }
     error
 }
 
 fn settle_window_refused(
-    transition: bitcoin_rs_execution::ChainTransition<'_>,
+    transition: bitcoin_rs_chain::ChainTransition<'_>,
     mempool_change: Option<bitcoin_rs_mempool::ChainChangeGuard>,
     refusal: WindowCommitError,
 ) -> WindowCommitError {
@@ -101,11 +101,11 @@ fn settle_window_refused(
 }
 
 fn settle_window_success(
-    transition: bitcoin_rs_execution::ChainTransition<'_>,
+    transition: bitcoin_rs_chain::ChainTransition<'_>,
     mempool_change: Option<bitcoin_rs_mempool::ChainChangeGuard>,
     applied: usize,
-    committed: Vec<bitcoin_rs_execution::ConnectOutcome>,
-) -> core::result::Result<usize, bitcoin_rs_execution::WindowApplyError> {
+    committed: Vec<bitcoin_rs_chain::ConnectOutcome>,
+) -> core::result::Result<usize, bitcoin_rs_chain::WindowApplyError> {
     let handles = transition.chainstate();
     match crate::chain_effects::ChainFollowers::finish_transition(
         handles,
@@ -119,11 +119,11 @@ fn settle_window_success(
                 "chain transition could not be settled after a committed window; \
                  mempool admission stays closed until recovery or restart"
             );
-            Err(bitcoin_rs_execution::WindowApplyError {
+            Err(bitcoin_rs_chain::WindowApplyError {
                 applied,
                 committed,
                 source: Box::new(finish_source),
-                disposition: bitcoin_rs_execution::WindowApplyDisposition::Fatal,
+                disposition: bitcoin_rs_chain::WindowApplyDisposition::Fatal,
                 invalidated: Box::default(),
             })
         }
@@ -132,11 +132,11 @@ fn settle_window_success(
 
 #[cfg(test)]
 pub(crate) fn fixture_insert_header_node(
-    handles: &bitcoin_rs_execution::Chainstate,
-    parent: bitcoin_rs_execution::chain::NodeId,
+    handles: &bitcoin_rs_chain::Chainstate,
+    parent: bitcoin_rs_chain::chain::NodeId,
     header: bitcoin_rs_consensus::primitives::Header,
-    status: bitcoin_rs_execution::chain::NodeStatus,
-) -> Result<bitcoin_rs_execution::chain::NodeId, bitcoin_rs_execution::chain::ChainError> {
+    status: bitcoin_rs_chain::chain::NodeStatus,
+) -> Result<bitcoin_rs_chain::chain::NodeId, bitcoin_rs_chain::chain::ChainError> {
     let mut tree = handles.block_tree().write();
     tree.insert_node(Some(parent), header, status)
 }
@@ -144,9 +144,9 @@ pub(crate) fn fixture_insert_header_node(
 impl SyncChain for NodeSyncChain {
     fn historical_base(&self) -> Option<Hash256> {
         match self.handles.role() {
-            bitcoin_rs_execution::assumeutxo::ChainstateRole::AssumedActive {
-                base_hash, ..
-            } => Some(base_hash),
+            bitcoin_rs_chain::assumeutxo::ChainstateRole::AssumedActive { base_hash, .. } => {
+                Some(base_hash)
+            }
             _ => None,
         }
     }
@@ -179,17 +179,15 @@ impl SyncChain for NodeSyncChain {
         self.handles.network()
     }
 
-    fn block_tree(
-        &self,
-    ) -> parking_lot::RwLockReadGuard<'_, bitcoin_rs_execution::chain::BlockTree> {
+    fn block_tree(&self) -> parking_lot::RwLockReadGuard<'_, bitcoin_rs_chain::chain::BlockTree> {
         self.block_tree.read()
     }
 
-    fn chain_tip(&self) -> Option<Arc<bitcoin_rs_execution::chain::TipSnapshot>> {
+    fn chain_tip(&self) -> Option<Arc<bitcoin_rs_chain::chain::TipSnapshot>> {
         self.handles.header_tip()
     }
 
-    fn applied_tip(&self) -> Option<Arc<bitcoin_rs_execution::chain::TipSnapshot>> {
+    fn applied_tip(&self) -> Option<Arc<bitcoin_rs_chain::chain::TipSnapshot>> {
         self.handles.applied_tip_snapshot()
     }
 
@@ -208,13 +206,11 @@ impl SyncChain for NodeSyncChain {
                 active_height: outcome.active_height,
                 demoted_tip: outcome.demoted_tip,
             },
-            Err(bitcoin_rs_execution::HeaderAdmissionError::Rejected(error)) => {
+            Err(bitcoin_rs_chain::HeaderAdmissionError::Rejected(error)) => {
                 HeaderAdmission::Rejected(error)
             }
-            Err(bitcoin_rs_execution::HeaderAdmissionError::Refused(error)) => {
-                HeaderAdmission::Refused(bitcoin_rs_execution::chain::HeaderRefusal::from_cause(
-                    &error,
-                ))
+            Err(bitcoin_rs_chain::HeaderAdmissionError::Refused(error)) => {
+                HeaderAdmission::Refused(bitcoin_rs_chain::chain::HeaderRefusal::from_cause(&error))
             }
         }
     }
@@ -226,7 +222,7 @@ impl SyncChain for NodeSyncChain {
             tree.lookup(hash)
                 .and_then(|node_id| tree.node(node_id).ok())
                 .is_none_or(|node| {
-                    bitcoin_rs_execution::chain::softfork_state(
+                    bitcoin_rs_chain::chain::softfork_state(
                         &tree,
                         self.handles.network(),
                         node.parent,
@@ -243,7 +239,7 @@ impl SyncChain for NodeSyncChain {
     }
 
     fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize {
-        bitcoin_rs_execution::window_len_within(serialized_sizes, self.budget.script_batch_limits())
+        bitcoin_rs_chain::window_len_within(serialized_sizes, self.budget.script_batch_limits())
     }
 
     fn commit_window(&self, payloads: &[&BlockImage]) -> Result<usize, WindowCommitError> {
@@ -315,7 +311,7 @@ impl SyncChain for NodeSyncChain {
 
     fn switch_to_branch(
         &self,
-        target: bitcoin_rs_execution::chain::NodeId,
+        target: bitcoin_rs_chain::chain::NodeId,
         staged_body: &mut dyn FnMut(Hash256) -> Option<BlockImage>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError> {
@@ -346,7 +342,7 @@ fn refused_window(source: bitcoin_rs_mempool::MempoolError) -> WindowCommitError
 fn settle_committed_followers(
     followers: &crate::chain_effects::ChainFollowers,
     payloads: &[&BlockImage],
-    committed: &[bitcoin_rs_execution::ConnectOutcome],
+    committed: &[bitcoin_rs_chain::ConnectOutcome],
 ) -> core::result::Result<(), bitcoin_rs_mempool::MempoolError> {
     for (payload, outcome) in payloads.iter().zip(committed) {
         followers.on_connect(payload, outcome)?;
@@ -354,7 +350,7 @@ fn settle_committed_followers(
     Ok(())
 }
 
-fn window_commit_error(error: bitcoin_rs_execution::WindowApplyError) -> WindowCommitError {
+fn window_commit_error(error: bitcoin_rs_chain::WindowApplyError) -> WindowCommitError {
     WindowCommitError {
         applied: error.applied,
         disposition: error.disposition,
@@ -368,18 +364,18 @@ mod tests {
     use std::sync::Arc;
 
     use arc_swap::ArcSwapOption;
+    use bitcoin_rs_chain::chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
     use bitcoin_rs_consensus::primitives::{
         Block, BlockHash, BlockImage, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
     };
     use bitcoin_rs_consensus::script::push_int;
-    use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
     use bitcoin_rs_storage::{split_chainstate_cache_budget, utxo::UtxoSet};
     use hashbrown::HashMap;
     use parking_lot::{Mutex, RwLock};
 
     use crate::p2p::sync::chain::{SyncChain, WindowApplyDisposition, WindowCommitError};
     use crate::test_support::TestError;
-    use bitcoin_rs_execution::Chainstate;
+    use bitcoin_rs_chain::Chainstate;
 
     fn sync_unit_test_budget() -> Arc<crate::budget::NodeBudget> {
         Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
@@ -492,9 +488,7 @@ mod tests {
             Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
                 bitcoin_rs_storage::utxo::stats::CoinStats::default(),
             )),
-            Arc::new(bitcoin_rs_execution::events::ChainEventPublisher::detached(
-                0,
-            )),
+            Arc::new(bitcoin_rs_chain::events::ChainEventPublisher::detached(0)),
         )
     }
 
@@ -844,8 +838,8 @@ mod tests {
             let dyn_store: Arc<dyn KvStore> = mem_store;
             let coins = Arc::new(CoinStore::open(Arc::clone(&dyn_store), 64 * 1024 * 1024));
             let commit_authority = Arc::new(CommitAuthority::new(dyn_store, Arc::clone(&coins)));
-            let handles = bitcoin_rs_execution::Chainstate::from_parts(
-                bitcoin_rs_execution::ChainstateParts {
+            let handles =
+                bitcoin_rs_chain::Chainstate::from_parts(bitcoin_rs_chain::ChainstateParts {
                     network: Network::Regtest,
                     block_tree: tree,
                     restored_applied_tip: None,
@@ -854,30 +848,28 @@ mod tests {
                         bitcoin_rs_storage::utxo::stats::CoinStats::default(),
                     )),
                     chain_events: Arc::new(
-                        bitcoin_rs_execution::events::ChainEventPublisher::detached(0),
+                        bitcoin_rs_chain::events::ChainEventPublisher::detached(0),
                     ),
                     block_body_store: Some(bodies_store.clone()),
                     undo_store,
                     durable_head,
                     coins,
                     commit_authority,
-                    chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new()
-                        .authority(),
+                    chain_transition: bitcoin_rs_chain::chain::TransitionDomain::new().authority(),
                     assume_valid_height: 0,
-                    validation_mode: bitcoin_rs_execution::ValidationMode::AssumeValid,
+                    validation_mode: bitcoin_rs_chain::ValidationMode::AssumeValid,
                     validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
                     script_cache: None,
                     capture_rawtx: false,
                     capture_block_bytes: true,
                     retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
-                    window_limits: bitcoin_rs_execution::default_window_limits_source(),
+                    window_limits: bitcoin_rs_chain::default_window_limits_source(),
                     history: bitcoin_rs_storage::pruning::HistoryAccess::new(
                         retention,
                         bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
                     ),
-                    role: bitcoin_rs_execution::ChainstateRole::Ordinary,
-                },
-            );
+                    role: bitcoin_rs_chain::ChainstateRole::Ordinary,
+                });
             handles.apply_block(&BlockImage::from_local(genesis))?;
             for block in &main {
                 handles.apply_block(&BlockImage::from_local(block.clone()))?;
@@ -955,7 +947,7 @@ mod tests {
                         ref disposition,
                         ref invalidated,
                         ..
-                    }) if *disposition == bitcoin_rs_execution::WindowApplyDisposition::BodyMutated
+                    }) if *disposition == bitcoin_rs_chain::WindowApplyDisposition::BodyMutated
                         && invalidated.is_empty()
                 ),
                 "the mutated second body must fail as BodyMutated after one committed connect, \
@@ -1054,7 +1046,7 @@ mod tests {
                 matches!(
                     &outcome,
                     Err(crate::reorg::ReorgError::ConnectFailed {
-                        disposition: bitcoin_rs_execution::WindowApplyDisposition::Permanent,
+                        disposition: bitcoin_rs_chain::WindowApplyDisposition::Permanent,
                         invalidated,
                         ..
                     }) if invalidated.len() == 2
@@ -1142,7 +1134,7 @@ mod tests {
             assert!(matches!(
                 *original,
                 crate::reorg::ReorgError::ConnectFailed {
-                    disposition: bitcoin_rs_execution::WindowApplyDisposition::Permanent,
+                    disposition: bitcoin_rs_chain::WindowApplyDisposition::Permanent,
                     ..
                 }
             ));
@@ -1361,7 +1353,7 @@ mod tests {
             assert_eq!(connected, 0, "nothing connected before the body mutation");
             assert_eq!(
                 disposition,
-                bitcoin_rs_execution::WindowApplyDisposition::BodyMutated
+                bitcoin_rs_chain::WindowApplyDisposition::BodyMutated
             );
             assert!(
                 invalidated.is_empty(),
@@ -1445,9 +1437,7 @@ mod tests {
                 None,
             ));
             let followers = crate::chain_effects::ChainFollowers::new(
-                Arc::new(RwLock::new(
-                    bitcoin_rs_projection::block_log::BlockLog::new(),
-                )),
+                Arc::new(RwLock::new(bitcoin_rs_index::block_log::BlockLog::new())),
                 Arc::new(crate::NoOpZmqPublisher),
                 None,
                 None,
@@ -1541,8 +1531,8 @@ mod tests {
                 dyn_store,
                 Arc::clone(&coins),
             ));
-            let handles = bitcoin_rs_execution::Chainstate::from_parts(
-                bitcoin_rs_execution::ChainstateParts {
+            let handles =
+                bitcoin_rs_chain::Chainstate::from_parts(bitcoin_rs_chain::ChainstateParts {
                     network: Network::Regtest,
                     block_tree: tree,
                     restored_applied_tip: None,
@@ -1551,30 +1541,28 @@ mod tests {
                         bitcoin_rs_storage::utxo::stats::CoinStats::default(),
                     )),
                     chain_events: Arc::new(
-                        bitcoin_rs_execution::events::ChainEventPublisher::detached(0),
+                        bitcoin_rs_chain::events::ChainEventPublisher::detached(0),
                     ),
                     block_body_store: Some(Arc::new(Bodies::default())),
                     undo_store,
                     durable_head,
                     coins,
                     commit_authority,
-                    chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new()
-                        .authority(),
+                    chain_transition: bitcoin_rs_chain::chain::TransitionDomain::new().authority(),
                     assume_valid_height: 0,
-                    validation_mode: bitcoin_rs_execution::ValidationMode::AssumeValid,
+                    validation_mode: bitcoin_rs_chain::ValidationMode::AssumeValid,
                     validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
                     script_cache: None,
                     capture_rawtx: false,
                     capture_block_bytes: true,
                     retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
-                    window_limits: bitcoin_rs_execution::default_window_limits_source(),
+                    window_limits: bitcoin_rs_chain::default_window_limits_source(),
                     history: bitcoin_rs_storage::pruning::HistoryAccess::new(
                         retention,
                         bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
                     ),
-                    role: bitcoin_rs_execution::ChainstateRole::Ordinary,
-                },
-            );
+                    role: bitcoin_rs_chain::ChainstateRole::Ordinary,
+                });
             handles.apply_block(&BlockImage::from_local(genesis))?;
             for block in &blocks {
                 handles.apply_block(&BlockImage::from_local(block.clone()))?;
@@ -1599,7 +1587,7 @@ mod tests {
                 lock_time: LockTime::from_consensus(GENESIS_TIME + 95),
             };
             let nonfinal_txid = nonfinal.txid();
-            let view = bitcoin_rs_serving::context::ChainAdmissionView::new(
+            let view = bitcoin_rs_wire::context::ChainAdmissionView::new(
                 handles.utxo_reader(),
                 handles.applied_tip_reader(),
                 handles.block_tree_reader(),
@@ -1727,8 +1715,8 @@ mod tests {
         use std::sync::Arc;
         use std::time::Duration;
 
+        use bitcoin_rs_chain::chain::{BlockTree, NodeStatus, regtest_fixture};
         use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network};
-        use bitcoin_rs_execution::chain::{BlockTree, NodeStatus, regtest_fixture};
         use bitcoin_rs_storage::memory_kv::MemoryKvStore;
         use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
         use bitcoin_rs_storage::utxo::UtxoSet;
@@ -1743,10 +1731,8 @@ mod tests {
 
         fn failing_commit_chain(
             depth: u32,
-        ) -> Result<(Arc<bitcoin_rs_execution::Chainstate>, Vec<Block>), TestError> {
-            use bitcoin_rs_execution::{
-                Chainstate, ChainstateParts, ChainstateRole, ValidationMode,
-            };
+        ) -> Result<(Arc<bitcoin_rs_chain::Chainstate>, Vec<Block>), TestError> {
+            use bitcoin_rs_chain::{Chainstate, ChainstateParts, ChainstateRole, ValidationMode};
 
             let genesis = Network::Regtest.genesis_block();
             let mut tree = BlockTree::new();
@@ -1778,15 +1764,13 @@ mod tests {
                 coin_stats: Arc::new(bitcoin_rs_storage::utxo::stats::CoinStatsListener::new(
                     bitcoin_rs_storage::utxo::stats::CoinStats::default(),
                 )),
-                chain_events: Arc::new(
-                    bitcoin_rs_execution::events::ChainEventPublisher::detached(0),
-                ),
+                chain_events: Arc::new(bitcoin_rs_chain::events::ChainEventPublisher::detached(0)),
                 block_body_store: None,
                 undo_store,
                 durable_head,
                 coins,
                 commit_authority,
-                chain_transition: bitcoin_rs_execution::chain::TransitionDomain::new().authority(),
+                chain_transition: bitcoin_rs_chain::chain::TransitionDomain::new().authority(),
                 assume_valid_height: 0,
                 validation_mode: ValidationMode::AssumeValid,
                 validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
@@ -1794,7 +1778,7 @@ mod tests {
                 capture_rawtx: false,
                 capture_block_bytes: false,
                 retention: MandatoryRetention::new(Arc::clone(&retention)),
-                window_limits: bitcoin_rs_execution::default_window_limits_source(),
+                window_limits: bitcoin_rs_chain::default_window_limits_source(),
                 history: HistoryAccess::new(retention, RetentionBudget::from_blocks(288)),
                 role: ChainstateRole::Ordinary,
             }));
@@ -1811,10 +1795,10 @@ mod tests {
         {
             let (handles, blocks) = failing_commit_chain(2)?;
             let followers = crate::chain_effects::ChainFollowers::noop();
-            let peers = Arc::new(bitcoin_rs_wire::PeerTable::new());
+            let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
             let (_inbound_headers_tx, inbound_headers_rx) = unbounded();
             let (inbound_blocks_tx, inbound_blocks_rx) = unbounded();
-            let ibd = Arc::new(bitcoin_rs_execution::chain::InitialBlockDownload::new(
+            let ibd = Arc::new(bitcoin_rs_chain::chain::InitialBlockDownload::new(
                 handles.applied_tip_reader(),
                 handles.block_tree_reader(),
             ));
@@ -1830,7 +1814,7 @@ mod tests {
             }));
 
             inbound_blocks_tx
-                .send(bitcoin_rs_wire::InboundBlock::from_local(blocks[0].clone()))
+                .send(bitcoin_rs_p2p::InboundBlock::from_local(blocks[0].clone()))
                 .map_err(|_| TestError::Missing("inbound block channel closed"))?;
             sync.tick();
             assert!(
@@ -1845,7 +1829,7 @@ mod tests {
 
             for block in [&blocks[1], &blocks[0]] {
                 inbound_blocks_tx
-                    .send(bitcoin_rs_wire::InboundBlock::from_local(block.clone()))
+                    .send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
                     .map_err(|_| TestError::Missing("inbound block channel closed"))?;
             }
             sync.tick();
@@ -1928,8 +1912,8 @@ mod tests {
     // SYNC-04
     #[test]
     fn fatal_window_settlement_closes_the_chain_for_recovery() -> Result<(), TestError> {
+        use bitcoin_rs_chain::{ApplyError, WindowApplyDisposition, WindowApplyError};
         use bitcoin_rs_consensus::ValidationEngine;
-        use bitcoin_rs_execution::{ApplyError, WindowApplyDisposition, WindowApplyError};
         use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
 
         let genesis = Network::Regtest.genesis_block();
@@ -1947,9 +1931,7 @@ mod tests {
             None,
         ));
         let followers = crate::chain_effects::ChainFollowers::new(
-            Arc::new(RwLock::new(
-                bitcoin_rs_projection::block_log::BlockLog::new(),
-            )),
+            Arc::new(RwLock::new(bitcoin_rs_index::block_log::BlockLog::new())),
             Arc::new(crate::NoOpZmqPublisher),
             None,
             None,
@@ -2122,9 +2104,7 @@ mod tests {
         ));
         *observer.gateway.lock() = Some(Arc::clone(&gateway));
         let followers = crate::chain_effects::ChainFollowers::new(
-            Arc::new(RwLock::new(
-                bitcoin_rs_projection::block_log::BlockLog::new(),
-            )),
+            Arc::new(RwLock::new(bitcoin_rs_index::block_log::BlockLog::new())),
             Arc::new(crate::NoOpZmqPublisher),
             None,
             None,
@@ -2242,7 +2222,7 @@ mod tests {
         assert!(
             matches!(
                 fixture.handles.begin_transition(),
-                Err(bitcoin_rs_execution::ApplyError::Shutdown)
+                Err(bitcoin_rs_chain::ApplyError::Shutdown)
             ),
             "a halted chain must refuse the next transition instead of reopening"
         );

@@ -18,7 +18,7 @@ pub enum IndexWorkerError {
 }
 
 pub(super) struct DerivedIndexHost {
-    status: Arc<bitcoin_rs_projection::runtime::DerivedIndexCapability>,
+    status: Arc<bitcoin_rs_index::runtime::DerivedIndexCapability>,
     enabled: Option<EnabledDerivedIndex>,
     #[cfg(test)]
     spawned_workers: usize,
@@ -27,29 +27,29 @@ pub(super) struct DerivedIndexHost {
 }
 
 struct EnabledDerivedIndex {
-    runtime: Arc<bitcoin_rs_projection::runtime::DerivedIndexRuntime>,
-    lifecycle: Arc<ArcSwap<bitcoin_rs_projection::runtime::DerivedIndexLifecycle>>,
-    adapter: Arc<bitcoin_rs_projection::runtime::DerivedIndexQueryAdapter>,
+    runtime: Arc<bitcoin_rs_index::runtime::DerivedIndexRuntime>,
+    lifecycle: Arc<ArcSwap<bitcoin_rs_index::runtime::DerivedIndexLifecycle>>,
+    adapter: Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>,
     phase: DerivedIndexPhase,
 }
 
 enum DerivedIndexPhase {
     Ready(Box<TxIndexSpawn>),
-    Running(bitcoin_rs_projection::runtime::DerivedIndexWorker),
+    Running(bitcoin_rs_index::runtime::DerivedIndexWorker),
     Stopped,
 }
 
 type DerivedIndexParts = (
-    Arc<bitcoin_rs_projection::runtime::DerivedIndexRuntime>,
+    Arc<bitcoin_rs_index::runtime::DerivedIndexRuntime>,
     TxIndexSpawn,
-    Arc<ArcSwap<bitcoin_rs_projection::runtime::DerivedIndexLifecycle>>,
-    Arc<bitcoin_rs_projection::runtime::DerivedIndexQueryAdapter>,
+    Arc<ArcSwap<bitcoin_rs_index::runtime::DerivedIndexLifecycle>>,
+    Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>,
 );
 
 impl DerivedIndexHost {
     pub(super) fn from_parts(
         enabled: Option<DerivedIndexParts>,
-        status: Arc<bitcoin_rs_projection::runtime::DerivedIndexCapability>,
+        status: Arc<bitcoin_rs_index::runtime::DerivedIndexCapability>,
     ) -> Self {
         let enabled = enabled.map(|(runtime, spawn, lifecycle, adapter)| EnabledDerivedIndex {
             runtime,
@@ -69,9 +69,9 @@ impl DerivedIndexHost {
 
     pub(super) fn start(
         &mut self,
-        chainstate: &bitcoin_rs_execution::Chainstate,
+        chainstate: &bitcoin_rs_chain::Chainstate,
         history: bitcoin_rs_storage::pruning::HistoryAccess,
-        historical_verified: bitcoin_rs_projection::runtime::HistoricalVerifiedReader,
+        historical_verified: bitcoin_rs_index::runtime::HistoricalVerifiedReader,
     ) -> Result<(), IndexWorkerError> {
         let Some(enabled) = self.enabled.as_mut() else {
             return Ok(());
@@ -84,7 +84,7 @@ impl DerivedIndexHost {
         else {
             return Ok(());
         };
-        let worker = bitcoin_rs_projection::runtime::DerivedIndexWorker::spawn_with_open(
+        let worker = bitcoin_rs_index::runtime::DerivedIndexWorker::spawn_with_open(
             Arc::clone(&enabled.runtime),
             spawn.spec,
             Arc::clone(&enabled.lifecycle),
@@ -142,20 +142,20 @@ impl DerivedIndexHost {
         tracing::warn!("txindex worker still blocked; abandoning join");
         worker.generation.revoke();
         enabled.lifecycle.store(Arc::new(
-            bitcoin_rs_projection::runtime::DerivedIndexLifecycle::ShutdownAbandoned,
+            bitcoin_rs_index::runtime::DerivedIndexLifecycle::ShutdownAbandoned,
         ));
         worker.poison_namespace();
         worker.detach();
         Err(IndexWorkerError::JoinDeadlineExceeded)
     }
 
-    pub(super) fn status(&self) -> Arc<dyn bitcoin_rs_projection::DerivedIndexCapabilitySource> {
+    pub(super) fn status(&self) -> Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> {
         self.status.clone()
     }
 
     pub(super) fn adapter(
         &self,
-    ) -> Option<&Arc<bitcoin_rs_projection::runtime::DerivedIndexQueryAdapter>> {
+    ) -> Option<&Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>> {
         self.enabled.as_ref().map(|enabled| &enabled.adapter)
     }
 
@@ -181,7 +181,7 @@ impl DerivedIndexHost {
         self.enabled.as_ref().is_some_and(|enabled| {
             matches!(
                 &**enabled.lifecycle.load(),
-                bitcoin_rs_projection::runtime::DerivedIndexLifecycle::Opening
+                bitcoin_rs_index::runtime::DerivedIndexLifecycle::Opening
             )
         })
     }
@@ -191,8 +191,8 @@ impl DerivedIndexHost {
         self.enabled.as_ref().is_some_and(|enabled| {
             matches!(
                 &**enabled.lifecycle.load(),
-                bitcoin_rs_projection::runtime::DerivedIndexLifecycle::Failed(_)
-                    | bitcoin_rs_projection::runtime::DerivedIndexLifecycle::ShutdownAbandoned
+                bitcoin_rs_index::runtime::DerivedIndexLifecycle::Failed(_)
+                    | bitcoin_rs_index::runtime::DerivedIndexLifecycle::ShutdownAbandoned
             )
         })
     }
