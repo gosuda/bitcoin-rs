@@ -36,7 +36,7 @@ job set.
 
 ## Pull-request verification
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs for pull requests
+[`.latchkey/workflows/ci.yml`](.latchkey/workflows/ci.yml) runs for pull requests
 against any base branch (including stacked PRs), on merge-group requests, and
 for pushes to `main`. PR green is fast feedback only: `fmt`, `deny`,
 `contracts`, `clippy`, and `test-crates` passed while `book`, `test-binary`,
@@ -96,10 +96,10 @@ The merge queue enforces the integration contract on the latest combined ref
   (<3 min).
 - **Merge-group green (`merge_group`)**: Pre-main integration eligibility.
   `ci-gate` strictly requires `book`, `test-binary`, and `test-workspace`;
-  [`ci-merge-gate.yml`](.github/workflows/ci-merge-gate.yml) strictly requires
+  [`deep.yml`](.latchkey/workflows/deep.yml) strictly requires
   `kernel-consensus` and `full-node-compile`.
 - **Main green (`push`)**: Post-merge historical evidence. Runs extended
-  campaigns and reference verifications in [`main.yml`](.github/workflows/main.yml).
+  campaigns and reference verifications in [`deep.yml`](.latchkey/workflows/deep.yml).
 
 Required status checks in repository branch rulesets (`ci-gate`,
 `kernel-consensus`, `full-node-compile`) enforce this boundary, guaranteeing
@@ -108,15 +108,15 @@ current base before `main` moves forward.
 
 ## Post-merge CI lanes
 
-[`.github/workflows/main.yml`](.github/workflows/main.yml) runs kernel-enabled
+[`.latchkey/workflows/deep.yml`](.latchkey/workflows/deep.yml) runs kernel-enabled
 tests and the main-only verification lanes. It triggers on pushes to `main` and
 on manual dispatch. The lanes are bench smoke, native-script evidence, the
 kernel oracle, and Core differential. Bench smoke
 includes the witness-activation kernel regression and the SegWit-v0 kernel
 oracle.
 Pull-request-triggered checks are defined in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) and the path-scoped
-[`fuzz-build.yml`](.github/workflows/fuzz-build.yml).
+[`.latchkey/workflows/ci.yml`](.latchkey/workflows/ci.yml) and the path-scoped
+[`ci.yml`](.latchkey/workflows/ci.yml).
 
 ### Full-node feature set
 
@@ -167,7 +167,7 @@ cargo install cargo-fuzz
 cargo +nightly fuzz run block_validate --target x86_64-unknown-linux-gnu -- -runs=10000
 ```
 
-[`fuzz-build.yml`](.github/workflows/fuzz-build.yml) compiles every fuzz
+[`ci.yml`](.latchkey/workflows/ci.yml) compiles every fuzz
 target on `fuzz/**` pull requests; the scheduled campaign is defined in
 [`.github/workflows/daily-fuzz.yml`](.github/workflows/daily-fuzz.yml). See
 [`fuzz/README.md`](fuzz/README.md) for local fuzzing, the
@@ -194,7 +194,7 @@ Each lane also runs `cargo deny check bans` against the mutated lockfile.
 Optional native storage backends are owned by the named feature matrix, not
 this script.
 CI runs these endpoints in the scheduled/manual
-[`compatibility-campaign.yml`](.github/workflows/compatibility-campaign.yml).
+[`scheduled.yml`](.latchkey/workflows/scheduled.yml).
 
 ### Bitcoin Core differential
 
@@ -220,7 +220,7 @@ scripts/check-feature-matrix.sh pure   # kernel-free and C++-engine-free crate r
 ```
 
 CI runs the matrix and the MSRV gate in the scheduled/manual
-[`compatibility-campaign.yml`](.github/workflows/compatibility-campaign.yml).
+[`scheduled.yml`](.latchkey/workflows/scheduled.yml).
 
 ## Architecture and contribution scope
 
