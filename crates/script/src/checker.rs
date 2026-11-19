@@ -232,11 +232,7 @@ impl<'a> TxSignatureChecker<'a> {
             Some(inp) => inp,
             None => return false,
         };
-        if input.sequence.to_consensus() == SEQUENCE_FINAL {
-            return false;
-        }
-
-        true
+        input.sequence.to_consensus() != SEQUENCE_FINAL
     }
 
     #[must_use]
@@ -265,11 +261,7 @@ impl<'a> TxSignatureChecker<'a> {
             return false;
         }
 
-        if seq_masked > tx_masked {
-            return false;
-        }
-
-        true
+        seq_masked <= tx_masked
     }
 }
 
@@ -371,11 +363,7 @@ fn is_valid_der_encoding(sig: &[u8]) -> bool {
     if sig[len_r + 6] & 0x80 != 0 {
         return false;
     }
-    if len_s > 1 && sig[len_r + 6] == 0x00 && sig[len_r + 7] & 0x80 == 0 {
-        return false;
-    }
-
-    true
+    !(len_s > 1 && sig[len_r + 6] == 0x00 && sig[len_r + 7] & 0x80 == 0)
 }
 
 fn is_low_der_signature(sig: &[u8]) -> bool {
