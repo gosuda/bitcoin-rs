@@ -227,6 +227,7 @@ fn rebuild_index_empty_txindex_follows_detected_chainstate_engine() -> TestResul
 
     let output = rebuild(&datadir)?;
     let report = parse_rebuild_report(&output)?;
+    assert_eq!(report.engine, "rocksdb");
     assert_eq!(report.format_version, 10);
     let store = RocksDbStore::open(datadir.join("txindex"))?;
     let marker = store

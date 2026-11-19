@@ -240,6 +240,7 @@ dependencies = [
  "bitcoin-rs-storage",
  "bytemuck",
  "hashbrown",
+ "log",
  "metrics",
  "parking_lot 0.13.0",
  "sha2",
