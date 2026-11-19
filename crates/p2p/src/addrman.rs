@@ -644,7 +644,7 @@ impl Manager {
             return false;
         }
         let final_pending = old.new_buckets.len() == 1 && self.pending.contains_key(&old.endpoint);
-        !(final_pending || !(old.terrible(now) || old.new_buckets.len() > 1 && refs == 0))
+        !final_pending && (old.terrible(now) || old.new_buckets.len() > 1 && refs == 0)
     }
 
     fn get_or_insert_entry(

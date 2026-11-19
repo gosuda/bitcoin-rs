@@ -313,13 +313,14 @@ class ModelEvidenceTests(unittest.TestCase):
         self.write_tool(body)
         record = self.run_check(timeout=1)
         self.assertEqual(record["evidence_rc"], 14)
-        pid_file = next(self.root.glob("target/apalache/**/descendant.pid"))
-        descendant = int(pid_file.read_text())
-        try:
-            stat = Path(f"/proc/{descendant}/stat").read_text(encoding="ascii")
-        except (ProcessLookupError, FileNotFoundError):
-            stat = None
-        if stat is not None:
+        pid_files = sorted(self.root.glob("target/apalache/**/descendant.pid"))
+        self.assertEqual(len(pid_files), 4)
+        for pid_file in pid_files:
+            descendant = int(pid_file.read_text())
+            try:
+                stat = Path(f"/proc/{descendant}/stat").read_text(encoding="ascii")
+            except (ProcessLookupError, FileNotFoundError):
+                continue
             state = stat[stat.rfind(")") + 1:].split(maxsplit=1)[0]
             self.assertEqual(state, "Z")
         results = self.results()
