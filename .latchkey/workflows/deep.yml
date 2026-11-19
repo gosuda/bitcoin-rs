@@ -1,0 +1,128 @@
+name: Deep
+
+# Merge-queue and main-only lanes (replaces the heavy lanes of ci.yml, ci-merge-gate.yml and main.yml).
+# merge_group: tests, book and the kernel merge gate. main pushes / manual runs: everything.
+on:
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+latchkey:
+  schema: 1
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  RUST_BACKTRACE: "1"
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+  BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
+
+jobs:
+  tests:
+    runs-on: medium
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        lane: [test-binary, test-workspace]
+    steps:
+      - run: bash .latchkey/setup.sh apt nextest corpus
+      - uses: latchkey/cache-restore@1.1.0
+        with:
+          key: "deep-${{ matrix.lane }}"
+          version: v1
+          hash-files: Cargo.lock rust-toolchain.toml
+      - run: bash scripts/provision-ci-reference-fixtures.sh core
+      - run: ./scripts/ci-pr.sh ${{ matrix.lane }}
+      - uses: latchkey/cache-save@1.1.0
+        with:
+          key: "deep-${{ matrix.lane }}"
+          version: v1
+          hash-files: Cargo.lock rust-toolchain.toml
+          path: target
+
+  book:
+    runs-on: small
+    timeout-minutes: 15
+    steps:
+      - run: bash .latchkey/setup.sh mdbook
+      - run: ./scripts/ci-pr.sh book
+
+  # Kernel/C++ lanes share one build tree. Clippy is the merge gate; main adds the full test runs.
+  kernel:
+    runs-on: large
+    timeout-minutes: 120
+    steps:
+      - run: bash .latchkey/setup.sh apt nextest corpus
+      - uses: latchkey/cache-restore@1.1.0
+        with:
+          key: deep-kernel
+          version: v1
+          hash-files: Cargo.lock rust-toolchain.toml
+      - name: Consensus kernel clippy
+        run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets --features kernel -- -D warnings
+      - name: Full-node kernel clippy
+        run: cargo clippy --locked -p bitcoin-rs --all-targets --no-default-features --features kernel -- -D warnings
+      - name: Kernel oracle parity tests (merge gate)
+        if: env.LATCHKEY_CI_EVENT_CLASS == 'merge_group'
+        run: |
+          cargo test --locked -p bitcoin-rs-consensus --features kernel --lib
+          cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- shared_sighash:: overhaul_parse_parity:: kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: core_vectors::
+      - name: Kernel consensus tests incl. ignored vectors (main)
+        if: always() && (env.LATCHKEY_CI_EVENT_CLASS == 'branch_push' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch')
+        run: cargo test --locked -p bitcoin-rs-consensus --features kernel --no-fail-fast -- --include-ignored
+      - name: Node kernel clippy (main)
+        if: always() && (env.LATCHKEY_CI_EVENT_CLASS == 'branch_push' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch')
+        run: cargo clippy --locked -p bitcoin-rs-node --all-targets --features kernel -- -D warnings
+      - name: Full-node binary tests (main)
+        if: always() && (env.LATCHKEY_CI_EVENT_CLASS == 'branch_push' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch')
+        run: |
+          bash scripts/provision-ci-reference-fixtures.sh core
+          cargo nextest run --locked --no-fail-fast -p bitcoin-rs --no-default-features --features kernel
+      - uses: latchkey/cache-save@1.1.0
+        with:
+          key: deep-kernel
+          version: v1
+          hash-files: Cargo.lock rust-toolchain.toml
+          path: target
+
+  # main-only lanes pinned to Rust 1.99.0 (the old bench-smoke, native-script and core-differential jobs).
+  pinned:
+    if: env.LATCHKEY_CI_EVENT_CLASS == 'branch_push' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch'
+    runs-on: large
+    timeout-minutes: 90
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
+    strategy:
+      matrix:
+        lane: [script, core-differential]
+    steps:
+      - run: bash .latchkey/setup.sh apt msrv
+      - uses: latchkey/cache-restore@1.1.0
+        with:
+          key: "pinned-${{ matrix.lane }}"
+          version: v1
+          hash-files: Cargo.lock rust-toolchain.toml
+      - name: Native script tests and clippy
+        if: matrix.lane == 'script'
+        run: |
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --no-fail-fast
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings
+      - name: Kernel script regressions and clippy
+        if: matrix.lane == 'script'
+        run: |
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --features kernel --test suite -- witness_sigop_activation:: validation_engine:: segwit_v0_sighash_edges:: core_vectors::
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --features kernel --test suite -- -D warnings
+      - name: Core vs bitcoin-rs differential
+        if: matrix.lane == 'core-differential'
+        run: |
+          bitcoind="$(scripts/install-bitcoind.sh --print-path)"
+          cargo build --locked -p bitcoin-rs --profile quickstart --no-default-features --features zmq
+          scripts/run-p2p-core-interop.sh --bitcoind-command "$bitcoind" --bitcoin-rs-command target/quickstart/bitcoin-rs --workdir "$PWD/target/core-differential/run" --evidence "$PWD/target/core-differential/evidence.json"
+      - uses: latchkey/cache-save@1.1.0
+        with:
+          key: "pinned-${{ matrix.lane }}"
+          version: v1
+          hash-files: Cargo.lock rust-toolchain.toml
+          path: target
