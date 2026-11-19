@@ -97,7 +97,8 @@ The merge queue enforces the integration contract on the latest combined ref
 - **Merge-group green (`merge_group`)**: Pre-main integration eligibility.
   `ci-gate` strictly requires `book`, `test-binary`, and `test-workspace`;
   [`deep.yml`](.latchkey/workflows/deep.yml) strictly requires
-  `kernel-consensus` and `full-node-compile`.
+  the `kernel` job (consensus kernel clippy with kernel-oracle
+  parity, plus full-node kernel clippy).
 - **Main green (`push`)**: Post-merge historical evidence. Runs extended
   campaigns and reference verifications in [`deep.yml`](.latchkey/workflows/deep.yml).
 
@@ -115,8 +116,8 @@ kernel oracle, and Core differential. Bench smoke
 includes the witness-activation kernel regression and the SegWit-v0 kernel
 oracle.
 Pull-request-triggered checks are defined in
-[`.latchkey/workflows/ci.yml`](.latchkey/workflows/ci.yml) and the path-scoped
-[`ci.yml`](.latchkey/workflows/ci.yml).
+[`.latchkey/workflows/ci.yml`](.latchkey/workflows/ci.yml), whose `fuzz`
+and `template-provider` jobs run only when their own paths change.
 
 ### Full-node feature set
 
