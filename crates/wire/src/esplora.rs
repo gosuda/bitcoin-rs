@@ -2520,7 +2520,7 @@ mod tests {
             tip.height + 1,
             "the extension adds exactly one block"
         );
-        context.chain.applied_tip.store(Some(tip));
+        context.chain.applied_tip.store(Some(Arc::clone(&tip)));
         let spend = paying_transaction(&[unconfirmed_outpoint(7)], &[(1_000, vec![0x51])]);
         context
             .mempool
@@ -2562,7 +2562,7 @@ mod tests {
             }
         });
         let entered = entered_recv.recv_timeout(GATE_TIMEOUT);
-        ctx.chain.applied_tip.store(Some(extended));
+        ctx.chain.applied_tip.store(Some(Arc::clone(&extended)));
         let _ = release_send.send(());
         let response = request.join().map_err(|_| "route thread failed")?;
         assert_eq!(
@@ -2571,9 +2571,41 @@ mod tests {
         );
         assert_eq!(response.body, stable_body);
         entered.map_err(|_| "request never reached summary encoding")?;
+        let mut next = Arc::clone(&tip);
         for path in ["/mempool/txids", "/mempool/recent", "/fee-estimates"] {
-            let reread = route(&handler, path, "");
-            assert_eq!(reread.status, 200, "unfenced route {path}");
+            let stable = route(&handler, path, "");
+            assert_eq!(
+                stable.status, 200,
+                "unfenced route {path} is 200 before the tip advances"
+            );
+            let (entered_send, entered_recv) = channel();
+            let (release_send, release_recv) = channel();
+            let request = std::thread::spawn({
+                let ctx = Arc::clone(&ctx);
+                move || {
+                    arm_mempool_read_gate(entered_send, release_recv);
+                    let handler = Handler::new(ctx);
+                    route(&handler, path, "")
+                }
+            });
+            let entered = entered_recv.recv_timeout(GATE_TIMEOUT);
+            ctx.chain.applied_tip.store(Some(Arc::clone(&next)));
+            next = if next.hash == tip.hash {
+                Arc::clone(&extended)
+            } else {
+                Arc::clone(&tip)
+            };
+            let _ = release_send.send(());
+            let response = request.join().map_err(|_| "route thread failed")?;
+            assert_eq!(
+                response.status, 200,
+                "a pure mempool read must not observe the applied-tip publication ({path})"
+            );
+            assert_eq!(
+                response.body, stable.body,
+                "unfenced route {path} keeps its body"
+            );
+            entered.map_err(|_| "request never reached mempool encoding")?;
         }
         let txids: Value = sonic_rs::from_slice(&route(&handler, "/mempool/txids", "").body)?;
         assert_eq!(txids.as_array().map(|ids| ids.len()), Some(1));
@@ -4932,6 +4964,8 @@ mod tests {
         static MEMPOOL_ACTIVITY_GATE: RefCell<Option<(Sender<()>, Receiver<()>)>> =
             const { RefCell::new(None) };
         static ROUTE_GATE: RefCell<Option<(Sender<()>, Receiver<()>)>> = const { RefCell::new(None) };
+        static MEMPOOL_READ_GATE: RefCell<Option<(Sender<()>, Receiver<()>)>> =
+            const { RefCell::new(None) };
     }
 
     const GATE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -4980,6 +5014,18 @@ mod tests {
 
     pub(crate) fn gate_route_for_tests() {
         let armed = ROUTE_GATE.with(|slot| slot.borrow_mut().take());
+        let Some((entered, release)) = armed else {
+            return;
+        };
+        let _ = entered.send(());
+        let _ = release.recv_timeout(GATE_TIMEOUT);
+    }
+    fn arm_mempool_read_gate(entered: Sender<()>, release: Receiver<()>) {
+        MEMPOOL_READ_GATE.with(|slot| *slot.borrow_mut() = Some((entered, release)));
+    }
+
+    pub(crate) fn gate_pure_mempool_read_for_tests() {
+        let armed = MEMPOOL_READ_GATE.with(|slot| slot.borrow_mut().take());
         let Some((entered, release)) = armed else {
             return;
         };
