@@ -322,9 +322,10 @@ class ModelEvidenceTests(unittest.TestCase):
         if stat is not None:
             state = stat[stat.rfind(")") + 1:].split(maxsplit=1)[0]
             self.assertEqual(state, "Z")
-        result = next(self.root.glob("target/apalache/**/result.json"))
-        self.assertEqual(json.loads(result.read_text()),
-                         {"k": 128, "native_rc": None, "evidence_rc": 14})
+        results = self.results()
+        self.assertEqual(sorted(result["k"] for result in results), [16, 32, 64, 128])
+        initial = [result for result in results if result["k"] == 128]
+        self.assertEqual(initial, [{"k": 128, "native_rc": None, "evidence_rc": 14}])
 
     def test_parallel_execution_preserves_summary_order_and_worst_code_selection(self) -> None:
         expected_summary = {
