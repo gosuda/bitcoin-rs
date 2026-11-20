@@ -14,6 +14,8 @@
 
 The [mdBook handbook](https://bitcoin-rs.org) is the chapter-by-chapter guide to running, embedding, and verifying the node; build it with `mdbook build docs/book`.
 
+[![Built with Depot](https://depot.dev/badges/built-with-depot.svg)](https://depot.dev?utm_source=Mealie)
+
 ---
 
 ## What is this
