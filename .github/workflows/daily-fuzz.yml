@@ -31,7 +31,7 @@ env:
 jobs:
   fuzz-matrix:
     name: Discover fuzz targets
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     outputs:
       targets: ${{ steps.targets.outputs.targets }}
     steps:
@@ -58,7 +58,7 @@ jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
     needs: fuzz-matrix
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -112,7 +112,7 @@ jobs:
     name: Publish corpus
     needs: fuzz
     if: ${{ always() && !cancelled() && needs.fuzz.result == 'success' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Download campaign outputs
