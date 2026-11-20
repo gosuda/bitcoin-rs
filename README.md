@@ -2,7 +2,7 @@
   <img src="logo.png" alt="bitcoin-rs logo" width="320">
 </p>
 
-[![Built with Depot](https://depot.dev/badges/built-with-depot.svg)](https://depot.dev?utm_source=Mealie)
+[![Built with Depot](https://depot.dev/badges/built-with-depot.svg)](https://depot.dev?utm_source=gosuda)
 
 # bitcoin-rs
 
