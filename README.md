@@ -2,6 +2,8 @@
   <img src="logo.png" alt="bitcoin-rs logo" width="320">
 </p>
 
+[![Built with Depot](https://depot.dev/badges/built-with-depot.svg)](https://depot.dev?utm_source=Mealie)
+
 # bitcoin-rs
 
 **Build on Bitcoin. Inside Rust.**
@@ -13,8 +15,6 @@
 [Limitations](#compatibility-and-limitations)
 
 The [mdBook handbook](https://bitcoin-rs.org) is the chapter-by-chapter guide to running, embedding, and verifying the node; build it with `mdbook build docs/book`.
-
-[![Built with Depot](https://depot.dev/badges/built-with-depot.svg)](https://depot.dev?utm_source=Mealie)
 
 ---
 
