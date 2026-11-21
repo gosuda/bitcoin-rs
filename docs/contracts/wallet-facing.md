@@ -61,13 +61,13 @@ Wallet keys, coin selection, and signing stay in the external process.
 - The ordered selection and its borrowed parent lookup retain the captured transaction Arcs for that page.
 - The prevout working set is bounded by one page's inputs.
 - Backend POST transaction and outspend requests accept at most 25 entries, including duplicates.
-- Backend transaction POST retains at most 16 MiB of distinct source transactions.
+- Backend transaction POST counts the serialized size of each distinct source transaction once. The sum MUST fit in 16 MiB.
 - Transaction POST requests resolve and render each distinct transaction once.
-- Each transaction projection can reuse all selected request transactions as parents.
+- A batch resolves each referenced parent once and retains only the required outputs. Backend prevout storage has a separate 16 MiB budget.
 - Duplicate transaction rows reuse the first bounded serialization and keep their requested order.
 - Backend bulk response assembly retains at most 16 MiB and returns 503 before it exceeds that limit.
-- All backend bulk routes use the node-wide expensive-query admission limit.
-- Request size, row ordering, duplicates, and omitted missing IDs keep existing semantics.
+- Each backend bulk HTTP request holds one node-wide expensive-query slot until the response write completes or fails.
+- Transaction batches preserve request order and duplicate rows. They omit missing IDs.
 - Transactions already selected through the mempool or verified index queries may supply those outputs.
 - A decoded block may supply those outputs only when all conditions hold:
   - Its header identity matches the requested record.
@@ -84,6 +84,9 @@ Wallet keys, coin selection, and signing stay in the external process.
   - `backend_mempool_get_keeps_captured_parents_within_a_page`
   - `backend_transaction_batches_share_duplicate_bodies_and_preserve_rows`
   - `backend_bulk_routes_share_expensive_admission`
+  - `esplora::backend::pagination_tests::bulk_request_count_includes_duplicate_entries`
+  - `esplora::backend::pagination_tests::bounded_json_reuses_rows_and_refuses_oversized_output`
+  - `esplora::backend::pagination_tests::transaction_batch_charges_only_distinct_source_bytes` checks source accounting at a reduced budget.
   - `crates/wire/src/esplora.rs` tests:
     - `history_resolves_shared_parents_once_per_page`
     - `batch_reuses_selected_transactions_and_mempool_parents`
@@ -91,7 +94,6 @@ Wallet keys, coin selection, and signing stay in the external process.
     - `block_transactions_reject_corrupt_witness_commitments`
     - `block_witness_binding_observes_activation`
     - `block_parent_reuse_checks_readiness_only_when_needed`
-    - `backend_transaction_batches_share_duplicate_bodies_and_preserve_rows`
     - `parent_query_errors_and_republication_never_yield_a_cached_success`
 - Routes:
   - Chain tip: `GET /blocks/tip/height`, `GET /blocks/tip/hash`.

@@ -360,9 +360,9 @@ wallet interoperability remain unverified.
 - Backend mempool GET returns at most 25 transactions and uses 25 when `max_txs` is absent.
 - An invalid `max_txs` or a value above 25 returns 400; a cursor selects the next page.
 - Each backend bulk POST accepts at most 25 entries, including duplicate entries, and returns 400 above that limit.
-- Backend transaction POST retains at most 16 MiB of distinct source transactions and returns 503 above that limit.
+- Backend transaction POST returns 503 when the serialized size of the distinct source transactions exceeds 16 MiB.
 - Backend bulk response assembly stops at 16 MiB and returns 503 without sending a partial JSON array.
-- All backend bulk routes use the node-wide expensive-query admission limit.
+- Backend bulk routes hold node-wide expensive-query admission through the HTTP response write.
 - History reads use bounded pages and cursors preserving public Esplora cursor semantics.
 - Cursors are the exact lowercase `txid` display text.
 - Malformed, noncanonical (including uppercase or prefixed), unknown, and missing cursors restart from the beginning.
@@ -791,7 +791,7 @@ wallet interoperability remain unverified.
 - Address and scripthash summaries, UTXOs, and transaction histories (including summary/mempool and chain pages) reserve one of `esplora_max_queries` slots before capturing the chain view or querying indexes.
 - The positive limit defaults to 2 and is independent of connection and JSON-RPC blocking admission.
 - Exhaustion returns HTTP 503 `expensive Esplora query limit reached` without queuing or index/body work.
-- Permits release after projection and generation checks on success or failure.
+- Script-query permits release after projection and generation checks. Backend bulk permits release when the HTTP response write completes or fails.
 - Cheap tip and status routes are exempt.
 - Per-query budgets and HTTP 422 script-limit errors remain unchanged.
 - Fixed-name active, rejected, and execution-latency metrics have no user-input labels.
