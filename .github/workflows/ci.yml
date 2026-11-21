@@ -96,3 +96,19 @@ jobs:
         run: |
           L=${{ matrix.lane }}
           case "$L" in clippy-*) ./scripts/ci-pr.sh clippy "${L#*-}" ;; *) ./scripts/ci-pr.sh test-crates "${L#*-}" ;; esac
+
+  ci-gate:
+    needs: [lint, fuzz, template-provider, lane]
+    if: always()
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the gate jobs
+        run: |
+          set -euo pipefail
+          echo "lint=${{ needs.lint.result }} fuzz=${{ needs.fuzz.result }} template-provider=${{ needs.template-provider.result }} lane=${{ needs.lane.result }}"
+          [ "${{ needs.lint.result }}" = "success" ]
+          [ "${{ needs.lane.result }}" = "success" ]
+          for result in "${{ needs.fuzz.result }}" "${{ needs.template-provider.result }}"; do
+            [ "$result" = "success" ] || [ "$result" = "skipped" ] || exit 1
+          done
