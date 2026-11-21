@@ -12,18 +12,20 @@ on:
         options: [compat, overlay]
         default: compat
 
-latchkey:
-  schema: 1
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  LATCHKEY_CI_EVENT_CLASS: ${{ github.event_name == 'schedule' && 'schedule' || 'workflow_dispatch' }}
+  LATCHKEY_INPUT_LANE: ${{ inputs.lane }}
 
 jobs:
   dependency-range:
-    if: env.LATCHKEY_CI_EVENT_CLASS == 'schedule' || env.LATCHKEY_INPUT_LANE == 'compat'
-    runs-on: large
+    if: github.event_name == 'schedule' || inputs.lane == 'compat'
+    runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 120
     env:
       RUSTUP_TOOLCHAIN: "1.99.0"
@@ -32,18 +34,24 @@ jobs:
       matrix:
         range: [minimal, maximum]
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: bash .latchkey/setup.sh apt msrv nightly deny
       - run: KEEP_LOCK=1 scripts/check-dep-range.sh ${{ matrix.range }}
 
   features:
-    if: env.LATCHKEY_CI_EVENT_CLASS == 'schedule' || env.LATCHKEY_INPUT_LANE == 'compat'
-    runs-on: large
+    if: github.event_name == 'schedule' || inputs.lane == 'compat'
+    runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         lane: [pure, native]
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - if: matrix.lane == 'native'
         run: bash .latchkey/setup.sh apt
       - run: scripts/check-feature-matrix.sh ${{ matrix.lane }}
@@ -53,12 +61,15 @@ jobs:
           cargo test --locked -p bitcoin-rs-consensus --features usdt --test sdt_notes
 
   msrv:
-    if: env.LATCHKEY_CI_EVENT_CLASS == 'schedule' || env.LATCHKEY_INPUT_LANE == 'compat'
-    runs-on: large
+    if: github.event_name == 'schedule' || inputs.lane == 'compat'
+    runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 90
     env:
       RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: bash .latchkey/setup.sh apt msrv
       - name: Workspace default targets
         run: cargo check --locked --workspace --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
@@ -70,10 +81,13 @@ jobs:
         run: cargo check --locked -p bitcoin-rs-node --no-default-features --features zmq
 
   overlay:
-    if: env.LATCHKEY_INPUT_LANE == 'overlay'
-    runs-on: medium
+    if: inputs.lane == 'overlay'
+    runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 45
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install external backends
         run: |
           bash .latchkey/setup.sh apt

@@ -1,0 +1,6 @@
+self-hosted-runner:
+  # Depot-hosted runners (depot.run).
+  labels:
+    - depot-ubuntu-24.04
+    - depot-ubuntu-24.04-4
+    - depot-ubuntu-24.04-8

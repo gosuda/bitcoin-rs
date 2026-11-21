@@ -31,7 +31,7 @@ env:
 jobs:
   fuzz-matrix:
     name: Discover fuzz targets
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     outputs:
       targets: ${{ steps.targets.outputs.targets }}
     steps:
@@ -58,7 +58,7 @@ jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
     needs: fuzz-matrix
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -78,10 +78,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-        with:
-          workspaces: fuzz -> target
-          shared-key: daily-fuzz-${{ matrix.target }}
       - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # cargo-fuzz
         with:
           tool: cargo-fuzz@0.13.2
@@ -111,8 +107,8 @@ jobs:
   publish-corpus:
     name: Publish corpus
     needs: fuzz
-    if: ${{ always() && !cancelled() && needs.fuzz.result == 'success' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
+    if: ${{ always() && !cancelled() && needs.fuzz.result == 'success' && github.ref == 'refs/heads/dev' }}
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Download campaign outputs
@@ -202,11 +198,6 @@ jobs:
           printf 'Updated targets: %s\n' "${changed_targets[*]}" >> "${GITHUB_STEP_SUMMARY}"
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         if: steps.apply.outputs.changed == 'true'
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-        if: steps.apply.outputs.changed == 'true'
-        with:
-          workspaces: policy-owner
-          cache-on-failure: true
       - uses: ./policy-owner/.github/actions/test-deps
         if: steps.apply.outputs.changed == 'true'
       - name: Regenerate pinned decoder verdicts
