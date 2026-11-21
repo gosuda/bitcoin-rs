@@ -2,8 +2,8 @@
 set -euo pipefail
 
 if [ "$1" = changed ]; then
-  [ "${LATCHKEY_CI_EVENT_CLASS:-}" = pr_update ] || exit 0
-  git fetch -q --depth=1 origin "$LATCHKEY_CI_BASE_REF" || exit 2
+  [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || exit 0
+  git fetch -q --depth=1 origin "$GITHUB_BASE_REF" || exit 2
   git diff --name-only FETCH_HEAD HEAD > /tmp/changed.txt || exit 2
   grep -Eq "$2" /tmp/changed.txt
   exit
