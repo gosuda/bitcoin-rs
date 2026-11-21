@@ -95,22 +95,27 @@ The merge queue enforces the integration contract on the latest combined ref
   `test-workspace`, and kernel/native checks are skipped to keep feedback fast
   (<3 min).
 - **Merge-group green (`merge_group`)**: Pre-dev integration eligibility.
-  `ci-gate` strictly requires `book`, `test-binary`, and `test-workspace`;
-  [`deep.yml`](.github/workflows/deep.yml) strictly requires
-  the `kernel` job (consensus kernel clippy with kernel-oracle
-  parity, plus full-node kernel clippy).
-- **Dev green (`push`)**: Post-merge historical evidence. Runs extended
-  campaigns and reference verifications in [`deep.yml`](.github/workflows/deep.yml).
+  `deep-gate` in [`deep.yml`](.github/workflows/deep.yml) requires the
+  `tests` matrix (`test-binary`, `test-workspace`), `book`, and `kernel`
+  (consensus kernel clippy with kernel-oracle parity, plus full-node
+  kernel clippy); `ci-gate` keeps requiring the PR lane.
+- **Main green (`push`)**: Post-merge historical evidence. Pushes to `main`
+  run the extended campaigns and reference verifications in
+  [`deep.yml`](.github/workflows/deep.yml).
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) publishes the `ci-gate`
 aggregate job: it needs `lint`, `fuzz`, `template-provider`, and `lane`, fails
 unless `lint` and `lane` succeed, and accepts `fuzz` and `template-provider`
 as `success` or `skipped` because both are path-gated on pull requests.
 
-Required status checks in repository branch rulesets (`ci-gate`,
-`kernel`) enforce this boundary, guaranteeing
-that heavy integration and production compilation checks have passed on the
-current base before `dev` moves forward.
+[`.github/workflows/deep.yml`](.github/workflows/deep.yml) publishes the
+`deep-gate` aggregate job: it needs `tests`, `book`, `kernel`, and `pinned`,
+requires the first three to succeed, and accepts `pinned` as `success` or
+`skipped` because it is event-gated.
+
+The repository rulesets do not currently require these gates by name; wiring
+`ci-gate`, `deep-gate`, and `kernel` into the rulesets is the remaining
+owner step before the merge queue enforces this boundary mechanically.
 
 ## Post-merge CI lanes
 
