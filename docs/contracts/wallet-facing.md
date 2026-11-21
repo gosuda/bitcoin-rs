@@ -63,7 +63,8 @@ Wallet keys, coin selection, and signing stay in the external process.
 - Backend POST transaction and outspend requests accept at most 25 entries, including duplicates.
 - Backend transaction POST counts the serialized size of each distinct source transaction once. The sum MUST fit in 16 MiB.
 - Transaction POST requests resolve and render each distinct transaction once.
-- A batch resolves each referenced parent once and retains only the required outputs. Backend prevout storage has a separate 16 MiB budget.
+- A batch resolves each referenced parent once and retains only the required outputs.
+- All Esplora transaction projections use a separate 16 MiB budget for previous outputs. It covers input slots before duplicate removal and the script bytes of the referenced outputs.
 - Duplicate transaction rows reuse the first bounded serialization and keep their requested order.
 - Backend bulk response assembly retains at most 16 MiB and returns 503 before it exceeds that limit.
 - Each backend bulk HTTP request holds one node-wide expensive-query slot until the response write completes or fails.
@@ -86,6 +87,7 @@ Wallet keys, coin selection, and signing stay in the external process.
   - `backend_bulk_routes_share_expensive_admission`
   - `esplora::backend::pagination_tests::bulk_request_count_includes_duplicate_entries`
   - `esplora::backend::pagination_tests::bounded_json_reuses_rows_and_refuses_oversized_output`
+  - `esplora::projection::tests::prevout_budget_includes_duplicate_input_slots_and_referenced_scripts`
   - `esplora::backend::pagination_tests::transaction_batch_charges_only_distinct_source_bytes` checks source accounting at a reduced budget.
   - `crates/wire/src/esplora.rs` tests:
     - `history_resolves_shared_parents_once_per_page`

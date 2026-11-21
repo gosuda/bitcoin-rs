@@ -499,7 +499,6 @@ pub(super) fn block_transaction_values(
         block,
         start..start.saturating_add(limit),
         &view,
-        usize::MAX,
         |value| {
             values.push(value);
             Ok(())
@@ -514,7 +513,6 @@ pub(super) fn visit_block_transactions(
     block: &Block,
     range: core::ops::Range<usize>,
     view: &crate::context::AppliedView,
-    prevout_limit: usize,
     mut emit: impl FnMut(TransactionValue) -> Result<(), Response>,
 ) -> Result<TxSource, Response> {
     let projection = Projection::new(ctx);
@@ -543,12 +541,8 @@ pub(super) fn visit_block_transactions(
                 Ok((tx, state))
             })
             .collect::<Result<Vec<_>, Response>>()?;
-        let chunk_source = projection.visit_transaction_values(
-            transactions,
-            Some(&parents),
-            prevout_limit,
-            &mut emit,
-        )?;
+        let chunk_source =
+            projection.visit_transaction_values(transactions, Some(&parents), &mut emit)?;
         if matches!(chunk_source, TxSource::Joined) {
             source = TxSource::Joined;
         }

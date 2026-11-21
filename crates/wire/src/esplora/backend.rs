@@ -6,6 +6,7 @@ use std::io;
 use bitcoin_rs_consensus::primitives::{OutPoint, Txid};
 use bitcoin_rs_mempool::MempoolEntry;
 
+use super::MAX_BATCH_BYTES;
 use super::http::dispatch_error;
 use super::model::{Outspend, TransactionValue};
 use super::projection::{Projection, TxSource};
@@ -18,7 +19,6 @@ use crate::rest::{bad_request, internal_error, json_ok, service_unavailable, tex
 use sonic_rs::json as sonic_json;
 
 pub(super) const MAX_BACKEND_BULK_ITEMS: usize = 25;
-const MAX_BACKEND_BULK_BYTES: usize = 16 * 1_024 * 1_024;
 
 struct BoundedJsonArray {
     body: Vec<u8>,
@@ -31,7 +31,7 @@ impl BoundedJsonArray {
 
     fn reserve_row_bytes(&mut self, additional: usize) -> bool {
         let required = self.body.len().saturating_add(additional).saturating_add(1);
-        if required > MAX_BACKEND_BULK_BYTES {
+        if required > MAX_BATCH_BYTES {
             return false;
         }
         if required > self.body.capacity() {
@@ -39,7 +39,7 @@ impl BoundedJsonArray {
                 .body
                 .capacity()
                 .saturating_mul(2)
-                .clamp(required, MAX_BACKEND_BULK_BYTES);
+                .clamp(required, MAX_BATCH_BYTES);
             self.body.reserve_exact(capacity - self.body.len());
         }
         true
@@ -151,13 +151,13 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Option<Respons
             ctx.as_ref(),
             body,
             TransactionScope::All,
-            MAX_BACKEND_BULK_BYTES,
+            MAX_BATCH_BYTES,
         )),
         "/internal/mempool/txs" => Some(internal_transactions_scoped(
             ctx.as_ref(),
             body,
             TransactionScope::MempoolOnly,
-            MAX_BACKEND_BULK_BYTES,
+            MAX_BATCH_BYTES,
         )),
         "/internal/txs/outspends/by-txid" => Some(internal_outspends_by_txid(ctx.as_ref(), body)),
         "/internal/txs/outspends/by-outpoint" => {
@@ -182,18 +182,13 @@ fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
         Err(response) => return response,
     };
     let mut output = BoundedJsonArray::new();
-    let source = match visit_block_transactions(
-        ctx,
-        &record,
-        &block,
-        0..block.txs.len(),
-        &view,
-        MAX_BACKEND_BULK_BYTES,
-        |value| output.push(&value).map(|_| ()),
-    ) {
-        Ok(source) => source,
-        Err(response) => return response,
-    };
+    let source =
+        match visit_block_transactions(ctx, &record, &block, 0..block.txs.len(), &view, |value| {
+            output.push(&value).map(|_| ())
+        }) {
+            Ok(source) => source,
+            Err(response) => return response,
+        };
     let response = output.finish();
     if matches!(source, TxSource::Joined) {
         match projection.ensure_chain_view(&view) {
@@ -237,7 +232,6 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
     match projection.visit_transaction_values(
         transactions.iter().map(|(_, _, tx)| (tx.as_ref(), None)),
         None,
-        MAX_BACKEND_BULK_BYTES,
         |value| output.push(&value).map(|_| ()),
     ) {
         Ok(_) => output.finish(),
@@ -360,14 +354,11 @@ fn internal_transactions_scoped(
                 .map(|(transaction, _, _)| (*id, transaction))
         })
         .collect();
-    let prevouts = match projection.resolve_prevouts(
-        parents.values().copied(),
-        &parents,
-        MAX_BACKEND_BULK_BYTES,
-    ) {
-        Ok(prevouts) => prevouts,
-        Err(response) => return response,
-    };
+    let prevouts =
+        match projection.resolve_prevouts(parents.values().copied(), &parents, MAX_BATCH_BYTES) {
+            Ok(prevouts) => prevouts,
+            Err(response) => return response,
+        };
     let mut output = BoundedJsonArray::new();
     let mut rendered = std::collections::HashMap::<Txid, Range<usize>>::new();
     for id in ids {
@@ -547,7 +538,7 @@ mod pagination_tests {
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
     use super::{
-        BoundedJsonArray, MAX_BACKEND_BULK_BYTES, MAX_BACKEND_BULK_ITEMS, bulk_strings,
+        BoundedJsonArray, MAX_BACKEND_BULK_ITEMS, MAX_BATCH_BYTES, bulk_strings,
         internal_mempool_txs, select_mempool_page,
     };
     use crate::context::Context;
@@ -734,7 +725,7 @@ mod pagination_tests {
         let decoded: Vec<String> = sonic_rs::from_slice(&output.finish().body).expect("valid JSON");
         assert_eq!(decoded, [text]);
         let mut output = BoundedJsonArray::new();
-        let oversized = "x".repeat(MAX_BACKEND_BULK_BYTES);
+        let oversized = "x".repeat(MAX_BATCH_BYTES);
         let response = output.push(&oversized).expect_err("oversized response");
         assert_eq!(response.status, 503);
     }

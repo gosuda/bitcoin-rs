@@ -361,6 +361,7 @@ wallet interoperability remain unverified.
 - An invalid `max_txs` or a value above 25 returns 400; a cursor selects the next page.
 - Each backend bulk POST accepts at most 25 entries, including duplicate entries, and returns 400 above that limit.
 - Backend transaction POST returns 503 when the serialized size of the distinct source transactions exceeds 16 MiB.
+- Esplora transaction projections return 503 when their previous-output slots and scripts exceed 16 MiB.
 - Backend bulk response assembly stops at 16 MiB and returns 503 without sending a partial JSON array.
 - Backend bulk routes hold node-wide expensive-query admission through the HTTP response write.
 - History reads use bounded pages and cursors preserving public Esplora cursor semantics.
