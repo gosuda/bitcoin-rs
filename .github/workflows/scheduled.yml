@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: bash .latchkey/setup.sh apt msrv nightly deny
+      - run: bash scripts/ci-setup.sh apt msrv nightly deny
       - run: KEEP_LOCK=1 scripts/check-dep-range.sh ${{ matrix.range }}
 
   features:
@@ -53,7 +53,7 @@ jobs:
         with:
           persist-credentials: false
       - if: matrix.lane == 'native'
-        run: bash .latchkey/setup.sh apt
+        run: bash scripts/ci-setup.sh apt
       - run: scripts/check-feature-matrix.sh ${{ matrix.lane }}
       - if: matrix.lane == 'native'
         run: |
@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: bash .latchkey/setup.sh apt msrv
+      - run: bash scripts/ci-setup.sh apt msrv
       - name: Workspace default targets
         run: cargo check --locked --workspace --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
       - name: Native consensus
@@ -90,7 +90,7 @@ jobs:
           persist-credentials: false
       - name: Install external backends
         run: |
-          bash .latchkey/setup.sh apt
+          bash scripts/ci-setup.sh apt
           sudo apt-get update -qq && sudo apt-get install -y -qq tor golang-go
           git clone -q https://github.com/gosuda/IVNP.git /tmp/ivnp
           git -C /tmp/ivnp checkout "$(python3 scripts/overlay-interop.py --ivnp-revision)"

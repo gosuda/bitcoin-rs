@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: bash .latchkey/setup.sh apt nextest corpus
+      - run: bash scripts/ci-setup.sh apt nextest corpus
       - run: bash scripts/provision-ci-reference-fixtures.sh core
       - run: ./scripts/ci-pr.sh ${{ matrix.lane }}
 
@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: bash .latchkey/setup.sh mdbook
+      - run: bash scripts/ci-setup.sh mdbook
       - run: ./scripts/ci-pr.sh book
 
   # Kernel/C++ lanes share one build tree. Clippy is the merge gate; main adds the full test runs.
@@ -55,9 +55,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: bash .latchkey/setup.sh apt nextest
+      - run: bash scripts/ci-setup.sh apt nextest
       - if: always() && (env.LATCHKEY_CI_EVENT_CLASS == 'branch_push' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch')
-        run: bash .latchkey/setup.sh corpus
+        run: bash scripts/ci-setup.sh corpus
       - name: Consensus kernel clippy
         run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets --features kernel -- -D warnings
       - name: Full-node kernel clippy
@@ -96,7 +96,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: bash .latchkey/setup.sh apt msrv
+      - run: bash scripts/ci-setup.sh apt msrv
       - name: Native script tests and clippy
         if: matrix.lane == 'script'
         run: |
