@@ -18,7 +18,7 @@ use super::model::{
     AddressTransactionSummary, BlockStatus, MempoolSummary, MerkleProof, Outspend,
     RecentTransaction, ScriptSummary, TransactionValue,
 };
-use super::projection::{Confirmation, ParentSource, Projection, TxSource};
+use super::projection::{Confirmation, Projection, TxSource};
 use crate::context::Context;
 use crate::convert;
 use crate::decimal::parse_ascii_decimal;
@@ -492,38 +492,65 @@ pub(super) fn block_transaction_values(
 ) -> Result<(Vec<TransactionValue>, TxSource), Response> {
     let projection = Projection::new(ctx);
     let view = projection.capture_chain_view();
-    let block_status = (ctx.chain.active_hash_in_view(&view, record.height)
+    let mut values = Vec::new();
+    let source = visit_block_transactions(
+        ctx,
+        record,
+        block,
+        start..start.saturating_add(limit),
+        &view,
+        |value| {
+            values.push(value);
+            Ok(())
+        },
+    )?;
+    Ok((values, source))
+}
+
+pub(super) fn visit_block_transactions(
+    ctx: &Context,
+    record: &bitcoin_rs_index::block_log::BlockRecord,
+    block: &Block,
+    range: core::ops::Range<usize>,
+    view: &crate::context::AppliedView,
+    mut emit: impl FnMut(TransactionValue) -> Result<(), Response>,
+) -> Result<TxSource, Response> {
+    let projection = Projection::new(ctx);
+    let block_status = (ctx.chain.active_hash_in_view(view, record.height)
         == Some(Hash256::from(record.hash)))
     .then_some(Confirmation {
         height: record.height,
         hash: record.hash,
         time: record.time,
     });
-    let transactions = block
-        .txs
-        .iter()
-        .skip(start)
-        .take(limit)
-        .map(|tx| {
-            let state = match block_status {
-                Some(state) => Some(state),
-                None => projection.confirmation(&tx.txid())?,
-            };
-            Ok((tx, state))
-        })
-        .collect::<Result<Vec<_>, Response>>()?;
-    let values = projection.transaction_values(
-        transactions,
-        Some(ParentSource::Block(if block_status.is_some() {
-            block.txs.as_slice()
-        } else {
-            &[]
-        })),
-    )?;
-    if block_status.is_none() {
-        projection.ensure_chain_view(&view)?;
+    let selected = &block.txs[range.start.min(block.txs.len())..range.end.min(block.txs.len())];
+    let parents = if block_status.is_some() {
+        projection.block_parents(&block.txs, selected)
+    } else {
+        std::collections::HashMap::new()
+    };
+    let mut source = TxSource::Confirmed;
+    for chunk in selected.chunks(CHAIN_PAGE) {
+        let transactions = chunk
+            .iter()
+            .map(|tx| {
+                let state = match block_status {
+                    Some(state) => Some(state),
+                    None => projection.confirmation(&tx.txid())?,
+                };
+                Ok((tx, state))
+            })
+            .collect::<Result<Vec<_>, Response>>()?;
+        let chunk_source =
+            projection.visit_transaction_values(transactions, Some(&parents), &mut emit)?;
+        if matches!(chunk_source, TxSource::Joined) {
+            source = TxSource::Joined;
+        }
     }
-    Ok(values)
+    if block_status.is_none() {
+        projection.ensure_chain_view(view)?;
+    }
+    Ok(source)
 }
 fn block_txids(ctx: &Context, h: &str) -> Response {
     let projection = Projection::new(ctx);

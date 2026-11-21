@@ -55,15 +55,20 @@ Wallet keys, coin selection, and signing stay in the external process.
 - This rule includes extension, replacement, and ABA republication.
 - Immutable transaction and block-owner reads retain their captured occurrence identity across ordinary extension. Composed history reads remain fenced. Public `/api` mempool-only reads remain unfenced.
 - Proof: `crates/wire/src/esplora.rs` (`composed_history_and_mempool_routes_refuse_reorg_and_aba_publications`) checks the composed fence on extension, replacement, and ABA republication. (`confirmed_transaction_survives_an_ordinary_extension`) checks that an unfenced transaction read keeps its captured occurrence identity when the tip advances mid-read. (`pure_mempool_reads_stay_unfenced_across_ordinary_extension`) checks that pure mempool reads stay 200 when the tip advances mid-read.
-- Transaction rendering resolves a distinct parent at most once per response or bounded backend batch.
-- It retains only referenced outputs until that batch finishes.
-- Backend mempool GETs render at most 25 selected transactions at a time without limiting the response count.
-- The ordered selection and its borrowed parent lookup retain the captured transaction Arcs across batches.
-- Only the prevout working set is bounded by one batch's inputs.
-- Backend POST transaction requests render at most 25 requested IDs at a time.
-- They share duplicate bodies within each batch.
-- Completed batches retain only response rows.
-- Request size, row ordering, duplicates, and omitted missing IDs keep existing semantics.
+- Mempool GET rendering resolves a distinct parent at most once per bounded page.
+- It retains only referenced outputs until that page finishes.
+- Backend mempool GETs return at most 25 selected transactions per cursor page.
+- The ordered selection and its borrowed parent lookup retain the captured transaction Arcs for that page.
+- The prevout working set is bounded by one page's inputs.
+- Backend POST transaction and outspend requests accept at most 25 entries, including duplicates.
+- Backend transaction POST counts the serialized size of each distinct source transaction once. The sum MUST fit in 16 MiB.
+- Transaction POST requests resolve and render each distinct transaction once.
+- A batch resolves each referenced parent once and retains only the required outputs.
+- All Esplora transaction projections use a separate 16 MiB budget for previous outputs. It covers input slots before duplicate removal and the script bytes of the referenced outputs.
+- Duplicate transaction rows reuse the first bounded serialization and keep their requested order.
+- Backend bulk response assembly retains at most 16 MiB and returns 503 before it exceeds that limit.
+- Each backend bulk HTTP request holds one node-wide expensive-query slot until the response write completes or fails.
+- Transaction batches preserve request order and duplicate rows. They omit missing IDs.
 - Transactions already selected through the mempool or verified index queries may supply those outputs.
 - A decoded block may supply those outputs only when all conditions hold:
   - Its header identity matches the requested record.
@@ -71,13 +76,20 @@ Wallet keys, coin selection, and signing stay in the external process.
   - It belongs to the applied chain.
   - The transaction index is healthy and caught up.
 - The readiness snapshot is consulted once only when the batch can reuse an in-block parent.
+- The block lookup contains only parents referenced by the requested rows. A full-block read reuses this lookup across its chunks.
 - Ordinary parent queries enforce their own readiness checks.
 - Losing branch bodies MUST never substitute for authoritative parent history.
 - Missing, pruned, unavailable, and corrupt required data keep their explicit errors.
 - Read-only backend POST batches use the same applied-tip publication fence as composed GET responses.
 - Proof:
-  - `esplora::tests::backend_mempool_get_bounds_prevouts_without_limiting_rows`
-  - `backend_mempool_get_keeps_captured_parents_across_batches`
+  - `esplora::tests::backend_mempool_get_bounds_pages_and_prevouts`
+  - `backend_mempool_get_keeps_captured_parents_within_a_page`
+  - `backend_transaction_batches_share_duplicate_bodies_and_preserve_rows`
+  - `backend_bulk_routes_share_expensive_admission`
+  - `esplora::backend::pagination_tests::bulk_request_count_includes_duplicate_entries`
+  - `esplora::backend::pagination_tests::bounded_json_reuses_rows_and_refuses_oversized_output`
+  - `esplora::projection::tests::prevout_budget_includes_duplicate_input_slots_and_referenced_scripts`
+  - `esplora::backend::pagination_tests::transaction_batch_charges_only_distinct_source_bytes` checks source accounting at a reduced budget.
   - `crates/wire/src/esplora.rs` tests:
     - `history_resolves_shared_parents_once_per_page`
     - `batch_reuses_selected_transactions_and_mempool_parents`
@@ -85,7 +97,6 @@ Wallet keys, coin selection, and signing stay in the external process.
     - `block_transactions_reject_corrupt_witness_commitments`
     - `block_witness_binding_observes_activation`
     - `block_parent_reuse_checks_readiness_only_when_needed`
-    - `backend_transaction_batches_share_duplicate_bodies_and_preserve_rows`
     - `parent_query_errors_and_republication_never_yield_a_cached_success`
 - Routes:
   - Chain tip: `GET /blocks/tip/height`, `GET /blocks/tip/hash`.

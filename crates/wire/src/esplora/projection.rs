@@ -1,4 +1,5 @@
 use core::str::FromStr as _;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bitcoin::hex::DisplayHex;
@@ -34,10 +35,9 @@ pub(super) enum TxSource {
     Joined,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum ParentSource<'a> {
-    Block(&'a [Tx]),
-    Selected(&'a std::collections::HashMap<Txid, &'a Tx>),
+pub(super) struct Prevouts {
+    outputs: Vec<(OutPoint, TxOut)>,
+    source: TxSource,
 }
 
 impl From<Confirmation> for TransactionStatus {
@@ -239,71 +239,125 @@ impl<'a> Projection<'a> {
         confirmation.map_or_else(TransactionStatus::unconfirmed, TransactionStatus::from)
     }
 
-    pub(super) fn transaction_values<'t>(
-        &self,
-        transactions: impl IntoIterator<Item = (&'t Tx, Option<Confirmation>)>,
-        parents: Option<ParentSource<'t>>,
-    ) -> Result<(Vec<TransactionValue>, TxSource), Response> {
-        let transactions = transactions
-            .into_iter()
-            .map(|(tx, status)| (tx, status, tx.txid()))
-            .collect::<Vec<_>>();
-        let mut outpoints = transactions
+    pub(super) fn block_parents<'t>(&self, block: &'t [Tx], page: &[Tx]) -> HashMap<Txid, &'t Tx> {
+        let mut needed: HashSet<_> = page
             .iter()
-            .flat_map(|(tx, _, _)| &tx.inputs)
+            .flat_map(|tx| &tx.inputs)
             .map(|input| input.previous_output)
-            .filter(|outpoint| !outpoint.is_null())
-            .collect::<Vec<_>>();
-        outpoints.sort_unstable_by_key(|point| (point.txid, point.vout));
-        outpoints.dedup();
-        let mut available = std::collections::HashMap::new();
-        let mut retain = |txid, tx| {
-            if outpoints
-                .binary_search_by_key(&txid, |point| point.txid)
-                .is_ok()
-            {
-                available.insert(txid, tx);
-            }
-        };
-        if let Some(ParentSource::Block(parents)) = parents {
-            for tx in parents {
-                retain(tx.txid(), tx);
-            }
-        } else if parents.is_none() {
-            for (tx, _, txid) in &transactions {
-                retain(*txid, *tx);
+            .filter(|point| !point.is_null())
+            .map(|point| point.txid)
+            .collect();
+        if needed.is_empty() {
+            return HashMap::new();
+        }
+        let mut available = HashMap::new();
+        for tx in block {
+            let id = tx.txid();
+            if needed.remove(&id) {
+                available.insert(id, tx);
+                if needed.is_empty() {
+                    break;
+                }
             }
         }
-        if matches!(parents, Some(ParentSource::Block(_)))
-            && !available.is_empty()
-            && !self
+        if !available.is_empty()
+            && self
                 .ctx
                 .indexes
                 .esplora_tx_index
                 .as_ref()
                 .is_some_and(|index| index.index_info().is_ok_and(|info| info.synced))
         {
-            available.clear();
+            available
+        } else {
+            HashMap::new()
         }
-        let mut prevouts = Vec::with_capacity(outpoints.len());
+    }
+
+    pub(super) fn transaction_values<'t>(
+        &self,
+        transactions: impl IntoIterator<Item = (&'t Tx, Option<Confirmation>)>,
+        parents: Option<&HashMap<Txid, &Tx>>,
+    ) -> Result<(Vec<TransactionValue>, TxSource), Response> {
+        let mut values = Vec::new();
+        let source = self.visit_transaction_values(transactions, parents, |value| {
+            values.push(value);
+            Ok(())
+        })?;
+        Ok((values, source))
+    }
+
+    pub(super) fn visit_transaction_values<'t>(
+        &self,
+        transactions: impl IntoIterator<Item = (&'t Tx, Option<Confirmation>)>,
+        parents: Option<&HashMap<Txid, &Tx>>,
+        mut emit: impl FnMut(TransactionValue) -> Result<(), Response>,
+    ) -> Result<TxSource, Response> {
+        let transactions = transactions
+            .into_iter()
+            .map(|(tx, status)| (tx, status, tx.txid()))
+            .collect::<Vec<_>>();
+        let selected;
+        let parents = match parents {
+            Some(parents) => parents,
+            None => {
+                selected = transactions.iter().map(|(tx, _, id)| (*id, *tx)).collect();
+                &selected
+            }
+        };
+        let prevouts = self.resolve_prevouts(
+            transactions.iter().map(|(tx, _, _)| *tx),
+            parents,
+            super::MAX_BATCH_BYTES,
+        )?;
+        for (tx, status, id) in transactions {
+            emit(self.transaction_value(tx, id, status, &prevouts)?)?;
+        }
+        Ok(prevouts.source)
+    }
+
+    pub(super) fn resolve_prevouts<'t>(
+        &self,
+        transactions: impl Iterator<Item = &'t Tx> + Clone,
+        parents: &HashMap<Txid, &Tx>,
+        byte_limit: usize,
+    ) -> Result<Prevouts, Response> {
+        let outpoints = transactions
+            .flat_map(|tx| &tx.inputs)
+            .map(|input| input.previous_output)
+            .filter(|point| !point.is_null());
+        let limit_error =
+            || service_unavailable("Esplora previous outputs exceed the memory limit");
+        let slot_bytes = size_of::<(OutPoint, TxOut)>();
+        let max_slots = byte_limit / slot_bytes;
+        let count = outpoints.clone().take(max_slots + 1).count();
+        if count > max_slots {
+            return Err(limit_error());
+        }
+        let mut outputs = Vec::with_capacity(count);
+        let mut remaining = byte_limit
+            .checked_sub(outputs.capacity().saturating_mul(slot_bytes))
+            .ok_or_else(limit_error)?;
+        outputs.extend(outpoints.map(|point| (point, TxOut::default())));
+        outputs.sort_unstable_by_key(|(point, _)| (point.txid, point.vout));
+        outputs.dedup_by_key(|(point, _)| *point);
         let mut mempool_used = false;
-        for points in outpoints.chunk_by(|left, right| left.txid == right.txid) {
-            let txid = points[0].txid;
+        for points in outputs.chunk_by_mut(|left, right| left.0.txid == right.0.txid) {
+            let txid = points[0].0.txid;
             let mut collect = |tx: &Tx| -> Result<(), Response> {
-                for point in points {
+                for (point, previous) in points.iter_mut() {
                     let output = tx
                         .outputs
                         .get(usize::try_from(point.vout).unwrap_or(usize::MAX))
                         .ok_or_else(|| service_unavailable("previous transaction unavailable"))?;
-                    prevouts.push((*point, output.clone()));
+                    remaining = remaining
+                        .checked_sub(output.script_pubkey.len())
+                        .ok_or_else(limit_error)?;
+                    *previous = output.clone();
                 }
                 Ok(())
             };
-            let selected = match parents {
-                Some(ParentSource::Selected(selected)) => selected.get(&txid).copied(),
-                _ => None,
-            };
-            if let Some(tx) = selected.or_else(|| available.get(&txid).copied()) {
+            if let Some(tx) = parents.get(&txid) {
                 collect(tx)?;
                 continue;
             }
@@ -323,26 +377,22 @@ impl<'a> Projection<'a> {
                 collect(&tx)?;
             }
         }
-        let values = transactions
-            .into_iter()
-            .map(|(tx, status, txid)| self.transaction_value(tx, txid, status, &prevouts))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((
-            values,
-            if mempool_used {
+        Ok(Prevouts {
+            outputs,
+            source: if mempool_used {
                 TxSource::Joined
             } else {
                 TxSource::Confirmed
             },
-        ))
+        })
     }
 
-    fn transaction_value(
+    pub(super) fn transaction_value(
         &self,
         transaction: &Tx,
         txid: Txid,
         confirmation: Option<Confirmation>,
-        prevouts: &[(OutPoint, TxOut)],
+        prevouts: &Prevouts,
     ) -> Result<TransactionValue, Response> {
         let mut input_value = 0_u64;
         let mut inputs = Vec::with_capacity(transaction.inputs.len());
@@ -353,12 +403,13 @@ impl<'a> Projection<'a> {
                 None
             } else {
                 let output = prevouts
+                    .outputs
                     .binary_search_by_key(
                         &(previous_output.txid, previous_output.vout),
                         |(point, _)| (point.txid, point.vout),
                     )
                     .ok()
-                    .map(|index| &prevouts[index].1)
+                    .map(|index| &prevouts.outputs[index].1)
                     .ok_or_else(|| service_unavailable("previous transaction unavailable"))?;
                 input_value = input_value.saturating_add(output.value.to_sat());
                 Some(output)
@@ -802,6 +853,30 @@ mod tests {
             value: Amount::from_sat(1_000),
             script_pubkey: script.into(),
         }
+    }
+
+    // API-09, WF-02
+    #[test]
+    fn prevout_budget_includes_duplicate_input_slots_and_referenced_scripts() {
+        let parent = Tx {
+            outputs: vec![txout(vec![0x51; 8])],
+            ..Tx::default()
+        };
+        let input = bitcoin_rs_consensus::primitives::TxIn {
+            previous_output: OutPoint::new(parent.txid(), 0),
+            ..Default::default()
+        };
+        let child = Tx {
+            inputs: vec![input; 2],
+            ..Tx::default()
+        };
+        let parents = HashMap::from([(parent.txid(), &parent)]);
+        let ctx = Context::new();
+        let projection = Projection::new(&ctx);
+        let required = 2 * size_of::<(OutPoint, TxOut)>() + 8;
+        let resolve = |budget| projection.resolve_prevouts([&child].into_iter(), &parents, budget);
+        assert!(matches!(resolve(required - 1), Err(response) if response.status == 503));
+        assert!(matches!(resolve(required), Ok(prevouts) if prevouts.outputs.len() == 1));
     }
 
     #[test]
