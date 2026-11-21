@@ -85,27 +85,40 @@ so local hooks are the kernel-free PR gate, not the C++ full-node lane.
 
 ### Merge queue and integration contract
 
-All merges to `main` must pass through the GitHub merge queue. Direct merges
+All merges to `dev` must pass through the GitHub merge queue. Direct merges
 bypassing the queue are disallowed for standard pull requests.
 
 The merge queue enforces the integration contract on the latest combined ref
-(`merge_group`) before updating `main`:
+(`merge_group`) before updating `dev`:
 - **PR green (`pull_request`)**: Fast feedback only. `ci-gate` requires `fmt`,
   `deny`, `contracts`, `clippy`, and `test-crates`; `book`, `test-binary`,
   `test-workspace`, and kernel/native checks are skipped to keep feedback fast
   (<3 min).
-- **Merge-group green (`merge_group`)**: Pre-main integration eligibility.
-  `ci-gate` strictly requires `book`, `test-binary`, and `test-workspace`;
-  [`deep.yml`](.github/workflows/deep.yml) strictly requires
-  the `kernel` job (consensus kernel clippy with kernel-oracle
-  parity, plus full-node kernel clippy).
-- **Main green (`push`)**: Post-merge historical evidence. Runs extended
-  campaigns and reference verifications in [`deep.yml`](.github/workflows/deep.yml).
+- **Merge-group green (`merge_group`)**: Pre-dev integration eligibility.
+  `deep-gate` in [`deep.yml`](.github/workflows/deep.yml) requires the
+  `tests` matrix (`test-binary`, `test-workspace`), `book`, and `kernel`
+  (consensus kernel clippy with kernel-oracle parity, plus full-node
+  kernel clippy); `ci-gate` keeps requiring the PR lane.
+- **Main green (`push`)**: Post-merge historical evidence. Pushes to `main`
+  run the extended campaigns and reference verifications in
+  [`deep.yml`](.github/workflows/deep.yml).
 
-Required status checks in repository branch rulesets (`ci-gate`,
-`kernel`) enforce this boundary, guaranteeing
-that heavy integration and production compilation checks have passed on the
-current base before `main` moves forward.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) publishes the `ci-gate`
+aggregate job: it needs `lint`, `fuzz`, `template-provider`, and `lane`, fails
+unless `lint` and `lane` succeed, and accepts `fuzz` and `template-provider`
+as `success` or `skipped` because both are event-gated to pull requests and
+manual runs (on pull requests their jobs return early success when the
+touched paths do not match).
+
+[`.github/workflows/deep.yml`](.github/workflows/deep.yml) publishes the
+`deep-gate` aggregate job: it needs `tests`, `book`, `kernel`, and `pinned`,
+requires the first three to succeed, and accepts `pinned` as `success` or
+`skipped` because it is event-gated.
+
+The repository rulesets do not currently require these gates by name. The
+remaining owner step is requiring `ci-gate` on pull requests and `deep-gate`
+with `kernel` on the merge queue; `deep.yml` never runs on pull requests, so
+its jobs cannot be required as pull-request checks.
 
 ## Post-merge CI lanes
 

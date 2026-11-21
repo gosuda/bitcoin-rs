@@ -17,7 +17,6 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   RUST_BACKTRACE: "1"
   RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-  LATCHKEY_CI_EVENT_CLASS: ${{ github.event_name == 'merge_group' && 'merge_group' || github.event_name == 'push' && 'branch_push' || 'workflow_dispatch' }}
 
 jobs:
   tests:
@@ -33,7 +32,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: bash .latchkey/setup.sh apt nextest corpus
+      - run: bash scripts/ci-setup.sh apt nextest corpus
       - run: bash scripts/provision-ci-reference-fixtures.sh core
       - run: ./scripts/ci-pr.sh ${{ matrix.lane }}
 
@@ -44,7 +43,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: bash .latchkey/setup.sh mdbook
+      - run: bash scripts/ci-setup.sh mdbook
       - run: ./scripts/ci-pr.sh book
 
   # Kernel/C++ lanes share one build tree. Clippy is the merge gate; main adds the full test runs.
@@ -55,28 +54,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: bash .latchkey/setup.sh apt nextest
-      - if: always() && (env.LATCHKEY_CI_EVENT_CLASS == 'branch_push' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch')
-        run: bash .latchkey/setup.sh corpus
+      - run: bash scripts/ci-setup.sh apt nextest
+      - if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        run: bash scripts/ci-setup.sh corpus
       - name: Consensus kernel clippy
         run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets --features kernel -- -D warnings
       - name: Full-node kernel clippy
         run: cargo clippy --locked -p bitcoin-rs --all-targets --no-default-features --features kernel -- -D warnings
       - name: Kernel oracle parity tests (merge gate)
-        if: env.LATCHKEY_CI_EVENT_CLASS == 'merge_group'
+        if: github.event_name == 'merge_group'
         run: |
           cargo test --locked -p bitcoin-rs-consensus --features kernel --lib
           cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- shared_sighash:: overhaul_parse_parity:: kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: core_vectors::
       - name: Kernel consensus tests incl. ignored vectors (main)
-        if: always() && (env.LATCHKEY_CI_EVENT_CLASS == 'branch_push' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch')
+        if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
           BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
         run: cargo test --locked -p bitcoin-rs-consensus --features kernel --no-fail-fast -- --include-ignored
       - name: Node kernel clippy (main)
-        if: always() && (env.LATCHKEY_CI_EVENT_CLASS == 'branch_push' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch')
+        if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: cargo clippy --locked -p bitcoin-rs-node --all-targets --features kernel -- -D warnings
       - name: Full-node binary tests (main)
-        if: always() && (env.LATCHKEY_CI_EVENT_CLASS == 'branch_push' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch')
+        if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: |
           bash scripts/provision-ci-reference-fixtures.sh core
           cargo nextest run --locked --no-fail-fast -p bitcoin-rs --no-default-features --features kernel
@@ -96,7 +95,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: bash .latchkey/setup.sh apt msrv
+      - run: bash scripts/ci-setup.sh apt msrv
       - name: Native script tests and clippy
         if: matrix.lane == 'script'
         run: |
@@ -113,3 +112,19 @@ jobs:
           bitcoind="$(scripts/install-bitcoind.sh --print-path)"
           cargo build --locked -p bitcoin-rs --profile quickstart --no-default-features --features zmq
           scripts/run-p2p-core-interop.sh --bitcoind-command "$bitcoind" --bitcoin-rs-command target/quickstart/bitcoin-rs --workdir "$PWD/target/core-differential/run" --evidence "$PWD/target/core-differential/evidence.json"
+
+  deep-gate:
+    needs: [tests, book, kernel, pinned]
+    if: always()
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the deep lanes
+        run: |
+          fail() { echo "deep-gate: $1 is $2" >&2; exit 1; }
+          for pair in "tests:${{ needs.tests.result }}" "book:${{ needs.book.result }}" "kernel:${{ needs.kernel.result }}"; do
+            name=${pair%%:*}; result=${pair#*:}
+            [ "$result" = success ] || fail "$name" "$result"
+          done
+          pinned=${{ needs.pinned.result }}
+          { [ "$pinned" = success ] || [ "$pinned" = skipped ]; } || fail pinned "$pinned"
