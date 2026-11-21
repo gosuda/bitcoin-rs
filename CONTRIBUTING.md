@@ -106,16 +106,19 @@ The merge queue enforces the integration contract on the latest combined ref
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) publishes the `ci-gate`
 aggregate job: it needs `lint`, `fuzz`, `template-provider`, and `lane`, fails
 unless `lint` and `lane` succeed, and accepts `fuzz` and `template-provider`
-as `success` or `skipped` because both are path-gated on pull requests.
+as `success` or `skipped` because both are event-gated to pull requests and
+manual runs (on pull requests their jobs return early success when the
+touched paths do not match).
 
 [`.github/workflows/deep.yml`](.github/workflows/deep.yml) publishes the
 `deep-gate` aggregate job: it needs `tests`, `book`, `kernel`, and `pinned`,
 requires the first three to succeed, and accepts `pinned` as `success` or
 `skipped` because it is event-gated.
 
-The repository rulesets do not currently require these gates by name; wiring
-`ci-gate`, `deep-gate`, and `kernel` into the rulesets is the remaining
-owner step before the merge queue enforces this boundary mechanically.
+The repository rulesets do not currently require these gates by name. The
+remaining owner step is requiring `ci-gate` on pull requests and `deep-gate`
+with `kernel` on the merge queue; `deep.yml` never runs on pull requests, so
+its jobs cannot be required as pull-request checks.
 
 ## Post-merge CI lanes
 
