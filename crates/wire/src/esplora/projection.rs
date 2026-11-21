@@ -1,5 +1,5 @@
 use core::str::FromStr as _;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bitcoin::hex::DisplayHex;
@@ -240,17 +240,27 @@ impl<'a> Projection<'a> {
     }
 
     pub(super) fn block_parents<'t>(&self, block: &'t [Tx], page: &[Tx]) -> HashMap<Txid, &'t Tx> {
-        let mut needed = page
+        let mut needed: HashSet<_> = page
             .iter()
             .flat_map(|tx| &tx.inputs)
             .map(|input| input.previous_output)
             .filter(|point| !point.is_null())
-            .peekable();
-        if needed.peek().is_none() {
+            .map(|point| point.txid)
+            .collect();
+        if needed.is_empty() {
             return HashMap::new();
         }
-        let available: HashMap<_, _> = block.iter().map(|tx| (tx.txid(), tx)).collect();
-        if needed.any(|point| available.contains_key(&point.txid))
+        let mut available = HashMap::new();
+        for tx in block {
+            let id = tx.txid();
+            if needed.remove(&id) {
+                available.insert(id, tx);
+                if needed.is_empty() {
+                    break;
+                }
+            }
+        }
+        if !available.is_empty()
             && self
                 .ctx
                 .indexes

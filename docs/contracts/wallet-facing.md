@@ -76,6 +76,7 @@ Wallet keys, coin selection, and signing stay in the external process.
   - It belongs to the applied chain.
   - The transaction index is healthy and caught up.
 - The readiness snapshot is consulted once only when the batch can reuse an in-block parent.
+- The block lookup contains only parents referenced by the requested rows. A full-block read reuses this lookup across its chunks.
 - Ordinary parent queries enforce their own readiness checks.
 - Losing branch bodies MUST never substitute for authoritative parent history.
 - Missing, pruned, unavailable, and corrupt required data keep their explicit errors.
