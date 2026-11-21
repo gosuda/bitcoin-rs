@@ -17,6 +17,7 @@ use crate::handlers::Handler;
 use crate::rest::Response;
 
 use self::projection::Projection;
+const MAX_BATCH_BYTES: usize = 16 * 1_024 * 1_024;
 pub const DEFAULT_MAX_QUERIES: std::num::NonZeroUsize =
     std::num::NonZeroUsize::MIN.saturating_add(1);
 
