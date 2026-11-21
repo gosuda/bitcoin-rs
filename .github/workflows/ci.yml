@@ -18,8 +18,6 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   RUST_BACKTRACE: "1"
-  LATCHKEY_CI_EVENT_CLASS: ${{ github.event_name == 'pull_request' && 'pr_update' || github.event_name == 'merge_group' && 'merge_group' || github.event_name == 'push' && 'branch_push' || 'workflow_dispatch' }}
-  LATCHKEY_CI_BASE_REF: ${{ github.base_ref }}
 
 jobs:
   lint:

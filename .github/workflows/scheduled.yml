@@ -19,8 +19,6 @@ env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  LATCHKEY_CI_EVENT_CLASS: ${{ github.event_name == 'schedule' && 'schedule' || 'workflow_dispatch' }}
-  LATCHKEY_INPUT_LANE: ${{ inputs.lane }}
 
 jobs:
   dependency-range:
