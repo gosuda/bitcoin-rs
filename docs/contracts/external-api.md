@@ -357,6 +357,12 @@ wallet interoperability remain unverified.
 - `/api/v1` belongs to the external mempool application's own API, not this node.
 - The backend dialect additionally requires `GET /internal/mempool/txs`, `GET /internal/block/{hash}/txs`, `POST /internal/txs`, `POST /internal/mempool/txs`, batched outspends `POST /internal/txs/outspends/by-txid` and `by-outpoint`, and address summaries.
 - Only declared backend routes exist; each route is marked as such.
+- Backend mempool GET returns at most 25 transactions and uses 25 when `max_txs` is absent.
+- An invalid `max_txs` or a value above 25 returns 400; a cursor selects the next page.
+- Each backend bulk POST accepts at most 25 entries, including duplicate entries, and returns 400 above that limit.
+- Backend transaction POST retains at most 16 MiB of distinct source transactions and returns 503 above that limit.
+- Backend bulk response assembly stops at 16 MiB and returns 503 without sending a partial JSON array.
+- All backend bulk routes use the node-wide expensive-query admission limit.
 - History reads use bounded pages and cursors preserving public Esplora cursor semantics.
 - Cursors are the exact lowercase `txid` display text.
 - Malformed, noncanonical (including uppercase or prefixed), unknown, and missing cursors restart from the beginning.

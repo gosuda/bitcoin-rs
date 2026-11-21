@@ -3,13 +3,6 @@ use bitcoin_rs_mempool::SubmitError;
 use crate::context::TxQueryError;
 use crate::rest::{Response, bad_request, internal_error, not_found, service_unavailable};
 
-pub(super) fn query_limit(query: &str, name: &str) -> Option<usize> {
-    query.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (key == name).then(|| value.parse().ok()).flatten()
-    })
-}
-
 pub(super) fn query_error(e: TxQueryError) -> Response {
     match e {
         TxQueryError::Unavailable(
