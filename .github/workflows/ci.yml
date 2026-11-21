@@ -4,25 +4,31 @@ name: CI
 # Deep lanes: deep.yml. Nightly campaigns: scheduled.yml.
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
   merge_group:
   push:
     branches: [main]
   workflow_dispatch:
 
-latchkey:
-  schema: 1
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   RUST_BACKTRACE: "1"
+  LATCHKEY_CI_EVENT_CLASS: ${{ github.event_name == 'pull_request' && 'pr_update' || github.event_name == 'merge_group' && 'merge_group' || github.event_name == 'push' && 'branch_push' || 'workflow_dispatch' }}
+  LATCHKEY_CI_BASE_REF: ${{ github.base_ref }}
 
 jobs:
   lint:
-    runs-on: small
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: bash .latchkey/setup.sh deny
       - run: ./scripts/ci-pr.sh fmt
       - run: ./scripts/ci-pr.sh deny
@@ -35,45 +41,34 @@ jobs:
   # Path-gated on pull requests (all paths on manual runs), as the old fuzz-build,
   # fuzz-lockfile and template-provider-lockfile workflows were.
   fuzz:
-    if: env.LATCHKEY_CI_EVENT_CLASS == 'pr_update' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch'
-    runs-on: large
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 60
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Lockfile drift
         run: |
           changed_rc=0; bash .latchkey/setup.sh changed '^(crates/[^/]+/Cargo\.toml|fuzz/|Cargo\.toml$)' || changed_rc=$?
           if [ "$changed_rc" -eq 1 ]; then exit 0; elif [ "$changed_rc" -ne 0 ]; then exit "$changed_rc"; fi
           bash .latchkey/setup.sh nightly
           cargo +nightly metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml >/dev/null
-      - uses: latchkey/cache-restore@1.1.0
-        with:
-          key: fuzz-target
-          version: v1
-          hash-files: fuzz/Cargo.lock
       - name: Fuzz targets build
         run: |
           changed_rc=0; bash .latchkey/setup.sh changed '^(fuzz/|.*Cargo\.toml$)' || changed_rc=$?
           if [ "$changed_rc" -eq 1 ]; then exit 0; elif [ "$changed_rc" -ne 0 ]; then exit "$changed_rc"; fi
           bash .latchkey/setup.sh apt nightly fuzz
           cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
-      - uses: latchkey/cache-save@1.1.0
-        with:
-          key: fuzz-target
-          version: v1
-          hash-files: fuzz/Cargo.lock
-          path: fuzz/target
 
   template-provider:
-    if: env.LATCHKEY_CI_EVENT_CLASS == 'pr_update' || env.LATCHKEY_CI_EVENT_CLASS == 'workflow_dispatch'
-    runs-on: medium
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 45
     steps:
-      - uses: latchkey/cache-restore@1.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          key: template-provider
-          version: v1
-          hash-files: tools/stratum-sv2/template-provider/Cargo.lock
-          into: tools/stratum-sv2/template-provider
+          persist-credentials: false
       - name: Lockfile, tests and clippy
         run: |
           changed_rc=0; bash .latchkey/setup.sh changed '^(tools/stratum-sv2/template-provider/|crates/|Cargo\.(toml|lock)$)' || changed_rc=$?
@@ -83,16 +78,9 @@ jobs:
           cargo metadata --locked --format-version 1 --manifest-path "$m" >/dev/null
           cargo test --locked --manifest-path "$m"
           cargo clippy --locked --manifest-path "$m" --all-targets -- -D warnings
-      - uses: latchkey/cache-save@1.1.0
-        with:
-          key: template-provider
-          version: v1
-          hash-files: tools/stratum-sv2/template-provider/Cargo.lock
-          from: tools/stratum-sv2/template-provider
-          path: target
 
   lane:
-    runs-on: medium
+    runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 90
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -102,19 +90,11 @@ jobs:
       matrix:
         lane: [clippy-services, clippy-node-runtime, test-silent-payments, test-storage, test-consensus-chain, test-node-wire]
     steps:
-      - run: bash .latchkey/setup.sh apt nextest corpus
-      - uses: latchkey/cache-restore@1.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          key: "${{ matrix.lane }}"
-          version: v1
-          hash-files: Cargo.lock rust-toolchain.toml
+          persist-credentials: false
+      - run: bash .latchkey/setup.sh apt nextest corpus
       - name: Run lane
         run: |
           L=${{ matrix.lane }}
           case "$L" in clippy-*) ./scripts/ci-pr.sh clippy "${L#*-}" ;; *) ./scripts/ci-pr.sh test-crates "${L#*-}" ;; esac
-      - uses: latchkey/cache-save@1.1.0
-        with:
-          key: "${{ matrix.lane }}"
-          version: v1
-          hash-files: Cargo.lock rust-toolchain.toml
-          path: target
