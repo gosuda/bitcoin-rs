@@ -6902,13 +6902,104 @@ mod mining_coinbase_sigops {
 
     use crate::mining::{
         Candidate, CandidateContext, MiningError, assemble_candidate, assemble_ordered_candidate,
+        finish_candidate, select_template_body, select_template_body_after,
     };
-    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Tx, Txid};
+    use bitcoin_rs_consensus::primitives::{Hash256, OutPoint, Tx, Txid, encode::consensus_bytes};
     use bitcoin_rs_consensus::script::VerifyFlags;
     use bitcoin_rs_consensus::transaction_sigop_cost;
     use common::{context, insert_with_cost, oracle_sigop_cost, p2pkh, tx, zero_fee_pool};
 
     type TestResult = Result<(), TestError>;
+
+    // API-11
+    #[test]
+    fn ordinary_templates_leave_room_for_the_miners_coinbase() -> TestResult {
+        use bitcoin::hashes::Hash as _;
+        use bitcoin::opcodes::all::OP_CHECKMULTISIG;
+
+        let mut pool = zero_fee_pool();
+        let mut weight = 0;
+        for label in 1..=252 {
+            let mut payment = tx(label, 1_000, None);
+            payment.outputs[0].script_pubkey = p2pkh().into();
+            let reference = common::oracle_transaction(&payment)?;
+            weight += reference.weight().to_wu();
+            insert_with_cost(
+                &mut pool,
+                payment,
+                u32::try_from(reference.vsize())?,
+                10_000,
+                0,
+                0,
+                4,
+            )?;
+        }
+        let plan = pool.plan_block_removals(&bitcoin_rs_mempool::TransitionFacts::empty());
+
+        let multisig = bitcoin::ScriptBuf::builder()
+            .push_int(1)
+            .push_slice([2; 33])
+            .push_int(1)
+            .push_opcode(OP_CHECKMULTISIG)
+            .into_script();
+        let p2wpkh =
+            bitcoin::ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([1; 20]));
+        let mut payouts = Vec::new();
+        for (count, script_pubkey) in [(5, multisig), (50, p2wpkh)] {
+            let output = bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1_000),
+                script_pubkey,
+            };
+            payouts.extend(std::iter::repeat_n(output, count));
+        }
+
+        for (max_weight, max_sigops, included) in [
+            (8_000 + weight, 401 + 252 * 4, 251),
+            (8_001 + weight, 400 + 252 * 4, 251),
+            (8_001 + weight, 401 + 252 * 4, 252),
+        ] {
+            let ctx = CandidateContext {
+                reserve_for_external_coinbase: true,
+                max_weight,
+                max_sigops,
+                ..context()
+            };
+            for body in [
+                select_template_body(&pool, &ctx, common::PAYOUT, None)?,
+                select_template_body_after(&pool, &plan, &ctx, common::PAYOUT)?,
+            ] {
+                let candidate = finish_candidate(&ctx, &body, common::PAYOUT)?;
+                assert_eq!(
+                    candidate.transactions.len(),
+                    included,
+                    "{max_weight} WU, {max_sigops} sigops"
+                );
+                let block = candidate.into_unsolved_block()?;
+                let mut miner_block: bitcoin::Block =
+                    bitcoin::consensus::deserialize(&consensus_bytes(&block))?;
+                assert_eq!(candidate.weight, miner_block.weight().to_wu());
+                let coinbase = &mut miner_block.txdata[0];
+                coinbase.input[0].script_sig.push_slice([0; 17]);
+                coinbase.output[0].value -=
+                    payouts.iter().map(|out| out.value).sum::<bitcoin::Amount>();
+                coinbase.output.extend_from_slice(&payouts);
+                assert_eq!(coinbase.total_sigop_cost(|_| None), 400);
+                assert!(miner_block.weight().to_wu() <= max_weight);
+                let cost: usize = miner_block
+                    .txdata
+                    .iter()
+                    .map(|tx| tx.total_sigop_cost(|_| None))
+                    .sum();
+                let cost = u64::try_from(cost)?;
+                assert!(cost <= max_sigops);
+                if included == 252 {
+                    assert_eq!(miner_block.weight().to_wu(), max_weight - 1);
+                    assert_eq!(cost, max_sigops - 1);
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn budgeted_coinbase_input_growth_sigop_boundary() -> TestResult {
@@ -9468,6 +9559,7 @@ mod mining_pool_jobs {
             network: Network::Regtest,
             csv_active: true,
             segwit_active: true,
+            reserve_for_external_coinbase: false,
             max_weight: 4_000_000,
             max_size: 4_000_000,
             max_sigops: 80_000,
@@ -12843,6 +12935,7 @@ mod mining_pool_sv2 {
             network: Network::Regtest,
             csv_active: true,
             segwit_active: true,
+            reserve_for_external_coinbase: false,
             max_weight: 4_000_000,
             max_size: 4_000_000,
             max_sigops: 80_000,
@@ -19538,6 +19631,7 @@ mod support {
                     network: Network::Regtest,
                     csv_active: true,
                     segwit_active: true,
+                    reserve_for_external_coinbase: false,
                     max_weight: 4_000_000,
                     max_size: 4_000_000,
                     max_sigops: 80_000,

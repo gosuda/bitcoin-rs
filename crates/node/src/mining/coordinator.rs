@@ -925,7 +925,10 @@ impl MiningService {
         let tip = self.applied_tip.applied_tip().ok_or_else(|| {
             MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
         })?;
-        let context = self.candidate_context(&tip)?;
+        let context = CandidateContext {
+            reserve_for_external_coinbase: false,
+            ..self.candidate_context(&tip)?
+        };
         match selection {
             GenerateSelection::Mempool => {
                 let body = self
@@ -1299,6 +1302,7 @@ fn candidate_context_for(
         network,
         csv_active: chain.csv_active,
         segwit_active: chain.segwit_active,
+        reserve_for_external_coinbase: true,
         max_weight: MAX_BLOCK_WEIGHT,
         max_size: MAX_BLOCK_SERIALIZED_SIZE,
         max_sigops: u64::from(MAX_BLOCK_SIGOPS_COST),
@@ -1616,6 +1620,30 @@ mod tests {
         fn sorted(mut ids: Vec<Txid>) -> Vec<Txid> {
             ids.sort_unstable_by_key(|id| *id.as_bytes());
             ids
+        }
+
+        // API-11
+        #[test]
+        fn template_reserves_sigops_while_generation_uses_its_fixed_payout() -> TestResult {
+            let mut pool = Mempool::new(MempoolLimits::default());
+            for label in 1..=5 {
+                let tx = tx(label);
+                let vsize = u32::try_from(tx.vsize())?;
+                pool.insert_entry(MempoolEntry::new(
+                    Arc::new(tx),
+                    vsize,
+                    10_000,
+                    1,
+                    0,
+                    (80_000 - 400) / 5,
+                ))?;
+            }
+            let (_, service) = service_over(pool)?;
+            let template = service.get_block_template(None, None)?;
+            assert_eq!(template.candidate.transactions.len(), 4);
+            let generated = service.assemble_fresh(&[0x51], &GenerateSelection::Mempool)?;
+            assert_eq!(generated.transactions.len(), 5);
+            Ok(())
         }
 
         #[test]

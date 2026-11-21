@@ -417,6 +417,8 @@ wallet interoperability remain unverified.
 - `getblocktemplate` never carries a coinbase budget.
 - Typed `BlockTemplateRequest.coinbase_budget` is `None` for every RPC request.
 - Only the typed `MiningControl` embedder (experimental SV2 regtest adapter in `tools/stratum-sv2`) sets it.
+- For an ordinary template, selection reserves 8,000 weight units for the header, transaction count, and miner-built coinbase. It reserves 400 units of coinbase sigop cost (Bitcoin Core 31.1).
+- The transaction weight plus its reserve must be less than `weightlimit`. The transaction sigop cost plus its reserve must be less than `sigoplimit`. The assembled block must also fit with the node's actual coinbase. The candidate records its actual weight.
 - A budgeted candidate leaves that room in the coinbase with a budget-qualified id.
 - The ordinary candidate is used when it already admits the budget.
 - The qualifier is not RPC contract: RPC callers never receive it, and long-poll waits compare generations only.

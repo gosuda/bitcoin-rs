@@ -908,6 +908,7 @@ mod tests {
             network: Network::Regtest,
             csv_active: true,
             segwit_active: true,
+            reserve_for_external_coinbase: false,
             max_weight: 4_000_000,
             max_size: 4_000_000,
             max_sigops: 80_000,

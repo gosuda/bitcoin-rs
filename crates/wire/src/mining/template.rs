@@ -29,6 +29,8 @@ pub struct CandidateContext {
     pub network: Network,
     pub csv_active: bool,
     pub segwit_active: bool,
+    /// Reserve room for a miner-built coinbase when the miner supplies no explicit budget.
+    pub reserve_for_external_coinbase: bool,
     pub max_weight: u64,
     pub max_size: u64,
     pub max_sigops: u64,
@@ -660,6 +662,7 @@ mod tests {
             network: Network::Regtest,
             csv_active: true,
             segwit_active,
+            reserve_for_external_coinbase: false,
             max_weight: limits.weight,
             max_size: limits.size,
             max_sigops: limits.sigops,

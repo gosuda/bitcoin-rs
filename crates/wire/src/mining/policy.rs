@@ -16,6 +16,9 @@ use crate::mining::template::{
 /// Fixed, with no configuration key.
 const BLOCK_MIN_TX_FEE_SAT_PER_KVB: i128 = 1;
 
+const DEFAULT_BLOCK_RESERVED_WEIGHT: u64 = 8_000;
+const DEFAULT_COINBASE_OUTPUT_MAX_ADDITIONAL_SIGOPS: u64 = 400;
+
 #[derive(Clone, Copy, Default)]
 struct PackageTotals {
     fee: u64,
@@ -112,6 +115,7 @@ struct SkippedChunk<'pool> {
 
 struct Selection {
     usage: BodyUsage,
+    ordinary_template_overhead: Option<FixedReservation>,
     selected: HashSet<EntryId>,
     ordered: Vec<SelectedTx>,
 }
@@ -135,7 +139,8 @@ impl Selection {
                 .ok_or(MiningError::CandidateScalarOverflow {
                     field: "transaction count",
                 })?;
-        let count_growth = transaction_count_size(next_count)? - transaction_count_size(count)?;
+        let count_size = transaction_count_size(next_count)?;
+        let count_growth = count_size - transaction_count_size(count)?;
         let Some(weight) = self
             .usage
             .weight
@@ -157,6 +162,19 @@ impl Selection {
         };
         if weight > context.max_weight || size > context.max_size || sigops > context.max_sigops {
             return Ok(None);
+        }
+        if let Some(overhead) = self.ordinary_template_overhead {
+            let transaction_weight = weight - overhead.weight - count_size * 4;
+            let transaction_sigops = sigops - overhead.sigops;
+            let weight_limit = context
+                .max_weight
+                .saturating_sub(DEFAULT_BLOCK_RESERVED_WEIGHT);
+            let sigop_limit = context
+                .max_sigops
+                .saturating_sub(DEFAULT_COINBASE_OUTPUT_MAX_ADDITIONAL_SIGOPS);
+            if transaction_weight >= weight_limit || transaction_sigops >= sigop_limit {
+                return Ok(None);
+            }
         }
         Ok(Some(BodyUsage {
             weight,
@@ -300,6 +318,9 @@ pub(crate) fn select_packages<'a>(
             sigops: start.sigops,
             fees: 0,
         },
+        ordinary_template_overhead: (context.reserve_for_external_coinbase
+            && reservation.budget.is_none())
+        .then_some(reservation.fixed),
         selected: HashSet::new(),
         ordered: Vec::new(),
     };
