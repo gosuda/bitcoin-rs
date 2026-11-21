@@ -4531,6 +4531,7 @@ mod tests {
         }
     }
 
+    // WF-02
     #[test]
     fn block_parent_reuse_checks_readiness_only_when_needed() -> Result<(), TestError> {
         struct ReadinessIndex {
