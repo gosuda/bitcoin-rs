@@ -126,7 +126,7 @@ $ curl -s http://127.0.0.1:45869/api/fee-estimates
 
 Chain history is paginated at 25 transactions per page. Cursors are exact lowercase txids. A malformed, uppercase, prefixed, unknown, or missing cursor restarts from the beginning; a valid cursor excludes itself and earlier entries. A lagging, rebuilding, or disabled capability returns the declared unavailable response instead of an empty success. Index lag and reorg map to 503; a storage failure maps to 500.
 
-The backend dialect adds `/esplora/internal/mempool/txs`, `/esplora/internal/block/{hash}/txs`, `/esplora/internal/txs`, and the batched outspend POST routes. Only declared backend routes exist.
+The backend dialect adds `/esplora/internal/mempool/txs`, `/esplora/internal/block/{hash}/txs`, `/esplora/internal/txs`, and the batched outspend POST routes. Only declared backend routes exist. Mempool GET uses 25 transactions by default and accepts no value above 25. Each backend bulk POST accepts at most 25 entries, including duplicates. Transaction POST retains at most 16 MiB of distinct source transactions. Use the last transaction ID as the mempool cursor for the next page. An invalid or excessive limit returns 400. A source or response limit returns 503. Bulk responses stop at 16 MiB, and all bulk routes share the expensive-query admission limit.
 
 ## Listener behavior and limits
 

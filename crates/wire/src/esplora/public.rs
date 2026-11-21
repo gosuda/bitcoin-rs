@@ -492,7 +492,19 @@ pub(super) fn block_transaction_values(
 ) -> Result<(Vec<TransactionValue>, TxSource), Response> {
     let projection = Projection::new(ctx);
     let view = projection.capture_chain_view();
-    let block_status = (ctx.chain.active_hash_in_view(&view, record.height)
+    block_transaction_values_in_view(ctx, record, block, start, limit, &view)
+}
+
+pub(super) fn block_transaction_values_in_view(
+    ctx: &Context,
+    record: &bitcoin_rs_index::block_log::BlockRecord,
+    block: &Block,
+    start: usize,
+    limit: usize,
+    view: &crate::context::AppliedView,
+) -> Result<(Vec<TransactionValue>, TxSource), Response> {
+    let projection = Projection::new(ctx);
+    let block_status = (ctx.chain.active_hash_in_view(view, record.height)
         == Some(Hash256::from(record.hash)))
     .then_some(Confirmation {
         height: record.height,
@@ -521,7 +533,7 @@ pub(super) fn block_transaction_values(
         })),
     )?;
     if block_status.is_none() {
-        projection.ensure_chain_view(&view)?;
+        projection.ensure_chain_view(view)?;
     }
     Ok(values)
 }

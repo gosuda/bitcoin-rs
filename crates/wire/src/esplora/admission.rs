@@ -66,3 +66,23 @@ pub(super) fn is_expensive(path: &str) -> bool {
             | ["address" | "scripthash", _, "txs", "chain", _]
     )
 }
+
+pub(super) fn is_backend_bulk_get(path: &str) -> bool {
+    let parts: Vec<_> = path.trim_matches('/').split('/').collect();
+    matches!(
+        parts.as_slice(),
+        ["internal", "mempool", "txs"]
+            | ["internal", "mempool", "txs", _]
+            | ["internal", "block", _, "txs"]
+    )
+}
+
+pub(super) fn is_backend_bulk_post(path: &str) -> bool {
+    matches!(
+        path,
+        "/internal/txs"
+            | "/internal/mempool/txs"
+            | "/internal/txs/outspends/by-txid"
+            | "/internal/txs/outspends/by-outpoint"
+    )
+}
