@@ -4590,13 +4590,14 @@ mod tests {
             0,
             "an index-resolved parent needs no readiness read"
         );
-        let Ok((values, _)) = Projection::new(&ctx).transaction_values(
-            [(&child, None), (&child, None)],
-            Some(
-                &Projection::new(&ctx)
-                    .block_parents(std::slice::from_ref(&parent), std::slice::from_ref(&child)),
-            ),
-        ) else {
+        let projection = Projection::new(&ctx);
+        let block = [parent.clone(), child.clone()];
+        let parents = projection.block_parents(&block, std::slice::from_ref(&child));
+        assert_eq!(parents.len(), 1);
+        assert!(parents.contains_key(&parent.txid()));
+        let Ok((values, _)) =
+            projection.transaction_values([(&child, None), (&child, None)], Some(&parents))
+        else {
             return Err("in-block parent".into());
         };
         assert_eq!(values[0].fee, 25);
