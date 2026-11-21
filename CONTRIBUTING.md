@@ -85,27 +85,32 @@ so local hooks are the kernel-free PR gate, not the C++ full-node lane.
 
 ### Merge queue and integration contract
 
-All merges to `main` must pass through the GitHub merge queue. Direct merges
+All merges to `dev` must pass through the GitHub merge queue. Direct merges
 bypassing the queue are disallowed for standard pull requests.
 
 The merge queue enforces the integration contract on the latest combined ref
-(`merge_group`) before updating `main`:
+(`merge_group`) before updating `dev`:
 - **PR green (`pull_request`)**: Fast feedback only. `ci-gate` requires `fmt`,
   `deny`, `contracts`, `clippy`, and `test-crates`; `book`, `test-binary`,
   `test-workspace`, and kernel/native checks are skipped to keep feedback fast
   (<3 min).
-- **Merge-group green (`merge_group`)**: Pre-main integration eligibility.
+- **Merge-group green (`merge_group`)**: Pre-dev integration eligibility.
   `ci-gate` strictly requires `book`, `test-binary`, and `test-workspace`;
   [`deep.yml`](.github/workflows/deep.yml) strictly requires
   the `kernel` job (consensus kernel clippy with kernel-oracle
   parity, plus full-node kernel clippy).
-- **Main green (`push`)**: Post-merge historical evidence. Runs extended
+- **Dev green (`push`)**: Post-merge historical evidence. Runs extended
   campaigns and reference verifications in [`deep.yml`](.github/workflows/deep.yml).
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) publishes the `ci-gate`
+aggregate job: it needs `lint`, `fuzz`, `template-provider`, and `lane`, fails
+unless `lint` and `lane` succeed, and accepts `fuzz` and `template-provider`
+as `success` or `skipped` because both are path-gated on pull requests.
 
 Required status checks in repository branch rulesets (`ci-gate`,
 `kernel`) enforce this boundary, guaranteeing
 that heavy integration and production compilation checks have passed on the
-current base before `main` moves forward.
+current base before `dev` moves forward.
 
 ## Post-merge CI lanes
 
