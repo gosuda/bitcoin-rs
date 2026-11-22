@@ -1,0 +1,114 @@
+name: CI
+
+# PR checks; the same file also runs for merge-queue groups and main pushes.
+# Deep lanes: deep.yml. Nightly campaigns: scheduled.yml.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  RUST_BACKTRACE: "1"
+
+jobs:
+  lint:
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash scripts/ci-setup.sh deny
+      - run: ./scripts/ci-pr.sh fmt
+      - run: ./scripts/ci-pr.sh deny
+      - run: ./scripts/ci-pr.sh contracts
+      - name: Script tools
+        run: |
+          for f in fetch-golden import-qa-assets fuzz-policy run-fuzz-campaign validate-corpus-seeds; do bash -n "scripts/${f}.sh"; done
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
+  # Path-gated on pull requests (all paths on manual runs), as the old fuzz-build,
+  # fuzz-lockfile and template-provider-lockfile workflows were.
+  fuzz:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lockfile drift
+        run: |
+          changed_rc=0; bash scripts/ci-setup.sh changed '^(crates/[^/]+/Cargo\.toml|fuzz/|Cargo\.toml$)' || changed_rc=$?
+          if [ "$changed_rc" -eq 1 ]; then exit 0; elif [ "$changed_rc" -ne 0 ]; then exit "$changed_rc"; fi
+          bash scripts/ci-setup.sh nightly
+          cargo +nightly metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml >/dev/null
+      - name: Fuzz targets build
+        run: |
+          changed_rc=0; bash scripts/ci-setup.sh changed '^(fuzz/|.*Cargo\.toml$)' || changed_rc=$?
+          if [ "$changed_rc" -eq 1 ]; then exit 0; elif [ "$changed_rc" -ne 0 ]; then exit "$changed_rc"; fi
+          bash scripts/ci-setup.sh apt nightly fuzz
+          cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
+
+  template-provider:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lockfile, tests and clippy
+        run: |
+          changed_rc=0; bash scripts/ci-setup.sh changed '^(tools/stratum-sv2/template-provider/|crates/|Cargo\.(toml|lock)$)' || changed_rc=$?
+          if [ "$changed_rc" -eq 1 ]; then exit 0; elif [ "$changed_rc" -ne 0 ]; then exit "$changed_rc"; fi
+          bash scripts/ci-setup.sh apt
+          m=tools/stratum-sv2/template-provider/Cargo.toml
+          cargo metadata --locked --format-version 1 --manifest-path "$m" >/dev/null
+          cargo test --locked --no-fail-fast --manifest-path "$m"
+          cargo clippy --locked --manifest-path "$m" --all-targets -- -D warnings
+
+  lane:
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [clippy-services, clippy-node-runtime, test-silent-payments, test-storage, test-consensus-chain, test-node-wire]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash scripts/ci-setup.sh apt nextest corpus
+      - name: Run lane
+        run: |
+          L=${{ matrix.lane }}
+          case "$L" in clippy-*) ./scripts/ci-pr.sh clippy "${L#*-}" ;; *) ./scripts/ci-pr.sh test-crates "${L#*-}" ;; esac
+
+  ci-gate:
+    needs: [lint, fuzz, template-provider, lane]
+    if: always()
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the gate jobs
+        run: |
+          set -euo pipefail
+          echo "lint=${{ needs.lint.result }} fuzz=${{ needs.fuzz.result }} template-provider=${{ needs.template-provider.result }} lane=${{ needs.lane.result }}"
+          [ "${{ needs.lint.result }}" = "success" ]
+          [ "${{ needs.lane.result }}" = "success" ]
+          for result in "${{ needs.fuzz.result }}" "${{ needs.template-provider.result }}"; do
+            [ "$result" = "success" ] || [ "$result" = "skipped" ] || exit 1
+          done

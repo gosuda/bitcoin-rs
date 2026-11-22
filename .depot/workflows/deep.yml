@@ -1,0 +1,130 @@
+name: Deep
+
+# Merge-queue and main-only lanes (replaces the heavy lanes of ci.yml, ci-merge-gate.yml and main.yml).
+# merge_group: tests, book and the kernel merge gate. main pushes / manual runs: everything.
+on:
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  RUST_BACKTRACE: "1"
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+jobs:
+  tests:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 120
+    env:
+      BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [test-binary, test-workspace]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash scripts/ci-setup.sh apt nextest corpus
+      - run: bash scripts/provision-ci-reference-fixtures.sh core
+      - run: ./scripts/ci-pr.sh ${{ matrix.lane }}
+
+  book:
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash scripts/ci-setup.sh mdbook
+      - run: ./scripts/ci-pr.sh book
+
+  # Kernel/C++ lanes share one build tree. Clippy is the merge gate; main adds the full test runs.
+  kernel:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash scripts/ci-setup.sh apt nextest
+      - if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        run: bash scripts/ci-setup.sh corpus
+      - name: Consensus kernel clippy
+        run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets --features kernel -- -D warnings
+      - name: Full-node kernel clippy
+        run: cargo clippy --locked -p bitcoin-rs --all-targets --no-default-features --features kernel -- -D warnings
+      - name: Kernel oracle parity tests (merge gate)
+        if: github.event_name == 'merge_group'
+        run: |
+          cargo test --locked -p bitcoin-rs-consensus --features kernel --lib
+          cargo test --locked -p bitcoin-rs-consensus --features kernel --test suite -- shared_sighash:: overhaul_parse_parity:: kernel_block_parity:: kernel_boundary_parity:: kernel_vector_parity:: core_vectors::
+      - name: Kernel consensus tests incl. ignored vectors (main)
+        if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        env:
+          BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
+        run: cargo test --locked -p bitcoin-rs-consensus --features kernel --no-fail-fast -- --include-ignored
+      - name: Node kernel clippy (main)
+        if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        run: cargo clippy --locked -p bitcoin-rs-node --all-targets --features kernel -- -D warnings
+      - name: Full-node binary tests (main)
+        if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        run: |
+          bash scripts/provision-ci-reference-fixtures.sh core
+          cargo nextest run --locked --no-fail-fast -p bitcoin-rs --no-default-features --features kernel
+
+  # main-only lanes pinned to Rust 1.99.0 (the old bench-smoke, native-script and core-differential jobs).
+  pinned:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 90
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [script, core-differential]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash scripts/ci-setup.sh apt msrv
+      - name: Native script tests and clippy
+        if: matrix.lane == 'script'
+        run: |
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --no-fail-fast
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings
+      - name: Kernel script regressions and clippy
+        if: matrix.lane == 'script'
+        run: |
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --features kernel --test suite -- witness_sigop_activation:: validation_engine:: segwit_v0_sighash_edges:: core_vectors::
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --features kernel --test suite -- -D warnings
+      - name: Core vs bitcoin-rs differential
+        if: matrix.lane == 'core-differential'
+        run: |
+          bitcoind="$(scripts/install-bitcoind.sh --print-path)"
+          cargo build --locked -p bitcoin-rs --profile quickstart --no-default-features --features zmq
+          scripts/run-p2p-core-interop.sh --bitcoind-command "$bitcoind" --bitcoin-rs-command target/quickstart/bitcoin-rs --workdir "$PWD/target/core-differential/run" --evidence "$PWD/target/core-differential/evidence.json"
+
+  deep-gate:
+    needs: [tests, book, kernel, pinned]
+    if: always()
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the deep lanes
+        run: |
+          fail() { echo "deep-gate: $1 is $2" >&2; exit 1; }
+          for pair in "tests:${{ needs.tests.result }}" "book:${{ needs.book.result }}" "kernel:${{ needs.kernel.result }}"; do
+            name=${pair%%:*}; result=${pair#*:}
+            [ "$result" = success ] || fail "$name" "$result"
+          done
+          pinned=${{ needs.pinned.result }}
+          { [ "$pinned" = success ] || [ "$pinned" = skipped ]; } || fail pinned "$pinned"
