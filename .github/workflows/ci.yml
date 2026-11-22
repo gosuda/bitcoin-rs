@@ -74,7 +74,7 @@ jobs:
           bash scripts/ci-setup.sh apt
           m=tools/stratum-sv2/template-provider/Cargo.toml
           cargo metadata --locked --format-version 1 --manifest-path "$m" >/dev/null
-          cargo test --locked --manifest-path "$m"
+          cargo test --locked --no-fail-fast --manifest-path "$m"
           cargo clippy --locked --manifest-path "$m" --all-targets -- -D warnings
 
   lane:
