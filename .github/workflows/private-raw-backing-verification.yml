@@ -63,7 +63,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Verify actual owner behavior and its negative controls
+      - name: Verify local owner behavior and its negative controls
         run: |
           set -euo pipefail
           mkdir -p target/raw-backing-proof
