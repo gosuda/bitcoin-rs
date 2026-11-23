@@ -31,7 +31,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - Scope covers `bitcoin`, `bitcoin_hashes`, `secp256k1`, and `secp256k1-sys`.
 - Each of those crates MUST resolve to exactly one version per graph, except the exact-version splits listed here.
 - The Bitcoin 0.32.102 reference dependency retains `bitcoin_hashes 0.14.101` alongside direct `bitcoin_hashes 1.2.0`.
-- The direct `secp256k1 0.33.1` line coexists with Bitcoin's exact `secp256k1 0.29.1` and `secp256k1-sys 0.10.1` reference line; versioned native links keep the two libraries distinct.
+- The direct `secp256k1 0.33.1` line coexists with Bitcoin's `secp256k1 0.29.1` or `0.29.100` reference line and `secp256k1-sys 0.10.1`; versioned native links keep the two libraries distinct.
 - The pool-only exception below remains approved.
 - The pinned SRI release family is `noise_sv2 2.1.0`.
 - The `pool-sv2` feature in `crates/wire/Cargo.toml` reaches this family.
@@ -93,18 +93,22 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The DEP-01 lanes run `check bans` only.
 
 ## Selected range prerequisites
+- `bytes` is bounded at `>=1.11.1, <2`. SurrealKV requires `bytes 1.11.1` or later.
+- `smallvec` is bounded at `>=1.15.2, <2`. `parking_lot_core 0.10.0` requires `smallvec 1.15.2` or later.
+- SurrealKV permits `lz4_flex 0.12.2` in the committed graph and `0.12.3` at the maximum endpoint. Both exact versions have duplicate exceptions.
+- `windows-link 0.2.1` remains in the platform support graph when `generator 0.8.12` selects `windows-core 0.100.0` and `windows-link 0.100.0`. The exact `0.2.1` exception permits this split.
 - `bitcoin_hashes 1.2.0` requires `bitcoin-internals 0.6.0` directly and `bitcoin-internals 0.7.0` through `bitcoin-consensus-encoding 1.3`; only that exact-version split is approved, with `deny.toml` `[bans].skip` pinning `bitcoin-internals@0.6.0`.
 - `base64` is bounded to `>=0.23.1, <0.24` with defaults disabled and `std` (including `alloc`) enabled.
 - `simd-unsafe` remains disabled.
-- `secp256k1` is bounded to `>=0.33.1, <0.34` with `std`, `alloc`, `recovery`, `rand`, and `global-context` enabled. Bitcoin's exact `secp256k1 0.29.1` and `secp256k1-sys 0.10.1` reference line is an approved split, pinned in `deny.toml` `[bans].skip`; it approves no other version.
+- `secp256k1` is bounded to `>=0.33.1, <0.34` with `std`, `alloc`, `recovery`, `rand`, and `global-context` enabled. Bitcoin's `secp256k1 0.29.1` and `0.29.100` endpoint versions share the `secp256k1-sys 0.10.1` reference line. Each approved endpoint is pinned in `deny.toml` `[bans].skip`; these entries approve no other version.
 - The metrics exporter's `base64 0.22.1` is an approved exact-version duplicate, not approval for other versions.
 - `proptest` is bounded at `>=1.12, <1.13` and `proptest-state-machine` is pinned at `=0.9.0` in the root `Cargo.toml` `[workspace.dependencies]`.
 - Version `1.12` moves to the `rand_core 0.10` and `rand_xorshift 0.5` family, so the lock carries `rand_core@0.10.1` beside `rand_core@0.9.5` from the selected `rand 0.9` family.
 - That `rand_core` pair is an approved exact-version split. It approves no other `rand` family change.
 - `parking_lot` is bounded at `>=0.13.0, <0.14`. Transitive crates on the `0.12` line (`rust-rocksdb`, `signet-libmdbx`, `surrealkv`, `quick_cache`, `affinitypool`) keep `parking_lot@0.12.5`, with its `parking_lot_core@0.9.12` and `lock_api@0.4.14`.
 - That `parking_lot`/`parking_lot_core`/`lock_api` pair with the `0.13`/`0.10`/`0.5` lines is an approved exact-version split. It approves no other `parking_lot` family change.
-- The `syn@3.0.9` exception in `deny.toml` `[bans]` is an exact-version pin for the proc-macro chain.
-- When the `syn 3.0.x` patch in the root or `fuzz` lock moves, update the exception to that exact version in the same change.
+- The `syn@3.0.9` and `syn@3.0.10` exceptions in `deny.toml` `[bans]` cover the committed and maximum-endpoint proc-macro chains.
+- When a supported graph selects another `syn 3.0.x` patch, review that version and update its exact exception in the same change.
 - The entry describes this `syn` pin only.
 - It does not approve other splits.
 - The `secp256k1@0.28.2`, `secp256k1-sys@0.9.2`, and `bitcoin_hashes@0.13.1` exceptions in `deny.toml` `[bans]` are exact-version pins for the `noise_sv2 2.1.0` SV2 chain.
