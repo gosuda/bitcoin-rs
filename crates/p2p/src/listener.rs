@@ -2250,9 +2250,14 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
             getaddr_answerable(lease, shared, answered_getaddr),
             Instant::now(),
         ) {
-            DeferredStep::NoneHeld => {
-                step_parked_getdata(peer, shared, lease, lease.source(endpoint), &mut keepalive, &mut parked_since)?
-            }
+            DeferredStep::NoneHeld => step_parked_getdata(
+                peer,
+                shared,
+                lease,
+                lease.source(endpoint),
+                &mut keepalive,
+                &mut parked_since,
+            )?,
             DeferredStep::Waiting => ParkedStep::StillParked,
             DeferredStep::Ended => ParkedStep::Ended,
             DeferredStep::Ready(message, reply) => {
@@ -2369,9 +2374,10 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
             &message,
             shared.chain_query.as_deref(),
             shared.tx_inventory.as_deref(),
-            shared.tx_policy.as_ref().and_then(|policy| {
-                policy.transaction_serving_sequence(lease.source(endpoint))
-            }),
+            shared
+                .tx_policy
+                .as_ref()
+                .and_then(|policy| policy.transaction_serving_sequence(lease.source(endpoint))),
             &tx_relay_open,
             &|| sink.headroom(),
             &mut |response| sink.send(response),
@@ -3195,19 +3201,22 @@ mod transaction_poll_tests {
         }
         fn get_tx(
             &self,
-            _: bitcoin_rs_consensus::primitives::Txid, _last_inv_sequence: u64
+            _: bitcoin_rs_consensus::primitives::Txid,
+            _last_inv_sequence: u64,
         ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
         fn get_tx_by_wtxid(
             &self,
-            _: bitcoin_rs_consensus::primitives::Wtxid, _last_inv_sequence: u64
+            _: bitcoin_rs_consensus::primitives::Wtxid,
+            _last_inv_sequence: u64,
         ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
         fn resident_ancestor_package(
             &self,
-            _: bitcoin_rs_consensus::primitives::Wtxid, _last_inv_sequence: u64
+            _: bitcoin_rs_consensus::primitives::Wtxid,
+            _last_inv_sequence: u64,
         ) -> Option<Vec<bitcoin_rs_consensus::primitives::Wtxid>> {
             None
         }
@@ -3219,7 +3228,9 @@ mod transaction_poll_tests {
         }
 
         fn package_for_relay(
-            &self, wtxids: &[bitcoin_rs_consensus::primitives::Wtxid], _last_inv_sequence: u64
+            &self,
+            wtxids: &[bitcoin_rs_consensus::primitives::Wtxid],
+            _last_inv_sequence: u64,
         ) -> Option<Vec<Arc<bitcoin_rs_consensus::primitives::Tx>>> {
             self.resident_package(wtxids)
         }
@@ -6893,7 +6904,11 @@ mod getdata_pause_tests {
                 .cloned()
         }
 
-        fn resident_ancestor_package(&self, _wtxid: Wtxid, _last_inv_sequence: u64) -> Option<Vec<Wtxid>> {
+        fn resident_ancestor_package(
+            &self,
+            _wtxid: Wtxid,
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Wtxid>> {
             None
         }
 
@@ -6901,7 +6916,11 @@ mod getdata_pause_tests {
             None
         }
 
-        fn package_for_relay(&self, _wtxids: &[Wtxid], _last_inv_sequence: u64) -> Option<Vec<Arc<Tx>>> {
+        fn package_for_relay(
+            &self,
+            _wtxids: &[Wtxid],
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Arc<Tx>>> {
             self.resident_package(_wtxids)
         }
     }
@@ -7161,12 +7180,16 @@ mod getdata_pause_tests {
             let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
             shared.tx_inventory = Some(Arc::new(ScriptedTxs { txs: vec![tx] }));
             if observer_installed {
-                shared.tx_policy = Some(Arc::new(super::transaction_poll_tests::MockTxPolicy::default()));
+                shared.tx_policy = Some(Arc::new(
+                    super::transaction_poll_tests::MockTxPolicy::default(),
+                ));
             }
             let mut served = Served::start(
                 shared,
                 OutboundBudget::with_block_reserve(8, 1 << 20, 1024),
-                &WriterKind::Production { write_timeout: FAILSAFE },
+                &WriterKind::Production {
+                    write_timeout: FAILSAFE,
+                },
             )?;
             served.client.send(&Message::GetData(items.clone()))?;
             served.client.send(&Message::Ping(12))?;
@@ -7193,15 +7216,23 @@ mod getdata_pause_tests {
                 true,
                 OutboundBudget::with_block_reserve(1, 1 << 20, 1024),
             );
-            lease.send(Message::Ping(1)).map_err(|_| "fixture queue admits one frame")?;
+            lease
+                .send(Message::Ping(1))
+                .map_err(|_| "fixture queue admits one frame")?;
             let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
-            shared.tx_inventory = Some(Arc::new(ScriptedTxs { txs: vec![tx.clone()] }));
+            shared.tx_inventory = Some(Arc::new(ScriptedTxs {
+                txs: vec![tx.clone()],
+            }));
             let mut peer = parked_peer(vec![item]);
             let mut keepalive = Keepalive::starting(Instant::now());
             let mut parked_since = None;
             step_parked_getdata(
-                &mut peer, &shared, &lease, lease.source(None),
-                &mut keepalive, &mut parked_since,
+                &mut peer,
+                &shared,
+                &lease,
+                lease.source(None),
+                &mut keepalive,
+                &mut parked_since,
             )?;
             assert_eq!(peer.pending_getdata, vec![item]);
             assert_eq!(outbound_rx.try_recv(), Ok(Message::Ping(1)));
@@ -7210,8 +7241,12 @@ mod getdata_pause_tests {
                 shared.tx_policy = Some(Arc::new(policy));
             }
             step_parked_getdata(
-                &mut peer, &shared, &lease, lease.source(None),
-                &mut keepalive, &mut parked_since,
+                &mut peer,
+                &shared,
+                &lease,
+                lease.source(None),
+                &mut keepalive,
+                &mut parked_since,
             )?;
             assert!(peer.pending_getdata.is_empty());
             if announced_while_parked {

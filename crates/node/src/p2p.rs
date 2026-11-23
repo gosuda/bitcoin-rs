@@ -1417,7 +1417,9 @@ mod dispatch_tests {
             let (gateway, first) = gateway_holding_witness_tx(false);
             let cutoff = gateway.read().sequence_number();
             let requested = if readmitted {
-                gateway.clear(AdmissionOrigin::Block).expect("clear fixture");
+                gateway
+                    .clear(AdmissionOrigin::Block)
+                    .expect("clear fixture");
                 Arc::clone(&first)
             } else {
                 let mut later = dummy_tx(0x52);
@@ -1449,7 +1451,10 @@ mod dispatch_tests {
                     )?,
                     vec![Message::NotFound(vec![item])]
                 );
-                assert_eq!(gateway.read().unbroadcast_transactions().count(), unbroadcast);
+                assert_eq!(
+                    gateway.read().unbroadcast_transactions().count(),
+                    unbroadcast
+                );
                 assert_eq!(gateway.read().sequence_number(), sequence);
             }
             assert_eq!(
@@ -1554,7 +1559,7 @@ mod dispatch_tests {
                     &Message::Inv(vec![item]),
                     None,
                     Some(&RefTxInventory(&gateway)),
-                None,
+                    None,
                 )?;
                 if held_suppresses {
                     assert!(
@@ -1577,7 +1582,7 @@ mod dispatch_tests {
                         &Message::Inv(vec![item, unknown]),
                         None,
                         Some(&RefTxInventory(&gateway)),
-                    None,
+                        None,
                     )?,
                     vec![Message::GetData(expected)]
                 );
@@ -1598,7 +1603,7 @@ mod dispatch_tests {
                 &Message::GetData(vec![item]),
                 None,
                 Some(&RefTxInventory(&gateway)),
-            Some(sequence),
+                Some(sequence),
             )?;
             if orphan {
                 assert_eq!(responses, vec![Message::NotFound(vec![item])]);
@@ -1646,7 +1651,7 @@ mod dispatch_tests {
                 &Message::Inv(vec![item]),
                 None,
                 Some(&RefTxInventory(&gateway)),
-            None,
+                None,
             )?;
             assert_eq!(responses, []);
         }
@@ -1664,7 +1669,7 @@ mod dispatch_tests {
             &Message::GetData(vec![txid_item, witness_txid_item, wtxid_item, missing]),
             None,
             Some(&RefTxInventory(&gateway)),
-        Some(sequence),
+            Some(sequence),
         )?;
         assert_eq!(
             responses,
@@ -3055,21 +3060,24 @@ mod writer_shutdown_tests {
 
         fn get_tx(
             &self,
-            txid: bitcoin_rs_consensus::primitives::Txid, _last_inv_sequence: u64
+            txid: bitcoin_rs_consensus::primitives::Txid,
+            _last_inv_sequence: u64,
         ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             self.gateway.get_tx(txid)
         }
 
         fn get_tx_by_wtxid(
             &self,
-            wtxid: bitcoin_rs_consensus::primitives::Wtxid, _last_inv_sequence: u64
+            wtxid: bitcoin_rs_consensus::primitives::Wtxid,
+            _last_inv_sequence: u64,
         ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             self.gateway.get_tx_by_wtxid(wtxid)
         }
 
         fn resident_ancestor_package(
             &self,
-            wtxid: bitcoin_rs_consensus::primitives::Wtxid, _last_inv_sequence: u64
+            wtxid: bitcoin_rs_consensus::primitives::Wtxid,
+            _last_inv_sequence: u64,
         ) -> Option<Vec<bitcoin_rs_consensus::primitives::Wtxid>> {
             self.gateway.ancestor_package_wtxids(wtxid)
         }
@@ -3083,7 +3091,8 @@ mod writer_shutdown_tests {
 
         fn package_for_relay(
             &self,
-            wtxids: &[bitcoin_rs_consensus::primitives::Wtxid], _last_inv_sequence: u64
+            wtxids: &[bitcoin_rs_consensus::primitives::Wtxid],
+            _last_inv_sequence: u64,
         ) -> Option<Vec<Arc<bitcoin_rs_consensus::primitives::Tx>>> {
             self.resident_package(wtxids)
         }
@@ -3285,8 +3294,16 @@ impl TxInventory for NodeTxInventory {
     fn transaction_send_failed(&self, wtxid: Wtxid) {
         self.0.restore_unbroadcast(wtxid);
     }
-    fn resident_ancestor_package(&self, wtxid: Wtxid, last_inv_sequence: u64) -> Option<Vec<Wtxid>> {
-        bitcoin_rs_mempool::MempoolGateway::ancestor_package_for_relay(&self.0, wtxid, last_inv_sequence)
+    fn resident_ancestor_package(
+        &self,
+        wtxid: Wtxid,
+        last_inv_sequence: u64,
+    ) -> Option<Vec<Wtxid>> {
+        bitcoin_rs_mempool::MempoolGateway::ancestor_package_for_relay(
+            &self.0,
+            wtxid,
+            last_inv_sequence,
+        )
     }
     fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
         bitcoin_rs_mempool::MempoolGateway::resident_package(&self.0, wtxids)
@@ -3298,7 +3315,11 @@ impl TxInventory for NodeTxInventory {
         bitcoin_rs_mempool::MempoolGateway::get_tx_for_relay(&self.0, txid, last_inv_sequence)
     }
     fn get_tx_by_wtxid(&self, wtxid: Wtxid, last_inv_sequence: u64) -> Option<Tx> {
-        bitcoin_rs_mempool::MempoolGateway::get_tx_by_wtxid_for_relay(&self.0, wtxid, last_inv_sequence)
+        bitcoin_rs_mempool::MempoolGateway::get_tx_by_wtxid_for_relay(
+            &self.0,
+            wtxid,
+            last_inv_sequence,
+        )
     }
 
     fn package_for_relay(&self, wtxids: &[Wtxid], last_inv_sequence: u64) -> Option<Vec<Arc<Tx>>> {
@@ -3318,8 +3339,16 @@ impl TxInventory for RefTxInventory<'_> {
     fn transaction_send_failed(&self, wtxid: Wtxid) {
         self.0.restore_unbroadcast(wtxid);
     }
-    fn resident_ancestor_package(&self, wtxid: Wtxid, last_inv_sequence: u64) -> Option<Vec<Wtxid>> {
-        bitcoin_rs_mempool::MempoolGateway::ancestor_package_for_relay(self.0, wtxid, last_inv_sequence)
+    fn resident_ancestor_package(
+        &self,
+        wtxid: Wtxid,
+        last_inv_sequence: u64,
+    ) -> Option<Vec<Wtxid>> {
+        bitcoin_rs_mempool::MempoolGateway::ancestor_package_for_relay(
+            self.0,
+            wtxid,
+            last_inv_sequence,
+        )
     }
     fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
         bitcoin_rs_mempool::MempoolGateway::resident_package(self.0, wtxids)
@@ -3331,7 +3360,11 @@ impl TxInventory for RefTxInventory<'_> {
         bitcoin_rs_mempool::MempoolGateway::get_tx_for_relay(self.0, txid, last_inv_sequence)
     }
     fn get_tx_by_wtxid(&self, wtxid: Wtxid, last_inv_sequence: u64) -> Option<Tx> {
-        bitcoin_rs_mempool::MempoolGateway::get_tx_by_wtxid_for_relay(self.0, wtxid, last_inv_sequence)
+        bitcoin_rs_mempool::MempoolGateway::get_tx_by_wtxid_for_relay(
+            self.0,
+            wtxid,
+            last_inv_sequence,
+        )
     }
 
     fn package_for_relay(&self, wtxids: &[Wtxid], last_inv_sequence: u64) -> Option<Vec<Arc<Tx>>> {

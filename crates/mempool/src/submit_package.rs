@@ -805,13 +805,21 @@ mod tests {
 
         assert!(gateway.resident_package(&requested).is_some());
         assert!(gateway.package_for_relay(&requested, cutoff).is_none());
-        assert_eq!(gateway.ancestor_package_for_relay(child.wtxid(), cutoff), None);
+        assert_eq!(
+            gateway.ancestor_package_for_relay(child.wtxid(), cutoff),
+            None
+        );
         assert_eq!(
             gateway.ancestor_package_for_relay(parent.wtxid(), cutoff),
             Some(vec![parent.wtxid()])
         );
-        let bodies = gateway.package_for_relay(&requested, sequence).ok_or("announced package")?;
-        assert_eq!(bodies.iter().map(|tx| tx.wtxid()).collect::<Vec<_>>(), requested);
+        let bodies = gateway
+            .package_for_relay(&requested, sequence)
+            .ok_or("announced package")?;
+        assert_eq!(
+            bodies.iter().map(|tx| tx.wtxid()).collect::<Vec<_>>(),
+            requested
+        );
         assert_eq!(
             gateway.ancestor_package_for_relay(child.wtxid(), sequence),
             Some(vec![parent.wtxid(), child.wtxid()])

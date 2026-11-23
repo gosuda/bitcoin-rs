@@ -735,11 +735,7 @@ impl MempoolGateway {
     }
 
     #[must_use]
-    pub fn get_tx_by_wtxid_for_relay(
-        &self,
-        wtxid: Wtxid,
-        last_inv_sequence: u64,
-    ) -> Option<Tx> {
+    pub fn get_tx_by_wtxid_for_relay(&self, wtxid: Wtxid, last_inv_sequence: u64) -> Option<Tx> {
         let pool = self.read();
         let entry = pool.entry_by_wtxid(&wtxid)?;
         pool.entry_by_txid_for_relay(&entry.txid, last_inv_sequence)

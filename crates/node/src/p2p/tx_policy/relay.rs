@@ -1261,12 +1261,19 @@ mod tests {
         let now = Instant::now();
         let mut rng = StdRng::seed_from_u64(32);
         let (source, rx) = connect(
-            &table, 1, false, true, bitcoin_rs_p2p::PeerRole::FullRelay, true,
+            &table,
+            1,
+            false,
+            true,
+            bitcoin_rs_p2p::PeerRole::FullRelay,
+            true,
         );
         let remote_known = insert(&gateway, &transaction(1, None), 10_000);
         table.note_transaction_inventory(
             source,
-            &[Inventory::WTx(bitcoin::Wtxid::from_byte_array(*remote_known.wtxid.as_bytes()))],
+            &[Inventory::WTx(bitcoin::Wtxid::from_byte_array(
+                *remote_known.wtxid.as_bytes(),
+            ))],
         );
         table.queue_transaction_relay(remote_known, now, &mut rng);
         table.poll_transaction_relay(&gateway, now + Duration::from_secs(31), false, &mut rng);
@@ -1279,9 +1286,14 @@ mod tests {
         table.poll_transaction_relay(&gateway, now + Duration::from_secs(62), false, &mut rng);
         assert_eq!(
             inventory(&rx),
-            vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(*local.wtxid.as_bytes()))]
+            vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(
+                *local.wtxid.as_bytes()
+            ))]
         );
-        assert_eq!(table.transaction_serving_sequence(source), Some(local.sequence));
+        assert_eq!(
+            table.transaction_serving_sequence(source),
+            Some(local.sequence)
+        );
     }
 
     // P2P-01
@@ -1292,16 +1304,29 @@ mod tests {
         let now = Instant::now();
         let mut rng = StdRng::seed_from_u64(33);
         let (old, old_rx) = connect(
-            &table, 1, false, true, bitcoin_rs_p2p::PeerRole::FullRelay, true,
+            &table,
+            1,
+            false,
+            true,
+            bitcoin_rs_p2p::PeerRole::FullRelay,
+            true,
         );
         let first = insert(&gateway, &transaction(1, None), 10_000);
         table.queue_transaction_relay(first, now, &mut rng);
         table.poll_transaction_relay(&gateway, now + Duration::from_secs(31), false, &mut rng);
         assert_eq!(inventory(&old_rx).len(), 1);
-        assert_eq!(table.transaction_serving_sequence(old), Some(first.sequence));
+        assert_eq!(
+            table.transaction_serving_sequence(old),
+            Some(first.sequence)
+        );
 
         let (replacement, replacement_rx) = connect(
-            &table, 1, false, true, bitcoin_rs_p2p::PeerRole::FullRelay, true,
+            &table,
+            1,
+            false,
+            true,
+            bitcoin_rs_p2p::PeerRole::FullRelay,
+            true,
         );
         assert_ne!(replacement, old);
         assert_eq!(table.transaction_serving_sequence(replacement), None);
@@ -1314,7 +1339,10 @@ mod tests {
         table.queue_transaction_relay(next, now + Duration::from_secs(62), &mut rng);
         table.poll_transaction_relay(&gateway, now + Duration::from_secs(93), false, &mut rng);
         assert_eq!(inventory(&replacement_rx).len(), 1);
-        assert_eq!(table.transaction_serving_sequence(replacement), Some(next.sequence));
+        assert_eq!(
+            table.transaction_serving_sequence(replacement),
+            Some(next.sequence)
+        );
     }
 
     // P2P-01
@@ -1411,21 +1439,38 @@ mod tests {
         let now = Instant::now();
         let mut rng = StdRng::seed_from_u64(34);
         let (_, rx) = connect(
-            &table, 1, false, true, bitcoin_rs_p2p::PeerRole::FullRelay, true,
+            &table,
+            1,
+            false,
+            true,
+            bitcoin_rs_p2p::PeerRole::FullRelay,
+            true,
         );
         let current = insert(&gateway, &transaction(1, None), 10_000);
         assert_eq!(current.sequence, 1);
         table.queue_transaction_relay(
-            RelayRequest { sequence: u64::MAX - 1, ..current }, now, &mut rng,
+            RelayRequest {
+                sequence: u64::MAX - 1,
+                ..current
+            },
+            now,
+            &mut rng,
         );
         table.queue_transaction_relay(current, now, &mut rng);
         table.queue_transaction_relay(
-            RelayRequest { sequence: u64::MAX, ..current }, now, &mut rng,
+            RelayRequest {
+                sequence: u64::MAX,
+                ..current
+            },
+            now,
+            &mut rng,
         );
         table.poll_transaction_relay(&gateway, now + Duration::from_secs(31), false, &mut rng);
         assert_eq!(
             inventory(&rx),
-            vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(*current.wtxid.as_bytes()))]
+            vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(
+                *current.wtxid.as_bytes()
+            ))]
         );
     }
 
@@ -1437,16 +1482,24 @@ mod tests {
         let now = Instant::now();
         let mut rng = StdRng::seed_from_u64(35);
         let (source, rx) = connect(
-            &table, 1, false, true, bitcoin_rs_p2p::PeerRole::FullRelay, true,
+            &table,
+            1,
+            false,
+            true,
+            bitcoin_rs_p2p::PeerRole::FullRelay,
+            true,
         );
         let current = insert(&gateway, &transaction(1, None), 10_000);
         table.queue_transaction_relay(current, now, &mut rng);
-        for sequence in [
-            current.sequence,
-            current.sequence.wrapping_add(1_u64 << 63),
-        ] {
+        for sequence in [current.sequence, current.sequence.wrapping_add(1_u64 << 63)] {
             table.queue_transaction_relay(
-                RelayRequest { sequence, source: Some(u64::MAX), ..current }, now, &mut rng,
+                RelayRequest {
+                    sequence,
+                    source: Some(u64::MAX),
+                    ..current
+                },
+                now,
+                &mut rng,
             );
             let policy = table.tx_policy.lock();
             let pending = &policy.relay[&source].pending[&current.wtxid];
@@ -1456,7 +1509,9 @@ mod tests {
         table.poll_transaction_relay(&gateway, now + Duration::from_secs(31), false, &mut rng);
         assert_eq!(
             inventory(&rx),
-            vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(*current.wtxid.as_bytes()))]
+            vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(
+                *current.wtxid.as_bytes()
+            ))]
         );
     }
 

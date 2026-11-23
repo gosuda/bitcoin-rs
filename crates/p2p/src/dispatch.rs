@@ -140,7 +140,8 @@ pub trait TxInventory: Send + Sync {
 
     fn transaction_send_failed(&self, _wtxid: Wtxid) {}
 
-    fn resident_ancestor_package(&self, wtxid: Wtxid, last_inv_sequence: u64) -> Option<Vec<Wtxid>>;
+    fn resident_ancestor_package(&self, wtxid: Wtxid, last_inv_sequence: u64)
+    -> Option<Vec<Wtxid>>;
 
     fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>>;
 
@@ -241,14 +242,30 @@ pub fn dispatch_inbound_full<S>(
             ensure_inventory_request_within_bounds(items)?;
             step(peer, message)?;
             ensure_getdata_package_types_negotiated(peer, items)?;
-            serve_inbound_getdata(peer, chain, tx_inventory, last_inv_sequence, items, headroom, send)?;
+            serve_inbound_getdata(
+                peer,
+                chain,
+                tx_inventory,
+                last_inv_sequence,
+                items,
+                headroom,
+                send,
+            )?;
         }
         Message::AncPkgInfo(_)
         | Message::GetPkgTxns(_)
         | Message::PkgTxns(_)
         | Message::PkgTxnsPayload(_) => {
             step(peer, message)?;
-            receive_package_message(peer, message, tx_inventory, last_inv_sequence, tx_relay_open, headroom, send)?;
+            receive_package_message(
+                peer,
+                message,
+                tx_inventory,
+                last_inv_sequence,
+                tx_relay_open,
+                headroom,
+                send,
+            )?;
         }
         Message::GetBlockTxn(request) => {
             ensure_block_txn_indexes_valid(&request.txs_request)?;
@@ -479,12 +496,14 @@ fn serve_getpkgtxns(
     if !headroom() {
         return Ok(());
     }
-    let package = last_inv_sequence.zip(tx_inventory).and_then(|(sequence, inventory)| {
-        inventory
-            .package_for_relay(&request.wtxids, sequence)
-            .filter(|bodies| fits_one_frame(bodies))
-            .map(|bodies| (inventory, bodies))
-    });
+    let package = last_inv_sequence
+        .zip(tx_inventory)
+        .and_then(|(sequence, inventory)| {
+            inventory
+                .package_for_relay(&request.wtxids, sequence)
+                .filter(|bodies| fits_one_frame(bodies))
+                .map(|bodies| (inventory, bodies))
+        });
     let Some((inventory, bodies)) = package else {
         return send(Message::NotFound(vec![Inventory::Unknown {
             inv_type: MSG_PKGTXNS,
@@ -523,7 +542,8 @@ fn serve_ancpkginfo_item(
     if !headroom() {
         return Ok(false);
     }
-    let package = last_inv_sequence.zip(tx_inventory)
+    let package = last_inv_sequence
+        .zip(tx_inventory)
         .and_then(|(sequence, inventory)| inventory.resident_ancestor_package(subject, sequence))
         .map(|wtxids| AncPkgInfo { wtxids })
         .filter(|info| info.subject() == Some(subject) && info.encode().is_ok());
@@ -605,9 +625,19 @@ pub fn serve_getdata(
                 _,
             ) => {
                 let subject = Wtxid::from(Hash256::from_le_bytes(hash));
-                serve_ancpkginfo_item(tx_inventory, last_inv_sequence, item, subject, headroom, send, not_found)?
+                serve_ancpkginfo_item(
+                    tx_inventory,
+                    last_inv_sequence,
+                    item,
+                    subject,
+                    headroom,
+                    send,
+                    not_found,
+                )?
             }
-            (_, Some(inv)) => serve_tx_item(inv, last_inv_sequence, item, headroom, send, not_found)?,
+            (_, Some(inv)) => {
+                serve_tx_item(inv, last_inv_sequence, item, headroom, send, not_found)?
+            }
             (_, None) => serve_block_item(chain, compact_version, item, headroom, send, not_found)?,
         };
         if !served {
@@ -654,7 +684,8 @@ fn serve_tx_item(
         }
         Inventory::WTx(wtxid) => {
             let native = Wtxid::from(Hash256::from_le_bytes(wtxid.as_byte_array()));
-            inv.get_tx_by_wtxid(native, last_inv_sequence).map(|tx| (native, tx))
+            inv.get_tx_by_wtxid(native, last_inv_sequence)
+                .map(|tx| (native, tx))
         }
         _ => None,
     };
@@ -1823,7 +1854,11 @@ mod tests {
             self.txs_by_wtxid.get(&bwid).cloned()
         }
 
-        fn resident_ancestor_package(&self, wtxid: Wtxid, _last_inv_sequence: u64) -> Option<Vec<Wtxid>> {
+        fn resident_ancestor_package(
+            &self,
+            wtxid: Wtxid,
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Wtxid>> {
             self.ancestor_packages.get(&wtxid).cloned()
         }
 
@@ -1839,7 +1874,11 @@ mod tests {
                 .collect()
         }
 
-        fn package_for_relay(&self, wtxids: &[Wtxid], _last_inv_sequence: u64) -> Option<Vec<Arc<Tx>>> {
+        fn package_for_relay(
+            &self,
+            wtxids: &[Wtxid],
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Arc<Tx>>> {
             self.resident_package(wtxids)
         }
     }
@@ -2673,7 +2712,10 @@ mod tests {
             .with_resident_tx(tx)
             .with_ancestor_package(wtxid, vec![wtxid]);
         let loaded = AtomicUsize::new(0);
-        let counting = CountingResident { inner: &inventory, loaded: &loaded };
+        let counting = CountingResident {
+            inner: &inventory,
+            loaded: &loaded,
+        };
         let ancestor = package_item(MSG_ANCPKGINFO, wtxid);
         for (message, expected) in [
             (
@@ -2681,7 +2723,9 @@ mod tests {
                 Message::NotFound(vec![ancestor]),
             ),
             (
-                Message::GetPkgTxns(GetPkgTxns { wtxids: vec![wtxid] }),
+                Message::GetPkgTxns(GetPkgTxns {
+                    wtxids: vec![wtxid],
+                }),
                 Message::NotFound(vec![Inventory::Unknown {
                     inv_type: MSG_PKGTXNS,
                     hash: combined_package_hash(&[wtxid]),
@@ -2697,7 +2741,10 @@ mod tests {
                 None,
                 &|| true,
                 &|| true,
-                &mut |response| { responses.push(response); Ok(()) },
+                &mut |response| {
+                    responses.push(response);
+                    Ok(())
+                },
                 &mut |_| {},
                 &mut |_| {},
             )?;
@@ -2858,8 +2905,13 @@ mod tests {
             self.inner.get_tx_by_wtxid(wtxid, _last_inv_sequence)
         }
 
-        fn resident_ancestor_package(&self, wtxid: Wtxid, _last_inv_sequence: u64) -> Option<Vec<Wtxid>> {
-            self.inner.resident_ancestor_package(wtxid, _last_inv_sequence)
+        fn resident_ancestor_package(
+            &self,
+            wtxid: Wtxid,
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Wtxid>> {
+            self.inner
+                .resident_ancestor_package(wtxid, _last_inv_sequence)
         }
 
         fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
@@ -2867,7 +2919,11 @@ mod tests {
             self.inner.resident_package(wtxids)
         }
 
-        fn package_for_relay(&self, wtxids: &[Wtxid], _last_inv_sequence: u64) -> Option<Vec<Arc<Tx>>> {
+        fn package_for_relay(
+            &self,
+            wtxids: &[Wtxid],
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Arc<Tx>>> {
             self.resident_package(wtxids)
         }
     }
