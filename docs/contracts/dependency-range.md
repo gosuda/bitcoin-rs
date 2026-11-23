@@ -97,7 +97,9 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - `smallvec` is bounded at `>=1.15.2, <2`. `parking_lot_core 0.10.0` requires `smallvec 1.15.2` or later.
 - SurrealKV permits `lz4_flex 0.12.2` in the committed graph and `0.12.3` at the maximum endpoint. Both exact versions have duplicate exceptions.
 - `windows-link 0.2.1` remains in the platform support graph when `generator 0.8.12` selects `windows-core 0.100.0` and `windows-link 0.100.0`. The exact `0.2.1` exception permits this split.
-- `bitcoin_hashes 1.2.0` requires `bitcoin-internals 0.6.0` directly and `bitcoin-internals 0.7.0` through `bitcoin-consensus-encoding 1.3`; only that exact-version split is approved, with `deny.toml` `[bans].skip` pinning `bitcoin-internals@0.6.0`.
+- `bitcoin_hashes 1.2.0` requires `bitcoin-internals 0.6.0` directly and `0.7.0` through `bitcoin-consensus-encoding 1.3`.
+- The minimum endpoint also selects `bitcoin-internals 0.3.0` through `bitcoin 0.32.9`. Exact exceptions cover `0.3.0` and `0.6.0`; `0.7.0` remains the unskipped version.
+- The minimum endpoint selects `object 0.39.1` through `ar_archive_writer 0.5.5` and `0.40.0` through Tokio's backtrace dependency. The exact `0.39.1` exception permits this split.
 - `base64` is bounded to `>=0.23.1, <0.24` with defaults disabled and `std` (including `alloc`) enabled.
 - `simd-unsafe` remains disabled.
 - `secp256k1` is bounded to `>=0.33.1, <0.34` with `std`, `alloc`, `recovery`, `rand`, and `global-context` enabled. Bitcoin's `secp256k1 0.29.1` and `0.29.100` endpoint versions share the `secp256k1-sys 0.10.1` reference line. Each approved endpoint is pinned in `deny.toml` `[bans].skip`; these entries approve no other version.

@@ -14,10 +14,12 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
-  resolve:
+  ranges:
     if: github.head_ref == 'stabilize/dependency-range-20261124'
-    runs-on: depot-ubuntu-24.04
-    timeout-minutes: 20
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 120
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
     strategy:
       fail-fast: false
       matrix:
@@ -27,16 +29,9 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - run: bash scripts/ci-setup.sh nightly deny
-      - name: Resolve supported versions
-        run: |
-          if [ "${{ matrix.range }}" = minimal ]; then
-            cargo +nightly update -Zdirect-minimal-versions
-          else
-            cargo update
-          fi
-      - name: Check dependency policy
-        run: cargo deny check bans
+      - run: bash scripts/ci-setup.sh apt msrv nightly deny
+      - name: Verify supported dependency endpoint
+        run: KEEP_LOCK=1 scripts/check-dep-range.sh ${{ matrix.range }}
       - name: Show resolved graph
         if: always()
         run: cargo tree --locked --all-features --duplicates
@@ -51,6 +46,8 @@ jobs:
         include:
           - owner: api
             commit: 460f71e303910723053d14b57a239e92bcbf1b85
+          - owner: http
+            commit: 6de04fce5807d790d0cd7940665fc76580dcca9f
           - owner: mining
             commit: f6cd9fbcbafa485b77022aa5333c8c4d2cdf1995
           - owner: p2p
