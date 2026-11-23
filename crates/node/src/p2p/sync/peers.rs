@@ -489,9 +489,11 @@ impl BlockSync {
                 if scheduler
                     .headers_sync
                     .get(&peer.source)
-                    .and_then(|owned| owned.request)
-                    .is_some_and(|request| {
-                        request.state == super::HeaderRequestState::ResponseQueued
+                    .is_some_and(|owned| {
+                        owned.has_local_replay()
+                            || owned.request.is_some_and(|request| {
+                                request.state == super::HeaderRequestState::ResponseQueued
+                            })
                     })
                 {
                     continue;

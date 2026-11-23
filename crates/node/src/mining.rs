@@ -545,9 +545,11 @@ impl MiningControl for MiningCoordinator {
             Err(bitcoin_rs_chain::HeaderAdmissionError::Rejected(error)) => {
                 Err(header_reject_reason(error))
             }
-            Err(bitcoin_rs_chain::HeaderAdmissionError::Refused(error)) => Err(
-                MiningControlError::Unavailable(CompactString::from(error.to_string())),
-            ),
+            Err(error @ (
+                bitcoin_rs_chain::HeaderAdmissionError::Refused(_)
+                | bitcoin_rs_chain::HeaderAdmissionError::Resource(_)
+                | bitcoin_rs_chain::HeaderAdmissionError::Candidate(_)
+            )) => Err(MiningControlError::Unavailable(CompactString::from(error.to_string()))),
         }
     }
 
