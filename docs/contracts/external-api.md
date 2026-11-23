@@ -423,6 +423,9 @@ wallet interoperability remain unverified.
 - The next template read captures membership and fee revisions together.
 - `getblocktemplate` never carries a coinbase budget.
 - Typed `BlockTemplateRequest.coinbase_budget` is `None` for every RPC request.
+- Ordinary node templates reserve 8,000 WU for the block header, transaction count, and external coinbase by default. The configured `block_reserved_weight` is clamped to 2,000 through 4,000,000 WU, as in Core v31.1 `ClampOptions`.
+- Ordinary node templates reserve at least 400 coinbase sigop cost. The actual local coinbase cost is used when it is larger than either reserve.
+- `CandidateContext.coinbase_reserve` states this policy. A complete local coinbase can use `CoinbaseReserve::EXACT`; production templates use the immutable node configuration.
 - Only the typed `MiningControl` embedder (experimental SV2 regtest adapter in `tools/stratum-sv2`) sets it.
 - A budgeted candidate leaves that room in the coinbase with a budget-qualified id.
 - The ordinary candidate is used when it already admits the budget.

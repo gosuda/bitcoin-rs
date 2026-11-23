@@ -1575,6 +1575,7 @@ mod mining {
                 state.stable_read(),
                 state.chain_followers(),
                 state.config().mining.payout_script.clone(),
+                state.config().mining.coinbase_reserve,
             )
         }
 
@@ -2720,6 +2721,7 @@ mod mining {
                 state.stable_read(),
                 state.chain_followers(),
                 state.config().mining.payout_script.clone(),
+                state.config().mining.coinbase_reserve,
             ));
             mining.publish_generation();
             let current = expect_template(mining.get_block_template(template_request(None))?);
@@ -2909,6 +2911,7 @@ mod mining {
                 state.stable_read(),
                 state.chain_followers(),
                 state.config().mining.payout_script.clone(),
+                state.config().mining.coinbase_reserve,
             ));
             mining.publish_generation();
             let current = expect_template(mining.get_block_template(template_request(None))?);
@@ -3641,6 +3644,7 @@ mod mining {
                 state.stable_read(),
                 state.chain_followers(),
                 payout,
+                state.config().mining.coinbase_reserve,
             );
             let mut inputs = Vec::new();
             for _ in 0..6 {
