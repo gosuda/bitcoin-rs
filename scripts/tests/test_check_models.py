@@ -707,10 +707,15 @@ class ModelEvidenceTests(unittest.TestCase):
                     pgid = next(iter(new_sessions))
             if child_pid is None or pgid is None:
                 time.sleep(0.01)
-        self.assertIsNotNone(child_pid, "mock java never wrote tlc_child.pid")
-        self.assertIsNotNone(pgid, "execute_process never registered the session")
-        check_models.kill_session(pgid, signal.SIGKILL)
-        worker.join(timeout=10)
+        try:
+            self.assertIsNotNone(child_pid, "mock java never wrote tlc_child.pid")
+            self.assertIsNotNone(pgid, "execute_process never registered the session")
+        finally:
+            with check_models.LIVE_SESSIONS_LOCK:
+                leaked = check_models.LIVE_SESSIONS - before
+            for session in leaked:
+                check_models.kill_session(session, signal.SIGKILL)
+            worker.join(timeout=10)
         self.assertFalse(worker.is_alive())
         if "error" in outcome:
             raise outcome["error"]
