@@ -54,6 +54,9 @@ pub(crate) mod publisher;
 
 fn classify_checkpoint_error(error: CheckpointError) -> CheckpointLoadError {
     match error {
+        CheckpointError::Header(headers::HeaderCheckpointError::TemporaryIndex(error)) => {
+            CheckpointLoadError::Io(error)
+        }
         CheckpointError::Io(error)
         | CheckpointError::FullRevalidationMarker(error)
         | CheckpointError::Utxo(bitcoin_rs_storage::utxo::UtxoError::Io(error))
@@ -1073,6 +1076,29 @@ fn manifest_tip(tip: headers::HeaderCheckpointTip, chain_tx_count: u64) -> Check
 #[cfg(test)]
 mod tests {
     use super::headers;
+
+    // RCV-09, SYNC-04
+    #[test]
+    fn temporary_header_index_failures_preserve_checkpoint_error_identity() {
+        for kind in [
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::InvalidData,
+        ] {
+            let error = super::classify_checkpoint_error(
+                super::CheckpointError::Header(headers::HeaderCheckpointError::TemporaryIndex(
+                    std::io::Error::from(kind),
+                )),
+            );
+            assert!(matches!(error, CheckpointLoadError::Io(source) if source.kind() == kind));
+        }
+        let malformed = super::classify_checkpoint_error(
+            super::CheckpointError::Header(headers::HeaderCheckpointError::MalformedSideBranch {
+                index: 9,
+            }),
+        );
+        assert!(matches!(malformed, CheckpointLoadError::Corrupt(_)));
+    }
 
     use std::fs;
     use std::io::Cursor;
