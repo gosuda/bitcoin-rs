@@ -730,7 +730,7 @@ mod tests {
     use bitcoin_rs_wire::mining::MiningControlError;
     use compact_str::CompactString;
 
-    // API-11, SYNC-05
+    // API-11, API-30, SYNC-05
     #[test]
     fn templates_reject_missing_inputs_without_mutating_chainstate()
     -> Result<(), crate::test_support::TestError> {
@@ -765,6 +765,20 @@ mod tests {
             long_poll_id: None,
             coinbase_budget,
         };
+        mining.generate(GenerateRequest {
+            payout: vec![0x51],
+            count: 1,
+            max_tries: GenerateRequest::DEFAULT_MAX_TRIES,
+            selection: GenerateSelection::Ordered(Vec::new()),
+            submit: true,
+        })?;
+        assert_eq!(
+            state
+                .chainstate()
+                .utxo_reader()
+                .with_stable_view(|view| view.len())?,
+            1
+        );
         mining.get_block_template(request(None))?;
         let missing = Tx {
             version: 2,
@@ -790,7 +804,67 @@ mod tests {
             0,
             0,
         ))?;
+        state.mempool().write().prioritise(txid, 200)?;
         mining.publish_generation();
+        let capture_state = || -> Result<_, crate::test_support::TestError> {
+            let chain = state.chainstate();
+            let tip = chain
+                .applied_tip_snapshot()
+                .map(|tip| (tip.hash, tip.height, tip.chainwork, tip.chain_tx_count));
+            let coins = chain.utxo_reader().with_stable_view(|view| {
+                let mut coins = std::collections::HashMap::new();
+                view.for_each_all(|outpoint, bytes| {
+                    coins.insert(*outpoint, bytes.to_vec());
+                });
+                coins
+            })?;
+            let coin_stats = chain.coin_stats_handle().snapshot();
+            let pool_handle = state.mempool();
+            let pool = pool_handle.read();
+            let entries = pool
+                .iter_entries()
+                .map(|entry| {
+                    (
+                        entry.txid,
+                        (
+                            Arc::clone(&entry.tx),
+                            entry.wtxid,
+                            (entry.vsize, entry.bip141_vsize, entry.size, entry.weight),
+                            (entry.fee, entry.fee_rate, entry.fee_delta),
+                            (
+                                entry.ancestor_size,
+                                entry.ancestor_fee,
+                                entry.ancestor_fee_delta,
+                            ),
+                            (
+                                entry.descendant_size,
+                                entry.descendant_fee,
+                                entry.descendant_fee_delta,
+                            ),
+                            (entry.time, entry.height, entry.sigop_cost),
+                            (
+                                entry.unbroadcast,
+                                entry.broadcast_pending,
+                                entry.broadcast_done,
+                                entry.broadcast_marks,
+                            ),
+                        ),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let priorities = pool.prioritised_transactions();
+            Ok((
+                tip,
+                coins,
+                coin_stats,
+                entries,
+                priorities,
+                pool.stats(),
+                pool.sequence_number(),
+                pool.fee_delta_sequence_number(),
+                pool.settled_at_commit(),
+            ))
+        };
         for budget in [
             None,
             Some(CoinbaseBudget {
@@ -798,18 +872,15 @@ mod tests {
                 additional_sigops: 100,
             }),
         ] {
+            let before = capture_state()?;
             assert!(matches!(
                 mining.get_block_template(request(budget)),
                 Err(MiningControlError::Rejected(reason))
                     if reason == "TestBlockValidity failed: bad-txns-inputs-missingorspent"
             ));
-            let tip = state
-                .chainstate()
-                .applied_tip_snapshot()
-                .ok_or_else(|| crate::test_support::TestError::message("missing applied tip"))?;
-            assert_eq!(tip.hash, Network::Regtest.genesis_block_hash());
-            assert!(state.mempool().read().entry_id_by_txid(&txid).is_some());
+            assert_eq!(capture_state()?, before);
         }
+        let before = capture_state()?;
         assert!(matches!(
             mining.generate(GenerateRequest {
                 payout: vec![0x51],
@@ -821,6 +892,7 @@ mod tests {
             Err(MiningControlError::Rejected(reason))
                 if reason == "TestBlockValidity failed: bad-txns-inputs-missingorspent"
         ));
+        assert_eq!(capture_state()?, before);
         state.mempool().write().clear();
         mining.publish_generation();
         mining.get_block_template(request(None))?;

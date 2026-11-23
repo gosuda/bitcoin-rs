@@ -739,52 +739,37 @@ mod tests {
     // API-11
     #[test]
     fn ordinary_templates_reserve_external_coinbase_sigops() -> TestResult {
-        let mut pool = Mempool::new(MempoolLimits {
-            min_relay_fee_sat_per_kvb: 0,
-            ..MempoolLimits::default()
-        });
-        for label in 1..=5 {
-            let tx = witnessed_tx(label);
-            let vsize = u32::try_from(tx.vsize())?;
-            pool.insert_entry(MempoolEntry::new(Arc::new(tx), vsize, 10_000, 0, 0, 16_000))?;
+        for (sigops, expected_count) in [(79_599, 1), (79_600, 1), (79_601, 0)] {
+            let candidate = assemble(
+                &CandidateContext {
+                    coinbase_reserve: CoinbaseReserve::default(),
+                    ..context(true, GENEROUS)
+                },
+                &pool_with_tx(sigops)?,
+                None,
+            )?;
+            assert_eq!(candidate.transactions.len(), expected_count);
+            assert!(used(&candidate)?.2 + 400 <= 80_000);
         }
-        let candidate = assemble(
-            &CandidateContext {
-                coinbase_reserve: CoinbaseReserve::default(),
-                ..context(
-                    true,
-                    Limits {
-                        sigops: 80_000,
-                        ..GENEROUS
-                    },
-                )
-            },
-            &pool,
-            None,
-        )?;
-        assert_eq!(candidate.transactions.len(), 4);
-        assert!(used(&candidate)?.2 + 400 <= 80_000);
         Ok(())
     }
 
     // API-11
     #[test]
     fn ordinary_templates_reserve_external_coinbase_weight() -> TestResult {
-        let candidate = assemble(
-            &CandidateContext {
-                coinbase_reserve: CoinbaseReserve::default(),
-                ..context(
-                    true,
-                    Limits {
-                        weight: 8_000,
-                        ..GENEROUS
-                    },
-                )
-            },
-            &pool_with_tx(0)?,
-            None,
-        )?;
-        assert!(candidate.transactions.is_empty());
+        let pool = pool_with_tx(0)?;
+        assert_eq!(witnessed_tx(1).weight(), 448);
+        for (weight, expected_count) in [(8_447, 0), (8_448, 1), (8_449, 1)] {
+            let candidate = assemble(
+                &CandidateContext {
+                    coinbase_reserve: CoinbaseReserve::default(),
+                    ..context(true, Limits { weight, ..GENEROUS })
+                },
+                &pool,
+                None,
+            )?;
+            assert_eq!(candidate.transactions.len(), expected_count);
+        }
         Ok(())
     }
 
