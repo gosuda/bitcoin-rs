@@ -1,0 +1,42 @@
+name: Stabilization verification
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  resolve:
+    if: github.head_ref == 'stabilize/dependency-range-20261124'
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        range: [minimal, maximum]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - run: bash scripts/ci-setup.sh nightly deny
+      - name: Resolve supported versions
+        run: |
+          if [ "${{ matrix.range }}" = minimal ]; then
+            cargo +nightly update -Zdirect-minimal-versions
+          else
+            cargo update
+          fi
+      - name: Check dependency policy
+        run: cargo deny check bans
+      - name: Show resolved graph
+        if: always()
+        run: cargo tree --locked --all-features --duplicates
