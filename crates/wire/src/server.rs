@@ -872,6 +872,17 @@ fn read_head_line(reader: &mut impl BufRead, remaining: usize) -> io::Result<(St
             "headers too large",
         ));
     }
+    if line.ends_with('\r')
+        || line
+            .as_bytes()
+            .windows(2)
+            .any(|bytes| bytes[0] == b'\r' && bytes[1] != b'\n')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid carriage return in HTTP head",
+        ));
+    }
     Ok((line, read))
 }
 
@@ -2744,6 +2755,41 @@ mod tests {
             "a {MAX_BODY_BYTES}-byte declaration reserved {} bytes",
             body.capacity()
         );
+    }
+
+    // API-08
+    #[test]
+    fn bare_carriage_returns_in_request_heads_are_rejected() -> io::Result<()> {
+        for request in [
+            "POST / HTTP/1.1\r\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}",
+            "POST / HTTP/1.1\r\nX-Ignored: value\rTransfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n{}",
+            "POST / HTTP/1.1\r\nContent-Length: \r2\r\n\r\n{}",
+            "POST / HTTP/1.1\r\nContent-Length: 2\r\r\n\r\n{}",
+        ] {
+            match read_fed_request(request.as_bytes().to_vec(), usize::MAX)? {
+                Err(RequestReadError::Io(error)) => {
+                    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                }
+                _ => panic!("a bare carriage return in the request head was accepted"),
+            }
+            let response = rest_wire_request(request.as_bytes(), false)?;
+            assert!(response.starts_with(b"HTTP/1.1 400"), "{response:?}");
+        }
+        Ok(())
+    }
+
+    // API-08
+    #[test]
+    fn request_head_validation_preserves_field_text_and_binary_body() -> io::Result<()> {
+        let mut request =
+            b"POST / HTTP/1.1\r\nX-Meta: caf\xc3\xa9\tvalue\nContent-Length: 4\r\n\r\n".to_vec();
+        let body = [0x00, 0xff, b'\r', b'\n'];
+        request.extend_from_slice(&body);
+        let Ok(Some(received)) = read_fed_request(request, 1)? else {
+            panic!("valid field text and binary body must decode");
+        };
+        assert_eq!(received.body, body);
+        Ok(())
     }
 
     #[test]
