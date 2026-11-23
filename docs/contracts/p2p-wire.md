@@ -439,6 +439,7 @@ These local behavioral proofs do not establish complete Core peer-lifecycle pari
 - **Owners**: `HeadersSyncState` (`sync/headers_presync.rs`) enforces the low-work presync threshold. `Chainstate` owns final header validation, resident retention and winning-candidate admission.
 - `BlockSync::route_headers_batch` (`sync/headers.rs`) selects one peer-owned mode, `LowWork` or `Winning`, and delegates insertion to the chain owner.
 - `SyncChain::admit_headers` is reached directly (at-assumed-work fork, released chain) or with low-work committed headers, never a collected-but-unverified batch. A typed retention refusal starts a chain-owned `HeaderCandidate` from its retained anchor; any old low-work cursor is discarded before requesting that candidate's locator.
+- A `SyncChain` provider forwards candidate creation, verified release and retention maintenance to the same chainstate that owns direct header admission.
 - Winning-candidate receipt validates or authenticates bounded staging only. `Chainstate::admit_verified_headers` is the sole release path, acknowledges exactly its successful prefix and admits no more than 2,000 headers per call. The driver admits at most 4,000 winning headers per tick, sharing that budget across inbound and parked replay.
 - A completed candidate target triggers continuation from its own last hash; it does not establish the peer's final header horizon.
 - Authority: Core `HeadersSync` (`headerssync.h`, `headerssync.cpp`, wired at `net_processing.cpp`).
@@ -455,7 +456,7 @@ These local behavioral proofs do not establish complete Core peer-lifecycle pari
 - Spent or faulted states are removed for a fresh sync with fresh salt.
 - Lost-continuity breaks are possibly benign (connection kept, `headerssync.cpp`).
 - Every other failure disconnects (bad PoW, impermitted transition, commitment divergence, commitment or buffer bounds).
-- One lifecycle entry owns the optional `LowWork`/`Winning` mode plus its wire request. State cannot inherit across a replaced connection.
+- One lifecycle entry owns the optional `LowWork`/`Winning` mode plus its wire request. State cannot inherit across a replaced connection. Unrelated non-wire body headers, including known headers or a duplicate retention refusal, preserve an already-live winning candidate.
 - Saturated sends retain the mode and leave no wire request or deadline. A later tick retries the mode's exact locator, including when generic frontier planning also asks for headers.
 - Authenticated winning prefixes awaiting local replay or the chain owner's FIFO have no network timeout and are exempt from chain-sync eviction while that local work remains. An unauthenticated partial chunk and a candidate awaiting network input receive no exemption.
 - Candidate resource pressure, cancellation, supersession, clock changes and changed redownload commitments are local retry/resync outcomes. Only the existing typed consensus peer-fault classifier can disconnect for invalid candidate headers.

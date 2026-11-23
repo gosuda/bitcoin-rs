@@ -117,7 +117,6 @@ impl BlockSync {
             {
                 self.record_admitted_tips(None, Some(tip_hash), source);
                 if let Some(source) = source {
-                    self.clear_header_mode_for(source);
                     self.peer_table
                         .note_announced_tip(source, tip_hash, active_height);
                     credit_refresh_needed = true;
@@ -342,6 +341,12 @@ impl BlockSync {
         error: &bitcoin_rs_chain::chain::HeaderRefusal,
     ) {
         if let (Some(source), Some(anchor)) = (source, error.candidate_anchor()) {
+            let already_verifying = self.scheduler.lock().headers_sync.get(&source)
+                .is_some_and(|owned| matches!(&owned.mode, Some(HeaderSyncMode::Winning(_))));
+            if already_verifying {
+                self.resume_owned_header_requests();
+                return;
+            }
             self.clear_header_request_for(source);
             self.clear_header_mode_for(source);
             match self.chain.begin_header_candidate(anchor, self.chain.minimum_chain_work()) {
@@ -984,7 +989,6 @@ impl BlockSync {
             if self.presync_anchor(headers).is_none()
                 || self.body_carried_header_needs_admission(headers)
             {
-                self.clear_header_mode_for(source);
                 return Some(self.chain.admit_headers(headers));
             }
             return None;
@@ -1802,6 +1806,7 @@ mod winning_header_tests {
         source: PeerSource,
         outbound: MessageReceiver,
         aggregate: Arc<SharedOutboundBudget>,
+        inbound_headers: crossbeam_channel::Sender<InboundHeaders>,
         fork: Vec<Header>,
     }
 
@@ -1853,7 +1858,7 @@ mod winning_header_tests {
         peers.register(endpoint, lease.clone());
         peers.publish_info(endpoint, &lease, synthetic_peer(endpoint, i32::try_from(fork_height)?));
         let source = lease.source(endpoint);
-        let (_, inbound_headers_rx) = crossbeam_channel::unbounded();
+        let (inbound_headers, inbound_headers_rx) = crossbeam_channel::unbounded();
         let (_, inbound_blocks_rx) = crossbeam_channel::unbounded();
         let sync = crate::sync::block_sync(crate::sync::BlockSyncInputs {
             handles: Arc::clone(&chain),
@@ -1867,7 +1872,7 @@ mod winning_header_tests {
                 bitcoin_rs_storage::split_chainstate_cache_budget(64 << 20), 1,
             )),
         });
-        Ok(WinningFixture { sync, chain, source, outbound, aggregate, fork: headers(fork_height, 2)? })
+        Ok(WinningFixture { sync, chain, source, outbound, aggregate, inbound_headers, fork: headers(fork_height, 2)? })
     }
 
     fn candidate(fixture: &WinningFixture) -> Result<HeaderCandidate, TestError> {
@@ -2005,4 +2010,36 @@ mod winning_header_tests {
             .is_some_and(|owned| owned.mode.is_some() && owned.request.is_some()));
         Ok(())
     }
+    // P2P-06, P2P-10
+    #[test]
+    fn body_carried_headers_preserve_a_winning_candidate() -> Result<(), TestError> {
+        let fixture = fixture(2_000, 2_001)?;
+        let mut candidate = candidate(&fixture)?;
+        receive(&mut candidate, &fixture.fork[..2_000], true)?;
+        install(&fixture, candidate);
+        fixture.sync.resume_owned_header_requests();
+        let expected = Hash256::from(fixture.fork[1_999].compute_hash());
+        assert_eq!(first_locator(&fixture.outbound), Some(expected));
+        let genesis = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block().header;
+        for header in std::iter::once(genesis).chain(fixture.fork[..9].iter().copied()) {
+            fixture.inbound_headers.send(InboundHeaders {
+                headers: vec![header],
+                source: Some(fixture.source),
+                wire_response: false,
+            }).map_err(|_| TestError::message("body-header queue closed"))?;
+        }
+        fixture.sync.drain_inbound_headers();
+        let scheduler = fixture.sync.scheduler.lock();
+        let owned = scheduler.headers_sync.get(&fixture.source).ok_or("missing winning owner")?;
+        let Some(HeaderSyncMode::Winning(candidate)) = owned.mode.as_ref() else {
+            return Err(TestError::message("body traffic discarded the winning owner"));
+        };
+        assert_eq!(candidate.phase(), HeaderCandidatePhase::Verifying);
+        assert_eq!(candidate.height(), 2_000);
+        assert_eq!(candidate.locator().first(), Some(&expected));
+        assert_eq!(owned.request.map(|request| request.locator_tip_hash), Some(expected));
+        assert!(fixture.outbound.is_empty());
+        Ok(())
+    }
+
 }
