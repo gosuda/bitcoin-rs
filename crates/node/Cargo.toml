@@ -87,6 +87,7 @@ toml = { workspace = true, optional = true }
 rustix.workspace = true
 
 [dev-dependencies]
+bitcoin-rs-consensus = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-wire = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }

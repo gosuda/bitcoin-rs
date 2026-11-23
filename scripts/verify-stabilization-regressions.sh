@@ -84,8 +84,8 @@ submission='mining::tests::fresh_submission_rechecks_generation_under_transition
 joined='mining::coordinator::tests::joined_prepared_requests_share_validation_and_its_refusal'
 interrupted='mining::coordinator::tests::interrupted_validation_releases_joiners_without_publishing_failure'
 
-git fetch --depth=1 origin 9fef684b63359747eae3323ae52a9af30cb7fda1
-git checkout --detach 9fef684b63359747eae3323ae52a9af30cb7fda1
+git fetch --depth=1 origin d0695a87e667f4eb16d8210f6e49e1561993afcb
+git checkout --detach d0695a87e667f4eb16d8210f6e49e1561993afcb
 run_case recent-block-before-fix 2 "$recent_lookup" "$recent_dispatch"
 git checkout --detach "$qa_commit"
 

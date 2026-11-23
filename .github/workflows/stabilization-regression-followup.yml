@@ -1,0 +1,96 @@
+name: Stabilization regression and maximum-range follow-up
+
+on:
+  push:
+    branches: [stabilize/verification-followup-20261124]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stabilization-regression-followup-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "2"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  regression-controls:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 120
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Provision regression tools
+        run: |
+          set -euo pipefail
+          mkdir -p target/verification-logs
+          bash scripts/ci-setup.sh apt nextest 2>&1 | tee target/verification-logs/setup.log
+          cargo nextest --version > target/verification-logs/nextest-version.txt
+      - name: Prove the regressions fail before correction and pass afterward
+        run: |
+          set -euo pipefail
+          cp scripts/verify-stabilization-regressions.sh "$RUNNER_TEMP/resolution-regressions.sh"
+          bash "$RUNNER_TEMP/resolution-regressions.sh"
+      - name: Preserve regression evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: regression-controls-${{ github.run_attempt }}
+          path: target/verification-logs/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  dependency-range:
+    name: Dependency range (${{ matrix.range }})
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 120
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
+      KEEP_LOCK: "1"
+      DEPENDENCY_RANGE: ${{ matrix.range }}
+    strategy:
+      fail-fast: false
+      matrix:
+        range: [maximum]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Provision dependency check tools
+        run: |
+          set -euo pipefail
+          mkdir -p target/verification-logs
+          git rev-parse HEAD > target/verification-logs/commit.txt
+          bash scripts/ci-setup.sh apt msrv nightly deny 2>&1 | tee target/verification-logs/setup.log
+          {
+            rustc --version --verbose
+            cargo --version
+            rustup run nightly rustc --version --verbose
+          } > target/verification-logs/toolchain.txt
+      - name: Check resolved dependency range
+        run: |
+          set -euo pipefail
+          scripts/check-dep-range.sh "$DEPENDENCY_RANGE" 2>&1 | tee target/verification-logs/dependency-range.log
+      - name: Preserve dependency evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: dependency-range-${{ matrix.range }}-${{ github.run_attempt }}
+          path: |
+            target/verification-logs/**
+            Cargo.lock
+          if-no-files-found: warn
+          retention-days: 7
+
