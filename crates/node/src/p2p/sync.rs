@@ -234,6 +234,10 @@ struct PeerHeadersSync {
 }
 
 impl PeerHeadersSync {
+    fn has_cancelled_candidate(&self) -> bool {
+        matches!(&self.mode, Some(HeaderSyncMode::Winning(candidate)) if candidate.is_cancelled())
+    }
+
     fn has_local_replay(&self) -> bool {
         matches!(&self.mode, Some(HeaderSyncMode::Winning(candidate))
             if !candidate.is_cancelled() && candidate.has_verified_headers())

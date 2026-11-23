@@ -468,6 +468,7 @@ impl BlockSync {
                 let request = owned.request?;
                 (request.state == HeaderRequestState::AwaitingResponse
                     && !owned.has_local_replay()
+                    && !owned.has_cancelled_candidate()
                     && (below_floor || owned.mode.is_some())
                     && now.saturating_duration_since(request.requested_at) >= request.timeout())
                 .then_some(*source)
@@ -2082,6 +2083,54 @@ mod winning_header_tests {
                 .is_some_and(|owned| owned.mode.is_none() && owned.request.is_some()));
             assert_eq!(fixture.chain.header_tip().ok_or("missing unchanged tip")?.hash, active_hash);
         }
+        Ok(())
+    }
+
+    // P2P-10, SYNC-01
+    #[test]
+    fn locally_cancelled_candidate_drops_its_old_network_deadline() -> Result<(), TestError> {
+        struct NoBodyChanges;
+        impl bitcoin_rs_chain::reorg::ReorgObserver for NoBodyChanges {
+            fn disconnected(&mut self, _: &bitcoin_rs_chain::DisconnectOutcome) {
+                panic!("header-only invalidation disconnected a body");
+            }
+            fn connected(
+                &mut self,
+                _: &bitcoin_rs_consensus::primitives::BlockImage,
+                _: &bitcoin_rs_chain::ConnectOutcome,
+            ) {
+                panic!("header-only invalidation connected a body");
+            }
+            fn reconsider_disconnected(&mut self, _: &bitcoin_rs_consensus::primitives::BlockImage) {
+                panic!("header-only invalidation reconsidered a body");
+            }
+        }
+        let fixture = fixture(2, 3)?;
+        install(&fixture, candidate(&fixture)?);
+        fixture.sync.resume_owned_header_requests();
+        assert!(first_locator(&fixture.outbound).is_some());
+        let invalidated = {
+            let reader = fixture.chain.block_tree_reader();
+            let tree = reader.read();
+            let tip = tree.tip().ok_or("missing main branch")?;
+            let first = tree.node_at_height_from(tip.tip_id, 1).ok_or("missing invalidation root")?;
+            tree.node(first)?.hash
+        };
+        bitcoin_rs_chain::reorg::invalidate_block(
+            &fixture.chain, &mut NoBodyChanges, invalidated, |_, outcome| outcome,
+        ).map_err(|error| TestError::message(error.to_string()))?;
+        assert!(fixture.sync.scheduler.lock().headers_sync.get(&fixture.source)
+            .is_some_and(|owned| owned.has_cancelled_candidate() && owned.request.is_some()));
+        fixture.sync.retire_timed_out_header_syncs(
+            Instant::now() + HEADER_REQUEST_TIMEOUT + Duration::from_secs(1),
+        );
+        assert!(fixture.sync.peer_table.is_current(fixture.source),
+            "local candidate cancellation must not blame its peer");
+        fixture.sync.drain_inbound_headers();
+        assert_eq!(first_locator(&fixture.outbound),
+            Some(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash()));
+        assert!(fixture.sync.scheduler.lock().headers_sync.get(&fixture.source)
+            .is_some_and(|owned| owned.mode.is_none() && owned.request.is_some()));
         Ok(())
     }
 
