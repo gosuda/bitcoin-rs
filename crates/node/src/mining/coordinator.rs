@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use bitcoin_rs_chain::chain::TipSnapshot;
@@ -33,13 +33,13 @@ use parking_lot::Condvar;
 use parking_lot::Mutex;
 
 const CANDIDATE_CACHE_LIMIT: usize = 8;
-const CANDIDATE_GENERATION_RETRIES: usize = 8;
+pub(super) const CANDIDATE_GENERATION_RETRIES: usize = 8;
 const GENERATION_RACE: &str = "generation key changed during candidate assembly";
 const ASSEMBLY_BUSY: &str = "budgeted candidate assembly is busy";
 const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-struct GenerationKey {
+pub(super) struct GenerationKey {
     tip_hash: Hash256,
     commit_id: u64,
     mempool_sequence: u64,
@@ -87,8 +87,7 @@ impl CandidateKey {
 
 struct InFlight {
     key: GenerationKey,
-    id: u64,
-    result: Option<Result<Arc<Candidate>, MiningControlError>>,
+    result: OnceLock<Result<Arc<Candidate>, MiningControlError>>,
 }
 
 #[derive(Default)]
@@ -104,7 +103,7 @@ struct CoordinatorState {
     cache: HashMap<CandidateKey, Arc<Candidate>>,
     cache_order: VecDeque<CandidateKey>,
     signalling_rules: Option<(Hash256, u32, Vec<AvailableMiningRule>)>,
-    in_flight: Option<InFlight>,
+    in_flight: Option<Arc<InFlight>>,
     budgeted: Option<u64>,
     next_flight_id: u64,
     last_candidate: Option<LastCandidateInfo>,
@@ -341,7 +340,7 @@ impl MiningService {
             .map_or_else(|| self.network.genesis_block_hash(), |tip| tip.hash)
     }
 
-    fn live_generation_key(&self) -> GenerationKey {
+    pub(super) fn live_generation_key(&self) -> GenerationKey {
         let (tip_hash, epoch_commit) = self
             .applied_tip
             .applied_epoch()
@@ -669,42 +668,34 @@ impl MiningService {
             return Ok(None);
         }
         self.validate_candidate_for_key(key, &ready.candidate)?;
-        let cache_key = CandidateKey::ordinary(key);
-        let mut state = self.state.lock();
-        if let Some(cached) = state.cache_get(&cache_key) {
-            return Ok(Some(cached));
-        }
-        if self.live_generation_key() != key {
-            return Ok(None);
-        }
-        state.cache_insert(cache_key, Arc::clone(&ready.candidate));
-        state.last_candidate = Some(last_candidate_info(&ready.candidate));
-        state.published = Some(key);
-        drop(state);
         self.discard_preparation(key.tip_hash);
-        self.wake.notify_all();
         Ok(Some(ready.candidate))
     }
 
     fn await_flight(
         &self,
-        key: GenerationKey,
+        flight: &Arc<InFlight>,
         state: &mut parking_lot::MutexGuard<'_, CoordinatorState>,
-    ) -> Result<Option<Arc<Candidate>>, MiningControlError> {
+    ) -> Result<Arc<Candidate>, MiningControlError> {
         loop {
             if self.shutdown.is_triggered() {
                 return Err(MiningControlError::Unavailable(CompactString::from(
                     "node is shutting down",
                 )));
             }
-            let Some(flight) = state.in_flight.as_ref() else {
-                break;
-            };
-            if flight.key != key {
-                break;
+            if let Some(result) = flight.result.get() {
+                return result.clone();
             }
-            if let Some(result) = flight.result.clone() {
-                return result.map(Some);
+            if state
+                .in_flight
+                .as_ref()
+                .is_none_or(|current| !Arc::ptr_eq(current, flight))
+            {
+                return Err(generation_race());
+            }
+            #[cfg(test)]
+            {
+                state.ordinary_waiters += 1;
             }
             #[cfg(test)]
             {
@@ -716,70 +707,62 @@ impl MiningService {
                 state.ordinary_waiters -= 1;
             }
         }
-        Ok(None)
     }
 
     fn candidate_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
         let cache_key = CandidateKey::ordinary(key);
-        {
-            let state = self.state.lock();
-            if let Some(cached) = state.cache_get(&cache_key) {
-                return Ok(cached);
-            }
-        }
-        if let Some(candidate) = self.prepared_candidate_for_key(key)? {
-            return Ok(candidate);
-        }
         let mut state = self.state.lock();
-        if let Some(candidate) = self.await_flight(key, &mut state)? {
-            return Ok(candidate);
+        if self.live_generation_key() != key {
+            return Err(generation_race());
         }
         if let Some(cached) = state.cache_get(&cache_key) {
             return Ok(cached);
         }
+        if let Some(flight) = state.in_flight.as_ref().filter(|flight| flight.key == key) {
+            let flight = Arc::clone(flight);
+            return self.await_flight(&flight, &mut state);
+        }
 
-        state.next_flight_id = state.next_flight_id.wrapping_add(1);
-        let flight_id = state.next_flight_id;
-        state.in_flight = Some(InFlight {
+        let flight = Arc::new(InFlight {
             key,
-            id: flight_id,
-            result: None,
+            result: OnceLock::new(),
         });
+        state.in_flight = Some(Arc::clone(&flight));
+        self.wake.notify_all();
         drop(state);
         let mut flight_guard = InFlightAssemblyGuard {
             service: self,
-            key,
-            id: flight_id,
+            flight: Arc::clone(&flight),
             armed: true,
         };
 
-        let assembled = self.assemble_for_key(cache_key);
+        let assembled = self
+            .prepared_candidate_for_key(key)
+            .and_then(|prepared| prepared.map_or_else(|| self.assemble_for_key(cache_key), Ok));
         let mut state = self.state.lock();
-        let live = self.live_generation_key();
-        let returned = match &assembled {
-            Ok(candidate) => {
-                if live == key {
-                    state.cache_insert(cache_key, Arc::clone(candidate));
-                    state.last_candidate = Some(last_candidate_info(candidate));
+        let returned = if self.shutdown.is_triggered() {
+            Err(MiningControlError::Unavailable(CompactString::from(
+                "node is shutting down",
+            )))
+        } else if self.live_generation_key() != key {
+            Err(generation_race())
+        } else {
+            match assembled {
+                Ok(candidate) => {
+                    state.cache_insert(cache_key, Arc::clone(&candidate));
+                    state.last_candidate = Some(last_candidate_info(&candidate));
                     state.published = Some(key);
-                    Ok(Arc::clone(candidate))
-                } else {
-                    Err(generation_race())
+                    Ok(candidate)
                 }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error.clone()),
         };
-        if let Some(flight) = state.in_flight.as_mut()
-            && flight.key == key
-            && flight.id == flight_id
-        {
-            flight.result = Some(returned.clone());
-        }
+        assert!(flight.result.set(returned.clone()).is_ok());
         self.wake.notify_all();
         if state
             .in_flight
             .as_ref()
-            .is_some_and(|flight| flight.id == flight_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &flight))
         {
             state.in_flight = None;
         }
@@ -787,8 +770,10 @@ impl MiningService {
         returned
     }
 
-    fn assemble_for_key(&self, key: CandidateKey) -> Result<Arc<Candidate>, MiningControlError> {
-        let generation = key.generation;
+    fn context_for_generation(
+        &self,
+        generation: GenerationKey,
+    ) -> Result<CandidateContext, MiningControlError> {
         let epoch = self.applied_tip.applied_epoch().ok_or_else(|| {
             MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
         })?;
@@ -802,7 +787,12 @@ impl MiningService {
         {
             return Err(generation_race());
         }
-        let context = self.candidate_context(&epoch.tip)?;
+        self.candidate_context(&epoch.tip)
+    }
+
+    fn assemble_for_key(&self, key: CandidateKey) -> Result<Arc<Candidate>, MiningControlError> {
+        let generation = key.generation;
+        let context = self.context_for_generation(generation)?;
         let Some(body) = self.mempool.select_template(
             Some((generation.mempool_sequence, generation.fee_delta_sequence)),
             &context,
@@ -900,17 +890,24 @@ impl MiningService {
         budget: CoinbaseBudget,
     ) -> Result<Option<Arc<Candidate>>, MiningControlError> {
         let ordinary_key = CandidateKey::ordinary(key.generation);
-        let (exact, ordinary) = {
+        let (exact, ordinary, in_flight) = {
             let state = self.state.lock();
-            (state.cache_get(&key), state.cache_get(&ordinary_key))
+            (
+                state.cache_get(&key),
+                state.cache_get(&ordinary_key),
+                state
+                    .in_flight
+                    .as_ref()
+                    .is_some_and(|flight| flight.key == key.generation),
+            )
         };
         if exact.is_some() {
             return Ok(exact);
         }
         let ordinary = match ordinary {
             Some(ordinary) => Some(ordinary),
-            None if self.preparation_installable(key.generation.tip_hash) => {
-                self.prepared_candidate_for_key(key.generation)?
+            None if in_flight || self.preparation_installable(key.generation.tip_hash) => {
+                Some(self.candidate_for_key(key.generation)?)
             }
             None => None,
         };
@@ -950,50 +947,49 @@ impl MiningService {
         payout: &[u8],
         selection: &GenerateSelection,
     ) -> Result<Candidate, MiningControlError> {
-        let tip = self.applied_tip.applied_tip().ok_or_else(|| {
-            MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
-        })?;
-        let context = self.candidate_context(&tip)?;
-        let candidate = match selection {
+        match selection {
             GenerateSelection::Mempool => {
-                let body = self
-                    .mempool
-                    .select_template(None, &context, payout, None)?
-                    .ok_or_else(generation_race)?;
-                finish_candidate(&context, &body, payout)
+                self.assemble_fresh_for_generation(self.live_generation_key(), payout)
             }
             GenerateSelection::Ordered(_) => {
+                let tip = self.applied_tip.applied_tip().ok_or_else(|| {
+                    MiningControlError::Unavailable(CompactString::from(
+                        "applied tip is not available",
+                    ))
+                })?;
+                let context = self.candidate_context(&tip)?;
                 let snapshot = self.mempool.selection_snapshot(selection, &context)?;
                 assemble_ordered_candidate(&context, &snapshot, payout)
+                    .map_err(|error| bitcoin_rs_wire::mining::ordered_assembly_error(&error))
             }
         }
-        .map_err(|error| match selection {
-            GenerateSelection::Ordered(_) => {
-                bitcoin_rs_wire::mining::ordered_assembly_error(&error)
-            }
-            GenerateSelection::Mempool => {
-                MiningControlError::Failed(CompactString::from(error.to_string()))
-            }
-        })?;
-        if matches!(selection, GenerateSelection::Mempool) {
-            let validated = self.chain.validate_candidate(&candidate);
-            if self
-                .applied_tip
-                .applied_tip()
-                .is_none_or(|current| current.hash != tip.hash)
-            {
-                return Err(generation_race());
-            }
-            validated?;
-        }
+    }
+
+    pub(super) fn assemble_fresh_for_generation(
+        &self,
+        generation: GenerationKey,
+        payout: &[u8],
+    ) -> Result<Candidate, MiningControlError> {
+        let context = self.context_for_generation(generation)?;
+        let body = self
+            .mempool
+            .select_template(
+                Some((generation.mempool_sequence, generation.fee_delta_sequence)),
+                &context,
+                payout,
+                None,
+            )?
+            .ok_or_else(generation_race)?;
+        let candidate = finish_candidate(&context, &body, payout)
+            .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+        self.validate_candidate_for_key(generation, &candidate)?;
         Ok(candidate)
     }
 }
 
 struct InFlightAssemblyGuard<'a> {
     service: &'a MiningService,
-    key: GenerationKey,
-    id: u64,
+    flight: Arc<InFlight>,
     armed: bool,
 }
 
@@ -1003,15 +999,16 @@ impl Drop for InFlightAssemblyGuard<'_> {
             return;
         }
         let mut state = self.service.state.lock();
+        self.flight.result.get_or_init(|| Err(generation_race()));
         if state
             .in_flight
             .as_ref()
-            .is_some_and(|flight| flight.key == self.key && flight.id == self.id)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.flight))
         {
             state.in_flight = None;
-            drop(state);
-            self.service.wake.notify_all();
         }
+        drop(state);
+        self.service.wake.notify_all();
     }
 }
 
@@ -1524,7 +1521,7 @@ fn snapshot_entry_from_raw(
     }
 }
 
-fn generation_race() -> MiningControlError {
+pub(super) fn generation_race() -> MiningControlError {
     MiningControlError::Unavailable(CompactString::from(GENERATION_RACE))
 }
 
@@ -3821,6 +3818,85 @@ mod tests {
         Ok(())
     }
 
+    // API-11, SYNC-03, SYNC-05
+    #[test]
+    fn interrupted_validation_releases_joiners_without_publishing_failure() -> TestResult {
+        for cancel in [false, true] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let release = Arc::new((Mutex::new(false), Condvar::new()));
+            let (entered, validation_started) = std::sync::mpsc::channel();
+            let chain = {
+                let calls = Arc::clone(&calls);
+                let release = Arc::clone(&release);
+                Arc::new(ValidationChain(move |_candidate: &Candidate| {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        let _ = entered.send(());
+                        let mut released = release.0.lock();
+                        while !*released {
+                            assert!(
+                                !release
+                                    .1
+                                    .wait_for(&mut released, WAKE_PROOF_TIMEOUT)
+                                    .timed_out(),
+                                "validation was not released"
+                            );
+                        }
+                        assert!(cancel, "injected validation panic");
+                    }
+                    Ok(())
+                }))
+            };
+            let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
+            let service = Arc::new(service_with_source(
+                Some(tip_snapshot(Hash256::from_le_bytes(&[0x79; 32]))),
+                Arc::new(StaticPool::new(5, 2)),
+                chain,
+                shutdown.reader(),
+            ));
+            let first = {
+                let service = Arc::clone(&service);
+                std::thread::spawn(move || service.get_block_template(None, None))
+            };
+            validation_started.recv_timeout(WAKE_PROOF_TIMEOUT)?;
+            let (completed, result) = std::sync::mpsc::channel();
+            let joined = {
+                let service = Arc::clone(&service);
+                std::thread::spawn(move || {
+                    let _ = completed.send(service.get_block_template(None, None));
+                })
+            };
+            let deadline = Instant::now() + WAKE_PROOF_TIMEOUT;
+            while service.state.lock().ordinary_waiters == 0 {
+                assert!(Instant::now() < deadline, "the second request did not join");
+                std::thread::yield_now();
+            }
+            if cancel {
+                shutdown.trigger();
+                assert!(matches!(
+                    result.recv_timeout(WAKE_PROOF_TIMEOUT)?,
+                    Err(MiningControlError::Unavailable(_))
+                ));
+            }
+            *release.0.lock() = true;
+            release.1.notify_all();
+            let first = first.join();
+            if cancel {
+                assert!(matches!(first, Ok(Err(MiningControlError::Unavailable(_)))));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                let state = service.state.lock();
+                assert!(state.cache.is_empty());
+                assert!(state.last_candidate.is_none());
+            } else {
+                assert!(first.is_err());
+                result.recv_timeout(WAKE_PROOF_TIMEOUT)??;
+                assert_eq!(calls.load(Ordering::SeqCst), 2);
+            }
+            joined.join().map_err(|_| TestError::ThreadPanicked)?;
+            assert!(service.state.lock().in_flight.is_none());
+        }
+        Ok(())
+    }
+
     // API-30, SYNC-05
     #[test]
     fn fresh_mempool_validation_refuses_changed_membership_or_fee_revision() {
@@ -3851,6 +3927,86 @@ mod tests {
                 ));
             }
         }
+    }
+
+    // API-30, SYNC-05
+    #[test]
+    fn generate_retries_changed_revisions_and_bounds_persistent_churn() -> TestResult {
+        use bitcoin_rs_wire::mining::{GenerateRequest, MiningControl};
+
+        for membership in [false, true] {
+            for churn in [false, true] {
+                for reject in [false, true] {
+                    let directory = tempfile::tempdir()?;
+                    let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
+                    config.data_dir = directory.path().join("node");
+                    config.p2p.listen.clear();
+                    let state = crate::state::NodeState::open(config, None)?;
+                    let _ = state
+                        .apply_block(&BlockImage::from_local(Network::Regtest.genesis_block()))?;
+                    let tip = state.chainstate().applied_tip_snapshot().unwrap();
+                    let pool = Arc::new(StaticPool::new(5, 2));
+                    let calls = Arc::new(AtomicUsize::new(0));
+                    let chain = {
+                        let pool = Arc::clone(&pool);
+                        let calls = Arc::clone(&calls);
+                        Arc::new(ValidationChain(move |_candidate: &Candidate| {
+                            let call = calls.fetch_add(1, Ordering::SeqCst);
+                            if call == 0 || churn {
+                                let change = u64::try_from(call).unwrap() + 1;
+                                let (sequence, fee) = if membership {
+                                    (5 + change, 2)
+                                } else {
+                                    (5, 2 + change)
+                                };
+                                pool.set(sequence, fee);
+                                if reject {
+                                    return Err(MiningControlError::Rejected(CompactString::from(
+                                        "obsolete candidate",
+                                    )));
+                                }
+                            }
+                            Ok(())
+                        }))
+                    };
+                    let mut mining = crate::mining::MiningCoordinator::new(
+                        state.mempool_reader(),
+                        state.chainstate(),
+                        state.stable_read(),
+                        state.chain_followers(),
+                        vec![0x51],
+                        CoinbaseReserve::default(),
+                    );
+                    mining.service = service_with_chain(Some((*tip).clone()), pool, chain);
+                    let result = mining.generate(GenerateRequest {
+                        payout: vec![0x51],
+                        count: 1,
+                        max_tries: if churn {
+                            0
+                        } else {
+                            GenerateRequest::DEFAULT_MAX_TRIES
+                        },
+                        selection: GenerateSelection::Mempool,
+                        submit: false,
+                    });
+                    if churn {
+                        assert!(matches!(
+                            result,
+                            Err(error) if error.is_template_generation_race()
+                        ));
+                        assert_eq!(calls.load(Ordering::SeqCst), 8);
+                    } else {
+                        assert_eq!(result?.len(), 1);
+                        assert_eq!(calls.load(Ordering::SeqCst), 2);
+                    }
+                    assert_eq!(
+                        state.chainstate().applied_tip_snapshot().unwrap().hash,
+                        tip.hash
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     // API-11, SYNC-05

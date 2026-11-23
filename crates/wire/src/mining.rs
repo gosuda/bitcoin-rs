@@ -74,6 +74,7 @@ pub use template::{
     Candidate, CandidateContext, CandidateTransaction, CoinbaseBudget, CoinbaseReserve,
     SelectedBody, SelectedTx, TemplateId, assemble_candidate, assemble_ordered_candidate,
     finish_candidate, select_template_body, select_template_body_after, solve_block,
+    solve_block_with_budget,
 };
 
 #[cfg(feature = "pool")]

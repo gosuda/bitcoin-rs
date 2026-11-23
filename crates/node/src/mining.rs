@@ -49,7 +49,7 @@ use bitcoin_rs_wire::mining::header_reject_reason;
 use bitcoin_rs_wire::mining::image_needs_witness_reserved_value;
 use bitcoin_rs_wire::mining::select_template_body;
 use bitcoin_rs_wire::mining::select_template_body_after;
-use bitcoin_rs_wire::mining::solve_block;
+use bitcoin_rs_wire::mining::solve_block_with_budget;
 use bitcoin_rs_wire::mining::update_uncommitted_block_structures;
 use compact_str::CompactString;
 
@@ -559,52 +559,80 @@ impl MiningControl for MiningCoordinator {
             )));
         }
         let mut generated = Vec::new();
-        for _ in 0..request.count {
-            if self.shutdown.is_triggered() {
-                return Err(MiningControlError::Unavailable(CompactString::from(
-                    "node is shutting down",
-                )));
-            }
-            let candidate = self
-                .service
-                .assemble_fresh(&request.payout, &request.selection)?;
-            let mut block = candidate.into_unsolved_block().map_err(|error| {
-                MiningControlError::Failed(CompactString::from(error.to_string()))
-            })?;
-            if matches!(request.selection, GenerateSelection::Ordered(_)) {
-                let payload = BlockImage::from_local(block);
-                self.chainstate
-                    .validate_block(&payload)
-                    .map_err(|error| test_block_validity_error(&error))?;
-                block = payload.into_block();
-            }
-            solve_block(&mut block, request.max_tries).map_err(|error| {
-                MiningControlError::Failed(CompactString::from(error.to_string()))
-            })?;
-            let hash = block.block_hash();
-            if request.submit {
+        'blocks: for _ in 0..request.count {
+            let mut remaining = request.max_tries;
+            for _ in 0..coordinator::CANDIDATE_GENERATION_RETRIES {
+                if self.shutdown.is_triggered() {
+                    return Err(MiningControlError::Unavailable(CompactString::from(
+                        "node is shutting down",
+                    )));
+                }
+                let generation = matches!(request.selection, GenerateSelection::Mempool)
+                    .then(|| self.service.live_generation_key());
+                let assembled = match generation {
+                    Some(generation) => self
+                        .service
+                        .assemble_fresh_for_generation(generation, &request.payout),
+                    None => self
+                        .service
+                        .assemble_fresh(&request.payout, &request.selection),
+                };
+                if generation.is_some_and(|key| self.service.live_generation_key() != key) {
+                    continue;
+                }
+                let candidate = match assembled {
+                    Err(error) if generation.is_some() && error.is_template_generation_race() => {
+                        continue;
+                    }
+                    result => result?,
+                };
+                let mut block = candidate.into_unsolved_block().map_err(|error| {
+                    MiningControlError::Failed(CompactString::from(error.to_string()))
+                })?;
+                if matches!(request.selection, GenerateSelection::Ordered(_)) {
+                    let payload = BlockImage::from_local(block);
+                    self.chainstate
+                        .validate_block(&payload)
+                        .map_err(|error| test_block_validity_error(&error))?;
+                    block = payload.into_block();
+                }
+                if generation.is_some_and(|key| self.service.live_generation_key() != key) {
+                    continue;
+                }
+                let solved = solve_block_with_budget(&mut block, &mut remaining);
+                if generation.is_some_and(|key| self.service.live_generation_key() != key) {
+                    continue;
+                }
+                solved.map_err(|error| {
+                    MiningControlError::Failed(CompactString::from(error.to_string()))
+                })?;
+                let hash = block.block_hash();
                 let payload = BlockImage::from_local(block);
                 let hex = bitcoin_rs_consensus::primitives::hex::hex_encode(payload.bytes());
-                match self.submit(&payload)? {
-                    BlockValidationResult::Accepted => {}
-                    other => {
+                if generation.is_some_and(|key| self.service.live_generation_key() != key) {
+                    continue;
+                }
+                if request.submit {
+                    match self.submit(&payload)? {
+                        BlockValidationResult::Accepted => {}
+                        other => {
+                            return Err(MiningControlError::Failed(CompactString::from(format!(
+                                "generated block was not accepted: {other:?}"
+                            ))));
+                        }
+                    }
+                } else {
+                    let validation = self.propose(&payload)?;
+                    if validation != BlockValidationResult::Accepted {
                         return Err(MiningControlError::Failed(CompactString::from(format!(
-                            "generated block was not accepted: {other:?}"
+                            "generated block failed validation: {validation:?}"
                         ))));
                     }
                 }
                 generated.push(GeneratedBlock { hash, hex });
-            } else {
-                let payload = BlockImage::from_local(block);
-                let validation = self.propose(&payload)?;
-                if validation != BlockValidationResult::Accepted {
-                    return Err(MiningControlError::Failed(CompactString::from(format!(
-                        "generated block failed validation: {validation:?}"
-                    ))));
-                }
-                let hex = bitcoin_rs_consensus::primitives::hex::hex_encode(payload.bytes());
-                generated.push(GeneratedBlock { hash, hex });
+                continue 'blocks;
             }
+            return Err(coordinator::generation_race());
         }
         Ok(generated)
     }
