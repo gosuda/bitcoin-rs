@@ -1334,7 +1334,7 @@ mod tests {
         Ok(())
     }
 
-    // MPS-03, SNP-07, SYNC-04
+    // MPS-03, SYNC-04
     #[test]
     fn snapshot_settlement_refusal_after_durable_activation_keeps_admission_closed()
     -> Result<(), TestError> {
