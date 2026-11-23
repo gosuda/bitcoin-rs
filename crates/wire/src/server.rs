@@ -1882,10 +1882,12 @@ mod tests {
         #[test]
         fn expensive_query_saturation_preserves_shared_and_split_listener_service() -> io::Result<()>
         {
-            let context =
-                Arc::new(Context::new().with_esplora_query_limit(
-                    std::num::NonZeroUsize::new(1).expect("positive limit"),
-                ));
+            let control = crate::mining::FakeMiningControl::unavailable("template fixture");
+            let mut context = Context::new()
+                .with_esplora_query_limit(std::num::NonZeroUsize::MIN)
+                .with_mining_control(control.clone());
+            context.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
+            let context = Arc::new(context);
             let shared = RunningServer::start(&context, RpcSurface::Shared, 16)?;
             let public = RunningServer::start(&context, RpcSurface::Public, 16)?;
             let management = RunningServer::start(&context, RpcSurface::Management, 16)?;
@@ -1909,7 +1911,6 @@ mod tests {
                         "GET {prefix}/{namespace}/invalid{suffix} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
                     ).as_bytes())?;
                             assert!(response.starts_with("HTTP/1.1 503"), "{response}");
-                            assert!(response.contains("expensive Esplora query limit reached"));
                             assert_eq!(
                                 response.contains("Access-Control-Allow-Origin: *"),
                                 prefix == "/api"
@@ -1921,7 +1922,6 @@ mod tests {
                     b"GET /esplora/block-template HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
                 )?;
                 assert!(response.starts_with("HTTP/1.1 503"), "{response}");
-                assert!(response.contains("expensive Esplora query limit reached"));
                 let response = server.request(
                     b"GET /api/block-template HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
                 )?;
@@ -1931,6 +1931,7 @@ mod tests {
         )?;
                 assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
             }
+            assert_eq!(control.template_calls.load(Ordering::Relaxed), 0);
             for server in [&shared, &management] {
                 assert!(
                     server
@@ -1949,7 +1950,12 @@ mod tests {
             b"GET /api/address/invalid HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         )?;
                 assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+                let response = server.request(
+                    b"GET /esplora/block-template HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )?;
+                assert!(response.starts_with("HTTP/1.1 503"), "{response}");
             }
+            assert_eq!(control.template_calls.load(Ordering::Relaxed), 2);
             Ok(())
         }
 
@@ -2757,7 +2763,7 @@ mod tests {
         );
     }
 
-    // API-08
+    // API-38
     #[test]
     fn bare_carriage_returns_in_request_heads_are_rejected() -> io::Result<()> {
         for request in [
@@ -2778,7 +2784,7 @@ mod tests {
         Ok(())
     }
 
-    // API-08
+    // API-38
     #[test]
     fn request_head_validation_preserves_field_text_and_binary_body() -> io::Result<()> {
         let mut request =

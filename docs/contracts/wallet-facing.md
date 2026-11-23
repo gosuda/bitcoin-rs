@@ -86,6 +86,8 @@ Wallet keys, coin selection, and signing stay in the external process.
   - `backend_mempool_get_keeps_captured_parents_within_a_page`
   - `backend_transaction_batches_share_duplicate_bodies_and_preserve_rows`
   - `backend_bulk_routes_share_expensive_admission`
+  - `backend_templates_share_expensive_admission_through_send`
+  - `server::tests::listeners::expensive_query_saturation_preserves_shared_and_split_listener_service`
   - `esplora::backend::pagination_tests::bulk_request_count_includes_duplicate_entries`
   - `esplora::backend::pagination_tests::bounded_json_reuses_rows_and_refuses_oversized_output`
   - `esplora::projection::tests::prevout_budget_includes_duplicate_input_slots_and_referenced_scripts`
