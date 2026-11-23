@@ -697,10 +697,6 @@ impl MiningService {
             {
                 state.ordinary_waiters += 1;
             }
-            #[cfg(test)]
-            {
-                state.ordinary_waiters += 1;
-            }
             let _timed_out = self.wake.wait_for(state, LONG_POLL_SLICE);
             #[cfg(test)]
             {
@@ -3799,6 +3795,7 @@ mod tests {
             let first = first.join().map_err(|_| TestError::ThreadPanicked)?;
             let joined = joined.join().map_err(|_| TestError::ThreadPanicked)?;
             assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(service.state.lock().ordinary_waiters, 0);
             if refuse {
                 assert!(matches!(first, Err(MiningControlError::Rejected(_))));
                 assert!(matches!(joined, Err(MiningControlError::Rejected(_))));
@@ -3893,6 +3890,7 @@ mod tests {
             }
             joined.join().map_err(|_| TestError::ThreadPanicked)?;
             assert!(service.state.lock().in_flight.is_none());
+            assert_eq!(service.state.lock().ordinary_waiters, 0);
         }
         Ok(())
     }
@@ -3933,6 +3931,7 @@ mod tests {
     #[test]
     fn generate_retries_changed_revisions_and_bounds_persistent_churn() -> TestResult {
         use bitcoin_rs_wire::mining::{GenerateRequest, MiningControl};
+        use std::sync::atomic::AtomicU64;
 
         for membership in [false, true] {
             for churn in [false, true] {
@@ -3944,16 +3943,19 @@ mod tests {
                     let state = crate::state::NodeState::open(config, None)?;
                     let _ = state
                         .apply_block(&BlockImage::from_local(Network::Regtest.genesis_block()))?;
-                    let tip = state.chainstate().applied_tip_snapshot().unwrap();
+                    let tip = state
+                        .chainstate()
+                        .applied_tip_snapshot()
+                        .ok_or(TestError::Missing("applied genesis"))?;
                     let pool = Arc::new(StaticPool::new(5, 2));
-                    let calls = Arc::new(AtomicUsize::new(0));
+                    let calls = Arc::new(AtomicU64::new(0));
                     let chain = {
                         let pool = Arc::clone(&pool);
                         let calls = Arc::clone(&calls);
                         Arc::new(ValidationChain(move |_candidate: &Candidate| {
                             let call = calls.fetch_add(1, Ordering::SeqCst);
                             if call == 0 || churn {
-                                let change = u64::try_from(call).unwrap() + 1;
+                                let change = call + 1;
                                 let (sequence, fee) = if membership {
                                     (5 + change, 2)
                                 } else {
@@ -4000,8 +4002,11 @@ mod tests {
                         assert_eq!(calls.load(Ordering::SeqCst), 2);
                     }
                     assert_eq!(
-                        state.chainstate().applied_tip_snapshot().unwrap().hash,
-                        tip.hash
+                        state
+                            .chainstate()
+                            .applied_tip_snapshot()
+                            .map(|tip| tip.hash),
+                        Some(tip.hash)
                     );
                 }
             }

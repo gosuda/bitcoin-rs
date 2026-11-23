@@ -383,25 +383,19 @@ Proof for header ingress:
 - Failed spawns release the reservation.
 - Protection order follows Core:
   - Four by process-keyed netgroup hash.
-  - Eight by lowest minimum ping time.
+  - Eight by lowest minimum ping time. Proof: `eviction::tests::eight_lowest_minimum_pings_protect_connections` and `zero_ping_is_measured_and_unknown_ping_is_not_fast` in `crates/p2p/src/eviction.rs` check Core's eight-connection rule and measured-zero priority.
   - Four most-recent mempool-accepted tx deliverers.
   - Up to eight wanted-service block-relay-only most-recent committed-block deliverers.
   - Four most-recent committed-block deliverers.
-  - Half of the rest by uptime, with up to half of this protection reserved for I2P, local, and onion connections.
-- The reserved quota is shared among nonempty classes, with smaller classes first.
-- Equal class sizes use the fixed order I2P, local, onion, as in Core with the unsupported CJDNS class absent.
-- Each pass shares the remaining quota equally, with a minimum allocation of one per class, and stops when the quota is filled.
-- A class with fewer connections releases its unused share to the remaining classes.
-- Each class protects its longest-connected candidates.
-- Any unused reserved quota returns to general uptime protection.
-- Anonymous Tor circuits count as onion connections, never as the proxy's local IP address.
+  - Half of the rest by uptime, with up to half of this protection reserved for I2P, local, and onion connections. The reserved quota is shared among nonempty classes, with smaller classes first. Equal class sizes use the fixed order I2P, local, onion, as in Core with the unsupported CJDNS class absent. Each pass shares the remaining quota equally, with a minimum allocation of one per class, and stops when the quota is filled. A class with fewer connections releases its unused share to the remaining classes. Each class protects its longest-connected candidates. Any unused reserved quota returns to general uptime protection. Proof: `eviction::tests::network_ratio_matches_core_v31_1_vectors` in `crates/p2p/src/eviction.rs` checks Core's retained-candidate vectors and reversed input order. `absent_network_groups_leave_half_protected_by_uptime` checks empty classes and small sets.
+- Anonymous Tor circuits count as onion connections, never as the proxy's local IP address. Proof: `network_ratio_matches_core_v31_1_vectors` repeats the Core vectors with anonymous Tor identities.
 - CJDNS is unsupported. Ordinary IPv6 ULA addresses do not receive CJDNS protection.
-- `Keepalive` owns one outstanding nonce and its admission instant.
-- `PeerTable` owns the minimum successful elapsed time for each exact live connection.
-- A matching reply with zero elapsed time is a valid sample. Negative elapsed time settles the probe without changing the minimum.
+- `Keepalive` owns one outstanding nonce. It captures the start instant before queue handoff and retains it only after successful admission. Proof: `listener::keepalive_tests::only_the_outstanding_nonce_records_ping_time` in `crates/p2p/src/listener.rs` checks matching and stale replies and one outstanding probe.
+- `PeerTable` owns the minimum successful elapsed time for each exact live connection. Proof: `peer_table::tests::ping_samples_keep_the_connection_minimum_for_eviction` in `crates/p2p/src/peer_table.rs` checks the retained minimum. `listener::tests::matching_wire_pong_protects_the_live_inbound_connection` in `crates/p2p/src/listener.rs` checks the socket-to-eviction path.
+- A matching reply with zero elapsed time is a valid sample. Negative elapsed time settles the probe without changing the minimum. Proof: `listener::keepalive_tests::zero_and_negative_ping_times_follow_core_settlement` checks both boundaries.
 - An unknown minimum ping has lower protection priority than every measured minimum.
 - A slower later sample cannot increase the minimum.
-- A replacement connection starts with no sample. A callback from a replaced or cancelled connection cannot update it.
+- A replacement connection starts with no sample. A callback from a replaced or cancelled connection cannot update it. Proof: `peer_table::tests::replacement_connections_never_inherit_ping_protection` checks both boundaries.
 - Then evict the newest connection of the largest-remaining netgroup.
 - `set_network_active` and conditional socket registration share the table write lock.
 - Disable-first admits nothing (no lease, replacement, or capacity mutation).
@@ -423,15 +417,7 @@ Proof for header ingress:
 - Advertised set follows prune (`init.cpp`): `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED` when `storage.prune_target_mb > 0`.
 - Both handshake paths use `P2pServiceConfig::local_services`.
 
-Proof:
-- `eviction::tests::network_ratio_matches_core_v31_1_vectors` uses retained-candidate sets from Core v31.1 `src/test/net_peer_eviction_tests.cpp` for supported network classes.
-- It repeats each set with reversed input order and anonymous Tor identities.
-- `eight_lowest_minimum_pings_protect_connections` and `zero_ping_is_measured_and_unknown_ping_is_not_fast` check the minimum-ping stage against Core's eight-connection rule.
-- `absent_network_groups_leave_half_protected_by_uptime` checks empty classes and small candidate sets.
-- `listener::keepalive_tests` checks matching, stale, zero, and negative-time Pong settlement and one outstanding probe.
-- `peer_table::tests` checks the connection minimum and rejects callbacks after replacement or cancellation.
-- `matching_wire_pong_protects_the_live_inbound_connection` checks the listener-to-table path through a real socket and an inbound eviction.
-- These are local behavioral proofs. They do not establish complete Core peer-lifecycle parity. Policy §7 items 11 and 12 own the remaining differences.
+These local behavioral proofs do not establish complete Core peer-lifecycle parity. Policy §7 items 11 and 12 own the remaining differences.
 
 ### `P2P-09`: Block-body service eligibility
 
