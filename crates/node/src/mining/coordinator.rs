@@ -99,6 +99,8 @@ struct CoordinatorState {
     parked_long_poll_waiters: usize,
     #[cfg(any(test, feature = "test-seam"))]
     budgeted_waiters: usize,
+    #[cfg(test)]
+    ordinary_waiters: usize,
     cache: HashMap<CandidateKey, Arc<Candidate>>,
     cache_order: VecDeque<CandidateKey>,
     signalling_rules: Option<(Hash256, u32, Vec<AvailableMiningRule>)>,
@@ -704,7 +706,15 @@ impl MiningService {
             if let Some(result) = flight.result.clone() {
                 return result.map(Some);
             }
+            #[cfg(test)]
+            {
+                state.ordinary_waiters += 1;
+            }
             let _timed_out = self.wake.wait_for(state, LONG_POLL_SLICE);
+            #[cfg(test)]
+            {
+                state.ordinary_waiters -= 1;
+            }
         }
         Ok(None)
     }
@@ -3707,6 +3717,140 @@ mod tests {
         assert!(Arc::ptr_eq(&accepted, &cached));
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         Ok(())
+    }
+
+    // API-11, SYNC-03, SYNC-05
+    #[test]
+    fn joined_prepared_requests_share_validation_and_its_refusal() -> TestResult {
+        for (refuse, budget) in [
+            (false, None),
+            (true, None),
+            (
+                false,
+                Some(CoinbaseBudget {
+                    additional_size: 0,
+                    additional_sigops: 0,
+                }),
+            ),
+            (
+                true,
+                Some(CoinbaseBudget {
+                    additional_size: 0,
+                    additional_sigops: 0,
+                }),
+            ),
+        ] {
+            let tip_hash = Hash256::from_le_bytes(&[0x77; 32]);
+            let tip = tip_snapshot(tip_hash);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let rejected = Arc::new(AtomicBool::new(refuse));
+            let release = Arc::new((Mutex::new(false), Condvar::new()));
+            let (entered, validation_started) = std::sync::mpsc::channel();
+            let chain = {
+                let calls = Arc::clone(&calls);
+                let rejected = Arc::clone(&rejected);
+                let release = Arc::clone(&release);
+                Arc::new(ValidationChain(move |_candidate: &Candidate| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let _ = entered.send(());
+                    let mut released = release.0.lock();
+                    while !*released {
+                        assert!(
+                            !release
+                                .1
+                                .wait_for(&mut released, WAKE_PROOF_TIMEOUT)
+                                .timed_out(),
+                            "validation was not released"
+                        );
+                    }
+                    if rejected.load(Ordering::SeqCst) {
+                        Err(MiningControlError::Rejected(CompactString::from(
+                            "validation refused",
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                }))
+            };
+            let service = Arc::new(service_with_chain(
+                Some(tip.clone()),
+                Arc::new(StaticPool::new(5, 2)),
+                chain,
+            ));
+            service.stage_tip(
+                &tip,
+                &BlockImage::from_local(Network::Regtest.genesis_block()),
+            );
+            wait_until_ready(&service, tip_hash);
+            service.publish_block_generation(tip_hash, &MutationResult::empty());
+            let first = {
+                let service = Arc::clone(&service);
+                std::thread::spawn(move || service.get_block_template(None, None))
+            };
+            validation_started.recv_timeout(WAKE_PROOF_TIMEOUT)?;
+            let joined = {
+                let service = Arc::clone(&service);
+                std::thread::spawn(move || service.get_block_template(None, budget))
+            };
+            let deadline = Instant::now() + WAKE_PROOF_TIMEOUT;
+            while calls.load(Ordering::SeqCst) == 1 && service.state.lock().ordinary_waiters == 0 {
+                assert!(Instant::now() < deadline, "the second request did not join");
+                std::thread::yield_now();
+            }
+            *release.0.lock() = true;
+            release.1.notify_all();
+            let first = first.join().map_err(|_| TestError::ThreadPanicked)?;
+            let joined = joined.join().map_err(|_| TestError::ThreadPanicked)?;
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            if refuse {
+                assert!(matches!(first, Err(MiningControlError::Rejected(_))));
+                assert!(matches!(joined, Err(MiningControlError::Rejected(_))));
+                {
+                    let state = service.state.lock();
+                    assert!(state.cache.is_empty());
+                    assert!(state.last_candidate.is_none());
+                    assert!(state.in_flight.is_none());
+                }
+                rejected.store(false, Ordering::SeqCst);
+                service.get_block_template(None, None)?;
+                assert_eq!(calls.load(Ordering::SeqCst), 2);
+            } else {
+                assert!(Arc::ptr_eq(&first?.candidate, &joined?.candidate));
+            }
+        }
+        Ok(())
+    }
+
+    // API-30, SYNC-05
+    #[test]
+    fn fresh_mempool_validation_refuses_changed_membership_or_fee_revision() {
+        for (sequence, fee_revision) in [(6, 2), (5, 3)] {
+            for reject in [false, true] {
+                let pool = Arc::new(StaticPool::new(5, 2));
+                let chain = {
+                    let pool = Arc::clone(&pool);
+                    Arc::new(ValidationChain(move |_candidate: &Candidate| {
+                        pool.set(sequence, fee_revision);
+                        if reject {
+                            Err(MiningControlError::Rejected(CompactString::from(
+                                "obsolete candidate",
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    }))
+                };
+                let service = service_with_chain(
+                    Some(tip_snapshot(Hash256::from_le_bytes(&[0x78; 32]))),
+                    pool,
+                    chain,
+                );
+                assert!(matches!(
+                    service.assemble_fresh(&[], &GenerateSelection::Mempool),
+                    Err(error) if error.is_template_generation_race()
+                ));
+            }
+        }
     }
 
     // API-11, SYNC-05
