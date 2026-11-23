@@ -2998,6 +2998,23 @@ impl Mempool {
     }
 
     #[must_use]
+    pub(crate) fn entry_by_txid_for_relay(
+        &self,
+        txid: &Txid,
+        last_inv_sequence: u64,
+    ) -> Option<&MempoolEntry> {
+        let indexed = self.derived.by_txid.get(txid)?;
+        let admission_age = self
+            .mempool_sequence
+            .wrapping_sub(indexed.admitted_sequence);
+        let announcement_age = self.mempool_sequence.wrapping_sub(last_inv_sequence);
+        if admission_age < announcement_age {
+            return None;
+        }
+        self.entry(indexed.id)
+    }
+
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -4518,6 +4535,41 @@ mod tests {
         assert_eq!(result.sequence_of(0), Some(u64::MAX));
         assert_eq!(result.sequence_of(1), Some(0));
         assert_eq!(result.sequence_of(2), None);
+    }
+
+    // MPL-02, P2P-01
+    #[test]
+    fn relay_lookup_compares_admission_epochs_across_sequence_rollover() -> Result<(), MempoolError>
+    {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        pool.mempool_sequence = u64::MAX - 1;
+        let first = Arc::new(tx(1, Vec::new()));
+        let second = Arc::new(tx(2, Vec::new()));
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&first), 100, 10_000, 1, 0, 0))?;
+        let before_rollover = pool.sequence_number();
+        assert_eq!(before_rollover, u64::MAX);
+
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&second), 100, 10_000, 1, 0, 0))?;
+        assert_eq!(pool.sequence_number(), 0);
+        assert!(
+            pool.entry_by_txid_for_relay(&first.txid(), before_rollover)
+                .is_some()
+        );
+        assert!(
+            pool.entry_by_txid_for_relay(&second.txid(), before_rollover)
+                .is_none()
+        );
+        assert!(pool.entry_by_txid_for_relay(&first.txid(), 0).is_some());
+        assert!(pool.entry_by_txid_for_relay(&second.txid(), 0).is_some());
+
+        pool.clear();
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&first), 100, 10_000, 1, 0, 0))?;
+        assert!(pool.entry_by_txid_for_relay(&first.txid(), 0).is_none());
+        assert!(
+            pool.entry_by_txid_for_relay(&first.txid(), pool.sequence_number())
+                .is_some()
+        );
+        Ok(())
     }
 
     #[test]
