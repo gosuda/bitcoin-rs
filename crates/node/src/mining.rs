@@ -178,16 +178,22 @@ impl MiningCoordinator {
                 .map(|input| input.witness.len())
     }
 
-    fn submit(&self, payload: &BlockImage) -> Result<BlockValidationResult, MiningControlError> {
+    fn submit(
+        &self,
+        payload: &BlockImage,
+        generation: Option<coordinator::GenerationKey>,
+    ) -> Result<BlockValidationResult, MiningControlError> {
         let block_hash: Hash256 = payload.block_hash().into();
         let lock = match self.chainstate.lock_transition() {
             Ok(lock) => lock,
             Err(error) => return map_apply_error(error),
         };
-        if matches!(
-            self.known_block_result(block_hash),
-            Some(BlockValidationResult::Duplicate)
-        ) {
+        if generation.is_none()
+            && matches!(
+                self.known_block_result(block_hash),
+                Some(BlockValidationResult::Duplicate)
+            )
+        {
             return Ok(BlockValidationResult::Duplicate);
         }
 
@@ -196,6 +202,14 @@ impl MiningCoordinator {
             Err(error) => return map_apply_error(error),
         };
         let transition = lock.into_transition();
+        if generation.is_some_and(|key| self.service.live_generation_key() != key) {
+            if let Err(error) =
+                ChainFollowers::finish_transition(&self.chainstate, transition, mempool_change)
+            {
+                return map_apply_error(error);
+            }
+            return Err(coordinator::generation_race());
+        }
         match self.followers.apply_connect_in_transition(
             &self.chainstate,
             transition,
@@ -505,10 +519,10 @@ impl MiningControl for MiningCoordinator {
             let mut trial = payload.materialize();
             if self.fill_uncommitted_witness(&mut trial) {
                 let filled = BlockImage::from_local(trial);
-                return self.submit(&filled);
+                return self.submit(&filled, None);
             }
         }
-        self.submit(&payload)
+        self.submit(&payload, None)
     }
 
     fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
@@ -604,6 +618,14 @@ impl MiningControl for MiningCoordinator {
                     continue;
                 }
                 solved.map_err(|error| {
+                    let error = match error {
+                        bitcoin_rs_wire::mining::MiningError::Unsolved { .. } => {
+                            bitcoin_rs_wire::mining::MiningError::Unsolved {
+                                tries: request.max_tries - remaining,
+                            }
+                        }
+                        other => other,
+                    };
                     MiningControlError::Failed(CompactString::from(error.to_string()))
                 })?;
                 let hash = block.block_hash();
@@ -613,16 +635,26 @@ impl MiningControl for MiningCoordinator {
                     continue;
                 }
                 if request.submit {
-                    match self.submit(&payload)? {
-                        BlockValidationResult::Accepted => {}
-                        other => {
+                    match self.submit(&payload, generation) {
+                        Ok(BlockValidationResult::Accepted) => {}
+                        Err(error)
+                            if generation.is_some() && error.is_template_generation_race() =>
+                        {
+                            continue;
+                        }
+                        result => {
+                            let other = result?;
                             return Err(MiningControlError::Failed(CompactString::from(format!(
                                 "generated block was not accepted: {other:?}"
                             ))));
                         }
                     }
                 } else {
-                    let validation = self.propose(&payload)?;
+                    let validation = self.propose(&payload);
+                    if generation.is_some_and(|key| self.service.live_generation_key() != key) {
+                        continue;
+                    }
+                    let validation = validation?;
                     if validation != BlockValidationResult::Accepted {
                         return Err(MiningControlError::Failed(CompactString::from(format!(
                             "generated block failed validation: {validation:?}"
@@ -757,6 +789,75 @@ mod tests {
     use bitcoin_rs_wire::mining::BlockValidationResult;
     use bitcoin_rs_wire::mining::MiningControlError;
     use compact_str::CompactString;
+
+    // API-30, MPS-03, SYNC-05
+    #[test]
+    fn fresh_submission_rechecks_generation_under_transition_and_reopens_admission()
+    -> Result<(), crate::test_support::TestError> {
+        use bitcoin_rs_consensus::primitives::{BlockImage, Network};
+        use bitcoin_rs_wire::mining::{
+            CoinbaseReserve, GenerateRequest, GenerateSelection, MiningControl, solve_block,
+        };
+
+        let directory = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
+        config.data_dir = directory.path().join("node");
+        config.p2p.listen.clear();
+        let state = crate::state::NodeState::open(config, None)?;
+        state.apply_block(&BlockImage::from_local(Network::Regtest.genesis_block()))?;
+        let mining = super::MiningCoordinator::new(
+            state.mempool_reader(),
+            state.chainstate(),
+            state.stable_read(),
+            state.chain_followers(),
+            vec![0x51],
+            CoinbaseReserve::default(),
+        );
+        let generation = mining.service.live_generation_key();
+        let mut stale = mining
+            .service
+            .assemble_fresh_for_generation(generation, &[0x51])?
+            .into_unsolved_block()?;
+        solve_block(&mut stale, GenerateRequest::DEFAULT_MAX_TRIES)?;
+        let stale = BlockImage::from_local(stale);
+        let request = || GenerateRequest {
+            payout: vec![0x52],
+            count: 1,
+            max_tries: GenerateRequest::DEFAULT_MAX_TRIES,
+            selection: GenerateSelection::Mempool,
+            submit: true,
+        };
+        mining.generate(request())?;
+        let committed = state.chainstate().applied_tip_snapshot();
+        let before_gate = state
+            .mempool_gateway()
+            .stable_generation()
+            .ok_or(crate::test_support::TestError::Missing("open admission"))?;
+        assert!(matches!(
+            mining.submit(&stale, Some(generation)),
+            Err(error) if error.is_template_generation_race()
+        ));
+        assert_eq!(
+            state
+                .chainstate()
+                .applied_tip_snapshot()
+                .map(|tip| tip.hash),
+            committed.map(|tip| tip.hash)
+        );
+        assert_eq!(
+            state.mempool_gateway().stable_generation(),
+            Some(before_gate + 2)
+        );
+        assert_eq!(mining.generate(request())?.len(), 1);
+        assert_eq!(
+            state
+                .chainstate()
+                .applied_tip_snapshot()
+                .map(|tip| tip.height),
+            Some(2)
+        );
+        Ok(())
+    }
 
     // API-11, API-30, SYNC-05
     #[test]

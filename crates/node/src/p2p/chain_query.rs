@@ -21,6 +21,7 @@ use parking_lot::RwLock;
 use bitcoin_rs_p2p::dispatch::{
     ChainQuery, CommittedTip, FilterRequest, FilterServing, InventoryServing, StaleTipHeaders,
 };
+use bitcoin_rs_p2p::inbound::block_memory::{BlockMemory, BlockMemoryCredit};
 use bitcoin_rs_p2p::staletip::{
     CompressedHeader, MAX_STALETIP_HEADERS, STALETIP_RECENT_WINDOW, StaleTipAnnouncement,
 };
@@ -39,38 +40,62 @@ enum ServingPolicy {
     BlockTransactions,
 }
 
-struct HeldBlock {
-    body: Arc<BlockImage>,
+pub(super) struct HeldBlock {
+    pub(super) body: BlockImage,
     transaction_index: Box<[(TransactionId, usize)]>,
+    _credit: BlockMemoryCredit,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RecentBlockSlot {
     inner: Arc<Mutex<Option<Arc<HeldBlock>>>>,
+    memory: Arc<BlockMemory>,
 }
 
 impl RecentBlockSlot {
-    pub fn store(&self, block: Arc<BlockImage>) {
-        let mut transaction_index = Vec::with_capacity(block.tx_count() * 2);
+    #[must_use]
+    pub fn new(memory: Arc<BlockMemory>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(None)),
+            memory,
+        }
+    }
+
+    pub(super) fn prepare(&self, block: &BlockImage) -> Result<Arc<HeldBlock>, PeerError> {
+        let entry_count = block.tx_count().checked_mul(2).ok_or_else(|| {
+            PeerError::Io(std::io::Error::other("recent block index size overflow"))
+        })?;
+        let bytes = entry_count
+            .checked_mul(core::mem::size_of::<(TransactionId, usize)>())
+            .and_then(|index| index.checked_add(block.retained_heap_bytes()))
+            .and_then(|heap| heap.checked_add(core::mem::size_of::<(usize, usize, HeldBlock)>()))
+            .ok_or_else(|| {
+                PeerError::Io(std::io::Error::other(
+                    "recent block retention size overflow",
+                ))
+            })?;
+        let credit = self.memory.try_reserve(bytes)?;
+        let mut transaction_index = Vec::with_capacity(entry_count);
         for position in 0..block.tx_count() {
             let tx = block.tx(position);
             transaction_index.push((TransactionId::Txid(tx.txid()), position));
             transaction_index.push((TransactionId::Wtxid(tx.wtxid()), position));
         }
         transaction_index.sort_unstable();
-        transaction_index.dedup_by_key(|(id, _)| *id);
-        let held = Arc::new(HeldBlock {
-            body: block,
+        Ok(Arc::new(HeldBlock {
+            body: block.clone(),
             transaction_index: transaction_index.into_boxed_slice(),
-        });
-        let replaced = self.inner.lock().replace(held);
-        drop(replaced);
+            _credit: credit,
+        }))
+    }
+
+    pub(super) fn store(&self, held: Arc<HeldBlock>) -> Option<Arc<HeldBlock>> {
+        self.inner.lock().replace(held)
     }
 
     #[must_use]
-    pub fn load(&self) -> Option<(Hash256, Arc<BlockImage>)> {
-        let held = self.inner.lock().clone()?;
-        Some((held.body.block_hash().into(), Arc::clone(&held.body)))
+    pub(super) fn load(&self) -> Option<Arc<HeldBlock>> {
+        self.inner.lock().clone()
     }
 }
 
@@ -81,7 +106,7 @@ pub struct ActiveChainQuery {
     block_body_source: Option<Arc<dyn BlockBodySource>>,
     network: Network,
     compact_filters: Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>>,
-    recent: RecentBlockSlot,
+    recent: Option<RecentBlockSlot>,
 }
 
 impl ActiveChainQuery {
@@ -93,7 +118,7 @@ impl ActiveChainQuery {
             block_body_source: None,
             network,
             compact_filters: None,
-            recent: RecentBlockSlot::default(),
+            recent: None,
         }
     }
 
@@ -114,7 +139,7 @@ impl ActiveChainQuery {
 
     #[must_use]
     pub fn with_recent_block(mut self, recent: RecentBlockSlot) -> Self {
-        self.recent = recent;
+        self.recent = Some(recent);
         self
     }
 
@@ -203,9 +228,9 @@ impl ActiveChainQuery {
             .map(|(body, _)| Message::BlockBytes(body))
     }
 
-    fn recent_body(&self, hash: BlockHash) -> Option<Arc<BlockImage>> {
-        let (slot_hash, body) = self.recent.load()?;
-        (BlockHash::from(slot_hash) == hash).then_some(body)
+    fn recent_body(&self, hash: BlockHash) -> Option<Arc<HeldBlock>> {
+        let held = self.recent.as_ref()?.load()?;
+        (held.body.block_hash() == hash).then_some(held)
     }
 
     fn held_inventory_eligible(&self, hash: BlockHash) -> bool {
@@ -384,16 +409,12 @@ impl core::fmt::Debug for ActiveChainQuery {
 
 impl ChainQuery for ActiveChainQuery {
     fn recent_transaction(&self, id: TransactionId) -> Option<Tx> {
-        let held = self.recent.inner.lock().clone()?;
+        let held = self.recent.as_ref()?.load()?;
         let position = held
             .transaction_index
-            .binary_search_by(|(candidate, _)| candidate.cmp(&id))
-            .ok()?;
-        Some(
-            held.body
-                .tx(held.transaction_index[position].1)
-                .materialize(),
-        )
+            .partition_point(|(candidate, _)| *candidate < id);
+        let (found, index) = *held.transaction_index.get(position)?;
+        (found == id).then(|| held.body.tx(index).materialize())
     }
 
     fn compact_filters_ready(&self) -> bool {
@@ -609,7 +630,7 @@ impl ChainQuery for ActiveChainQuery {
                         outcome.halted = true;
                         return Ok(outcome);
                     }
-                    match cmpct_message_from_image(&body, version) {
+                    match cmpct_message_from_image(&body.body, version) {
                         Some(message) => serve(message)?,
                         None => outcome.not_found.push(*item),
                     }
@@ -642,7 +663,7 @@ impl ChainQuery for ActiveChainQuery {
             if !headroom() {
                 return Ok(None);
             }
-            return Self::blocktxn_message(body.bytes().as_ref(), request, compact_version);
+            return Self::blocktxn_message(body.body.bytes().as_ref(), request, compact_version);
         }
         let Some((tip_height, height)) =
             self.serving_position(hash, ServingPolicy::BlockTransactions)
@@ -768,7 +789,7 @@ impl ActiveChainQuery {
         policy: ServingPolicy,
     ) -> Option<Message> {
         if let Some(body) = self.recent_body(hash) {
-            return cmpct_message_from_image(&body, compact_version?);
+            return cmpct_message_from_image(&body.body, compact_version?);
         }
         self.serving_position(hash, policy)?;
         let version = u32::try_from(compact_version?).ok()?;
@@ -938,6 +959,10 @@ mod tests {
     }
 
     type TestResult = Result<(), TestError>;
+
+    fn recent_slot() -> RecentBlockSlot {
+        RecentBlockSlot::new(Arc::new(BlockMemory::default()))
+    }
 
     struct SingleBlockSource {
         height: u32,
@@ -3388,8 +3413,8 @@ mod tests {
         };
         let image = Arc::new(BlockImage::from_local(block));
         watch_materializations(&image);
-        let slot = RecentBlockSlot::default();
-        slot.store(Arc::clone(&image));
+        let slot = recent_slot();
+        drop(slot.store(slot.prepare(&image)?));
         assert_eq!(transaction_view_materialize_call_count(&image), 0);
         let query = query_with(Vec::new())?.with_recent_block(slot.clone());
         for tx in [&coinbase, &witness] {
@@ -3421,10 +3446,10 @@ mod tests {
             header: test_header(image.block_hash(), 22),
             txs: vec![replacement.clone()],
         }));
-        slot.store(Arc::clone(&next));
+        drop(slot.store(slot.prepare(&next)?));
         assert_eq!(
-            slot.load().map(|(hash, held)| (hash, held.block_hash())),
-            Some((Hash256::from(next.block_hash()), next.block_hash()))
+            slot.load().map(|held| held.body.block_hash()),
+            Some(next.block_hash())
         );
         for tx in [&coinbase, &witness] {
             assert_eq!(
@@ -3448,8 +3473,8 @@ mod tests {
     fn held_early_body_answers_before_the_store() -> TestResult {
         let headers = seed_headers(2);
         let block = block_at(&headers, 1)?;
-        let slot = RecentBlockSlot::default();
-        slot.store(Arc::new(BlockImage::from_local(block.clone())));
+        let slot = recent_slot();
+        drop(slot.store(slot.prepare(&BlockImage::from_local(block.clone()))?));
         let query = query_with(headers)?.with_recent_block(slot);
         let request = bitcoin::bip152::BlockTransactionsRequest {
             block_hash: wire_block_hash(block.block_hash()),
@@ -3508,8 +3533,8 @@ mod tests {
         let mut block = block_at(&headers, 1)?;
         block.header.nonce = 0x7a7a_7a7a;
         let hash = block.block_hash();
-        let slot = RecentBlockSlot::default();
-        slot.store(Arc::new(BlockImage::from_local(block)));
+        let slot = recent_slot();
+        drop(slot.store(slot.prepare(&BlockImage::from_local(block))?));
         let query = query_with(headers)?.with_recent_block(slot);
         let compact = Inventory::CompactBlock(wire_block_hash(hash));
         let full = Inventory::Block(wire_block_hash(hash));
@@ -3556,8 +3581,8 @@ mod tests {
     fn held_invalid_body_is_not_served_from_inventory() -> TestResult {
         let headers = seed_headers(2);
         let block = block_at(&headers, 1)?;
-        let slot = RecentBlockSlot::default();
-        slot.store(Arc::new(BlockImage::from_local(block.clone())));
+        let slot = recent_slot();
+        drop(slot.store(slot.prepare(&BlockImage::from_local(block.clone()))?));
         let query = query_with(headers)?.with_recent_block(slot);
         {
             let mut tree = query.block_tree.write();
@@ -3588,9 +3613,9 @@ mod tests {
             let tip = tree.tip_id().ok_or("tip")?;
             tree.node_mut(tip)?.header.time = stale.header.time + 2_592_000;
         }
-        let slot = RecentBlockSlot::default();
-        slot.store(Arc::new(BlockImage::from_local(stale.clone())));
-        query.recent = slot;
+        let slot = recent_slot();
+        drop(slot.store(slot.prepare(&BlockImage::from_local(stale.clone()))?));
+        query.recent = Some(slot);
         let item = Inventory::CompactBlock(wire_block_hash(stale.block_hash()));
         let mut served = Vec::new();
         let outcome = query.serve_inventory_blocks(&[item], Some(2), &|| true, &mut |message| {
@@ -3609,8 +3634,8 @@ mod tests {
     fn held_tip_child_body_is_served_from_inventory() -> TestResult {
         let headers = seed_headers(3);
         let block = block_at(&headers, 2)?;
-        let slot = RecentBlockSlot::default();
-        slot.store(Arc::new(BlockImage::from_local(block.clone())));
+        let slot = recent_slot();
+        drop(slot.store(slot.prepare(&BlockImage::from_local(block.clone()))?));
         let query = query_with(headers[..2].to_vec())?.with_recent_block(slot);
         {
             let mut tree = query.block_tree.write();
@@ -3643,8 +3668,8 @@ mod tests {
             txs: vec![test_tx(1), test_tx(2)],
         };
         let parent_hash = headers[1].compute_hash();
-        let slot = RecentBlockSlot::default();
-        slot.store(Arc::new(BlockImage::from_local(block.clone())));
+        let slot = recent_slot();
+        drop(slot.store(slot.prepare(&BlockImage::from_local(block.clone()))?));
         let query = query_with(headers)?.with_recent_block(slot);
         {
             let mut tree = query.block_tree.write();
@@ -3672,8 +3697,8 @@ mod tests {
     fn held_deep_body_uses_full_block_inventory_policy() -> TestResult {
         let headers = seed_headers(8);
         let block = block_at(&headers, 1)?;
-        let slot = RecentBlockSlot::default();
-        slot.store(Arc::new(BlockImage::from_local(block.clone())));
+        let slot = recent_slot();
+        drop(slot.store(slot.prepare(&BlockImage::from_local(block.clone()))?));
         let query = chain_at(&headers, 1, &block)?.with_recent_block(slot);
         let item = Inventory::CompactBlock(wire_block_hash(block.block_hash()));
         let mut served = Vec::new();

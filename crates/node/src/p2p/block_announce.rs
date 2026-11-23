@@ -115,7 +115,7 @@ pub struct BlockAnnouncer {
         bitcoin_rs_consensus::primitives::Network,
     )>,
     state: Mutex<AnnounceState>,
-    recent: RecentBlockSlot,
+    recent: Option<RecentBlockSlot>,
     stale_tips: Option<Arc<crate::p2p::sync::stale_tips::StaleTipRetainer>>,
     block_tree: Option<bitcoin_rs_chain::chain::BlockTreeReader>,
 }
@@ -133,7 +133,7 @@ impl BlockAnnouncer {
             config,
             ibd: None,
             state: Mutex::new(AnnounceState::default()),
-            recent: RecentBlockSlot::default(),
+            recent: None,
             stale_tips: None,
             block_tree: None,
         }
@@ -152,7 +152,7 @@ impl BlockAnnouncer {
 
     #[must_use]
     pub fn with_recent_block(mut self, recent: RecentBlockSlot) -> Self {
-        self.recent = recent;
+        self.recent = Some(recent);
         self
     }
 
@@ -472,17 +472,25 @@ impl BlockAnnouncer {
         if self.in_ibd() {
             return Vec::new();
         }
+        let prepared = match self.recent.as_ref() {
+            Some(slot) => match slot.prepare(block) {
+                Ok(held) => Some((slot, held)),
+                Err(_) => return Vec::new(),
+            },
+            None => None,
+        };
         let Some(prebuilt) = cmpct_message_from_image(block, COMPACT_BLOCK_VERSION) else {
             return Vec::new();
         };
-        {
+        let replaced = {
             let mut state = self.state.lock();
             if height <= state.highest_fast_announce {
                 return Vec::new();
             }
             state.highest_fast_announce = height;
-            self.recent.store(Arc::new(block.clone()));
-        }
+            prepared.and_then(|(slot, held)| slot.store(held))
+        };
+        drop(replaced);
         let mut sent = Vec::new();
         for session in self.ready_sessions() {
             let (_, peer_state, known_position) = self.peer_anchor(&session);
@@ -849,6 +857,7 @@ mod tests {
         TxIn, TxOut, Witness,
     };
     use bitcoin_rs_p2p::dispatch::InventoryServing;
+    use bitcoin_rs_p2p::wire::PeerError;
     use parking_lot::RwLock;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -2413,12 +2422,154 @@ mod tests {
         }
     }
 
+    // P2P-01, BUD-01, BUD-03, BUD-06, BUD-07, SYNC-03
+    #[test]
+    fn recent_block_budget_refusal_preserves_slot_and_last_reader() -> Result<(), PeerError> {
+        use crate::budget::{BudgetedIngressLedger, NodeBudget};
+        use crate::p2p::chain_query::HeldBlock;
+        use bitcoin_rs_p2p::inbound::block_memory::{BlockMemory, BlockMemoryCredit};
+        use bitcoin_rs_p2p::inv::TransactionId;
+        use bitcoin_rs_storage::budget::{BudgetOwner, BudgetReclaimer};
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::{Barrier, Weak};
+
+        struct ChargedBacking {
+            bytes: Box<[u8]>,
+            _credit: BlockMemoryCredit,
+        }
+
+        impl AsRef<[u8]> for ChargedBacking {
+            fn as_ref(&self) -> &[u8] {
+                &self.bytes
+            }
+        }
+
+        struct ReclaimProbe {
+            announcer: Weak<BlockAnnouncer>,
+            calls: AtomicUsize,
+        }
+
+        impl BudgetReclaimer for ReclaimProbe {
+            fn reclaim(&self, _: u64) -> u64 {
+                let announcer = self.announcer.upgrade().expect("live announcer");
+                assert!(
+                    announcer.state.try_lock().is_some(),
+                    "cache preparation must precede the announcement lock"
+                );
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                0
+            }
+        }
+
+        let budget = Arc::new(NodeBudget::from_chainstate_cache_budget(
+            bitcoin_rs_storage::split_chainstate_cache_budget(64 * 1024 * 1024),
+            1,
+        ));
+        let memory = Arc::new(BlockMemory::new(Arc::new(BudgetedIngressLedger::new(
+            Arc::clone(&budget),
+        ))));
+        let slot = RecentBlockSlot::new(Arc::clone(&memory));
+        let chain = Arc::new(MockAnnounceChain::new(2));
+        let raw = bitcoin_rs_consensus::primitives::serialize(&tip_child_block(
+            chain.block_hash_at(1),
+            1200,
+        ))
+        .into_boxed_slice();
+        let raw_bytes = raw.len();
+        let raw_u64 = u64::try_from(raw_bytes).expect("fixture wire size fits u64");
+        let first = BlockImage::from_raw(bytes::Bytes::from_owner(ChargedBacking {
+            bytes: raw,
+            _credit: memory.try_reserve(raw_bytes)?,
+        }))
+        .expect("fixture block parses");
+        let first_hash = first.block_hash();
+        let retained = first.retained_heap_bytes()
+            + 2 * first.tx_count() * core::mem::size_of::<(TransactionId, usize)>()
+            + core::mem::size_of::<(usize, usize, HeldBlock)>();
+        let retained_u64 = u64::try_from(retained).expect("fixture allocation fits u64");
+        let announcer = Arc::new(
+            BlockAnnouncer::new(
+                Arc::new(PeerTable::new()),
+                chain,
+                BlockAnnounceConfig::default(),
+            )
+            .with_recent_block(slot.clone()),
+        );
+        let probe = Arc::new(ReclaimProbe {
+            announcer: Arc::downgrade(&announcer),
+            calls: AtomicUsize::new(0),
+        });
+        budget.add_reclaimer(BudgetOwner::StagedImages, probe.clone());
+        assert!(
+            announcer
+                .announce_pow_valid(&first, first_hash.into(), 2)
+                .is_empty()
+        );
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::StagedImages),
+            raw_u64 + retained_u64
+        );
+        let reader = slot.load().expect("first cached block");
+        assert_eq!(reader.body.bytes().as_ptr(), first.bytes().as_ptr());
+        drop(first);
+
+        let pressure = memory.try_reserve(memory.ledger().capacity() - retained - raw_bytes)?;
+        let next = BlockImage::from_local(tip_child_block(first_hash, 1800));
+        assert!(
+            announcer
+                .announce_pow_valid(&next, next.block_hash().into(), 3)
+                .is_empty()
+        );
+        assert_eq!(probe.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(announcer.state.lock().highest_fast_announce, 2);
+        assert_eq!(
+            slot.load().map(|held| held.body.block_hash()),
+            Some(first_hash)
+        );
+        drop(pressure);
+
+        let highest = BlockImage::from_local(tip_child_block(next.block_hash(), 2400));
+        let start = Barrier::new(3);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                start.wait();
+                let _ = announcer.announce_pow_valid(&next, next.block_hash().into(), 3);
+            });
+            scope.spawn(|| {
+                start.wait();
+                let _ = announcer.announce_pow_valid(&highest, highest.block_hash().into(), 4);
+            });
+            start.wait();
+        });
+        assert_eq!(announcer.state.lock().highest_fast_announce, 4);
+        assert_eq!(
+            slot.load().map(|held| held.body.block_hash()),
+            Some(highest.block_hash())
+        );
+        assert_eq!(reader.body.block_hash(), first_hash);
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::StagedImages),
+            raw_u64 + 2 * retained_u64
+        );
+        drop(reader);
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::StagedImages),
+            retained_u64
+        );
+        drop(announcer);
+        drop(slot);
+        assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), 0);
+        Ok(())
+    }
+
     // P2P-01
     #[test]
     fn early_announce_sends_one_cmpctblock_to_parent_known_hb_peer() {
         let chain = Arc::new(MockAnnounceChain::new(2));
         let table = Arc::new(PeerTable::new());
-        let recent = RecentBlockSlot::default();
+        let recent = RecentBlockSlot::new(Arc::new(
+            bitcoin_rs_p2p::inbound::block_memory::BlockMemory::default(),
+        ));
         let query = crate::p2p::ActiveChainQuery::new(
             BlockTreeReader::new(Arc::new(RwLock::new(BlockTree::new()))),
             TipReader::new(Arc::new(ArcSwapOption::empty())),
@@ -2475,7 +2626,10 @@ mod tests {
             Arc::clone(&table),
             Arc::clone(&chain) as Arc<dyn ChainQuery>,
             BlockAnnounceConfig::default(),
-        );
+        )
+        .with_recent_block(RecentBlockSlot::new(Arc::new(
+            bitcoin_rs_p2p::inbound::block_memory::BlockMemory::default(),
+        )));
         let addr = test_addr(1311);
         let (_lease, rx) = setup_peer(&table, &announcer, addr, false);
         note_compact_preference(&table, addr, true, 2);
@@ -2499,7 +2653,14 @@ mod tests {
             announcer.announce_pow_valid(&BlockImage::from_local(same_height), other_hash, 2),
             []
         );
-        assert_eq!(announcer.recent.load().map(|(held, _)| held), Some(hash));
+        assert_eq!(
+            announcer
+                .recent
+                .as_ref()
+                .and_then(RecentBlockSlot::load)
+                .map(|held| Hash256::from(held.body.block_hash())),
+            Some(hash)
+        );
         assert!(rx.try_recv().is_err());
     }
 

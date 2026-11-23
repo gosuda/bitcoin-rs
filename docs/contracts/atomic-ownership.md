@@ -466,6 +466,8 @@ Proof: `crates/node/src/budget.rs::saturated_ingress_preserves_execution_headroo
 
 - One memory budget must cover all retained allocations: block images and layouts, resolved prevouts, window workspaces, verification scratch, coin cache, projection buffers, query snapshots, and backend caches.
 - A shared buffer is charged once to its owner.
+- The peer-serving `RecentBlockSlot` reserves the cloned block layout and identities, its transaction index, and its held-owner allocation through the node's existing `BlockMemory` ledger before allocation. Peer-origin shared raw bytes keep their existing receipt. The cache receipt follows the immutable body/index owner until its last reader drops. A local refusal preserves the old cache and does not change validation. `crates/node/src/p2p/block_announce.rs::recent_block_budget_refusal_preserves_slot_and_last_reader` checks refusal, concurrent replacement, and final release.
+- Open gap: locally generated or submitted bodies can enter the same early cache through `MiningCoordinator::submit`. `BlockImage::from_local` creates raw `Bytes` without a receipt. The cache shares that existing backing, so this raw allocation can remain after its producer returns. The new cache receipt covers its distinct metadata, not that backing. Local-body production must attach a receipt that follows the shared raw owner.
 - Production raw receive allocations use `PeerReceive` on the same node ledger as image and decoder allocations. Shared raw backing is charged once; decoder receipts cover only distinct heaps.
 - Standalone wire `BlockMemory::default` has a bounded 512 MiB image lane plus a bounded 64 MiB receive lane, for a combined 576 MiB allowance. Utilities without a node ledger keep their standalone framing semantics. These are not the production node's allocation policy.
 - Outbound-generated handshake garbage and outbound buffers are not receive-origin allocations.
@@ -500,6 +502,7 @@ Proof: `crates/p2p/src/inbound/block_memory.rs::message_loop_refuses_receive_pre
 
 - Mining template generation must consume a matched pair: one applied epoch and one settled mempool generation.
 - A template must never combine a new chain state with an obsolete dependency graph.
+- Snapshot activation replaces both the applied epoch and the empty pool's settlement commit before it reopens admission. Proof: `snapshot::tests::mining_resumes_after_snapshot_replaces_a_settled_tip` in `crates/node/src/snapshot.rs` builds a template and generates a block after importing a snapshot over a previously settled tip.
 
 ### `MPS-04`: Event delivery
 

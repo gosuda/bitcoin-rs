@@ -176,20 +176,16 @@ impl BlockMemory {
         })
     }
 
-    pub(crate) fn try_reserve(
-        self: &Arc<Self>,
-        bytes: usize,
-    ) -> Result<BlockMemoryCredit, PeerError> {
+    pub fn try_reserve(self: &Arc<Self>, bytes: usize) -> Result<BlockMemoryCredit, PeerError> {
         if bytes > self.ledger.capacity() {
-            return Err(std::io::Error::other(
-                "compact reconstruction reservation exceeds ingress budget",
-            )
-            .into());
+            return Err(
+                std::io::Error::other("retained block reservation exceeds ingress budget").into(),
+            );
         }
         if !self.ledger.try_take(bytes) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
-                "compact reconstruction ingress budget unavailable",
+                "retained block ingress budget unavailable",
             )
             .into());
         }

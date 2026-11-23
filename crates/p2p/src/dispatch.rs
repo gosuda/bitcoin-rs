@@ -615,20 +615,11 @@ pub fn serve_getdata(
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
 ) -> Result<Vec<Inventory>, PeerError> {
     for (index, item) in items.iter().enumerate() {
-        let tx_source = tx_inventory.filter(|_| {
-            matches!(
-                item,
-                Inventory::Transaction(_) | Inventory::WitnessTransaction(_) | Inventory::WTx(_)
-            )
-        });
-        let served = match (item, tx_source) {
-            (
-                Inventory::Unknown {
-                    inv_type: MSG_ANCPKGINFO,
-                    hash,
-                },
-                _,
-            ) => {
+        let served = match item {
+            Inventory::Unknown {
+                inv_type: MSG_ANCPKGINFO,
+                hash,
+            } => {
                 let subject = Wtxid::from(Hash256::from_le_bytes(hash));
                 serve_ancpkginfo_item(
                     tx_inventory,
@@ -640,16 +631,18 @@ pub fn serve_getdata(
                     not_found,
                 )?
             }
-            (_, Some(inv)) => serve_tx_item(
-                inv,
-                chain,
-                last_inv_sequence,
-                item,
-                headroom,
-                send,
-                not_found,
-            )?,
-            (_, None) => serve_block_item(chain, compact_version, item, headroom, send, not_found)?,
+            Inventory::Transaction(_) | Inventory::WitnessTransaction(_) | Inventory::WTx(_) => {
+                serve_tx_item(
+                    tx_inventory,
+                    chain,
+                    last_inv_sequence,
+                    item,
+                    headroom,
+                    send,
+                    not_found,
+                )?
+            }
+            _ => serve_block_item(chain, compact_version, item, headroom, send, not_found)?,
         };
         if !served {
             return Ok(items[index..].to_vec());
@@ -666,7 +659,7 @@ pub fn serve_getdata(
 }
 
 fn serve_tx_item(
-    inv: &dyn TxInventory,
+    inv: Option<&dyn TxInventory>,
     chain: Option<&dyn ChainQuery>,
     last_inv_sequence: Option<u64>,
     item: &Inventory,
@@ -680,16 +673,16 @@ fn serve_tx_item(
     let found = match item {
         Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
             let native = Txid::from(Hash256::from_le_bytes(txid.as_byte_array()));
-            last_inv_sequence
-                .and_then(|sequence| inv.get_tx(native, sequence))
+            inv.zip(last_inv_sequence)
+                .and_then(|(inventory, sequence)| inventory.get_tx(native, sequence))
                 .or_else(|| {
                     chain.and_then(|query| query.recent_transaction(TransactionId::Txid(native)))
                 })
         }
         Inventory::WTx(wtxid) => {
             let native = Wtxid::from(Hash256::from_le_bytes(wtxid.as_byte_array()));
-            last_inv_sequence
-                .and_then(|sequence| inv.get_tx_by_wtxid(native, sequence))
+            inv.zip(last_inv_sequence)
+                .and_then(|(inventory, sequence)| inventory.get_tx_by_wtxid(native, sequence))
                 .or_else(|| {
                     chain.and_then(|query| query.recent_transaction(TransactionId::Wtxid(native)))
                 })
@@ -704,9 +697,11 @@ fn serve_tx_item(
                     input.witness.clear();
                 }
             }
-            let marks = BroadcastMarks::mark(inv, &[wtxid]);
+            let marks = inv.map(|inventory| BroadcastMarks::mark(inventory, &[wtxid]));
             send(Message::Tx(tx))?;
-            marks.commit();
+            if let Some(marks) = marks {
+                marks.commit();
+            }
         }
         None => not_found.push(*item),
     }
@@ -813,7 +808,7 @@ mod tests {
     use crate::connection::{OutboundBudget, PeerLease};
     use crate::feature::{FEATURE_VERSION, FeatureAnnouncement, FeatureId};
     use crate::handshake::{feature_messages, negotiated_features};
-    use crate::inv::MAX_INV_PER_MSG;
+    use crate::inv::{MAX_INV_PER_MSG, TransactionId};
     use crate::packages::{
         AncPkgInfo, GetPkgTxns, MSG_ANCPKGINFO, MSG_PKGTXNS, PKG_RELAY_ANC, PKG_RELAY_PKGTXNS,
         PkgTxns, SendPackages, combined_package_hash,
@@ -855,6 +850,18 @@ mod tests {
     }
 
     impl ChainQuery for FakeChain {
+        fn recent_transaction(&self, id: TransactionId) -> Option<Tx> {
+            self.blocks
+                .last()?
+                .txs
+                .iter()
+                .find(|tx| match id {
+                    TransactionId::Txid(txid) => tx.txid() == txid,
+                    TransactionId::Wtxid(wtxid) => tx.wtxid() == wtxid,
+                })
+                .cloned()
+        }
+
         fn stale_tip_announcement(
             &self,
             _tip: Hash256,
@@ -2165,6 +2172,56 @@ mod tests {
             matches!(responses[0], Message::Tx(_)),
             "wtxid-typed getdata for a held tx must serve its body"
         );
+    }
+
+    // P2P-01
+    #[test]
+    fn chain_only_getdata_serves_recent_transactions_without_inventory() -> Result<(), PeerError> {
+        let mut tx = dummy_tx(0x47);
+        tx.inputs[0].witness =
+            bitcoin_rs_consensus::primitives::Witness::from_stack(vec![vec![0x51]]);
+        let txid = bitcoin::Txid::from_byte_array(*tx.txid().as_bytes());
+        let wtxid = bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes());
+        let chain = FakeChain::default().with_block(Block {
+            header: test_header(BlockHash::default(), 1),
+            txs: vec![tx.clone()],
+        });
+        let missing = Inventory::WTx(bitcoin::Wtxid::from_byte_array([0xee; 32]));
+        for item in [
+            Inventory::Transaction(txid),
+            Inventory::WitnessTransaction(txid),
+            Inventory::WTx(wtxid),
+        ] {
+            for cutoff in [None, Some(0)] {
+                let mut expected = tx.clone();
+                if matches!(item, Inventory::Transaction(_)) {
+                    expected.inputs[0].witness.clear();
+                }
+                let mut responses = Vec::new();
+                assert!(
+                    serve_getdata(
+                        Some(&chain),
+                        None,
+                        cutoff,
+                        None,
+                        &[item, missing],
+                        &mut Vec::new(),
+                        &|| true,
+                        &mut |message| {
+                            responses.push(message);
+                            Ok(())
+                        },
+                    )?
+                    .is_empty()
+                );
+                assert_eq!(
+                    responses,
+                    vec![Message::Tx(expected), Message::NotFound(vec![missing])]
+                );
+            }
+        }
+        assert_eq!(chain.blocks[0].txs[0], tx);
+        Ok(())
     }
 
     #[test]

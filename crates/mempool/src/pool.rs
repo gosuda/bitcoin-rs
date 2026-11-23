@@ -2444,6 +2444,14 @@ impl Mempool {
         )
     }
 
+    pub(crate) fn settle_for_snapshot(&mut self) {
+        assert!(
+            self.is_empty(),
+            "snapshot activation requires an empty mempool"
+        );
+        self.settled_at_commit = 0;
+    }
+
     #[must_use]
     pub const fn min_relay_fee_sat_per_kvb(&self) -> u64 {
         self.limits.min_relay_fee_sat_per_kvb

@@ -1645,8 +1645,10 @@ mod dispatch_tests {
                                 },
                             ],
                         }));
-                        let slot = super::RecentBlockSlot::default();
-                        slot.store(image);
+                        let slot = super::RecentBlockSlot::new(Arc::new(
+                            bitcoin_rs_p2p::inbound::block_memory::BlockMemory::default(),
+                        ));
+                        drop(slot.store(slot.prepare(&image)?));
                         let query = super::ActiveChainQuery::new(
                             BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(
                                 BlockTree::new(),
@@ -2384,6 +2386,12 @@ mod loopback_serving_tests {
         ChainQuery, Message, Peer, PeerCounters, PeerError, PeerLease, PeerSession, PeerTable,
     };
 
+    fn recent_slot() -> RecentBlockSlot {
+        RecentBlockSlot::new(Arc::new(
+            bitcoin_rs_p2p::inbound::block_memory::BlockMemory::default(),
+        ))
+    }
+
     const MAGIC: bitcoin::p2p::Magic = bitcoin::p2p::Magic::BITCOIN;
     const FAILSAFE: Duration = Duration::from_secs(20);
 
@@ -2769,8 +2777,8 @@ mod loopback_serving_tests {
             vec![coinbase(2, 1), payment(2)],
         )?);
         let held_hash = held.block_hash();
-        let slot = RecentBlockSlot::default();
-        slot.store(Arc::new(BlockImage::from_local((*held).clone())));
+        let slot = recent_slot();
+        drop(slot.store(slot.prepare(&BlockImage::from_local((*held).clone()))?));
         let chain = chain_over(&[genesis, tip], slot)?;
         assert_eq!(
             chain.active_height(held_hash),
@@ -2906,7 +2914,7 @@ mod loopback_serving_tests {
         });
         let hog_item = Inventory::WitnessBlock(wire_block_hash(hog_block.block_hash()));
         let blocks = [genesis, hog_block, victim_block];
-        let node = Node::start(chain_over(&blocks, RecentBlockSlot::default())?)?;
+        let node = Node::start(chain_over(&blocks, recent_slot())?)?;
         let mut victim = Client::connect(&node)?;
         let victim_session = session_of(&node, &victim)?;
         victim.send(&request)?;
@@ -2978,7 +2986,7 @@ mod loopback_serving_tests {
         ))))?;
         let victim_payload = consensus_bytes(&victim_block);
         let blocks = [genesis, hog_block, victim_block];
-        let chain = chain_over(&blocks, RecentBlockSlot::default())?;
+        let chain = chain_over(&blocks, recent_slot())?;
 
         let node = Node::start(chain)?;
         let mut victim = Client::connect(&node)?;
@@ -3091,7 +3099,7 @@ mod loopback_serving_tests {
     #[test]
     fn a_node_ledger_without_peer_outbound_room_refuses_the_server_reply() -> TestResult {
         let genesis = child_block(BlockHash::default(), 0, vec![coinbase(0, 1)])?;
-        let node = Node::start(chain_over(&[genesis], RecentBlockSlot::default())?)?;
+        let node = Node::start(chain_over(&[genesis], recent_slot())?)?;
         let mut client = Client::connect(&node)?;
 
         let (budget, ledger) = node_outbound_ledger(0);
@@ -3116,7 +3124,7 @@ mod loopback_serving_tests {
     #[test]
     fn a_node_ledger_with_peer_outbound_room_delivers_the_server_reply() -> TestResult {
         let genesis = child_block(BlockHash::default(), 0, vec![coinbase(0, 1)])?;
-        let node = Node::start(chain_over(&[genesis], RecentBlockSlot::default())?)?;
+        let node = Node::start(chain_over(&[genesis], recent_slot())?)?;
         let mut client = Client::connect(&node)?;
 
         let (budget, ledger) = node_outbound_ledger(64 * 1024 * 1024);

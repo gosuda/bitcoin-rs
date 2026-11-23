@@ -93,16 +93,18 @@ Queue accounting:
 - A held orphan is no serving source. Its body is served only if the independent recent-block lookup contains that identity.
 - The node relay owner records the mempool sequence sampled with eligible inventory only after that connection successfully queues a nonempty transaction `inv`.
 - Incoming peer inventory, a refused send, and an empty relay tick never create or advance this serving cutoff. A replacement connection starts without one.
-- An unset cutoff, including absent transaction relay policy or state, skips mempool body lookup. Sequence `0` is valid under `MPL-02` and is not the unset state. The recent-block lookup requires no cutoff.
+- An unset cutoff, including absent transaction relay policy or state, skips mempool body lookup. Sequence `0` is valid under `MPL-02` and is not the unset state. The recent-block lookup requires neither a cutoff nor a mempool inventory provider.
 - For mempool lookup, the body must still reside under an admission no later than the cutoff. Removal and re-admission create a new admission even when the identity is unchanged. Sequence ages are compared modulo 2^64 against the current pool sequence under one read guard.
 - Transaction-bearing initial and resumed `getdata` obtain the cutoff from the requesting connection. The mempool lookup checks eligibility before cloning, and releases the pool guard before sending or updating broadcast state.
 - Negotiated ancestor-package and package-body responses apply the same cutoff to every member. They do not use the recent-block fallback. Local package-presence checks remain independent of serving authorization.
 - `RecentBlockSlot` owns one immutable body and its typed txid/wtxid index. Each update builds at most two entries per transaction from `BlockImage` identity views, including coinbase, as Core `NewPoWValidBlock` does. The block hash comes from that same body.
-- Replacement publishes the body and index together. The slot mutex only exchanges or clones their shared owner. Index construction and old-slot disposal occur outside this mutex. A request searches the sorted index and materializes only the selected transaction after releasing the mutex. It does not scan the block or query stored history.
+- Replacement publishes the body and index together. The slot mutex only exchanges or clones their shared owner. Preparation and old-slot disposal occur outside both the slot mutex and the announcement-state mutex. The high-water check and publication stay under the announcement-state mutex, so a concurrent lower-height result cannot replace a higher one. A request searches the sorted index and materializes only the selected transaction after releasing the mutex. It does not scan the block or query stored history.
+- Production installs the slot with the node's existing `BlockMemory` owner. Checked arithmetic computes its reservation before allocation: the cloned layout and identity heap, two typed index entries per transaction, and the held-owner allocation. Peer-origin shared raw bytes keep their original backing receipt and receive no second charge. The new receipt stays with the immutable owner until its last cache reader drops, including after replacement. This reservation covers new cache allocations; `BUD-06` records the existing local-body backing gap.
+- No default production slot creates a separate budget. Without a supplied slot, the query has no recent cache. A failed reservation leaves the existing slot and announcement high-water mark unchanged, skips this optional early announcement, and does not refuse chain validation. `recent_block_budget_refusal_preserves_slot_and_last_reader` checks this boundary, lock scope, concurrent replacement, and final release under the node ledger (BUD-01, BUD-03, BUD-06, BUD-07, SYNC-03).
 - The existing early-relay hook fills this slot only for a SegWit-active tip child after the shared block admission checks, finality, and BIP34 checks. The announcer also requires inactive IBD and a new height above its early-relay high-water mark.
 - This slot is no proof of successful script validation or durable commit. A later connect failure does not retract the early-announced body. The fallback publishes no applied-chain state and changes no mempool admission.
-- The headroom gate precedes either lookup. `MSG_TX` strips witness; `MSG_WITNESS_TX` and `MSG_WTX` preserve it. Successful queue admission commits broadcast marks under the original wtxid. A refused send restores them.
-- Proof: `recent_block_lookup_keeps_typed_identities_and_one_body`, `recent_block_getdata_preserves_privacy_and_broadcast_state`, and `early_announce_sends_one_cmpctblock_to_parent_known_hb_peer` cover identity, replacement, producer publication, privacy, and queue outcomes. Existing `pow_valid_hook_tests` own the hook's admission boundary.
+- The headroom gate precedes either lookup. `MSG_TX` strips witness; `MSG_WITNESS_TX` and `MSG_WTX` preserve it. When a mempool inventory provider exists, successful queue admission commits its broadcast marks under the original wtxid. A refused send restores them. Chain-only serving creates no broadcast mark.
+- Proof: `recent_block_lookup_keeps_typed_identities_and_one_body`, `recent_block_getdata_preserves_privacy_and_broadcast_state`, `chain_only_getdata_serves_recent_transactions_without_inventory`, and `early_announce_sends_one_cmpctblock_to_parent_known_hb_peer` cover identity, replacement, producer publication, privacy, provider independence, and queue outcomes. Existing `pow_valid_hook_tests` own the hook's admission boundary.
 - `MSG_WITNESS_BLOCK` answers exact stored consensus bytes (`Message::BlockBytes`).
 - `MSG_BLOCK` copies checked header, tx count, and stripped spans (BIP144).
 - Neither format materializes scripts or witnesses.
@@ -389,25 +391,19 @@ Proof for header ingress:
 - Failed spawns release the reservation.
 - Protection order follows Core:
   - Four by process-keyed netgroup hash.
-  - Eight by lowest minimum ping time.
+  - Eight by lowest minimum ping time. Proof: `eviction::tests::eight_lowest_minimum_pings_protect_connections` and `zero_ping_is_measured_and_unknown_ping_is_not_fast` in `crates/p2p/src/eviction.rs` check Core's eight-connection rule and measured-zero priority.
   - Four most-recent mempool-accepted tx deliverers.
   - Up to eight wanted-service block-relay-only most-recent committed-block deliverers.
   - Four most-recent committed-block deliverers.
-  - Half of the rest by uptime, with up to half of this protection reserved for I2P, local, and onion connections.
-- The reserved quota is shared among nonempty classes, with smaller classes first.
-- Equal class sizes use the fixed order I2P, local, onion, as in Core with the unsupported CJDNS class absent.
-- Each pass shares the remaining quota equally, with a minimum allocation of one per class, and stops when the quota is filled.
-- A class with fewer connections releases its unused share to the remaining classes.
-- Each class protects its longest-connected candidates.
-- Any unused reserved quota returns to general uptime protection.
-- Anonymous Tor circuits count as onion connections, never as the proxy's local IP address.
+  - Half of the rest by uptime, with up to half of this protection reserved for I2P, local, and onion connections. The reserved quota is shared among nonempty classes, with smaller classes first. Equal class sizes use the fixed order I2P, local, onion, as in Core with the unsupported CJDNS class absent. Each pass shares the remaining quota equally, with a minimum allocation of one per class, and stops when the quota is filled. A class with fewer connections releases its unused share to the remaining classes. Each class protects its longest-connected candidates. Any unused reserved quota returns to general uptime protection. Proof: `eviction::tests::network_ratio_matches_core_v31_1_vectors` in `crates/p2p/src/eviction.rs` checks Core's retained-candidate vectors and reversed input order. `absent_network_groups_leave_half_protected_by_uptime` checks empty classes and small sets.
+- Anonymous Tor circuits count as onion connections, never as the proxy's local IP address. Proof: `network_ratio_matches_core_v31_1_vectors` repeats the Core vectors with anonymous Tor identities.
 - CJDNS is unsupported. Ordinary IPv6 ULA addresses do not receive CJDNS protection.
-- `Keepalive` owns one outstanding nonce and its admission instant.
-- `PeerTable` owns the minimum successful elapsed time for each exact live connection.
-- A matching reply with zero elapsed time is a valid sample. Negative elapsed time settles the probe without changing the minimum.
+- `Keepalive` owns one outstanding nonce. It captures the start instant before queue handoff and retains it only after successful admission. Proof: `listener::keepalive_tests::only_the_outstanding_nonce_records_ping_time` in `crates/p2p/src/listener.rs` checks matching and stale replies and one outstanding probe.
+- `PeerTable` owns the minimum successful elapsed time for each exact live connection. Proof: `peer_table::tests::ping_samples_keep_the_connection_minimum_for_eviction` in `crates/p2p/src/peer_table.rs` checks the retained minimum. `listener::tests::matching_wire_pong_protects_the_live_inbound_connection` in `crates/p2p/src/listener.rs` checks the socket-to-eviction path.
+- A matching reply with zero elapsed time is a valid sample. Negative elapsed time settles the probe without changing the minimum. Proof: `listener::keepalive_tests::zero_and_negative_ping_times_follow_core_settlement` checks both boundaries.
 - An unknown minimum ping has lower protection priority than every measured minimum.
 - A slower later sample cannot increase the minimum.
-- A replacement connection starts with no sample. A callback from a replaced or cancelled connection cannot update it.
+- A replacement connection starts with no sample. A callback from a replaced or cancelled connection cannot update it. Proof: `peer_table::tests::replacement_connections_never_inherit_ping_protection` checks both boundaries.
 - Then evict the newest connection of the largest-remaining netgroup.
 - `set_network_active` and conditional socket registration share the table write lock.
 - Disable-first admits nothing (no lease, replacement, or capacity mutation).
@@ -429,15 +425,7 @@ Proof for header ingress:
 - Advertised set follows prune (`init.cpp`): `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED` when `storage.prune_target_mb > 0`.
 - Both handshake paths use `P2pServiceConfig::local_services`.
 
-Proof:
-- `eviction::tests::network_ratio_matches_core_v31_1_vectors` uses retained-candidate sets from Core v31.1 `src/test/net_peer_eviction_tests.cpp` for supported network classes.
-- It repeats each set with reversed input order and anonymous Tor identities.
-- `eight_lowest_minimum_pings_protect_connections` and `zero_ping_is_measured_and_unknown_ping_is_not_fast` check the minimum-ping stage against Core's eight-connection rule.
-- `absent_network_groups_leave_half_protected_by_uptime` checks empty classes and small candidate sets.
-- `listener::keepalive_tests` checks matching, stale, zero, and negative-time Pong settlement and one outstanding probe.
-- `peer_table::tests` checks the connection minimum and rejects callbacks after replacement or cancellation.
-- `matching_wire_pong_protects_the_live_inbound_connection` checks the listener-to-table path through a real socket and an inbound eviction.
-- These are local behavioral proofs. They do not establish complete Core peer-lifecycle parity. Policy §7 items 11 and 12 own the remaining differences.
+These local behavioral proofs do not establish complete Core peer-lifecycle parity. Policy §7 items 11 and 12 own the remaining differences.
 
 ### `P2P-09`: Block-body service eligibility
 
