@@ -872,6 +872,17 @@ fn read_head_line(reader: &mut impl BufRead, remaining: usize) -> io::Result<(St
             "headers too large",
         ));
     }
+    if line.ends_with('\r')
+        || line
+            .as_bytes()
+            .windows(2)
+            .any(|bytes| bytes[0] == b'\r' && bytes[1] != b'\n')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid carriage return in HTTP head",
+        ));
+    }
     Ok((line, read))
 }
 
