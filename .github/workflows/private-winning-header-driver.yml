@@ -45,7 +45,7 @@ jobs:
           cargo run --locked -p contract-index -- --check
           git diff --check
           git add -u
-          git rm --cached -- .github/workflows/private-winning-header-driver-verification.yml
+          git rm --cached -- .github/workflows/private-winning-header-driver.yml
           printf 'PRODUCT_TREE %s\n' "$(git write-tree)"
           node <<'NODE'
           const fs = require('node:fs');
@@ -81,15 +81,70 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Execute existing node header-driver tests
+      - name: Execute node and chain driver proofs
         run: |
           set -euo pipefail
-          mkdir -p target/winning-header-driver-proof
-          git rev-parse HEAD > target/winning-header-driver-proof/source.txt
-          bash scripts/ci-setup.sh apt nextest 2>&1 | tee target/winning-header-driver-proof/setup.log
-          cargo nextest run --locked -p bitcoin-rs-node --lib --no-default-features --no-tests fail --no-fail-fast \
-            -E 'test(p2p::sync::)' \
-            2>&1 | tee target/winning-header-driver-proof/tests.log
+          qa_source="$(git rev-parse HEAD)"
+          qa_control="44f70fb2ecf7a1e64d564e2f341a303f40011bb3"
+          qa_evidence="$PWD/target/winning-header-driver-proof"
+          qa_config="$RUNNER_TEMP/winning-header-nextest.toml"
+          mkdir -p "$qa_evidence"
+          printf '%s\n' "$qa_source" > "$qa_evidence/source.txt"
+          bash scripts/ci-setup.sh apt nextest 2>&1 | tee "$qa_evidence/setup.log"
+          cargo nextest run --locked -p bitcoin-rs-node --lib --no-default-features --features test-seam --no-tests fail --no-fail-fast \
+            -E 'test(p2p::sync::)' 2>&1 | tee "$qa_evidence/node-tests.log"
+          cat > "$qa_config" <<'TOML'
+          [profile.header_driver_control]
+          retries = 0
+          fail-fast = false
+          test-threads = 1
+          [profile.header_driver_control.junit]
+          path = "junit.xml"
+          report-skipped = "none"
+          TOML
+          run_control() {
+            local label="$1" expected_status="$2" expected_failures="$3"
+            local report="$PWD/target/nextest/header_driver_control/junit.xml"
+            rm -f "$report"
+            git rev-parse HEAD > "$qa_evidence/$label-source.txt"
+            git diff > "$qa_evidence/$label-diff.patch"
+            set +e
+            cargo nextest run --locked -p bitcoin-rs-node --test suite --no-default-features --features test-seam \
+              --config-file "$qa_config" --profile header_driver_control --color never --no-tests fail --no-fail-fast \
+              -E 'test(=winning_header_driver::winning_header_driver_applies_deep_fork_and_recovers_durable_tip)' \
+              2>&1 | tee "$qa_evidence/$label.log"
+            local statuses=("${PIPESTATUS[@]}")
+            set -e
+            if [[ -f "$report" ]]; then cp "$report" "$qa_evidence/$label.xml"; fi
+            if (( statuses[0] != expected_status || statuses[1] != 0 )); then
+              printf 'unexpected nextest exit %s (expected %s), tee %s\n' "${statuses[0]}" "$expected_status" "${statuses[1]}" >&2
+              return 1
+            fi
+            node - "$report" "$expected_failures" "$qa_evidence/$label.log" "$expected_status" <<'NODE' | tee "$qa_evidence/$label-result.json"
+          const fs = require('node:fs');
+          const [path, failures, logPath, status] = process.argv.slice(2);
+          const xml = fs.readFileSync(path, 'utf8');
+          const root = /<testsuites\b([^>]*)>/.exec(xml);
+          if (!root) throw new Error('missing testsuites');
+          const counts = Object.fromEntries([...root[1].matchAll(/\b(tests|failures|errors)="(\d+)"/g)].map(([, key, n]) => [key, Number(n)]));
+          const names = [...xml.matchAll(/<testcase\b[^>]*\bname="([^"]+)"/g)].map(([, name]) => name);
+          const expected = 'winning_header_driver::winning_header_driver_applies_deep_fork_and_recovers_durable_tip';
+          if (counts.tests !== 1 || counts.failures !== Number(failures) || counts.errors !== 0 || names.length !== 1 || names[0] !== expected || /<skipped\b/.test(xml)) throw new Error('unexpected test set/counts ' + JSON.stringify({counts, names}));
+          if (Number(failures) && !fs.readFileSync(logPath, 'utf8').includes('retention refusal must request its own retained fork anchor')) throw new Error('missing expected behavioral assertion');
+          console.log(JSON.stringify({name: expected, ...counts, nextestExit: Number(status)}));
+          NODE
+          }
+          git fetch --no-tags --depth=1 origin "$qa_control"
+          trap 'git checkout --detach "$qa_source"' EXIT
+          git checkout --detach "$qa_control"
+          run_control before-driver-fix 100 1
+          git checkout --detach "$qa_source"
+          run_control complete-driver 0 0
+          cargo nextest run --locked -p bitcoin-rs-chain --lib --features test-seam --no-tests fail --no-fail-fast \
+            -E 'test(header_admission::tests::) or test(chain::header_sync::candidate::tests::)' \
+            2>&1 | tee "$qa_evidence/chain-tests.log"
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features test-seam --all-targets -- -D warnings \
+            2>&1 | tee "$qa_evidence/clippy.log"
           git diff --exit-code
       - name: Preserve node driver evidence
         if: ${{ always() }}
