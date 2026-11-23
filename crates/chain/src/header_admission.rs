@@ -8,7 +8,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::chain::header_sync::{
     HeaderCandidate, HeaderCandidateBudget, HeaderCandidateError, HeaderValidationMode,
-    MAX_FUTURE_TIME_SECONDS, PreparedHeader, VerifiedHeaderTarget, current_unix_seconds,
+    MAX_FUTURE_TIME_SECONDS, MAX_HEADER_CANDIDATES, PreparedHeader, VerifiedHeaderTarget, current_unix_seconds,
     prepare_header,
 };
 use crate::chain::{BlockTree, ChainError, NodeId, NodeStatus, TipSnapshot};
@@ -131,12 +131,23 @@ struct RequiredAncestry {
 }
 
 #[derive(Default)]
+struct RetainedAnchors {
+    required_roots: Vec<NodeId>,
+    anchors: [Option<Hash256>; MAX_HEADER_CANDIDATES],
+    side_limit: usize,
+    resolved: [Option<NodeId>; MAX_HEADER_CANDIDATES],
+    retained: [Option<NodeId>; MAX_HEADER_CANDIDATES],
+    cancelled: [Option<Hash256>; MAX_HEADER_CANDIDATES],
+}
+
+#[derive(Default)]
 struct RetentionPins {
     roles: Vec<Weak<HeaderRoleRetention>>,
     operations: usize,
     transient: BTreeMap<Hash256, usize>,
     replay: Option<ActiveReplay>,
     ancestry: RequiredAncestry,
+    anchors: RetainedAnchors,
 }
 
 pub(crate) struct HeaderRetention {
@@ -201,6 +212,7 @@ impl HeaderRetention {
         assert_eq!(pins.operations, 0);
         pins.replay = None;
         pins.ancestry = RequiredAncestry::default();
+        pins.anchors = RetainedAnchors::default();
         for role in pins.roles.iter().filter_map(Weak::upgrade) {
             let mut pending = role.pending.lock();
             assert_eq!(pending.scopes, 0);
@@ -251,20 +263,8 @@ impl HeaderRetention {
         let required = pins.ancestry.count(tree, &required_roots)?;
         let side_limit = self.side_limit();
         let ordinary_limit = required.checked_add(side_limit).ok_or(HeaderResourceError::CapacityOverflow)?;
-        let mut anchor_ancestry = 0_usize;
-        for hash in self.candidates.anchors().into_iter().flatten() {
-            let Some(id) = tree.lookup(hash) else {
-                self.candidates.cancel_anchor(hash);
-                continue;
-            };
-            let added = additional_ancestry(tree, id, &required_roots)?;
-            if added > side_limit - anchor_ancestry {
-                self.candidates.cancel_anchor(hash);
-                continue;
-            }
-            anchor_ancestry += added;
-            required_roots.push(id);
-        }
+        let cancelled = pins.anchors.apply(tree, &mut required_roots, self.candidates.anchors(), side_limit)?;
+        for hash in cancelled.into_iter().flatten() { self.candidates.cancel_anchor(hash); }
         if pins.replay.is_some_and(|replay| self.candidates.active_replay() != Some(replay.candidate)) {
             pins.replay = None;
         }
@@ -287,12 +287,7 @@ impl HeaderRetention {
 impl RequiredAncestry {
     fn count(&mut self, tree: &BlockTree, roots: &[NodeId]) -> Result<usize, HeaderAdmissionError> {
         if self.roots == roots { return Ok(self.count); }
-        if roots.len() == self.roots.len()
-            && let (Some(best), Some(previous)) = (roots.first(), self.roots.first())
-            && roots[1..] == self.roots[1..]
-            && tree.node(*best)?.parent == Some(*previous)
-            && self.roots.iter().all(|root| root < best)
-        {
+        if is_direct_best_extension(tree, roots, &self.roots, [])? {
             self.count = self.count.checked_add(1).ok_or(HeaderResourceError::CapacityOverflow)?;
             self.roots.copy_from_slice(roots);
             return Ok(self.count);
@@ -307,6 +302,71 @@ impl RequiredAncestry {
         self.roots.extend_from_slice(roots);
         Ok(self.count)
     }
+}
+
+
+impl RetainedAnchors {
+    fn apply(
+        &mut self,
+        tree: &BlockTree,
+        required_roots: &mut Vec<NodeId>,
+        anchors: [Option<Hash256>; MAX_HEADER_CANDIDATES],
+        side_limit: usize,
+    ) -> Result<[Option<Hash256>; MAX_HEADER_CANDIDATES], HeaderAdmissionError> {
+        let reusable = self.anchors == anchors
+            && self.side_limit == side_limit
+            && self.resolved.iter().flatten().all(|id| tree.node(*id).is_ok())
+            && (self.required_roots == *required_roots
+                || is_direct_best_extension(tree, required_roots, &self.required_roots, self.resolved.iter().flatten().copied())?);
+        if reusable {
+            self.required_roots.clone_from(required_roots);
+            required_roots.extend(self.retained.iter().flatten().copied());
+            return Ok(self.cancelled);
+        }
+
+        let required_count = required_roots.len();
+        let mut resolved = [None; MAX_HEADER_CANDIDATES];
+        let mut retained = [None; MAX_HEADER_CANDIDATES];
+        let mut cancelled = [None; MAX_HEADER_CANDIDATES];
+        let mut ancestry = 0_usize;
+        for (index, hash) in anchors.iter().enumerate() {
+            let Some(hash) = *hash else { continue; };
+            let Some(id) = tree.lookup(hash) else {
+                cancelled[index] = Some(hash);
+                continue;
+            };
+            resolved[index] = Some(id);
+            let added = additional_ancestry(tree, id, required_roots)?;
+            if added > side_limit - ancestry {
+                cancelled[index] = Some(hash);
+                continue;
+            }
+            ancestry += added;
+            retained[index] = Some(id);
+            required_roots.push(id);
+        }
+        self.required_roots.clear();
+        self.required_roots.extend_from_slice(&required_roots[..required_count]);
+        self.anchors = anchors;
+        self.side_limit = side_limit;
+        self.resolved = resolved;
+        self.retained = retained;
+        self.cancelled = cancelled;
+        Ok(cancelled)
+    }
+}
+
+fn is_direct_best_extension(
+    tree: &BlockTree,
+    roots: &[NodeId],
+    previous: &[NodeId],
+    additional: impl IntoIterator<Item = NodeId>,
+) -> Result<bool, ChainError> {
+    if roots.len() != previous.len() { return Ok(false); }
+    let (Some(&best), Some(&parent)) = (roots.first(), previous.first()) else { return Ok(false); };
+    Ok(roots[1..] == previous[1..]
+        && tree.node(best)?.parent == Some(parent)
+        && previous.iter().copied().chain(additional).all(|id| id < best))
 }
 
 fn additional_ancestry(tree: &BlockTree, id: NodeId, retained: &[NodeId]) -> Result<usize, HeaderAdmissionError> {
