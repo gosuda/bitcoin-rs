@@ -1,0 +1,100 @@
+name: Header owner verification
+
+on:
+  push:
+    branches: [stabilize/private-header-owner-20261124]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: header-owner-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "2"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  regenerate:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Resolve consumers and export generated product files
+        run: |
+          set -euo pipefail
+          mkdir -p target/header-owner-proof
+          git fetch --no-tags --depth=1 origin ba8e30e7adb9d2b1367789d20d62d52d290288d8
+          cargo metadata --format-version 1 --manifest-path tools/ldk/Cargo.toml > target/header-owner-proof/ldk-metadata.json
+          cargo metadata --locked --format-version 1 --manifest-path tools/ldk/Cargo.toml > /dev/null
+          cargo metadata --format-version 1 --manifest-path tools/stratum-sv2/template-provider/Cargo.toml > target/header-owner-proof/sv2-metadata.json
+          cargo metadata --locked --format-version 1 --manifest-path tools/stratum-sv2/template-provider/Cargo.toml > /dev/null
+          git diff --exit-code -- Cargo.lock
+          cargo fmt --all
+          cargo run --locked -p contract-index
+          cargo run --locked -p contract-index -- --check
+          git diff --check
+          git add -u
+          git rm --cached -- .github/workflows/private-header-owner-verification.yml
+          printf 'PRODUCT_TREE %s\n' "$(git write-tree)"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const cp = require('node:child_process');
+          const paths = cp.execFileSync('git', [
+            'diff', '--cached', '--name-only', '-z',
+            'ba8e30e7adb9d2b1367789d20d62d52d290288d8',
+          ], { encoding: 'utf8' }).split('\0').filter(Boolean);
+          for (const path of paths) {
+            if (!fs.existsSync(path)) {
+              console.log('PRODUCT_DELETE ' + JSON.stringify({path}));
+              continue;
+            }
+            const bytes = fs.readFileSync(path);
+            const sha = crypto.createHash('sha1')
+              .update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
+            console.log('PRODUCT_FILE ' + JSON.stringify({path, sha, size: bytes.length}));
+            for (let offset = 0; offset < bytes.length; offset += 12000) {
+              console.log('PRODUCT_CHUNK ' + JSON.stringify({
+                path, offset, data: bytes.subarray(offset, offset + 12000).toString('base64'),
+              }));
+            }
+          }
+          NODE
+
+  chain-tests:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Execute chain owner and checkpoint tests
+        run: |
+          set -euo pipefail
+          mkdir -p target/header-owner-proof
+          git rev-parse HEAD > target/header-owner-proof/source.txt
+          bash scripts/ci-setup.sh apt nextest 2>&1 | tee target/header-owner-proof/setup.log
+          cargo nextest run --locked -p bitcoin-rs-chain --lib --no-tests fail --no-fail-fast \
+            2>&1 | tee target/header-owner-proof/tests.log
+          git diff --exit-code
+      - name: Preserve chain owner evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: header-owner-proof-${{ github.run_attempt }}
+          path: target/header-owner-proof/**
+          if-no-files-found: warn
+          retention-days: 7
