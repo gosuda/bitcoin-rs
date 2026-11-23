@@ -940,7 +940,7 @@ mod tests {
         Ok(())
     }
 
-    // API-11, API-30, MPS-03, SYNC-05
+    // API-30, MPS-03, SYNC-05
     #[test]
     fn fresh_submission_commits_after_fee_changes_past_generation_check()
     -> Result<(), crate::test_support::TestError> {
