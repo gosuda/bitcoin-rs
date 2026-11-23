@@ -1,10 +1,11 @@
-"""Manual real-tool regression: python3 scripts/tests/proofs_crate_paths.py --verbose."""
+"""Manual proofs-stage regression: uv run scripts/tests/proofs_crate_paths.py --verbose."""
 
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -40,7 +41,7 @@ class ProofsCratePathsTest(unittest.TestCase):
             )
         environment = {
             key: os.environ[key]
-            for key in ("PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "ELAN_HOME")
+            for key in ("PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "ELAN_HOME", "KANI_HOME")
             if key in os.environ
         }
         environment.update(
@@ -56,7 +57,7 @@ class ProofsCratePathsTest(unittest.TestCase):
                 "Cargo.toml": '[workspace]\nmembers = ["crates/storage"]\nresolver = "2"\n',
                 "crates/storage/Cargo.toml": (
                     '[package]\nname = "bitcoin-rs-storage"\nversion = "0.0.0"\n'
-                    'edition = "2021"\nautotests = false\n'
+                    'edition = "2024"\nautotests = false\n'
                     "[features]\ndefault = []\nmdbx = []\n"
                     '[[test]]\nname = "mdbx_bounded_read_allocation"\n'
                     'path = "mdbx_bounded_read_allocation_tests.rs"\n'
@@ -147,6 +148,169 @@ class ProofsCratePathsTest(unittest.TestCase):
             self.assertIn("==> FAILED: kani: crates/nested/gone", output)
             self.assertIn("==> ok: kani: crates/storage", output)
             self.assertIn("==> ok: lean: pipeline", output)
+
+
+WORKER_PROBE = r"""import argparse
+import os
+import sys
+import time
+from pathlib import Path
+
+root = Path(os.environ["PROOFS_PROBE_ROOT"])
+release = root / "release"
+
+
+def run_kani() -> None:
+    (root / "started" / Path.cwd().name).touch()
+    deadline = time.monotonic() + 20
+    while not release.exists():
+        if time.monotonic() >= deadline:
+            raise SystemExit("model worker probe did not release Kani")
+        time.sleep(0.01)
+
+
+class Arguments:
+    jobs: str = ""
+
+
+def run_models() -> None:
+    try:
+        (root / "model-arguments").write_text(
+            "\n".join(sys.argv[1:]), encoding="utf-8"
+        )
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--jobs", required=True)
+        arguments = Arguments()
+        parser.parse_args(namespace=arguments)
+        expected = os.environ["PROOFS_PROBE_JOBS"]
+        if arguments.jobs != expected:
+            raise SystemExit(
+                f"model jobs must be canonical decimal {expected}, got {arguments.jobs}"
+            )
+        width = int(os.environ["PROOFS_PROBE_WIDTH"])
+        deadline = time.monotonic() + 10
+        while len(tuple((root / "started").iterdir())) < width:
+            if time.monotonic() >= deadline:
+                raise SystemExit("Kani scheduler did not reach the model worker limit")
+            time.sleep(0.01)
+        time.sleep(0.2)
+        observed = len(tuple((root / "started").iterdir()))
+        (root / "first-cohort").write_text(str(observed), encoding="utf-8")
+        if observed != width:
+            raise SystemExit(
+                f"Kani scheduler started {observed} workers for model limit {width}"
+            )
+    finally:
+        release.touch()
+
+
+if len(sys.argv) > 1 and sys.argv[1] == "kani":
+    run_kani()
+else:
+    run_models()
+"""
+
+class ProofsJobLimitsTest(unittest.TestCase):
+    def fixture(
+        self, root: Path, jobs: str, expected: int, crate_count: int
+    ) -> dict[str, str]:
+        for tool in ("bash", "lake", "rg"):
+            self.assertIsNotNone(shutil.which(tool), f"Required real tool missing: {tool}")
+        scripts = root / "scripts"
+        scripts.mkdir()
+        for name in ("ci-pr.sh", "extract_lean.sh"):
+            shutil.copy2(SCRIPTS / name, scripts / name)
+        (scripts / "check_models.py").write_text(WORKER_PROBE, encoding="utf-8")
+        lean = root / "docs/lean"
+        lean.mkdir(parents=True)
+        (lean / "lakefile.toml").write_text(
+            'name = "worker_probe"\ndefaultTargets = ["Probe"]\n'
+            '[[lean_lib]]\nname = "Probe"\n',
+            encoding="utf-8",
+        )
+        (lean / "Probe.lean").write_text(
+            "theorem probe_identity (n : Nat) : n = n := rfl\n", encoding="utf-8"
+        )
+        shutil.copy2(SCRIPTS.parent / "docs/lean/lean-toolchain", lean / "lean-toolchain")
+        probe = root / "probe"
+        (probe / "started").mkdir(parents=True)
+        crates = tuple(f"crates/probe-{index:02}" for index in range(crate_count))
+        for crate in crates:
+            (root / crate).mkdir(parents=True)
+        environment = {
+            key: os.environ[key]
+            for key in ("PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "ELAN_HOME", "KANI_HOME")
+            if key in os.environ
+        }
+        environment.update(
+            CARGO_TERM_COLOR="never",
+            PROOFS_JOBS=jobs,
+            PROOFS_CRATES=" ".join(crates),
+            PROOFS_VERBOSE="1",
+            PROOFS_EXTRACT_LEAN_CMD="/usr/bin/true",
+            PROOFS_KANI_CMD=f"{sys.executable} {scripts / 'check_models.py'} kani",
+            PROOFS_PROBE_ROOT=str(probe),
+            PROOFS_PROBE_JOBS=str(expected),
+            PROOFS_PROBE_WIDTH=str(min(expected, crate_count)),
+        )
+        return environment
+
+    def test_decimal_limit_reaches_both_schedulers(self) -> None:
+        cases = (
+            ("1", 1, 2),
+            ("0002", 2, 3),
+            ("08", 8, 9),
+            ("010", 10, 11),
+            ("9223372036854775807", 9223372036854775807, 2),
+            ("00009223372036854775807", 9223372036854775807, 2),
+        )
+        for jobs, expected, crate_count in cases:
+            with self.subTest(jobs=jobs), tempfile.TemporaryDirectory(
+                prefix="proofs-job-limits-"
+            ) as temporary:
+                root = Path(temporary)
+                environment = self.fixture(root, jobs, expected, crate_count)
+                status, output = run_proofs(root, environment)
+                self.assertEqual(status, 0, output)
+                self.assertEqual(
+                    (root / "probe/model-arguments").read_text(encoding="utf-8").splitlines(),
+                    ["--jobs", str(expected)],
+                )
+                self.assertEqual(
+                    int((root / "probe/first-cohort").read_text(encoding="utf-8")),
+                    min(expected, crate_count),
+                )
+                self.assertEqual(len(tuple((root / "probe/started").iterdir())), crate_count)
+                self.assertIn("==> ok: models: check_models", output)
+
+    def test_invalid_limit_refuses_before_launching_proof_jobs(self) -> None:
+        for jobs in (
+            "",
+            "0",
+            "000",
+            "-1",
+            "+1",
+            " 2",
+            "2 ",
+            "1.5",
+            "08x",
+            "1+1",
+            "9223372036854775808",
+            "18446744073709551616",
+            "9" * 100,
+        ):
+            with self.subTest(jobs=jobs), tempfile.TemporaryDirectory(
+                prefix="proofs-invalid-job-limit-"
+            ) as temporary:
+                root = Path(temporary)
+                environment = self.fixture(root, jobs, 1, 2)
+                status, output = run_proofs(root, environment)
+                self.assertEqual(status, 2, output)
+                self.assertIn("PROOFS_JOBS must be a decimal integer", output)
+                self.assertEqual(tuple((root / "probe/started").iterdir()), ())
+                self.assertFalse((root / "probe/model-arguments").exists())
+                self.assertFalse((root / "docs/lean/.lake").exists())
+
 
 
 if __name__ == "__main__":

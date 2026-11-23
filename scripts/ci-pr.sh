@@ -246,10 +246,18 @@ proofs_stage() {
   if (( default_jobs < 1 )); then
     default_jobs=1
   fi
-  local kani_jobs
-  kani_jobs="${PROOFS_JOBS:-$default_jobs}"
-  if ! [[ "$kani_jobs" =~ ^[0-9]+$ ]] || (( kani_jobs < 1 )); then
-    kani_jobs=1
+  local proof_jobs
+  proof_jobs="${PROOFS_JOBS-$default_jobs}"
+  if ! [[ "$proof_jobs" =~ ^[0-9]+$ ]]; then
+    echo "PROOFS_JOBS must be a decimal integer in 1..9223372036854775807" >&2
+    return 2
+  fi
+  proof_jobs="${proof_jobs#"${proof_jobs%%[!0]*}"}"
+  proof_jobs="${proof_jobs:-0}"
+  if [[ "$proof_jobs" == 0 || ${#proof_jobs} -gt 19 ||
+        ( ${#proof_jobs} -eq 19 && "$proof_jobs" > 9223372036854775807 ) ]]; then
+    echo "PROOFS_JOBS must be a decimal integer in 1..9223372036854775807" >&2
+    return 2
   fi
 
   local -a pending_pids=()
@@ -357,7 +365,7 @@ proofs_stage() {
       local models_start
       models_start=$SECONDS
       echo "==> models: check_models"
-      python3 scripts/check_models.py --jobs "$kani_jobs" > "$models_log" 2>&1 &
+      python3 scripts/check_models.py --jobs "$proof_jobs" > "$models_log" 2>&1 &
       local models_pid
       models_pid=$!
       pending_pids+=("$models_pid")
@@ -405,7 +413,7 @@ proofs_stage() {
     job_logs[$kani_pid]="$kani_log"
     job_starts[$kani_pid]=$kani_start
 
-    if (( ${#running_kani[@]} >= kani_jobs )); then
+    if (( ${#running_kani[@]} >= proof_jobs )); then
       reap running_kani 0
     fi
   done
