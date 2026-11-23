@@ -3239,18 +3239,21 @@ mod transaction_poll_tests {
     pub(super) struct MockTxPolicy {
         polls: AtomicUsize,
         serving_sequence: Option<u64>,
+        pub(super) serving_reads: AtomicUsize,
     }
     impl MockTxPolicy {
         pub(super) fn with_serving_sequence(sequence: u64) -> Self {
             Self {
                 polls: AtomicUsize::new(0),
                 serving_sequence: Some(sequence),
+                serving_reads: AtomicUsize::new(0),
             }
         }
     }
 
     impl crate::listener::TxPolicyObserver for MockTxPolicy {
         fn transaction_serving_sequence(&self, _: crate::PeerSource) -> Option<u64> {
+            self.serving_reads.fetch_add(1, Ordering::Relaxed);
             self.serving_sequence
         }
 
@@ -7164,6 +7167,59 @@ mod getdata_pause_tests {
             }
         }
         Ok(received)
+    }
+
+    // P2P-01
+    #[test]
+    fn block_and_control_messages_do_not_read_transaction_serving_cutoff() -> TestResult {
+        let policy =
+            Arc::new(super::transaction_poll_tests::MockTxPolicy::with_serving_sequence(0));
+        let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
+        shared.tx_policy = Some(policy.clone());
+        let mut served = Served::start(
+            shared,
+            OutboundBudget::with_block_reserve(8, 1 << 20, 1024),
+            &WriterKind::Production {
+                write_timeout: FAILSAFE,
+            },
+        )?;
+        let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([7; 32]));
+        for message in [
+            Message::Headers(Vec::new()),
+            Message::Inv(vec![block]),
+            Message::GetData(vec![block]),
+            Message::Ping(12),
+        ] {
+            served.client.send(&message)?;
+        }
+        let received = read_messages(&mut served.client, 3)?;
+        assert!(matches!(received.first(), Some(Message::Ping(_))));
+        assert_eq!(
+            &received[1..],
+            &[Message::NotFound(vec![block]), Message::Pong(12)]
+        );
+        assert_eq!(
+            policy
+                .serving_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        let tx = Inventory::WTx(bitcoin::Wtxid::from_byte_array([8; 32]));
+        served.client.send(&Message::GetData(vec![tx]))?;
+        served.client.send(&Message::Ping(13))?;
+        assert_eq!(
+            read_messages(&mut served.client, 2)?,
+            vec![Message::NotFound(vec![tx]), Message::Pong(13)]
+        );
+        assert_eq!(
+            policy
+                .serving_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert!(!served.lease.is_cancelled());
+        Ok(())
     }
 
     // P2P-01
