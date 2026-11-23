@@ -943,13 +943,12 @@ mod tests {
         let mut raw = Vec::with_capacity(fixture.len() + 41);
         raw.extend_from_slice(&fixture);
         let capacity = raw.capacity();
-        let image = BlockImage::from_raw(bytes::Bytes::from(raw))?
-            .with_owned_backing(|bytes| {
-                Ok::<_, TestError>(BackingReceipt {
-                    released: Arc::clone(&released),
-                    bytes,
-                })
-            })?;
+        let image = BlockImage::from_raw(bytes::Bytes::from(raw))?.with_owned_backing(|bytes| {
+            Ok::<_, TestError>(BackingReceipt {
+                released: Arc::clone(&released),
+                bytes,
+            })
+        })?;
         let previous_pointer = image.bytes().as_ptr();
         let reserved = std::cell::Cell::new(0);
         let image = image.with_owned_backing(|bytes| {
@@ -973,13 +972,12 @@ mod tests {
         let raw = read_test_fixture("0.bin")?;
         let capacity = raw.capacity();
         let released = Arc::new(AtomicUsize::new(0));
-        let image = BlockImage::from_raw(bytes::Bytes::from(raw))?
-            .with_owned_backing(|bytes| {
-                Ok::<_, TestError>(BackingReceipt {
-                    released: Arc::clone(&released),
-                    bytes,
-                })
-            })?;
+        let image = BlockImage::from_raw(bytes::Bytes::from(raw))?.with_owned_backing(|bytes| {
+            Ok::<_, TestError>(BackingReceipt {
+                released: Arc::clone(&released),
+                bytes,
+            })
+        })?;
         let expected = image.bytes().len();
         let refused = image.with_owned_backing::<(), _, _>(|bytes| {
             assert_eq!(bytes, expected);
@@ -1003,13 +1001,12 @@ mod tests {
         raw.extend_from_slice(&fixture);
         let capacity = raw.capacity();
         let released = Arc::new(AtomicUsize::new(0));
-        let image = BlockImage::from_raw(bytes::Bytes::from(raw))?
-            .with_owned_backing(|bytes| {
-                Ok::<_, TestError>(BackingReceipt {
-                    released: Arc::clone(&released),
-                    bytes,
-                })
-            })?;
+        let image = BlockImage::from_raw(bytes::Bytes::from(raw))?.with_owned_backing(|bytes| {
+            Ok::<_, TestError>(BackingReceipt {
+                released: Arc::clone(&released),
+                bytes,
+            })
+        })?;
         let image_clone = image.clone();
         let raw = image.bytes().clone();
         let final_slice = raw.slice(80..81);

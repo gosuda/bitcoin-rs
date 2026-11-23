@@ -205,9 +205,9 @@ impl MiningCoordinator {
     fn encode_local(&self, block: Block) -> Result<AccountedBlock, MiningControlError> {
         let mut credit = self
             .block_memory
-            .try_reserve(bitcoin_rs_consensus::primitives::layout::decode_reservation(
-                block.total_size(),
-            ))
+            .try_reserve(
+                bitcoin_rs_consensus::primitives::layout::decode_reservation(block.total_size()),
+            )
             .map_err(mining_memory_refusal)?;
         let image = BlockImage::from_local(block)
             .with_owned_backing(|bytes| credit.split_off(bytes))
@@ -853,7 +853,11 @@ mod tests {
     use compact_str::CompactString;
 
     fn mining_state_at_genesis() -> Result<
-        (tempfile::TempDir, crate::state::NodeState, super::MiningCoordinator),
+        (
+            tempfile::TempDir,
+            crate::state::NodeState,
+            super::MiningCoordinator,
+        ),
         crate::test_support::TestError,
     > {
         use bitcoin_rs_consensus::primitives::{BlockImage, Network};
@@ -905,7 +909,9 @@ mod tests {
         let raw = captured
             .lock()
             .take()
-            .ok_or(crate::test_support::TestError::Missing("generated raw backing"))?;
+            .ok_or(crate::test_support::TestError::Missing(
+                "generated raw backing",
+            ))?;
         let retained = u64::try_from(generated[0].hex.len() / 2)?;
         assert_eq!(u64::try_from(raw.len())?, retained);
         assert_eq!(
@@ -923,7 +929,10 @@ mod tests {
         drop(header);
         assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), before);
         assert_eq!(
-            state.chainstate().applied_tip_snapshot().map(|tip| tip.hash),
+            state
+                .chainstate()
+                .applied_tip_snapshot()
+                .map(|tip| tip.hash),
             Some(generated[0].hash.into())
         );
         Ok(())
@@ -983,8 +992,13 @@ mod tests {
                 bytes::Bytes::from(raw)
             };
             let payload = BlockImage::from_raw(bytes)?;
-            let original_reader = matches!(source, "shared" | "charged").then(|| payload.bytes().clone());
-            let original_charge = if source == "charged" { source_capacity } else { 0 };
+            let original_reader =
+                matches!(source, "shared" | "charged").then(|| payload.bytes().clone());
+            let original_charge = if source == "charged" {
+                source_capacity
+            } else {
+                0
+            };
             let metadata_bytes = payload.retained_heap_bytes();
             let accounted = mining.account_image(payload.clone())?;
             let accounted_reader = accounted.image.bytes().clone();
@@ -1009,12 +1023,20 @@ mod tests {
                 .set_pow_valid_block(Arc::new(move |image, _, _| {
                     assert!(hook_capture.lock().replace(image.bytes().clone()).is_none());
                 }))
-                .map_err(|_| crate::test_support::TestError::ExpectationFailed("one raw owner hook"))?;
-            assert_eq!(mining.submit_block(payload)?, BlockValidationResult::Accepted);
-            let retained = captured
-                .lock()
-                .take()
-                .ok_or(crate::test_support::TestError::Missing("submitted raw backing"))?;
+                .map_err(|_| {
+                    crate::test_support::TestError::ExpectationFailed("one raw owner hook")
+                })?;
+            assert_eq!(
+                mining.submit_block(payload)?,
+                BlockValidationResult::Accepted
+            );
+            let retained =
+                captured
+                    .lock()
+                    .take()
+                    .ok_or(crate::test_support::TestError::Missing(
+                        "submitted raw backing",
+                    ))?;
             assert_eq!(retained.as_ref(), encoded.as_slice());
             let new_charge = if source == "unique" {
                 assert_eq!(retained.as_ptr(), source_pointer);
@@ -1023,13 +1045,20 @@ mod tests {
                 assert_ne!(retained.as_ptr(), source_pointer);
                 encoded.len()
             };
-            let old_charge = if source == "charged" { source_capacity } else { 0 };
+            let old_charge = if source == "charged" {
+                source_capacity
+            } else {
+                0
+            };
             assert_eq!(
                 budget.charged_bytes(BudgetOwner::StagedImages),
                 before + u64::try_from(new_charge + old_charge)?
             );
             assert_eq!(
-                state.chainstate().applied_tip_snapshot().map(|tip| tip.hash),
+                state
+                    .chainstate()
+                    .applied_tip_snapshot()
+                    .map(|tip| tip.hash),
                 Some(block.block_hash().into())
             );
             drop(retained);
@@ -1063,8 +1092,12 @@ mod tests {
         let chain = state.chainstate();
         let durable = state.durable_head();
         let gateway = state.mempool_gateway();
-        let before_head = durable.load()?.map(|head| (head.tip, head.height, head.commit_id));
-        let before_tip = chain.applied_tip_snapshot().map(|tip| (tip.hash, tip.height));
+        let before_head = durable
+            .load()?
+            .map(|head| (head.tip, head.height, head.commit_id));
+        let before_tip = chain
+            .applied_tip_snapshot()
+            .map(|tip| (tip.hash, tip.height));
         let before_pool = gateway.read().settled_generation();
         let before_gate = gateway.stable_generation();
         let before_lookup = chain.block_tree_reader().read().lookup(expected_hash);
@@ -1079,11 +1112,24 @@ mod tests {
                 mining.submit_block(payload.clone()),
                 Err(MiningControlError::Unavailable(_))
             ));
-            assert_eq!(durable.load()?.map(|head| (head.tip, head.height, head.commit_id)), before_head);
-            assert_eq!(chain.applied_tip_snapshot().map(|tip| (tip.hash, tip.height)), before_tip);
+            assert_eq!(
+                durable
+                    .load()?
+                    .map(|head| (head.tip, head.height, head.commit_id)),
+                before_head
+            );
+            assert_eq!(
+                chain
+                    .applied_tip_snapshot()
+                    .map(|tip| (tip.hash, tip.height)),
+                before_tip
+            );
             assert_eq!(gateway.read().settled_generation(), before_pool);
             assert_eq!(gateway.stable_generation(), before_gate);
-            assert_eq!(chain.block_tree_reader().read().lookup(expected_hash), before_lookup);
+            assert_eq!(
+                chain.block_tree_reader().read().lookup(expected_hash),
+                before_lookup
+            );
             assert!(!chain.is_closed_for_recovery());
             assert_eq!(
                 budget.charged_bytes(BudgetOwner::StagedImages),
@@ -1092,17 +1138,32 @@ mod tests {
             drop(pressure);
             assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), baseline);
         }
-        assert_eq!(mining.submit_block(payload.clone())?, BlockValidationResult::Accepted);
-        assert_eq!(chain.applied_tip_snapshot().map(|tip| tip.hash), Some(expected_hash));
+        assert_eq!(
+            mining.submit_block(payload.clone())?,
+            BlockValidationResult::Accepted
+        );
+        assert_eq!(
+            chain.applied_tip_snapshot().map(|tip| tip.hash),
+            Some(expected_hash)
+        );
         assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), baseline);
-        let pressure = memory.try_reserve(
-            memory.ledger().capacity() - usize::try_from(baseline)?,
-        )?;
-        let committed = durable.load()?.map(|head| (head.tip, head.height, head.commit_id));
+        let pressure =
+            memory.try_reserve(memory.ledger().capacity() - usize::try_from(baseline)?)?;
+        let committed = durable
+            .load()?
+            .map(|head| (head.tip, head.height, head.commit_id));
         let settled = gateway.read().settled_generation();
         let gate = gateway.stable_generation();
-        assert_eq!(mining.submit_block(payload)?, BlockValidationResult::Duplicate);
-        assert_eq!(durable.load()?.map(|head| (head.tip, head.height, head.commit_id)), committed);
+        assert_eq!(
+            mining.submit_block(payload)?,
+            BlockValidationResult::Duplicate
+        );
+        assert_eq!(
+            durable
+                .load()?
+                .map(|head| (head.tip, head.height, head.commit_id)),
+            committed
+        );
         assert_eq!(gateway.read().settled_generation(), settled);
         assert_eq!(gateway.stable_generation(), gate);
         drop(pressure);

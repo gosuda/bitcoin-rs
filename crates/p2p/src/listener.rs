@@ -9492,10 +9492,13 @@ mod aggregate_budget_tests {
             let shared = shared_with(ScriptedChain { blocks: Vec::new() });
             let ledger = shared.block_memory.ledger();
             let credit = shared.block_memory.try_reserve(reserved)?;
-            let error = super::retain_compact_image(credit, image)
-                .err()
-                .ok_or(CompactIngressTestError::Missing("compact allocation refusal"))?;
-            assert!(matches!(crate::PeerError::inbound(error), crate::PeerError::Io(_)));
+            let error = super::retain_compact_image(credit, image).err().ok_or(
+                CompactIngressTestError::Missing("compact allocation refusal"),
+            )?;
+            assert!(matches!(
+                crate::PeerError::inbound(error),
+                crate::PeerError::Io(_)
+            ));
             assert!(
                 ledger.try_take(ledger.capacity()),
                 "{refusal}: refusal releases every part of the original reservation"

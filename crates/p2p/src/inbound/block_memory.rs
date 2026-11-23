@@ -420,7 +420,8 @@ mod tests {
 
     // BUD-01, BUD-06
     #[test]
-    fn split_receive_credit_keeps_its_lane_through_refused_and_successful_transfers() -> TestResult {
+    fn split_receive_credit_keeps_its_lane_through_refused_and_successful_transfers() -> TestResult
+    {
         let used = Arc::new(Mutex::new(0));
         let ledger = Arc::new(FixedIngressLedger {
             capacity: 32,
