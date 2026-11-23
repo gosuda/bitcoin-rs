@@ -372,6 +372,7 @@ fn reset_rolled_back_chainstate(active: &Chainstate) -> Result<(), AssumeUtxoErr
         active.header_retention.restore_operator_verdicts(&mut restored)
             .map_err(crate::error::ApplyError::from)?;
         *tree = restored;
+        active.reevaluate_assume_valid_with(&tree);
     }
     active
         .coin_stats
