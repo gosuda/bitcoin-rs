@@ -85,9 +85,10 @@ jobs:
         run: |
           set -euo pipefail
           qa_source="$(git rev-parse HEAD)"
-          qa_control="2019a41836ffee19edcf77b1765594d6d0d6b724"
-          qa_body_control="ac9e8ba89b3b5ba61c5e1ca9fa00451a236dd7d8"
-          qa_continuity_control="4e209a2bc6fe4fb3f407bd197660c21cc07d767a"
+          qa_control="e4566d0f2f6b8586c469e29ae85a12e40ff2e622"
+          qa_body_control="65b662af6dd0f09c351afbc7ec78638bff5cf635"
+          qa_continuity_control="31084a8a896c347ca946ce980df574eacc3dc025"
+          qa_cancel_control="c8c0e45fbc0ee058d7b1c5540798c80e76fa9774"
           qa_evidence="$PWD/target/winning-header-driver-proof"
           qa_config="$RUNNER_TEMP/winning-header-nextest.toml"
           mkdir -p "$qa_evidence"
@@ -137,11 +138,12 @@ jobs:
           console.log(JSON.stringify({name: expected, ...counts, nextestExit: Number(status)}));
           NODE
           }
-          git fetch --no-tags --depth=1 origin "$qa_control" "$qa_body_control" "$qa_continuity_control"
+          git fetch --no-tags --depth=1 origin "$qa_control" "$qa_body_control" "$qa_continuity_control" "$qa_cancel_control"
           trap 'git checkout --detach "$qa_source"' EXIT
           qa_fork_test='winning_header_driver::winning_header_driver_applies_deep_fork_and_recovers_durable_tip'
           qa_body_test='p2p::sync::headers::winning_header_tests::body_carried_headers_preserve_a_winning_candidate'
           qa_continuity_test='p2p::sync::headers::winning_header_tests::reorged_winning_continuations_restart_without_peer_blame'
+          qa_cancel_test='p2p::sync::headers::winning_header_tests::locally_cancelled_candidate_drops_its_old_network_deadline'
           git checkout --detach "$qa_control"
           run_control before-driver-fix 100 1 suite "$qa_fork_test" 'retention refusal must request its own retained fork anchor'
           git checkout --detach "$qa_source"
@@ -154,6 +156,10 @@ jobs:
           run_control before-continuity-resync 100 1 lib "$qa_continuity_test" 'a valid reorged continuation must keep its source connected'
           git checkout --detach "$qa_source"
           run_control complete-continuity-resync 0 0 lib "$qa_continuity_test" ''
+          git checkout --detach "$qa_cancel_control"
+          run_control before-cancellation-resync 100 1 lib "$qa_cancel_test" 'local candidate cancellation must not blame its peer'
+          git checkout --detach "$qa_source"
+          run_control complete-cancellation-resync 0 0 lib "$qa_cancel_test" ''
           cargo nextest run --locked -p bitcoin-rs-chain --lib --features test-seam --no-tests fail --no-fail-fast \
             2>&1 | tee "$qa_evidence/chain-tests.log"
           cargo clippy --locked -p bitcoin-rs-node --no-default-features --features test-seam --all-targets -- -D warnings \
