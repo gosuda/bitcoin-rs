@@ -546,6 +546,135 @@ mod core_compat {
 
     // P2P-01
     #[test]
+    fn v1_envelope_matches_rust_bitcoin_for_borrowed_payloads() -> Result<(), TestError> {
+        use bitcoin::bip152::{
+            BlockTransactions, HeaderAndShortIds, PrefilledTransaction, ShortId,
+        };
+        use bitcoin::bip158::{FilterHash, FilterHeader};
+        use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
+        use bitcoin::p2p::message_bloom::{BloomFlags, FilterAdd, FilterLoad};
+        use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn, SendCmpct};
+        use bitcoin::p2p::message_filter::{
+            CFCheckpt, CFHeaders, CFilter, GetCFCheckpt, GetCFHeaders, GetCFilters,
+        };
+        use bitcoin::p2p::message_network::Reject;
+
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let hash = block.block_hash();
+        let mut transaction = block.txdata[0].clone();
+        transaction.input[0].witness = bitcoin::Witness::from_slice(&[b"witness"]);
+        let mut reject_payload = vec![2, b't', b'x', 0x10, 3, b'b', b'a', b'd'];
+        reject_payload.extend_from_slice(&[7; 32]);
+        let reject: Reject =
+            bitcoin_encode::deserialize(&reject_payload).map_err(PeerError::from)?;
+        let cases = [
+            NetworkMessage::Addr(vec![(
+                123,
+                Address::new(
+                    &std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 18444)),
+                    ServiceFlags::NETWORK,
+                ),
+            )]),
+            NetworkMessage::NotFound(vec![Inventory::WitnessBlock(hash)]),
+            NetworkMessage::GetBlocks(GetBlocksMessage::new(vec![hash], BlockHash::all_zeros())),
+            NetworkMessage::GetHeaders(GetHeadersMessage::new(vec![hash], BlockHash::all_zeros())),
+            NetworkMessage::MerkleBlock(
+                bitcoin::merkle_tree::MerkleBlock::from_block_with_predicate(&block, |_| true),
+            ),
+            NetworkMessage::FilterLoad(FilterLoad {
+                filter: vec![0x2a; 253],
+                hash_funcs: 3,
+                tweak: 7,
+                flags: BloomFlags::All,
+            }),
+            NetworkMessage::FilterAdd(FilterAdd {
+                data: vec![1, 2, 3],
+            }),
+            NetworkMessage::FilterClear,
+            NetworkMessage::GetCFilters(GetCFilters {
+                filter_type: 0,
+                start_height: 3,
+                stop_hash: hash,
+            }),
+            NetworkMessage::CFilter(CFilter {
+                filter_type: 0,
+                block_hash: hash,
+                filter: vec![0x3c; 253],
+            }),
+            NetworkMessage::GetCFHeaders(GetCFHeaders {
+                filter_type: 0,
+                start_height: 3,
+                stop_hash: hash,
+            }),
+            NetworkMessage::CFHeaders(CFHeaders {
+                filter_type: 0,
+                stop_hash: hash,
+                previous_filter_header: FilterHeader::from_byte_array([4; 32]),
+                filter_hashes: vec![FilterHash::from_byte_array([5; 32]); 2],
+            }),
+            NetworkMessage::GetCFCheckpt(GetCFCheckpt {
+                filter_type: 0,
+                stop_hash: hash,
+            }),
+            NetworkMessage::CFCheckpt(CFCheckpt {
+                filter_type: 0,
+                stop_hash: hash,
+                filter_headers: vec![FilterHeader::from_byte_array([6; 32]); 2],
+            }),
+            NetworkMessage::SendCmpct(SendCmpct {
+                send_compact: true,
+                version: 2,
+            }),
+            NetworkMessage::CmpctBlock(CmpctBlock {
+                compact_block: HeaderAndShortIds {
+                    header: block.header,
+                    nonce: 9,
+                    short_ids: vec![ShortId::from([1; 6])],
+                    prefilled_txs: vec![PrefilledTransaction {
+                        idx: 0,
+                        tx: transaction.clone(),
+                    }],
+                },
+            }),
+            NetworkMessage::GetBlockTxn(GetBlockTxn {
+                txs_request: BlockTransactionsRequest {
+                    block_hash: hash,
+                    indexes: vec![1, 3, 9],
+                },
+            }),
+            NetworkMessage::BlockTxn(BlockTxn {
+                transactions: BlockTransactions {
+                    block_hash: hash,
+                    transactions: vec![transaction],
+                },
+            }),
+            NetworkMessage::Alert(vec![0x5a; 253]),
+            NetworkMessage::Reject(reject),
+            NetworkMessage::AddrV2(vec![AddrV2Message {
+                time: 123,
+                services: ServiceFlags::NETWORK,
+                addr: AddrV2::Ipv4(Ipv4Addr::LOCALHOST),
+                port: 18444,
+            }]),
+            NetworkMessage::Unknown {
+                command: "custom".parse()?,
+                payload: vec![0x5a; 253],
+            },
+        ];
+
+        for reference in cases {
+            let command = reference.command();
+            let expected = rust_bitcoin_frame(reference);
+            let (message, _) = read_message(&mut Cursor::new(&expected), Magic::REGTEST)?;
+            assert_eq!(message.command(), command);
+            assert_eq!(our_frame(&message)?, expected, "v1 frame for {command}");
+            assert_eq!(bitcoin_rs_p2p::wire::wire_len(&message)?, expected.len());
+        }
+        Ok(())
+    }
+
+    // P2P-01
+    #[test]
     fn version_message_pins_core_31_handshake_fields() {
         let version = version_message(
             0xdead_beef,
