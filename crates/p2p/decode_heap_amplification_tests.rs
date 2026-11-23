@@ -277,3 +277,150 @@ fn encoding_inventory_allocates_only_the_output() {
         "encoding must own only its output buffer, without cloning the inventory"
     );
 }
+
+// P2P-01
+#[test]
+fn borrowed_payloads_match_rust_bitcoin_without_length_allocations() -> Result<(), PeerError> {
+    use std::net::Ipv4Addr;
+
+    use bitcoin::BlockHash;
+    use bitcoin::bip152::{
+        BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds, PrefilledTransaction,
+        ShortId,
+    };
+    use bitcoin::bip158::{FilterHash, FilterHeader};
+    use bitcoin::consensus::encode as bitcoin_encode;
+    use bitcoin::p2p::ServiceFlags;
+    use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
+    use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
+    use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage};
+    use bitcoin::p2p::message_bloom::{BloomFlags, FilterAdd, FilterLoad};
+    use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn, SendCmpct};
+    use bitcoin::p2p::message_filter::{
+        CFCheckpt, CFHeaders, CFilter, GetCFCheckpt, GetCFHeaders, GetCFilters,
+    };
+    use bitcoin::p2p::message_network::Reject;
+    use bitcoin_rs_p2p::wire::write_message;
+
+    let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let hash = block.block_hash();
+    let mut transaction = block.txdata[0].clone();
+    transaction.input[0].witness = bitcoin::Witness::from_slice(&[b"witness"]);
+    let mut reject_payload = vec![2, b't', b'x', 0x10, 3, b'b', b'a', b'd'];
+    reject_payload.extend_from_slice(&[7; 32]);
+    let reject: Reject = bitcoin_encode::deserialize(&reject_payload).map_err(PeerError::from)?;
+    let cases = [
+        NetworkMessage::Addr(vec![(
+            123,
+            Address::new(
+                &std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 18444)),
+                ServiceFlags::NETWORK,
+            ),
+        )]),
+        NetworkMessage::NotFound(vec![Inventory::WitnessBlock(hash)]),
+        NetworkMessage::GetBlocks(GetBlocksMessage::new(vec![hash], BlockHash::all_zeros())),
+        NetworkMessage::GetHeaders(GetHeadersMessage::new(vec![hash], BlockHash::all_zeros())),
+        NetworkMessage::MerkleBlock(
+            bitcoin::merkle_tree::MerkleBlock::from_block_with_predicate(&block, |_| true),
+        ),
+        NetworkMessage::FilterLoad(FilterLoad {
+            filter: vec![0x2a; 253],
+            hash_funcs: 3,
+            tweak: 7,
+            flags: BloomFlags::All,
+        }),
+        NetworkMessage::FilterAdd(FilterAdd {
+            data: vec![1, 2, 3],
+        }),
+        NetworkMessage::FilterClear,
+        NetworkMessage::GetCFilters(GetCFilters {
+            filter_type: 0,
+            start_height: 3,
+            stop_hash: hash,
+        }),
+        NetworkMessage::CFilter(CFilter {
+            filter_type: 0,
+            block_hash: hash,
+            filter: vec![0x3c; 253],
+        }),
+        NetworkMessage::GetCFHeaders(GetCFHeaders {
+            filter_type: 0,
+            start_height: 3,
+            stop_hash: hash,
+        }),
+        NetworkMessage::CFHeaders(CFHeaders {
+            filter_type: 0,
+            stop_hash: hash,
+            previous_filter_header: FilterHeader::from_byte_array([4; 32]),
+            filter_hashes: vec![FilterHash::from_byte_array([5; 32]); 2],
+        }),
+        NetworkMessage::GetCFCheckpt(GetCFCheckpt {
+            filter_type: 0,
+            stop_hash: hash,
+        }),
+        NetworkMessage::CFCheckpt(CFCheckpt {
+            filter_type: 0,
+            stop_hash: hash,
+            filter_headers: vec![FilterHeader::from_byte_array([6; 32]); 2],
+        }),
+        NetworkMessage::SendCmpct(SendCmpct {
+            send_compact: true,
+            version: 2,
+        }),
+        NetworkMessage::CmpctBlock(CmpctBlock {
+            compact_block: HeaderAndShortIds {
+                header: block.header,
+                nonce: 9,
+                short_ids: vec![ShortId::from([1; 6])],
+                prefilled_txs: vec![PrefilledTransaction {
+                    idx: 0,
+                    tx: transaction.clone(),
+                }],
+            },
+        }),
+        NetworkMessage::GetBlockTxn(GetBlockTxn {
+            txs_request: BlockTransactionsRequest {
+                block_hash: hash,
+                indexes: vec![1, 3, 9],
+            },
+        }),
+        NetworkMessage::BlockTxn(BlockTxn {
+            transactions: BlockTransactions {
+                block_hash: hash,
+                transactions: vec![transaction],
+            },
+        }),
+        NetworkMessage::Alert(vec![0x5a; 253]),
+        NetworkMessage::Reject(reject),
+        NetworkMessage::AddrV2(vec![AddrV2Message {
+            time: 123,
+            services: ServiceFlags::NETWORK,
+            addr: AddrV2::Ipv4(Ipv4Addr::LOCALHOST),
+            port: 18444,
+        }]),
+        NetworkMessage::Unknown {
+            command: "custom".parse().expect("valid command"),
+            payload: vec![0x5a; 253],
+        },
+    ];
+
+    for reference in cases {
+        let command = reference.command();
+        let expected =
+            bitcoin_encode::serialize(&RawNetworkMessage::new(Magic::REGTEST, reference));
+        let (message, _) = read_message(&mut Cursor::new(&expected), Magic::REGTEST)?;
+        assert_eq!(message.command(), command);
+
+        let measurement = Measurement::start();
+        let length = wire_len(&message);
+        let peak = measurement.peak();
+        drop(measurement);
+
+        assert_eq!(peak, 0, "counting {command} must borrow its payload");
+        assert_eq!(length?, expected.len());
+        let mut actual = Vec::new();
+        write_message(&mut actual, Magic::REGTEST, &message)?;
+        assert_eq!(actual, expected, "v1 frame for {command}");
+    }
+    Ok(())
+}
