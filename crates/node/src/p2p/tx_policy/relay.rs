@@ -47,6 +47,7 @@ pub(super) struct RelayPeer {
     pending: HashMap<Wtxid, RelayRequest>,
     known: HashSet<Identity>,
     known_order: VecDeque<Identity>,
+    last_inv_sequence: Option<u64>,
     fee_filter: u64,
     next_inv: Instant,
     next_filter: Instant,
@@ -156,6 +157,7 @@ impl RelayPeer {
             pending: HashMap::new(),
             known: HashSet::new(),
             known_order: VecDeque::new(),
+            last_inv_sequence: None,
             fee_filter: 0,
             next_inv,
             next_filter: now,
@@ -210,6 +212,15 @@ impl RelayPeer {
 use super::NodeTxPolicy;
 
 impl NodeTxPolicy {
+    #[must_use]
+    pub(crate) fn transaction_serving_sequence(&self, source: PeerSource) -> Option<u64> {
+        self.tx_policy
+            .lock()
+            .relay
+            .get(&source)
+            .and_then(|peer| peer.last_inv_sequence)
+    }
+
     #[must_use]
     pub fn transaction_fee_filter(&self, source: PeerSource) -> u64 {
         self.tx_policy
@@ -509,9 +520,9 @@ impl NodeTxPolicy {
             return;
         }
         let target = (INVENTORY_TARGET + (requests.len() / 1000) * 5).min(MAX_BATCH);
-        let candidates = {
+        let (sequence, candidates) = {
             let pool = gateway.read();
-            requests
+            let candidates = requests
                 .into_iter()
                 .filter_map(|request| {
                     let entry = pool.entry_by_txid_at_sequence(&request.txid, request.sequence)?;
@@ -528,7 +539,8 @@ impl NodeTxPolicy {
                             .collect(),
                     })
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (pool.sequence_number(), candidates)
         };
         let candidates = dependency_order(candidates);
         let mut policy = self.tx_policy.lock();
@@ -580,6 +592,7 @@ impl NodeTxPolicy {
         }
         match self.table.send(source, Message::Inv(items)) {
             Ok(()) => {
+                peer.last_inv_sequence = Some(sequence);
                 for identity in identities {
                     peer.note_known(identity);
                 }
@@ -1239,6 +1252,74 @@ mod tests {
         assert!(!state(&table).1);
     }
 
+    // P2P-01
+    // TXR-09
+    #[test]
+    fn remote_inventory_cannot_authorize_transaction_serving() {
+        let table = NodeTxPolicy::default();
+        let gateway = gateway();
+        let now = Instant::now();
+        let mut rng = StdRng::seed_from_u64(32);
+        let (source, rx) = connect(
+            &table, 1, false, true, bitcoin_rs_p2p::PeerRole::FullRelay, true,
+        );
+        let remote_known = insert(&gateway, &transaction(1, None), 10_000);
+        table.note_transaction_inventory(
+            source,
+            &[Inventory::WTx(bitcoin::Wtxid::from_byte_array(*remote_known.wtxid.as_bytes()))],
+        );
+        table.queue_transaction_relay(remote_known, now, &mut rng);
+        table.poll_transaction_relay(&gateway, now + Duration::from_secs(31), false, &mut rng);
+        assert_eq!(inventory(&rx), []);
+        assert_eq!(table.transaction_serving_sequence(source), None);
+
+        let local = insert(&gateway, &transaction(2, None), 10_000);
+        table.queue_transaction_relay(local, now + Duration::from_secs(31), &mut rng);
+        assert_eq!(table.transaction_serving_sequence(source), None);
+        table.poll_transaction_relay(&gateway, now + Duration::from_secs(62), false, &mut rng);
+        assert_eq!(
+            inventory(&rx),
+            vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(*local.wtxid.as_bytes()))]
+        );
+        assert_eq!(table.transaction_serving_sequence(source), Some(local.sequence));
+    }
+
+    // P2P-01
+    // TXR-09
+    #[test]
+    fn replacement_connection_does_not_inherit_inventory_cutoff() {
+        let table = NodeTxPolicy::default();
+        let gateway = gateway();
+        let now = Instant::now();
+        let mut rng = StdRng::seed_from_u64(33);
+        let (old, old_rx) = connect(
+            &table, 1, false, true, bitcoin_rs_p2p::PeerRole::FullRelay, true,
+        );
+        let first = insert(&gateway, &transaction(1, None), 10_000);
+        table.queue_transaction_relay(first, now, &mut rng);
+        table.poll_transaction_relay(&gateway, now + Duration::from_secs(31), false, &mut rng);
+        assert_eq!(inventory(&old_rx).len(), 1);
+        assert_eq!(table.transaction_serving_sequence(old), Some(first.sequence));
+
+        let (replacement, replacement_rx) = connect(
+            &table, 1, false, true, bitcoin_rs_p2p::PeerRole::FullRelay, true,
+        );
+        assert_ne!(replacement, old);
+        assert_eq!(table.transaction_serving_sequence(replacement), None);
+        table.poll_transaction_relay(&gateway, now + Duration::from_secs(62), false, &mut rng);
+        assert_eq!(inventory(&replacement_rx), []);
+        assert_eq!(table.transaction_serving_sequence(replacement), None);
+        assert_eq!(table.transaction_serving_sequence(old), None);
+
+        let next = insert(&gateway, &transaction(2, None), 10_000);
+        table.queue_transaction_relay(next, now + Duration::from_secs(62), &mut rng);
+        table.poll_transaction_relay(&gateway, now + Duration::from_secs(93), false, &mut rng);
+        assert_eq!(inventory(&replacement_rx).len(), 1);
+        assert_eq!(table.transaction_serving_sequence(replacement), Some(next.sequence));
+    }
+
+    // P2P-01
+    // TXR-09
     #[test]
     fn relay_inv_saturated_requeues() {
         let table = NodeTxPolicy::default();
@@ -1252,6 +1333,7 @@ mod tests {
         let identity = Identity::Wtxid(request.wtxid.0);
         table.queue_transaction_relay(request, now, &mut rng);
 
+        assert_eq!(table.transaction_serving_sequence(source), None);
         let hold = bitcoin_rs_p2p::test_support::hog(&aggregate, 512);
         table.poll_transaction_relay(&gateway, now + Duration::from_secs(31), false, &mut rng);
         assert_eq!(inventory(&rx), Vec::new());
@@ -1264,8 +1346,10 @@ mod tests {
                 "the refused request is pending again"
             );
             assert!(!peer.known.contains(&identity), "nothing was announced");
+            assert_eq!(peer.last_inv_sequence, None);
         }
 
+        let later = insert(&gateway, &transaction(2, None), 10_000);
         drop(hold);
         table.poll_transaction_relay(&gateway, now + Duration::from_secs(62), false, &mut rng);
         assert_eq!(
@@ -1278,6 +1362,7 @@ mod tests {
         let peer = &policy.relay[&source];
         assert!(peer.pending.is_empty());
         assert!(peer.known.contains(&identity));
+        assert_eq!(peer.last_inv_sequence, Some(later.sequence));
     }
 
     #[test]

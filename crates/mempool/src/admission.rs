@@ -727,6 +727,25 @@ impl MempoolGateway {
         pool.entry_by_wtxid(&wtxid).map(|entry| (*entry.tx).clone())
     }
 
+    #[must_use]
+    pub fn get_tx_for_relay(&self, txid: Txid, last_inv_sequence: u64) -> Option<Tx> {
+        let pool = self.read();
+        pool.entry_by_txid_for_relay(&txid, last_inv_sequence)
+            .map(|entry| (*entry.tx).clone())
+    }
+
+    #[must_use]
+    pub fn get_tx_by_wtxid_for_relay(
+        &self,
+        wtxid: Wtxid,
+        last_inv_sequence: u64,
+    ) -> Option<Tx> {
+        let pool = self.read();
+        let entry = pool.entry_by_wtxid(&wtxid)?;
+        pool.entry_by_txid_for_relay(&entry.txid, last_inv_sequence)
+            .map(|entry| (*entry.tx).clone())
+    }
+
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn orphan_count(&self) -> usize {
