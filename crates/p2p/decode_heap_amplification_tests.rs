@@ -5,8 +5,11 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::io::Cursor;
 
+use bitcoin::hashes::Hash;
 use bitcoin::p2p::Magic;
-use bitcoin_rs_p2p::wire::{Message, PeerError, read_message};
+use bitcoin::p2p::message_blockdata::Inventory;
+use bitcoin::p2p::message_filter::CFilter;
+use bitcoin_rs_p2p::wire::{Message, PeerError, encode_payload, read_message, wire_len};
 use sha2::{Digest, Sha256};
 
 thread_local! {
@@ -223,5 +226,54 @@ fn cmpctblock_prefilled_transaction_decode_allocation_stays_within_the_reservati
     assert!(
         matches!(outcome, Err(PeerError::NativeDecode(_))),
         "4,000,000 declared witness items cannot exist in the remaining bytes: {outcome:?}"
+    );
+}
+
+#[test]
+fn wire_length_borrows_retained_payloads() {
+    let hash = bitcoin::BlockHash::from_byte_array([7; 32]);
+    let cases = [
+        (
+            Message::Inv(vec![Inventory::Block(hash); 50_000]),
+            24 + 3 + 50_000 * 36,
+        ),
+        (
+            Message::CFilter(CFilter {
+                filter_type: 0,
+                block_hash: hash,
+                filter: vec![0x2a; 100_000],
+            }),
+            24 + 1 + 32 + 5 + 100_000,
+        ),
+    ];
+
+    for (message, expected_len) in cases {
+        let measurement = Measurement::start();
+        let result = wire_len(&message);
+        let peak = measurement.peak();
+        drop(measurement);
+
+        assert_eq!(result.expect("message has a wire length"), expected_len);
+        assert_eq!(peak, 0, "counting a borrowed payload must not allocate");
+    }
+}
+
+#[test]
+fn encoding_inventory_allocates_only_the_output() {
+    let hash = bitcoin::BlockHash::from_byte_array([7; 32]);
+    let message = Message::Inv(vec![Inventory::Block(hash); 50_000]);
+
+    let measurement = Measurement::start();
+    let result = encode_payload(&message);
+    let peak = measurement.peak();
+    drop(measurement);
+
+    let payload = result.expect("inventory encodes");
+    assert_eq!(payload.len(), 3 + 50_000 * 36);
+    assert_eq!(payload.capacity(), payload.len());
+    assert_eq!(
+        peak,
+        payload.capacity(),
+        "encoding must own only its output buffer, without cloning the inventory"
     );
 }
