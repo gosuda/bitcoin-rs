@@ -434,11 +434,13 @@ These local behavioral proofs do not establish complete Core peer-lifecycle pari
 - A soft-blocked peer still serves as single-deep-peer last resort.
 - Header requests stay open to every peer above the applied height regardless of services.
 
-### `P2P-10`: Header presync gates admission on committed work
+### `P2P-10`: Header sync gates admission on committed work and bounded retention
 
-- **Owner**: `HeadersSyncState` (`sync/headers_presync.rs`) is the sole admission decider.
-- `BlockSync::route_headers_batch` (`sync/headers.rs`) is the sole caller.
-- `SyncChain::admit_headers` is reached directly (at-assumed-work fork, released chain) or with committed headers, never a collected-but-unverified batch.
+- **Owners**: `HeadersSyncState` (`sync/headers_presync.rs`) enforces the low-work presync threshold. `Chainstate` owns final header validation, resident retention and winning-candidate admission.
+- `BlockSync::route_headers_batch` (`sync/headers.rs`) selects one peer-owned mode, `LowWork` or `Winning`, and delegates insertion to the chain owner.
+- `SyncChain::admit_headers` is reached directly (at-assumed-work fork, released chain) or with low-work committed headers, never a collected-but-unverified batch. A typed retention refusal starts a chain-owned `HeaderCandidate` from its retained anchor; any old low-work cursor is discarded before requesting that candidate's locator.
+- Winning-candidate receipt validates or authenticates bounded staging only. `Chainstate::admit_verified_headers` is the sole release path, acknowledges exactly its successful prefix and admits no more than 2,000 headers per call. The driver admits at most 4,000 winning headers per tick, sharing that budget across inbound and parked replay.
+- A completed candidate target triggers continuation from its own last hash; it does not establish the peer's final header horizon.
 - Authority: Core `HeadersSync` (`headerssync.h`, `headerssync.cpp`, wired at `net_processing.cpp`).
 - Chains below the anti-DoS work threshold are collected first. The threshold is `max(minimum_chain_work, applied-tip work - 144 blocks of the tip's work)` (Core `GetAntiDoSWorkThreshold`; `BlockSync::anti_dos_work_threshold`), so a low-work fork off an old block is never stored. The decision and the presync state use one computed value. If the applied tip is missing from the block tree, the threshold is the larger of `minimum_chain_work` and the full tip work.
 - Checks include per-header continuity, own proof of work, and permitted difficulty transition.
@@ -453,7 +455,10 @@ These local behavioral proofs do not establish complete Core peer-lifecycle pari
 - Spent or faulted states are removed for a fresh sync with fresh salt.
 - Lost-continuity breaks are possibly benign (connection kept, `headerssync.cpp`).
 - Every other failure disconnects (bad PoW, impermitted transition, commitment divergence, commitment or buffer bounds).
-- One lifecycle entry owns the optional presync cursor plus wire request.
+- One lifecycle entry owns the optional `LowWork`/`Winning` mode plus its wire request. State cannot inherit across a replaced connection.
+- Saturated sends retain the mode and leave no wire request or deadline. A later tick retries the mode's exact locator, including when generic frontier planning also asks for headers.
+- Authenticated winning prefixes awaiting local replay or the chain owner's FIFO have no network timeout and are exempt from chain-sync eviction while that local work remains. An unauthenticated partial chunk and a candidate awaiting network input receive no exemption.
+- Candidate resource pressure, cancellation, supersession, clock changes and changed redownload commitments are local retry/resync outcomes. Only the existing typed consensus peer-fault classifier can disconnect for invalid candidate headers.
 - A nonempty answer clears only the request.
 - An empty answer ends presync but retains the answered request with its original timestamp.
 - Exact-source teardown removes the entry.
@@ -461,7 +466,7 @@ These local behavioral proofs do not establish complete Core peer-lifecycle pari
 - Suppression lasts five seconds for ordinary frontier (including PRESYNC and REDOWNLOAD continuations).
 - Suppression lasts the existing two-minute window for chain-sync eviction probes.
 - Answered requests pace only identical locator or target pairs until five seconds from the original timestamp.
-- Only an unanswered below-floor or PRESYNC/REDOWNLOAD timeout retires connection plus state pre-processing, even as the last usable peer.
+- An unanswered below-floor or active low-work/winning network request timeout retires connection plus state pre-processing, even as the last usable peer. Local authenticated replay is not network silence.
 - Recovery starts elsewhere.
 - Retired or replaced-source deliveries are ignored at the ingress identity check.
 - Foreground bodies accepted while current may finish staging and retry embedded headers post-retirement.

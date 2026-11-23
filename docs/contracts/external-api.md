@@ -463,7 +463,7 @@ Proof: `mining::template::tests::ordinary_templates_reserve_external_coinbase_we
 - For an unknown header, the previous header MUST already be in the block tree.
 - An empty tree admits the network genesis root.
 - Otherwise, the call returns `-25` (`Must submit previous header (HASH) first`) before PoW validation, including invalid targets.
-- Admission uses `accept_headers`, the same gate as inbound P2P headers.
+- Admission uses `Chainstate::admit_headers`, the same validation and resident-resource authority as inbound P2P headers. A typed retention or candidate refusal is an operational unavailability result, not a consensus-invalid header verdict.
 - Known-valid duplicates (including genesis) succeed.
 - Known-invalid duplicates return `-25` (`duplicate-invalid`).
 - Extending node-marked-invalid returns `-25` (`bad-prevblk`).

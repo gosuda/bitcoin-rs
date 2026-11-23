@@ -1780,3 +1780,229 @@ mod stale_tip_routing_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod winning_header_tests {
+    use super::*;
+    use crate::test_support::TestError;
+    use arc_swap::ArcSwapOption;
+    use bitcoin_rs_chain::chain::{NodeStatus, regtest_fixture};
+    use bitcoin_rs_p2p::connection::SharedOutboundBudget;
+    use bitcoin_rs_p2p::test_support::{MessageReceiver, hog, message_channel, synthetic_peer, test_addr};
+    use bitcoin_rs_p2p::{PeerLease, PeerTable};
+    use bitcoin_rs_storage::utxo::UtxoSet;
+    use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct WinningFixture {
+        sync: BlockSync,
+        chain: Arc<bitcoin_rs_chain::Chainstate>,
+        source: PeerSource,
+        outbound: MessageReceiver,
+        aggregate: Arc<SharedOutboundBudget>,
+        fork: Vec<Header>,
+    }
+
+    fn headers(count: u32, marker: u8) -> Result<Vec<Header>, TestError> {
+        let mut parent = bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block().block_hash();
+        let mut headers = Vec::with_capacity(usize::try_from(count)?);
+        for height in 1..=count {
+            let mut header = regtest_fixture::mined_regtest_header(parent, height)?;
+            header.merkle_root = Hash256::from_le_bytes(&[marker; 32]);
+            header.nonce = 0;
+            regtest_fixture::mine_header_to_declared_target(&mut header)?;
+            parent = header.compute_hash();
+            headers.push(header);
+        }
+        Ok(headers)
+    }
+
+    fn fixture(main_height: u32, fork_height: u32) -> Result<WinningFixture, TestError> {
+        let network = bitcoin_rs_consensus::primitives::Network::Regtest;
+        let mut tree = BlockTree::new();
+        tree.insert_header(network.genesis_block().header, NodeStatus::HeaderValid)?;
+        let applied = tree.tip();
+        bitcoin_rs_chain::chain::accept_headers(
+            &mut tree,
+            &headers(main_height, 1)?,
+            network,
+            bitcoin_rs_chain::chain::current_unix_seconds(),
+            bitcoin_rs_chain::chain::HeaderValidationMode::LiveAdmission,
+        )?;
+        let tip = tree.tip_handle();
+        let stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
+        let mut utxo = UtxoSet::new();
+        utxo.track_coin_stats((*stats).clone());
+        let chain = Arc::new(bitcoin_rs_chain::Chainstate::new(
+            network,
+            tip,
+            Arc::new(ArcSwapOption::new(applied)),
+            Arc::new(RwLock::new(tree)),
+            Arc::new(utxo),
+            stats,
+            Arc::new(bitcoin_rs_chain::events::ChainEventPublisher::detached(0)),
+        ));
+        chain.set_header_side_cache_limit(8);
+        let peers = Arc::new(PeerTable::new());
+        let aggregate = Arc::new(SharedOutboundBudget::with_limits(4096, 0));
+        let (sender, outbound) = message_channel();
+        let lease = PeerLease::new(sender).with_shared_budget(&aggregate);
+        let endpoint = test_addr(28371, 0)?;
+        peers.register(endpoint, lease.clone());
+        peers.publish_info(endpoint, &lease, synthetic_peer(endpoint, i32::try_from(fork_height)?));
+        let source = lease.source(endpoint);
+        let (_, inbound_headers_rx) = crossbeam_channel::unbounded();
+        let (_, inbound_blocks_rx) = crossbeam_channel::unbounded();
+        let sync = crate::sync::block_sync(crate::sync::BlockSyncInputs {
+            handles: Arc::clone(&chain),
+            followers: crate::chain_effects::ChainFollowers::noop(),
+            peer_table: peers,
+            inbound_headers_rx,
+            inbound_blocks_rx,
+            ibd: chain.ibd_latch(),
+            assumeutxo: None,
+            budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(64 << 20), 1,
+            )),
+        });
+        Ok(WinningFixture { sync, chain, source, outbound, aggregate, fork: headers(fork_height, 2)? })
+    }
+
+    fn candidate(fixture: &WinningFixture) -> Result<HeaderCandidate, TestError> {
+        fixture.chain.begin_header_candidate(
+            bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash(),
+            ChainWork::ZERO,
+        ).map_err(|error| TestError::message(error.to_string()))
+    }
+
+    fn receive(candidate: &mut HeaderCandidate, headers: &[Header], full: bool) -> Result<(), TestError> {
+        candidate.receive(headers, full)
+            .map(|_| ())
+            .map_err(|error| TestError::message(error.to_string()))
+    }
+
+    fn install(fixture: &WinningFixture, candidate: HeaderCandidate) {
+        fixture.sync.scheduler.lock().headers_sync.entry(fixture.source).or_default().mode =
+            Some(HeaderSyncMode::Winning(candidate));
+    }
+
+    fn first_locator(outbound: &MessageReceiver) -> Option<Hash256> {
+        outbound.try_iter().find_map(|message| match message {
+            Message::GetHeaders(request) => request.locator_hashes.first().copied().map(Hash256::from),
+            _ => None,
+        })
+    }
+
+    // P2P-10, P2P-07, SYNC-01
+    #[test]
+    fn winning_replay_admits_at_most_four_thousand_headers_per_tick() -> Result<(), TestError> {
+        let fixture = fixture(5_000, 6_000)?;
+        let mut candidate = candidate(&fixture)?;
+        for page in fixture.fork.chunks(2_000) {
+            receive(&mut candidate, page, true)?;
+        }
+        assert_eq!(candidate.phase(), HeaderCandidatePhase::Redownloading);
+        for page in fixture.fork.chunks(2_000) {
+            receive(&mut candidate, page, true)?;
+        }
+        assert!(candidate.has_verified_headers());
+        install(&fixture, candidate);
+        let before = fixture.chain.block_tree_reader().read().len();
+        fixture.sync.drain_inbound_headers();
+        assert_eq!(fixture.chain.block_tree_reader().read().len() - before, 4_000);
+        let scheduler = fixture.sync.scheduler.lock();
+        let owned = scheduler.headers_sync.get(&fixture.source).ok_or("missing local replay")?;
+        assert!(owned.has_local_replay());
+        assert!(owned.request.is_none());
+        drop(scheduler);
+        assert!(fixture.outbound.is_empty());
+        fixture.sync.drain_inbound_headers();
+        assert_eq!(fixture.chain.header_tip().ok_or("missing winning tip")?.height, 6_000);
+        assert_eq!(first_locator(&fixture.outbound), Some(Hash256::from(fixture.fork[5_999].compute_hash())));
+        Ok(())
+    }
+
+    // P2P-10, SYNC-01
+    #[test]
+    fn authenticated_fifo_wait_does_not_expire_as_network_silence() -> Result<(), TestError> {
+        let fixture = fixture(2, 3)?;
+        let mut first = candidate(&fixture)?;
+        receive(&mut first, &fixture.fork, false)?;
+        let mut waiting = candidate(&fixture)?;
+        receive(&mut waiting, &fixture.fork, false)?;
+        receive(&mut waiting, &fixture.fork, false)?;
+        install(&fixture, waiting);
+        fixture.sync.drain_inbound_headers();
+        assert!(fixture.sync.scheduler.lock().headers_sync.get(&fixture.source)
+            .is_some_and(|owned| owned.has_local_replay() && owned.request.is_none()));
+        let now = Instant::now() + Duration::from_mins(30);
+        fixture.sync.retire_timed_out_header_syncs(now);
+        for elapsed in [0, 21, 24] {
+            let now = now + Duration::from_mins(elapsed);
+            let frontier = fixture.sync.observe_frontier(fixture.sync.observe_chain_frontier(), now);
+            fixture.sync.sweep_chain_sync(&frontier, now);
+        }
+        assert!(fixture.sync.peer_table.is_current(fixture.source));
+        assert!(fixture.sync.scheduler.lock().chain_sync.get(&fixture.source).is_none());
+        assert!(fixture.outbound.is_empty());
+        drop(first);
+        fixture.sync.drain_inbound_headers();
+        assert_eq!(fixture.chain.header_tip().ok_or("missing replay tip")?.height, 3);
+        Ok(())
+    }
+
+    // P2P-10
+    #[test]
+    fn winning_network_wait_expires_with_no_authenticated_prefix() -> Result<(), TestError> {
+        for incomplete_redownload in [false, true] {
+            let fixture = fixture(2_000, 4_000)?;
+            let mut candidate = candidate(&fixture)?;
+            if incomplete_redownload {
+                for page in fixture.fork.chunks(2_000) {
+                    receive(&mut candidate, page, true)?;
+                }
+                receive(&mut candidate, &fixture.fork[..2_000], true)?;
+                assert_eq!(candidate.phase(), HeaderCandidatePhase::Redownloading);
+            }
+            assert!(!candidate.has_verified_headers());
+            install(&fixture, candidate);
+            fixture.sync.resume_owned_header_requests();
+            assert!(first_locator(&fixture.outbound).is_some());
+            assert!(fixture.sync.scheduler.lock().headers_sync.get(&fixture.source)
+                .is_some_and(|owned| !owned.has_local_replay() && owned.request.is_some()));
+            fixture.sync.retire_timed_out_header_syncs(
+                Instant::now() + HEADER_REQUEST_TIMEOUT + Duration::from_secs(1),
+            );
+            assert!(!fixture.sync.peer_table.is_current(fixture.source));
+            assert!(!fixture.sync.scheduler.lock().headers_sync.contains_key(&fixture.source));
+        }
+        Ok(())
+    }
+
+    // P2P-10, BUD-02
+    #[test]
+    fn saturated_winning_request_retries_its_own_locator() -> Result<(), TestError> {
+        let fixture = fixture(2_000, 2_001)?;
+        let mut candidate = candidate(&fixture)?;
+        receive(&mut candidate, &fixture.fork[..2_000], true)?;
+        assert_eq!(candidate.phase(), HeaderCandidatePhase::Verifying);
+        install(&fixture, candidate);
+        let hold = hog(&fixture.aggregate, 4096);
+        fixture.sync.resume_owned_header_requests();
+        assert!(fixture.outbound.is_empty());
+        assert!(fixture.sync.scheduler.lock().headers_sync.get(&fixture.source)
+            .is_some_and(|owned| owned.mode.is_some() && owned.request.is_none()));
+        assert_eq!(fixture.sync.send_getheaders(
+            fixture.source, 2_000, 2_001, fixture.sync.build_locator(),
+        ), GetheadersOutcome::Failed);
+        assert!(fixture.sync.peer_table.is_current(fixture.source));
+        drop(hold);
+        fixture.sync.resume_owned_header_requests();
+        assert_eq!(first_locator(&fixture.outbound), Some(Hash256::from(fixture.fork[1_999].compute_hash())));
+        assert!(fixture.sync.scheduler.lock().headers_sync.get(&fixture.source)
+            .is_some_and(|owned| owned.mode.is_some() && owned.request.is_some()));
+        Ok(())
+    }
+}
