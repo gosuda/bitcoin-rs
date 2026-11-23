@@ -44,8 +44,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - owner: mining
-            commit: 6b706b36ee4b19869b92633e8fedc1f2543f1280
+          - owner: p2p
+            commit: 11c217eea657c09c4a73ea49fc19eda35287a173
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
