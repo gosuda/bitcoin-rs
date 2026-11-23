@@ -406,10 +406,11 @@ fn reserve(
     let growth = match budget {
         Some(budget) => coinbase_growth(&reservation, budget)?,
         None => {
-            let weight = context
-                .coinbase_reserve
-                .weight
-                .saturating_sub(checked_sum(fixed.weight, 4, "weight")?);
+            let weight = context.coinbase_reserve.weight.saturating_sub(checked_sum(
+                fixed.weight,
+                4,
+                "weight",
+            )?);
             FixedReservation {
                 weight,
                 size: weight.div_ceil(4),
