@@ -9173,9 +9173,9 @@ mod winning_header_driver {
                 match message {
                     Message::GetHeaders(request) => {
                         let first = request.locator_hashes.first().ok_or("empty locator")?;
-                        locators.push(Hash256::from(*first));
+                        locators.push(Hash256::from_le_bytes(first.as_byte_array()));
                         let start = request.locator_hashes.iter().find_map(|hash| {
-                            let hash = Hash256::from(*hash);
+                            let hash = Hash256::from_le_bytes(hash.as_byte_array());
                             if hash == Network::Regtest.genesis_block_hash() {
                                 Some(0)
                             } else {

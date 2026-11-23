@@ -1157,6 +1157,12 @@ impl BlockSync {
 
     fn settle_winning_header_error(&self, source: PeerSource, error: HeaderAdmissionError) {
         let peer_fault = match &error {
+            HeaderAdmissionError::Candidate(HeaderCandidateError::Chain(
+                ChainError::NonContinuousHeader { .. },
+            ))
+            | HeaderAdmissionError::Candidate(HeaderCandidateError::Validation(
+                HeaderContextError::Chain(ChainError::NonContinuousHeader { .. }),
+            )) => false,
             HeaderAdmissionError::Rejected(error)
             | HeaderAdmissionError::Candidate(HeaderCandidateError::Chain(error))
             | HeaderAdmissionError::Candidate(HeaderCandidateError::Validation(
@@ -1895,7 +1901,7 @@ mod winning_header_tests {
 
     fn first_locator(outbound: &MessageReceiver) -> Option<Hash256> {
         outbound.try_iter().find_map(|message| match message {
-            Message::GetHeaders(request) => request.locator_hashes.first().copied().map(Hash256::from),
+            Message::GetHeaders(request) => request.locator_hashes.first().map(|hash| Hash256::from_le_bytes(hash.as_byte_array())),
             _ => None,
         })
     }
@@ -2039,6 +2045,43 @@ mod winning_header_tests {
         assert_eq!(candidate.locator().first(), Some(&expected));
         assert_eq!(owned.request.map(|request| request.locator_tip_hash), Some(expected));
         assert!(fixture.outbound.is_empty());
+        Ok(())
+    }
+
+    // P2P-10, SYNC-01
+    #[test]
+    fn reorged_winning_continuations_restart_without_peer_blame() -> Result<(), TestError> {
+        for redownload in [false, true] {
+            let fixture = fixture(2_000, 4_000)?;
+            let mut candidate = candidate(&fixture)?;
+            receive(&mut candidate, &fixture.fork[..2_000], true)?;
+            if redownload {
+                receive(&mut candidate, &fixture.fork[2_000..], true)?;
+                receive(&mut candidate, &fixture.fork[..2_000], true)?;
+            }
+            let expected = Hash256::from(fixture.fork[1_999].compute_hash());
+            install(&fixture, candidate);
+            fixture.sync.resume_owned_header_requests();
+            assert_eq!(first_locator(&fixture.outbound), Some(expected));
+            let (alternative, active_hash) = {
+                let reader = fixture.chain.block_tree_reader();
+                let tree = reader.read();
+                let tip = tree.tip().ok_or("missing active branch")?;
+                let first = tree.node_at_height_from(tip.tip_id, 1).ok_or("missing alternate header")?;
+                (tree.node(first)?.header, tip.hash)
+            };
+            fixture.inbound_headers.send(InboundHeaders {
+                headers: vec![alternative],
+                source: Some(fixture.source),
+                wire_response: true,
+            }).map_err(|_| TestError::message("alternate header queue closed"))?;
+            fixture.sync.drain_inbound_headers();
+            assert!(fixture.sync.peer_table.is_current(fixture.source), "a valid reorged continuation must keep its source connected");
+            assert_eq!(first_locator(&fixture.outbound), Some(active_hash));
+            assert!(fixture.sync.scheduler.lock().headers_sync.get(&fixture.source)
+                .is_some_and(|owned| owned.mode.is_none() && owned.request.is_some()));
+            assert_eq!(fixture.chain.header_tip().ok_or("missing unchanged tip")?.hash, active_hash);
+        }
         Ok(())
     }
 

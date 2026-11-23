@@ -459,7 +459,7 @@ These local behavioral proofs do not establish complete Core peer-lifecycle pari
 - One lifecycle entry owns the optional `LowWork`/`Winning` mode plus its wire request. State cannot inherit across a replaced connection. Unrelated non-wire body headers, including known headers or a duplicate retention refusal, preserve an already-live winning candidate.
 - Saturated sends retain the mode and leave no wire request or deadline. A later tick retries the mode's exact locator, including when generic frontier planning also asks for headers.
 - Authenticated winning prefixes awaiting local replay or the chain owner's FIFO have no network timeout and are exempt from chain-sync eviction while that local work remains. An unauthenticated partial chunk and a candidate awaiting network input receive no exemption.
-- Candidate resource pressure, cancellation, supersession, clock changes and changed redownload commitments are local retry/resync outcomes. Only the existing typed consensus peer-fault classifier can disconnect for invalid candidate headers.
+- Candidate resource pressure, cancellation, supersession, clock changes, continuity loss against its staged cursor and changed redownload commitments are local retry/resync outcomes. Only the existing typed consensus peer-fault classifier can disconnect for invalid candidate headers.
 - A nonempty answer clears only the request.
 - An empty answer ends presync but retains the answered request with its original timestamp.
 - Exact-source teardown removes the entry.
