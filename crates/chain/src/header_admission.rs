@@ -277,7 +277,8 @@ impl HeaderRetention {
             if let Some(hash) = pending.hash {
                 roots.push(retained_id(tree, hash)?);
             }
-            match *role.role.read() {
+            let role = *role.role.read();
+            match role {
                 ChainstateRole::Ordinary => {}
                 ChainstateRole::AssumedActive { base_hash, .. }
                 | ChainstateRole::Historical { base_hash, .. } => {
