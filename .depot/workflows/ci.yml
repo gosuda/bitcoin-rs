@@ -2,6 +2,8 @@ name: CI
 
 # PR checks; the same file also runs for merge-queue groups and main pushes.
 # Deep lanes: deep.yml. Nightly campaigns: scheduled.yml.
+# Fork pull requests do not start Depot workflows;
+# .github/workflows/ci.yml stays their CI path.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
