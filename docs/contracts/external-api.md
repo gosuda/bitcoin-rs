@@ -364,6 +364,8 @@ wallet interoperability remain unverified.
 - Esplora transaction projections return 503 when their previous-output slots and scripts exceed 16 MiB.
 - Backend bulk response assembly stops at 16 MiB and returns 503 without sending a partial JSON array.
 - Backend bulk routes hold node-wide expensive-query admission through the HTTP response write.
+- `GET /esplora/block-template` keeps unauthenticated backend access and uses the same admission before template assembly.
+- Template requests retain their slot until the response write completes or fails.
 - History reads use bounded pages and cursors preserving public Esplora cursor semantics.
 - Cursors are the exact lowercase `txid` display text.
 - Malformed, noncanonical (including uppercase or prefixed), unknown, and missing cursors restart from the beginning.
@@ -423,7 +425,12 @@ wallet interoperability remain unverified.
 - The next template read captures membership and fee revisions together.
 - `getblocktemplate` never carries a coinbase budget.
 - Typed `BlockTemplateRequest.coinbase_budget` is `None` for every RPC request.
-- Only the typed `MiningControl` embedder (experimental SV2 regtest adapter in `tools/stratum-sv2`) sets it.
+- Ordinary node templates reserve 8,000 WU for the block header, transaction count, and external coinbase by default. The configured `block_reserved_weight` is clamped to 2,000 through 4,000,000 WU, as in Core v31.1 `ClampOptions`.
+- Ordinary node templates reserve at least 400 coinbase sigop cost. The actual local coinbase cost is used when it is larger than either reserve.
+- Before cache publication, the node validates each newly assembled or prepared candidate through the chainstate proposal path. Invalid candidates return a rejection and are not served. Validation does not commit the block, require solved PoW, or check a signet solution.
+- A generation change during validation retries assembly. Mining cache and mempool locks are not held during chainstate validation.
+- `CandidateContext.coinbase_reserve` states this policy. A complete local coinbase can use `CoinbaseReserve::EXACT`; production templates use the immutable node configuration.
+- Only the typed `MiningControl` embedder (experimental SV2 regtest adapter in `tools/stratum-sv2`) sets a coinbase budget.
 - A budgeted candidate leaves that room in the coinbase with a budget-qualified id.
 - The ordinary candidate is used when it already admits the budget.
 - The qualifier is not RPC contract: RPC callers never receive it, and long-poll waits compare generations only.
@@ -626,7 +633,7 @@ wallet interoperability remain unverified.
 - Failure returns Core `-25` (`TestBlockValidity failed: {reason}`) where `{reason}` is the BIP22 `GetRejectReason` string (`API-19`).
 - This pre-check applies only to `Ordered` selection (`generateblock`).
 - An ordered candidate refused by the mining sigop preflight also returns this `-25` (`bad-blk-sigops`), not an operational `Failed`.
-- `generatetoaddress` (`Mempool`) matches Core `generateBlocks` and skips it.
+- `generatetoaddress` (`Mempool`) skips the ordered pre-check. Its fresh candidate passes the same assembly validation as a served template before solve.
 - The check calls `apply::validate_block` directly (`ApplyIntent::Propose` already skips hash-meets-target), not GBT `propose` (`API-18` vocabulary).
 - Shutdown and a closed-for-recovery chainstate stay `Unavailable`, not `TestBlockValidity`.
 ### `API-31`: `generateblock` multipath, ranged, and Expand errors
@@ -792,7 +799,7 @@ wallet interoperability remain unverified.
 - Address and scripthash summaries, UTXOs, and transaction histories (including summary/mempool and chain pages) reserve one of `esplora_max_queries` slots before capturing the chain view or querying indexes.
 - The positive limit defaults to 2 and is independent of connection and JSON-RPC blocking admission.
 - Exhaustion returns HTTP 503 `expensive Esplora query limit reached` without queuing or index/body work.
-- Script-query permits release after projection and generation checks. Backend bulk permits release when the HTTP response write completes or fails.
+- Script-query permits release after projection and generation checks. Backend bulk and template permits release when the HTTP response write completes or fails.
 - Cheap tip and status routes are exempt.
 - Per-query budgets and HTTP 422 script-limit errors remain unchanged.
 - Fixed-name active, rejected, and execution-latency metrics have no user-input labels.

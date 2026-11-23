@@ -1878,6 +1878,7 @@ mod tests {
             request
         }
 
+        // API-08, API-09, WF-02
         #[test]
         fn expensive_query_saturation_preserves_shared_and_split_listener_service() -> io::Result<()>
         {
@@ -1916,6 +1917,15 @@ mod tests {
                         }
                     }
                 }
+                let response = server.request(
+                    b"GET /esplora/block-template HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )?;
+                assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+                assert!(response.contains("expensive Esplora query limit reached"));
+                let response = server.request(
+                    b"GET /api/block-template HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )?;
+                assert!(response.starts_with("HTTP/1.1 404"), "{response}");
                 let response = server.request(
             b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         )?;

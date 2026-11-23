@@ -105,8 +105,11 @@ Environment booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `of
 | `validation_mode` | `BITCOIN_RS_VALIDATION_MODE` | no | `assume-valid` |
 | `validation_engine` | `BITCOIN_RS_VALIDATION_ENGINE` | no | `native` |
 | `mining_payout_address` | `BITCOIN_RS_MINING_PAYOUT_ADDRESS` | no | unset |
+| `block_reserved_weight` | `BITCOIN_RS_BLOCK_RESERVED_WEIGHT` | no | `8000` |
 
 `mining_payout_address` is required when `pool` is true. It sets the pool payout script; solo generation takes its address in the RPC call.
+
+`block_reserved_weight` reserves weight units for the block header, transaction count, and external coinbase. The CLI flag is `--block-reserved-weight`. Values are clamped to 2,000 through 4,000,000 weight units. Ordinary templates also reserve at least 400 sigop cost for the coinbase. An explicit typed coinbase budget uses its own size and sigop limits.
 
 ### Pool
 
