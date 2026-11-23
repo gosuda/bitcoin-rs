@@ -3,7 +3,6 @@ name: Stabilization verification
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,74 +11,64 @@ env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  RUST_BACKTRACE: "1"
 
 jobs:
-  ranges:
-    if: github.head_ref == 'stabilize/dependency-range-20261124' && github.event.pull_request.head.sha == '1704949b4b9fb3fe9ce48f04fb6362a46bb08092'
+  combined:
+    if: github.head_ref == 'stabilize/dependency-range-20261124'
     runs-on: depot-ubuntu-24.04-8
-    timeout-minutes: 120
+    timeout-minutes: 90
     env:
-      RUSTUP_TOOLCHAIN: "1.99.0"
-    strategy:
-      fail-fast: false
-      matrix:
-        range: [minimal, maximum]
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      BITCOIN_RS_FUZZ_CORPUS: /tmp/fuzz-corpus/corpus
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: 0a6fbda199240c7187d11657acd2d020dde43680
           persist-credentials: false
-      - run: bash scripts/ci-setup.sh apt msrv nightly deny
-      - name: Verify supported dependency endpoint
-        run: KEEP_LOCK=1 scripts/check-dep-range.sh ${{ matrix.range }}
-      - name: Show resolved graph
-        if: always()
-        run: cargo tree --locked --all-features --duplicates
+      - run: bash scripts/ci-setup.sh apt nextest corpus
+      - name: Verify combined source formatting and contracts
+        run: |
+          cargo fmt --all -- --check
+          cargo run --locked -p contract-index -- --check
+      - name: Reproduce the prior relay rollover behavior
+        run: |
+          git apply <<'PATCH'
+          diff --git a/crates/node/src/p2p/tx_policy/relay.rs b/crates/node/src/p2p/tx_policy/relay.rs
+          --- a/crates/node/src/p2p/tx_policy/relay.rs
+          +++ b/crates/node/src/p2p/tx_policy/relay.rs
+          @@ -288,6 +288,5 @@
+                       if let Some(current) = peer.pending.get_mut(&request.wtxid) {
+          -                let advance = request.sequence.wrapping_sub(current.sequence);
+          -                if (1..(1_u64 << 63)).contains(&advance) {
+          +                if request.sequence > current.sequence {
+                               *current = request;
+                           }
+                       } else if peer.pending.len() < MAX_PENDING_PER_PEER && total < MAX_PENDING {
+          PATCH
+          git diff -- crates/node/src/p2p/tx_policy/relay.rs
+          set +e
+          cargo test --locked -p bitcoin-rs-node --lib --features bitcoin-rs-wire/pool,bitcoin-rs-wire/pool-sv2 wrapped_admission_replaces_pending_relay_and_rejects_stale_callbacks > relay-before.log 2>&1
+          relay_before_rc=$?
+          set -e
+          cat relay-before.log
+          test "$relay_before_rc" -eq 101
+          rg '^test .*::wrapped_admission_replaces_pending_relay_and_rejects_stale_callbacks \.\.\. FAILED$' relay-before.log
+          rg -F 'test result: FAILED. 0 passed; 1 failed;' relay-before.log
+          rg -F 'assertion' relay-before.log
+          git restore --source=HEAD -- crates/node/src/p2p/tx_policy/relay.rs
+          git diff --exit-code
+      - name: Verify the combined owner suites
+        run: cargo nextest run --locked --no-fail-fast -p bitcoin-rs-mempool -p bitcoin-rs-node -p bitcoin-rs-p2p -p bitcoin-rs-wire --features bitcoin-rs-wire/pool,bitcoin-rs-wire/pool-sv2
 
-  owner-evidence:
+  proofs:
     if: github.head_ref == 'stabilize/dependency-range-20261124'
     runs-on: depot-ubuntu-24.04
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - owner: p2p
-            commit: 11c217eea657c09c4a73ea49fc19eda35287a173
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ matrix.commit }}
+          ref: 0a6fbda199240c7187d11657acd2d020dde43680
           persist-credentials: false
-      - name: Generate contract evidence and format source
-        run: |
-          cargo run --locked -p contract-index
-          cargo fmt --all
-          git diff --binary
-          while IFS= read -r -d '' path; do
-            printf 'GENERATED_FILE %s %s\n' "$(git hash-object "$path")" "$path"
-          done < <(git diff --name-only -z)
-  scripts:
-    if: github.head_ref == 'stabilize/dependency-range-20261124' && github.event.pull_request.head.sha == '08229e20fd583c47bfd6ce6a265ec48189fd94b1'
-    runs-on: depot-ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-      - run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-      - run: python3 scripts/check_book_links.py
-
-  reserve-regression:
-    if: github.head_ref == 'stabilize/dependency-range-20261124' && github.event.pull_request.head.sha == '08229e20fd583c47bfd6ce6a265ec48189fd94b1'
-    runs-on: depot-ubuntu-24.04-8
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: f6cd9fbcbafa485b77022aa5333c8c4d2cdf1995
-          persist-credentials: false
-      - run: bash scripts/ci-setup.sh apt
-      - name: Reproduce external coinbase reserve defects
-        run: cargo test --locked -p bitcoin-rs-wire --lib ordinary_templates_reserve_external_coinbase
+      - name: Run the required formal proof stage
+        run: ./scripts/ci-pr.sh proofs
