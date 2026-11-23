@@ -58,6 +58,8 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - `cargo deny check bans` runs after each DEP-01 resolve.
 - Missing cargo-deny is a failed prerequisite, not a skip.
 
+Proof: `scripts/check-dep-range.sh minimal` resolves the lower endpoint and checks all targets with all features. `scripts/check-dep-range.sh maximum` resolves the upper endpoint and checks default targets plus the explicit kernel build. Both execute `cargo deny check bans` using the all-features graph in `deny.toml` against their resolved lockfile. A checked-in lockfile alone does not establish either endpoint result.
+
 ### `DEP-03`: One JSON stack and one time stack
 - **Owner**: `deny.toml` `[bans]`.
 - First-party code MUST serialize JSON with `sonic-rs`.

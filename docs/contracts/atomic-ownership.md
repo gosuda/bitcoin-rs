@@ -502,7 +502,9 @@ Proof: `crates/p2p/src/inbound/block_memory.rs::message_loop_refuses_receive_pre
 
 - Mining template generation must consume a matched pair: one applied epoch and one settled mempool generation.
 - A template must never combine a new chain state with an obsolete dependency graph.
-- Snapshot activation replaces both the applied epoch and the empty pool's settlement commit before it reopens admission. Proof: `snapshot::tests::mining_resumes_after_snapshot_replaces_a_settled_tip` in `crates/node/src/snapshot.rs` builds a template and generates a block after importing a snapshot over a previously settled tip.
+- Snapshot activation replaces both the applied epoch and the empty pool's settlement commit before it reopens admission.
+
+Proof: `crates/node/src/snapshot.rs::mining_resumes_after_snapshot_replaces_a_settled_tip` builds a template and generates a block after importing a snapshot over a previously settled tip. `crates/node/src/chain_effects.rs::snapshot_reconciles_empty_pool_and_index_without_fabricating_block_events` checks that the previous nonzero settlement commit becomes zero while admission remains closed, then explicitly finishes the guard. `crates/node/src/chain_effects.rs::snapshot_clears_the_cached_epoch_with_the_block_log` checks removal of the previous applied epoch.
 
 ### `MPS-04`: Event delivery
 
