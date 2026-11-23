@@ -1,0 +1,273 @@
+name: Stabilization resolution verification
+
+on:
+  push:
+    branches: [stabilize/verification-20261124]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stabilization-resolution-verification-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "2"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  regression-controls:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 120
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Provision regression tools
+        run: |
+          set -euo pipefail
+          mkdir -p target/verification-logs
+          bash scripts/ci-setup.sh apt nextest 2>&1 | tee target/verification-logs/setup.log
+          cargo nextest --version > target/verification-logs/nextest-version.txt
+      - name: Prove the regressions fail before correction and pass afterward
+        run: |
+          set -euo pipefail
+          cp scripts/verify-stabilization-regressions.sh "$RUNNER_TEMP/resolution-regressions.sh"
+          bash "$RUNNER_TEMP/resolution-regressions.sh"
+      - name: Preserve regression evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: regression-controls-${{ github.run_attempt }}
+          path: target/verification-logs/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  ldk-consumer:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check the independent LDK consumer lock
+        run: |
+          set -euo pipefail
+          mkdir -p target/verification-logs
+          git rev-parse HEAD > target/verification-logs/commit.txt
+          bash scripts/ci-setup.sh apt 2>&1 | tee target/verification-logs/setup.log
+          cargo check --locked --manifest-path tools/ldk/Cargo.toml --all-targets \
+            2>&1 | tee target/verification-logs/ldk-consumer.log
+          git diff --exit-code -- tools/ldk/Cargo.lock
+      - name: Preserve LDK evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ldk-consumer-${{ github.run_attempt }}
+          path: target/verification-logs/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  dependency-range:
+    name: Dependency range (${{ matrix.range }})
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 120
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
+      KEEP_LOCK: "1"
+      DEPENDENCY_RANGE: ${{ matrix.range }}
+    strategy:
+      fail-fast: false
+      matrix:
+        range: [minimal, maximum]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Provision dependency check tools
+        run: |
+          set -euo pipefail
+          mkdir -p target/verification-logs
+          git rev-parse HEAD > target/verification-logs/commit.txt
+          bash scripts/ci-setup.sh apt msrv nightly deny 2>&1 | tee target/verification-logs/setup.log
+          {
+            rustc --version --verbose
+            cargo --version
+            rustup run nightly rustc --version --verbose
+          } > target/verification-logs/toolchain.txt
+      - name: Check resolved dependency range
+        run: |
+          set -euo pipefail
+          scripts/check-dep-range.sh "$DEPENDENCY_RANGE" 2>&1 | tee target/verification-logs/dependency-range.log
+      - name: Preserve dependency evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: dependency-range-${{ matrix.range }}-${{ github.run_attempt }}
+          path: |
+            target/verification-logs/**
+            Cargo.lock
+          if-no-files-found: warn
+          retention-days: 7
+
+  header-retarget:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Provision header test tools
+        run: |
+          set -euo pipefail
+          mkdir -p target/verification-logs
+          git rev-parse HEAD > target/verification-logs/commit.txt
+          bash scripts/ci-setup.sh apt nextest 2>&1 | tee target/verification-logs/setup.log
+      - name: Check retarget rules and checkpoint recovery
+        run: |
+          set -euo pipefail
+          cargo nextest run --locked -p bitcoin-rs-chain --lib \
+            -E 'test(chain::header_sync::retarget_rule_tests::) | test(checkpoint::)' \
+            2>&1 | tee target/verification-logs/header-retarget.log
+      - name: Preserve header evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: header-retarget-${{ github.run_attempt }}
+          path: target/verification-logs/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  proofs:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 360
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
+      PROOFS_JOBS: "1"
+      EXTRACT_JOBS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78
+        with:
+          distribution: temurin
+          java-version: "25.0.5+8"
+      - name: Provision the native toolchain and pinned model checker
+        run: |
+          set -euo pipefail
+          mkdir -p target/verification-logs
+          git rev-parse HEAD > target/verification-logs/commit.txt
+          {
+            bash scripts/ci-setup.sh apt msrv
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq zstd unzip
+            export JAVA_HOME_25_X64="$JAVA_HOME"
+            printf 'JAVA_HOME_25_X64=%s\n' "$JAVA_HOME_25_X64" >> "$GITHUB_ENV"
+            bash scripts/provision-ci-reference-fixtures.sh formal
+          } 2>&1 | tee target/verification-logs/setup-native-models.log
+      - name: Provision pinned Kani
+        run: |
+          set -euo pipefail
+          formal_tools="$RUNNER_TEMP/formal-tools"
+          mkdir -p "$formal_tools"
+          {
+            archive="$formal_tools/kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz"
+            curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --silent --show-error \
+              https://github.com/model-checking/kani/releases/download/kani-0.68.0/kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz \
+              --output "$archive"
+            printf '%s  %s\n' 32e2b484d73ede0bbf64a2cf0879c4259422497d8aec4ee67d448de9ae7843d3 "$archive" \
+              | sha256sum --check --strict
+            cargo install --locked kani-verifier --version 0.68.0 --root "$formal_tools/kani-proxy"
+            export KANI_HOME="$formal_tools/kani-home"
+            export PATH="$formal_tools/kani-proxy/bin:$PATH"
+            cargo kani setup --use-local-bundle "$archive"
+            printf 'KANI_HOME=%s\n' "$KANI_HOME" >> "$GITHUB_ENV"
+            printf '%s\n' "$formal_tools/kani-proxy/bin" >> "$GITHUB_PATH"
+            cargo kani --version
+            rustup run nightly-2026-08-21 rustc --version --verbose
+          } 2>&1 | tee target/verification-logs/setup-kani.log
+      - name: Build pinned Charon
+        run: |
+          set -euo pipefail
+          formal_tools="$RUNNER_TEMP/formal-tools"
+          charon_source="$formal_tools/charon"
+          {
+            rustup toolchain install nightly-2026-09-17 --profile minimal \
+              --component rustc-dev --component llvm-tools --component rust-src \
+              --component miri --component rustfmt
+            git init "$charon_source"
+            git -C "$charon_source" remote add origin https://github.com/AeneasVerif/charon.git
+            git -C "$charon_source" fetch --depth 1 origin 373d84044d80f6eb44285c2c349bae1453f5b6ca
+            git -C "$charon_source" checkout --detach FETCH_HEAD
+            test "$(git -C "$charon_source" rev-parse HEAD)" = 373d84044d80f6eb44285c2c349bae1453f5b6ca
+            RUSTUP_TOOLCHAIN=nightly-2026-09-17 make -C "$charon_source" build-charon-rust
+            git -C "$charon_source" diff --exit-code
+            test -x "$charon_source/bin/charon-driver"
+            charon_version="$("$charon_source/bin/charon" version)"
+            printf '%s\n' "$charon_version"
+            test "$charon_version" = '0.1.301 (373d84044d80f6eb44285c2c349bae1453f5b6ca)'
+            printf 'CHARON_BIN=%s\n' "$charon_source/bin/charon" >> "$GITHUB_ENV"
+            rustup run nightly-2026-09-17 rustc --version --verbose
+          } 2>&1 | tee target/verification-logs/setup-charon.log
+      - name: Provision pinned Aeneas and Lean
+        run: |
+          set -euo pipefail
+          formal_tools="$RUNNER_TEMP/formal-tools"
+          {
+            aeneas_archive="$formal_tools/aeneas-linux-x86_64.tar.gz"
+            curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --silent --show-error \
+              https://github.com/AeneasVerif/aeneas/releases/download/nightly-2026.10.30-de16f3c/aeneas-linux-x86_64.tar.gz \
+              --output "$aeneas_archive"
+            printf '%s  %s\n' 0963dc77cab890de16b213b903091721961afca6303b9b0ea05ff8d76013f624 "$aeneas_archive" \
+              | sha256sum --check --strict
+            mkdir -p "$formal_tools/aeneas"
+            tar -xzf "$aeneas_archive" -C "$formal_tools/aeneas"
+            "$formal_tools/aeneas/aeneas" -version
+            printf 'AENEAS_BIN=%s\n' "$formal_tools/aeneas/aeneas" >> "$GITHUB_ENV"
+            lean_archive="$formal_tools/lean-4.35.0-linux.tar.zst"
+            curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --silent --show-error \
+              https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst \
+              --output "$lean_archive"
+            printf '%s  %s\n' 7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d "$lean_archive" \
+              | sha256sum --check --strict
+            tar --zstd -xf "$lean_archive" -C "$formal_tools"
+            "$formal_tools/lean-4.35.0-linux/bin/lean" --version
+            printf '%s\n' "$formal_tools/lean-4.35.0-linux/bin" >> "$GITHUB_PATH"
+          } 2>&1 | tee target/verification-logs/setup-aeneas-lean.log
+      - name: Run the required proofs stage
+        run: |
+          set -euo pipefail
+          ./scripts/ci-pr.sh proofs 2>&1 | tee target/verification-logs/proofs.log
+      - name: Preserve proof evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: formal-proofs-${{ github.run_attempt }}
+          path: |
+            target/verification-logs/**
+            target/proofs-logs/**
+            target/apalache/**/*.json
+            target/apalache/**/*.log
+            target/apalache/**/*.cfg
+            target/apalache/**/te/**
+            target/aeneas/**/extract.log
+            target/aeneas/**/status
+          if-no-files-found: warn
+          retention-days: 7
