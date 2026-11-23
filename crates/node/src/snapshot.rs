@@ -557,8 +557,11 @@ impl SnapshotControl {
             return Err(SnapshotImportError::MempoolNotEmpty);
         }
         let result = activation(self.manager.as_ref());
-        if result.is_ok() {
-            self.followers.on_snapshot();
+        if result.is_ok()
+            && let Err(settlement) = self.followers.on_snapshot(change.as_ref())
+        {
+            self.chainstate.fail_closed_for_recovery();
+            return Err(SnapshotImportError::Settlement(settlement));
         }
         if !self.chainstate.is_closed_for_recovery()
             && let Some(change) = change

@@ -15,7 +15,7 @@ use bitcoin_rs_consensus::{
 use hashbrown::{HashMap, HashSet};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-seam"))]
 use std::sync::mpsc;
 
 struct PrevoutMap<'a> {
@@ -97,6 +97,8 @@ pub enum ChainChangeError {
     ForeignGuard,
     #[error("mempool delivery queue is full")]
     DeliveryQueueFull,
+    #[error("snapshot activation requires an empty mempool")]
+    SnapshotMempoolNotEmpty,
 }
 
 pub struct AdmissionRequest {
@@ -579,14 +581,14 @@ impl Drop for DrainScope {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-seam"))]
 #[derive(Default)]
 struct BeginChainProbes {
     entered: Option<mpsc::Sender<()>>,
     lock_held: Option<BeginLockHold>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-seam"))]
 struct BeginLockHold {
     signal: mpsc::Sender<bool>,
     resume: mpsc::Receiver<()>,
@@ -604,7 +606,7 @@ pub struct MempoolGateway {
     chain_generation: AtomicU64,
     engine: ValidationEngine,
     script_cache: Option<Arc<ScriptExecutionCache>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-seam"))]
     begin_probes: Mutex<BeginChainProbes>,
 }
 
@@ -647,7 +649,7 @@ impl MempoolGateway {
             chain_generation: AtomicU64::new(0),
             engine,
             script_cache,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-seam"))]
             begin_probes: Mutex::new(BeginChainProbes::default()),
         }
     }
@@ -706,10 +708,10 @@ impl MempoolGateway {
     }
 
     pub fn begin_chain_change(self: &Arc<Self>) -> Result<ChainChangeGuard, ChainChangeError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-seam"))]
         self.notify_begin_entry();
         let pool_guard = self.pool.write();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-seam"))]
         self.hold_at_begin_lock();
         let current = self.chain_generation.load(Ordering::Relaxed);
         if !current.is_multiple_of(2) {
@@ -726,14 +728,14 @@ impl MempoolGateway {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-seam"))]
     fn notify_begin_entry(&self) {
         if let Some(entered) = self.begin_probes.lock().entered.as_ref() {
             let _ = entered.send(());
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-seam"))]
     fn hold_at_begin_lock(&self) {
         let Some(hold) = self.begin_probes.lock().lock_held.take() else {
             return;
@@ -745,7 +747,7 @@ impl MempoolGateway {
         let _ = hold.resume.recv();
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn install_begin_chain_change_probes(
         &self,
         entered: mpsc::Sender<()>,

@@ -692,13 +692,27 @@ impl MempoolGateway {
         }
     }
 
-    /// Requires empty membership under the caller's active chain-change fence.
-    pub fn snapshot_changed(&self) {
+    /// Settles an empty pool while this gateway's chain-change guard is active.
+    /// Refusal leaves the pool and its admission lifecycle unchanged.
+    pub fn snapshot_changed(
+        &self,
+        change: &crate::ChainChangeGuard,
+    ) -> Result<(), crate::ChainChangeError> {
+        if !change.owns(self) {
+            return Err(crate::ChainChangeError::ForeignGuard);
+        }
         let mut pool = self.pool.write();
+        if self.chain_generation() != change.odd_generation() {
+            return Err(crate::ChainChangeError::GenerationMoved);
+        }
+        if !pool.is_empty() {
+            return Err(crate::ChainChangeError::SnapshotMempoolNotEmpty);
+        }
         pool.settle_for_snapshot();
         let mut lifecycle = self.lifecycle.lock();
         lifecycle.clear_rejects();
         lifecycle.orphans.mark_all_ready();
+        Ok(())
     }
 
     #[must_use]
@@ -3501,6 +3515,64 @@ mod tests {
         );
         assert!(gateway_a.read().iter_entries().next().is_none());
         guard_b.finish().expect("finish b");
+    }
+
+    // MPL-04, MPS-03
+    #[test]
+    fn snapshot_settlement_requires_its_live_guard_and_empty_membership()
+    -> Result<(), crate::test_error::TestError> {
+        let owner = gateway();
+        let foreign = gateway();
+        let absent = Txid::from(Hash256::from_le_bytes(&[91; 32]));
+        owner.prioritise(absent, 700)?;
+        owner
+            .pool()
+            .write()
+            .settle_for_block(&crate::TransitionFacts::empty(), 17, 0, 0);
+        let original = owner.read().settled_generation();
+        let foreign_guard = foreign.begin_chain_change()?;
+        assert_eq!(
+            owner.snapshot_changed(&foreign_guard),
+            Err(crate::ChainChangeError::ForeignGuard)
+        );
+        assert_eq!(owner.read().settled_generation(), original);
+        assert_eq!(owner.stable_generation(), Some(0));
+        foreign_guard.finish()?;
+
+        let guard = owner.begin_chain_change()?;
+        let odd = guard.odd_generation();
+        owner.force_chain_generation(odd + 1);
+        assert_eq!(
+            owner.snapshot_changed(&guard),
+            Err(crate::ChainChangeError::GenerationMoved)
+        );
+        assert_eq!(owner.read().settled_generation(), original);
+        owner.force_chain_generation(odd);
+        owner.snapshot_changed(&guard)?;
+        assert_eq!(
+            owner.read().settled_generation(),
+            (0, original.1, original.2)
+        );
+        assert_eq!(owner.prioritised_transactions()[0].fee_delta, 700);
+        assert_eq!(owner.stable_generation(), None);
+        guard.finish()?;
+        assert_eq!(owner.stable_generation(), Some(odd + 1));
+
+        let populated = gateway();
+        let (parent, _) = parent_and_child();
+        let txid = parent.txid();
+        insert_parent(&populated, parent, AdmissionOrigin::Rpc);
+        let original = populated.read().settled_generation();
+        let guard = populated.begin_chain_change()?;
+        assert_eq!(
+            populated.snapshot_changed(&guard),
+            Err(crate::ChainChangeError::SnapshotMempoolNotEmpty)
+        );
+        assert_eq!(populated.read().settled_generation(), original);
+        assert!(populated.read().contains_txid(&txid));
+        assert_eq!(populated.stable_generation(), None);
+        guard.finish()?;
+        Ok(())
     }
 
     fn batch_logged_gateway() -> (Arc<ReorgBatchLog>, Arc<MempoolGateway>) {
