@@ -12,6 +12,13 @@ The Mempool backend uses `ESPLORA_REST_API_URL=http://node:8332/esplora`;
 JSON-RPC keeps the listener root. The stack adds frontend, backend, and MariaDB
 services to `bitcoin-rs`; only the frontend is public.
 
+The Compose file sets `ESPLORA_BATCH_QUERY_BASE_SIZE=25` for mempool reloads
+and updates. The full-block endpoint `/esplora/internal/block/{hash}/txs`
+returns HTTP 503 when its response exceeds 16 MiB. The v3.3.1
+block update loop then fetches the remaining transactions individually.
+Clients that need block pages can read `/esplora/block/{hash}/txs/{start_index}`
+in steps of 25.
+
 `txindex` and `scriptindex` are enabled so the Esplora backend can resolve
 historical transactions and address activity. Index backfill and initial chain
 sync must complete before those results are available.

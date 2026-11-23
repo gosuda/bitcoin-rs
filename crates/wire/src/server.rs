@@ -788,15 +788,22 @@ fn dispatch_http_request(
             path,
             query,
         } => {
-            let esplora_surface = esplora_surface(surface);
-            let response = crate::esplora::route(handler, esplora_surface, path, query);
-            write_response(stream, &response, keep_alive, surface.cors_policy())?;
+            crate::esplora::respond(
+                handler,
+                esplora_surface(surface),
+                path,
+                crate::esplora::Request::Get(query),
+                |response| write_response(stream, &response, keep_alive, surface.cors_policy()),
+            )?;
         }
         HttpRoute::EsploraPost { surface, path } => {
-            let esplora_surface = esplora_surface(surface);
-            let response =
-                crate::esplora::route_post(handler, esplora_surface, path, &request.body);
-            write_response(stream, &response, keep_alive, surface.cors_policy())?;
+            crate::esplora::respond(
+                handler,
+                esplora_surface(surface),
+                path,
+                crate::esplora::Request::Post(&request.body),
+                |response| write_response(stream, &response, keep_alive, surface.cors_policy()),
+            )?;
         }
         HttpRoute::Preflight { surface } => {
             let response = crate::rest::Response {

@@ -112,3 +112,19 @@ jobs:
           bitcoind="$(scripts/install-bitcoind.sh --print-path)"
           cargo build --locked -p bitcoin-rs --profile quickstart --no-default-features --features zmq
           scripts/run-p2p-core-interop.sh --bitcoind-command "$bitcoind" --bitcoin-rs-command target/quickstart/bitcoin-rs --workdir "$PWD/target/core-differential/run" --evidence "$PWD/target/core-differential/evidence.json"
+
+  deep-gate:
+    needs: [tests, book, kernel, pinned]
+    if: always()
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the deep lanes
+        run: |
+          fail() { echo "deep-gate: $1 is $2" >&2; exit 1; }
+          for pair in "tests:${{ needs.tests.result }}" "book:${{ needs.book.result }}" "kernel:${{ needs.kernel.result }}"; do
+            name=${pair%%:*}; result=${pair#*:}
+            [ "$result" = success ] || fail "$name" "$result"
+          done
+          pinned=${{ needs.pinned.result }}
+          { [ "$pinned" = success ] || [ "$pinned" = skipped ]; } || fail pinned "$pinned"

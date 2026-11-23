@@ -17,6 +17,7 @@ use crate::handlers::Handler;
 use crate::rest::Response;
 
 use self::projection::Projection;
+const MAX_BATCH_BYTES: usize = 16 * 1_024 * 1_024;
 pub const DEFAULT_MAX_QUERIES: std::num::NonZeroUsize =
     std::num::NonZeroUsize::MIN.saturating_add(1);
 
@@ -26,19 +27,64 @@ pub enum Surface {
     Backend,
 }
 
-#[must_use]
-pub fn route(handler: &Handler, surface: Surface, path: &str, query: &str) -> Response {
-    let ctx = handler.context();
-    let _permit = if admission::is_expensive(path) {
-        match ctx.esplora_admission.try_acquire() {
-            Some(permit) => Some(permit),
-            None => {
-                return crate::rest::service_unavailable("expensive Esplora query limit reached");
-            }
-        }
+pub(crate) enum Request<'a> {
+    Get(&'a str),
+    Post(&'a [u8]),
+}
+
+pub(crate) fn respond<R>(
+    handler: &Handler,
+    surface: Surface,
+    path: &str,
+    request: Request<'_>,
+    send: impl FnOnce(Response) -> R,
+) -> R {
+    let bulk = surface == Surface::Backend
+        && match request {
+            Request::Get(_) => admission::is_backend_bulk_get(path),
+            Request::Post(_) => admission::is_backend_bulk_post(path),
+        };
+    let permit = if bulk || (matches!(request, Request::Get(_)) && admission::is_expensive(path)) {
+        let Some(permit) = handler.context().esplora_admission.try_acquire() else {
+            return send(crate::rest::service_unavailable(
+                "expensive Esplora query limit reached",
+            ));
+        };
+        Some(permit)
     } else {
         None
     };
+    let response = match request {
+        Request::Get(query) => get(handler, surface, path, query),
+        Request::Post(body) => {
+            if surface == Surface::Backend
+                && let Some(response) = backend_post(handler, path, body)
+            {
+                response
+            } else {
+                public::post(handler, path, body)
+            }
+        }
+    };
+    if !bulk {
+        drop(permit);
+    }
+    send(response)
+}
+
+#[must_use]
+pub fn route(handler: &Handler, surface: Surface, path: &str, query: &str) -> Response {
+    respond(
+        handler,
+        surface,
+        path,
+        Request::Get(query),
+        core::convert::identity,
+    )
+}
+
+fn get(handler: &Handler, surface: Surface, path: &str, query: &str) -> Response {
+    let ctx = handler.context();
     if needs_tip_fence(path) {
         let projection = Projection::new(&ctx);
         let chain_view = projection.capture_chain_view();
@@ -71,15 +117,17 @@ fn dispatch_get(
     }
     public::get(ctx, path)
 }
-#[must_use]
+#[cfg(test)]
 pub(crate) fn route_post(handler: &Handler, surface: Surface, path: &str, body: &[u8]) -> Response {
-    if surface == Surface::Backend {
-        if let Some(response) = backend_post(handler, path, body) {
-            return response;
-        }
-    }
-    public::post(handler, path, body)
+    respond(
+        handler,
+        surface,
+        path,
+        Request::Post(body),
+        core::convert::identity,
+    )
 }
+
 fn backend_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
     if !needs_tip_fence(path) {
         return backend::post(handler, path, body);
@@ -3139,6 +3187,62 @@ mod tests {
         assert_eq!(values[0]["txid"], json!(txid.to_string()));
     }
 
+    // API-09, WF-02
+    #[test]
+    fn backend_bulk_routes_share_expensive_admission() {
+        let ctx = Arc::new(Context::new().with_esplora_query_limit(
+            std::num::NonZeroUsize::new(1).expect("nonzero admission limit"),
+        ));
+        let handler = Handler::new(Arc::clone(&ctx));
+        let permit = ctx
+            .esplora_admission
+            .try_acquire()
+            .expect("reserve the only slot");
+        for path in ["/internal/mempool/txs", "/internal/block/00/txs"] {
+            let response = backend_route(&handler, path, "max_txs=0");
+            assert_eq!(response.status, 503, "status for {path}");
+        }
+        let body = sonic_rs::to_vec(&Vec::<String>::new()).expect("empty request");
+        for path in [
+            "/internal/txs",
+            "/internal/mempool/txs",
+            "/internal/txs/outspends/by-txid",
+            "/internal/txs/outspends/by-outpoint",
+        ] {
+            let response = backend_route_post(&handler, path, &body);
+            assert_eq!(response.status, 503, "status for {path}");
+        }
+        drop(permit);
+        for request in [
+            super::Request::Get("max_txs=0"),
+            super::Request::Post(&body),
+        ] {
+            super::respond(
+                &handler,
+                super::Surface::Backend,
+                "/internal/mempool/txs",
+                request,
+                |response| {
+                    assert_eq!(response.status, 200);
+                    assert!(ctx.esplora_admission.try_acquire().is_none());
+                },
+            );
+        }
+        for path in [
+            "/internal/txs",
+            "/internal/mempool/txs",
+            "/internal/txs/outspends/by-txid",
+            "/internal/txs/outspends/by-outpoint",
+        ] {
+            assert_eq!(
+                backend_route_post(&handler, path, &body).status,
+                200,
+                "status for {path}"
+            );
+        }
+    }
+
+    // API-09, WF-02
     #[test]
     fn mempool_backend_extension_surface_uses_the_same_projections() -> Result<(), TestError> {
         let (handler, transaction, block, address) = contract_fixture()?;
@@ -3163,6 +3267,8 @@ mod tests {
             "",
         );
         assert_eq!(block_response.status, 200);
+        let block_rows: Vec<Value> = sonic_rs::from_slice(&block_response.body)?;
+        assert_eq!(block_rows.len(), block.txs.len());
         let summary = route(&handler, &format!("/address/{address}/txs/summary"), "");
         assert_eq!(summary.status, 200);
         Ok(())
@@ -4425,6 +4531,7 @@ mod tests {
         }
     }
 
+    // WF-02
     #[test]
     fn block_parent_reuse_checks_readiness_only_when_needed() -> Result<(), TestError> {
         struct ReadinessIndex {
@@ -4471,9 +4578,10 @@ mod tests {
         }));
         let Ok((values, _)) = Projection::new(&ctx).transaction_values(
             [(&child, None)],
-            Some(super::projection::ParentSource::Block(
-                std::slice::from_ref(&child),
-            )),
+            Some(
+                &Projection::new(&ctx)
+                    .block_parents(std::slice::from_ref(&child), std::slice::from_ref(&child)),
+            ),
         ) else {
             return Err("external parent".into());
         };
@@ -4483,12 +4591,14 @@ mod tests {
             0,
             "an index-resolved parent needs no readiness read"
         );
-        let Ok((values, _)) = Projection::new(&ctx).transaction_values(
-            [(&child, None), (&child, None)],
-            Some(super::projection::ParentSource::Block(
-                std::slice::from_ref(&parent),
-            )),
-        ) else {
+        let projection = Projection::new(&ctx);
+        let block = [parent.clone(), child.clone()];
+        let parents = projection.block_parents(&block, std::slice::from_ref(&child));
+        assert_eq!(parents.len(), 1);
+        assert!(parents.contains_key(&parent.txid()));
+        let Ok((values, _)) =
+            projection.transaction_values([(&child, None), (&child, None)], Some(&parents))
+        else {
             return Err("in-block parent".into());
         };
         assert_eq!(values[0].fee, 25);
@@ -4505,9 +4615,10 @@ mod tests {
         }));
         let Err(error) = Projection::new(&ctx).transaction_values(
             [(&child, None)],
-            Some(super::projection::ParentSource::Block(
-                std::slice::from_ref(&parent),
-            )),
+            Some(
+                &Projection::new(&ctx)
+                    .block_parents(std::slice::from_ref(&parent), std::slice::from_ref(&child)),
+            ),
         ) else {
             return Err("index behind tip".into());
         };
@@ -4520,8 +4631,9 @@ mod tests {
         Ok(())
     }
 
+    // API-09, WF-02
     #[test]
-    fn backend_mempool_get_bounds_prevouts_without_limiting_rows() {
+    fn backend_mempool_get_bounds_pages_and_prevouts() {
         let parent = paying_transaction(
             &[OutPoint::null()],
             &(0..57)
@@ -4555,12 +4667,13 @@ mod tests {
                 .expect("fixture entry");
         }
         let handler = Handler::new(Arc::new(ctx));
-        let cursor = format!("/internal/mempool/txs/{}", txs[24].txid());
+        let first_cursor = format!("/internal/mempool/txs/{}", txs[24].txid());
+        let second_cursor = format!("/internal/mempool/txs/{}", txs[49].txid());
         for (path, query, start, count) in [
-            ("/internal/mempool/txs", "", 0, 57),
-            ("/internal/mempool/txs", "max_txs=26", 0, 26),
-            (cursor.as_str(), "", 25, 32),
-            (cursor.as_str(), "max_txs=25", 25, 25),
+            ("/internal/mempool/txs", "", 0, 25),
+            ("/internal/mempool/txs", "max_txs=25", 0, 25),
+            (first_cursor.as_str(), "", 25, 25),
+            (second_cursor.as_str(), "", 50, 7),
             ("/internal/mempool/txs", "max_txs=0", 0, 0),
         ] {
             calls.store(0, Ordering::Relaxed);
@@ -4570,7 +4683,7 @@ mod tests {
             assert_eq!(rows.len(), count);
             assert_eq!(
                 calls.load(Ordering::Relaxed),
-                count.div_ceil(super::backend::TRANSACTION_BATCH_SIZE),
+                count.div_ceil(super::backend::MAX_BACKEND_BULK_ITEMS),
                 "one index read per distinct prevout txid in each batch for {path} with {count} rows"
             );
             for (row, tx) in rows.iter().zip(txs.iter().skip(start)) {
@@ -4599,17 +4712,22 @@ mod tests {
             ))
             .expect("unavailable parent fixture");
         assert_eq!(
-            backend_route(&handler, "/internal/mempool/txs", "").status,
+            backend_route(&handler, second_cursor.as_str(), "").status,
             503
         );
         assert_eq!(
-            backend_route(&handler, "/internal/mempool/txs", "max_txs=57").status,
+            backend_route(&handler, second_cursor.as_str(), "max_txs=7").status,
             200
+        );
+        assert_eq!(
+            backend_route(&handler, "/internal/mempool/txs", "max_txs=26").status,
+            400
         );
     }
 
+    // WF-02
     #[test]
-    fn backend_mempool_get_keeps_captured_parents_across_batches() {
+    fn backend_mempool_get_keeps_captured_parents_within_a_page() {
         struct RemovingIndex {
             gateway: Arc<bitcoin_rs_mempool::MempoolGateway>,
             captured_parent: Txid,
@@ -4644,7 +4762,7 @@ mod tests {
             paying_transaction(&[OutPoint::new(external.txid(), 0)], &[(350, vec![0x51])]);
         let child = paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(250, vec![0x51])]);
         let mut txs = vec![parent.clone(), trigger];
-        txs.extend((2..26).map(|n| paying_transaction(&[OutPoint::null()], &[(n, vec![0x51])])));
+        txs.extend((2..24).map(|n| paying_transaction(&[OutPoint::null()], &[(n, vec![0x51])])));
         txs.push(child.clone());
         let mut ctx = Context::new();
         for (n, tx) in (0_u64..).zip(&txs) {
@@ -4671,19 +4789,24 @@ mod tests {
         for (row, tx) in rows.iter().zip(&txs) {
             assert_eq!(row["txid"], tx.txid().to_string());
         }
-        assert_eq!(rows[26]["vin"][0]["prevout"]["value"], 300);
-        assert_eq!(rows[26]["fee"], 50);
+        assert_eq!(rows[24]["vin"][0]["prevout"]["value"], 300);
+        assert_eq!(rows[24]["fee"], 50);
         assert!(!ctx.mempool.gateway.read().contains_txid(&parent.txid()));
         assert!(!ctx.mempool.gateway.read().contains_txid(&child.txid()));
     }
 
+    // API-09, WF-02
     #[test]
     fn backend_transaction_batches_share_duplicate_bodies_and_preserve_rows() {
-        let mut first = paying_transaction(&[OutPoint::null()], &[(125, vec![0x51])]);
+        let parent =
+            paying_transaction(&[OutPoint::null()], &[(150, vec![0x51]), (200, vec![0x52])]);
+        let mut first =
+            paying_transaction(&[OutPoint::new(parent.txid(), 0)], &[(125, vec![0x51])]);
         first.inputs[0].witness = vec![vec![0x42; 1024]].into();
-        let second = paying_transaction(&[OutPoint::null()], &[(175, vec![0x52])]);
+        let second = paying_transaction(&[OutPoint::new(parent.txid(), 1)], &[(175, vec![0x52])]);
         let missing = Txid::default();
-        let ids = [first.txid(), missing, second.txid(), first.txid()].repeat(30);
+        let mut ids = [first.txid(), missing, second.txid(), first.txid()].repeat(6);
+        ids.push(first.txid());
         let body = sonic_rs::to_vec(&ids.iter().map(ToString::to_string).collect::<Vec<_>>())
             .expect("request");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -4702,7 +4825,7 @@ mod tests {
             .expect("batch block header");
         ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
             block: ctx.chain.block_by_height(0),
-            transactions: vec![first.clone(), second.clone()],
+            transactions: vec![first.clone(), second.clone(), parent],
             calls: Arc::clone(&calls),
         }));
         let ctx = Arc::new(ctx);
@@ -4718,10 +4841,17 @@ mod tests {
         }
         assert_eq!(rows[0], rows[2]);
         assert_eq!(rows[0]["vin"][0]["witness"], json!(["42".repeat(1024)]));
-        assert!(
-            calls.load(Ordering::Relaxed) < ids.len() / 2,
-            "duplicate IDs must share body resolution within bounded batches"
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            4,
+            "three distinct IDs and one shared parent"
         );
+        calls.store(0, Ordering::Relaxed);
+        let oversized = vec![first.txid().to_string(); 26];
+        let oversized = sonic_rs::to_vec(&oversized).expect("oversized request");
+        let response = backend_route_post(&handler, "/internal/txs", &oversized);
+        assert_eq!(response.status, 400);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
         for tx in [first, second] {
             ctx.mempool
                 .gateway
@@ -4734,6 +4864,11 @@ mod tests {
         let response = backend_route_post(&handler, "/internal/mempool/txs", &body);
         assert_eq!(response.status, 200);
         let mempool: Vec<Value> = sonic_rs::from_slice(&response.body).expect("pool batch");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "one shared confirmed parent"
+        );
         assert_eq!(mempool.len(), rows.len());
         for (mut row, expected) in mempool.into_iter().zip(rows) {
             assert_eq!(row["status"]["confirmed"], false);

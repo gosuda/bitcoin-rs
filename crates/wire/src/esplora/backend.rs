@@ -1,21 +1,137 @@
 use alloc::sync::Arc;
+use core::ops::Range;
 use core::str::FromStr as _;
+use std::io;
 
 use bitcoin_rs_consensus::primitives::{OutPoint, Txid};
 use bitcoin_rs_mempool::MempoolEntry;
 
-use super::http::{dispatch_error, query_limit};
+use super::MAX_BATCH_BYTES;
+use super::http::dispatch_error;
 use super::model::{Outspend, TransactionValue};
-use super::projection::{ParentSource, Projection, TxSource};
-use super::public::{block_transaction_values, outspend, outspends_for_transaction};
+use super::projection::{Projection, TxSource};
+use super::public::{outspend, outspends_for_transaction, visit_block_transactions};
 use crate::context::Context;
 use crate::handlers::Handler;
 use crate::handlers::mining::required_gbt_rules;
 use crate::rest::Response;
-use crate::rest::{bad_request, json_ok, service_unavailable};
+use crate::rest::{bad_request, internal_error, json_ok, service_unavailable, text_response};
 use sonic_rs::json as sonic_json;
 
-pub(super) const TRANSACTION_BATCH_SIZE: usize = 25;
+pub(super) const MAX_BACKEND_BULK_ITEMS: usize = 25;
+
+struct BoundedJsonArray {
+    body: Vec<u8>,
+}
+
+impl BoundedJsonArray {
+    fn new() -> Self {
+        Self { body: vec![b'['] }
+    }
+
+    fn reserve_row_bytes(&mut self, additional: usize) -> bool {
+        let required = self.body.len().saturating_add(additional).saturating_add(1);
+        if required > MAX_BATCH_BYTES {
+            return false;
+        }
+        if required > self.body.capacity() {
+            let capacity = self
+                .body
+                .capacity()
+                .saturating_mul(2)
+                .clamp(required, MAX_BATCH_BYTES);
+            self.body.reserve_exact(capacity - self.body.len());
+        }
+        true
+    }
+
+    fn push<T: serde::Serialize>(&mut self, value: &T) -> Result<Range<usize>, Response> {
+        let rollback = self.body.len();
+        if rollback > 1 {
+            if !self.reserve_row_bytes(1) {
+                return Err(bulk_response_limit());
+            }
+            self.body.push(b',');
+        }
+        let start = self.body.len();
+        if let Err(error) = value.serialize(&mut sonic_rs::Serializer::with_formatter(
+            sonic_rs::writer::BufferedWriter::new(&mut *self),
+            ChunkedStrings,
+        )) {
+            self.body.truncate(rollback);
+            return if error.io_error_kind() == Some(io::ErrorKind::FileTooLarge) {
+                Err(bulk_response_limit())
+            } else {
+                Err(internal_error("failed to serialize response"))
+            };
+        }
+        Ok(start..self.body.len())
+    }
+
+    fn repeat(&mut self, row: Range<usize>) -> Result<(), Response> {
+        if !self.reserve_row_bytes(1 + row.len()) {
+            return Err(bulk_response_limit());
+        }
+        self.body.push(b',');
+        self.body.extend_from_within(row);
+        Ok(())
+    }
+
+    fn finish(mut self) -> Response {
+        self.body.push(b']');
+        text_response("application/json", self.body)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ChunkedStrings;
+
+impl sonic_rs::format::Formatter for ChunkedStrings {
+    fn write_string_fast<W: sonic_rs::writer::WriteExt + ?Sized>(
+        &mut self,
+        writer: &mut W,
+        mut value: &str,
+        need_quote: bool,
+    ) -> io::Result<()> {
+        const CHUNK: usize = 4096;
+        let mut formatter = sonic_rs::format::CompactFormatter;
+        if value.len() <= CHUNK {
+            return formatter.write_string_fast(writer, value, need_quote);
+        }
+        if need_quote {
+            writer.write_all(b"\"")?;
+        }
+        while !value.is_empty() {
+            let (chunk, rest) = value.split_at(value.floor_char_boundary(CHUNK));
+            formatter.write_string_fast(writer, chunk, false)?;
+            value = rest;
+        }
+        if need_quote {
+            writer.write_all(b"\"")?;
+        }
+        Ok(())
+    }
+}
+
+impl io::Write for BoundedJsonArray {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if !self.reserve_row_bytes(bytes.len()) {
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
+        self.body.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bulk_response_limit() -> Response {
+    service_unavailable(
+        "backend bulk response exceeds 16 MiB; split the batch or page block transactions with /esplora/block/{hash}/txs/{start_index}",
+    )
+}
 
 pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> Option<Response> {
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
@@ -35,11 +151,13 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Option<Respons
             ctx.as_ref(),
             body,
             TransactionScope::All,
+            MAX_BATCH_BYTES,
         )),
         "/internal/mempool/txs" => Some(internal_transactions_scoped(
             ctx.as_ref(),
             body,
             TransactionScope::MempoolOnly,
+            MAX_BATCH_BYTES,
         )),
         "/internal/txs/outspends/by-txid" => Some(internal_outspends_by_txid(ctx.as_ref(), body)),
         "/internal/txs/outspends/by-outpoint" => {
@@ -63,22 +181,30 @@ fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    let (values, source) = match block_transaction_values(ctx, &record, &block, 0, usize::MAX) {
-        Ok(values) => values,
-        Err(response) => return response,
-    };
-    let response = json_ok(values);
-    match source {
-        TxSource::Confirmed => response,
-        TxSource::Joined => match projection.ensure_chain_view(&view) {
+    let mut output = BoundedJsonArray::new();
+    let source =
+        match visit_block_transactions(ctx, &record, &block, 0..block.txs.len(), &view, |value| {
+            output.push(&value).map(|_| ())
+        }) {
+            Ok(source) => source,
+            Err(response) => return response,
+        };
+    let response = output.finish();
+    if matches!(source, TxSource::Joined) {
+        match projection.ensure_chain_view(&view) {
             Ok(()) => response,
             Err(unavailable) => unavailable,
-        },
+        }
+    } else {
+        response
     }
 }
 
 fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Response {
-    let max_txs = query_limit(query, "max_txs").unwrap_or(usize::MAX);
+    let max_txs = match mempool_page_limit(query) {
+        Ok(limit) => limit,
+        Err(response) => return response,
+    };
     if max_txs == 0 {
         return json_ok(Vec::<TransactionValue>::new());
     }
@@ -100,26 +226,38 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
             left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
         });
         ordered
-            .into_iter()
-            .map(|(_, txid, transaction)| (txid, transaction))
-            .collect::<Vec<_>>()
     };
     let projection = Projection::new(ctx);
-    let parents = transactions
-        .iter()
-        .map(|(txid, tx)| (*txid, tx.as_ref()))
-        .collect();
-    let mut values = Vec::new();
-    for batch in transactions.chunks(TRANSACTION_BATCH_SIZE) {
-        match projection.transaction_values(
-            batch.iter().map(|(_, tx)| (tx.as_ref(), None)),
-            Some(ParentSource::Selected(&parents)),
-        ) {
-            Ok((batch, _)) => values.extend(batch),
-            Err(response) => return response,
-        }
+    let mut output = BoundedJsonArray::new();
+    match projection.visit_transaction_values(
+        transactions.iter().map(|(_, _, tx)| (tx.as_ref(), None)),
+        None,
+        |value| output.push(&value).map(|_| ()),
+    ) {
+        Ok(_) => output.finish(),
+        Err(response) => response,
     }
-    json_ok(values)
+}
+
+fn mempool_page_limit(query: &str) -> Result<usize, Response> {
+    let requested = query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == "max_txs").then_some(value)
+    });
+    let Some(requested) = requested else {
+        return Ok(MAX_BACKEND_BULK_ITEMS);
+    };
+    let Ok(requested) = requested.parse::<usize>() else {
+        return Err(bad_request(
+            "max_txs must be an unsigned integer no greater than 25",
+        ));
+    };
+    if requested > MAX_BACKEND_BULK_ITEMS {
+        return Err(bad_request(
+            "max_txs must be an unsigned integer no greater than 25",
+        ));
+    }
+    Ok(requested)
 }
 
 fn select_mempool_page<'a>(
@@ -158,9 +296,18 @@ enum TransactionScope {
     MempoolOnly,
 }
 
-fn internal_transactions_scoped(ctx: &Context, body: &[u8], scope: TransactionScope) -> Response {
-    let Ok(text_ids) = sonic_rs::from_slice::<Vec<String>>(body) else {
-        return bad_request("transaction request body must be a JSON array of txids");
+fn internal_transactions_scoped(
+    ctx: &Context,
+    body: &[u8],
+    scope: TransactionScope,
+    source_limit: usize,
+) -> Response {
+    let text_ids = match bulk_strings(
+        body,
+        "transaction request body must be a JSON array of txids",
+    ) {
+        Ok(ids) => ids,
+        Err(response) => return response,
     };
     let ids = match text_ids
         .into_iter()
@@ -171,71 +318,179 @@ fn internal_transactions_scoped(ctx: &Context, body: &[u8], scope: TransactionSc
         Err(response) => return response,
     };
     let projection = Projection::new(ctx);
-    let mut values = Vec::new();
-    for ids in ids.chunks(TRANSACTION_BATCH_SIZE) {
-        let mut transactions = std::collections::HashMap::new();
-        for id in ids {
-            if transactions.contains_key(id) {
-                continue;
+    let mut transactions = std::collections::HashMap::new();
+    let mut source_bytes = 0usize;
+    for id in &ids {
+        if transactions.contains_key(id) {
+            continue;
+        }
+        let transaction = if scope == TransactionScope::MempoolOnly {
+            ctx.mempool
+                .gateway
+                .read()
+                .transaction_by_txid(id)
+                .map(|transaction| ((*transaction).clone(), None, TxSource::Joined))
+        } else {
+            match projection.transaction(id) {
+                Ok(transaction) => transaction,
+                Err(response) => return response,
             }
-            let transaction = if scope == TransactionScope::MempoolOnly {
-                ctx.mempool
-                    .gateway
-                    .read()
-                    .transaction_by_txid(id)
-                    .map(|transaction| ((*transaction).clone(), None, TxSource::Joined))
-            } else {
-                match projection.transaction(id) {
-                    Ok(transaction) => transaction,
-                    Err(response) => return response,
-                }
-            };
-            transactions.insert(*id, transaction);
+        };
+        if let Some((transaction, _, _)) = transaction.as_ref() {
+            source_bytes = source_bytes.saturating_add(transaction.total_size());
+            if source_bytes > source_limit {
+                return service_unavailable(
+                    "backend bulk transaction sources exceed 16 MiB limit; split the request",
+                );
+            }
         }
-        let selected = ids.iter().filter_map(|id| {
-            transactions
-                .get(id)
-                .and_then(Option::as_ref)
-                .map(|(tx, status, _)| (tx, *status))
-        });
-        match projection.transaction_values(selected, None) {
-            Ok((batch, _)) => values.extend(batch),
-            Err(response) => return response,
-        }
+        transactions.insert(*id, transaction);
     }
-    json_ok(values)
+    let parents: std::collections::HashMap<_, _> = transactions
+        .iter()
+        .filter_map(|(id, transaction)| {
+            transaction
+                .as_ref()
+                .map(|(transaction, _, _)| (*id, transaction))
+        })
+        .collect();
+    let prevouts =
+        match projection.resolve_prevouts(parents.values().copied(), &parents, MAX_BATCH_BYTES) {
+            Ok(prevouts) => prevouts,
+            Err(response) => return response,
+        };
+    let mut output = BoundedJsonArray::new();
+    let mut rendered = std::collections::HashMap::<Txid, Range<usize>>::new();
+    for id in ids {
+        if let Some(row) = rendered.get(&id) {
+            if let Err(response) = output.repeat(row.clone()) {
+                return response;
+            }
+            continue;
+        }
+        let Some(Some((transaction, status, _))) = transactions.get(&id) else {
+            continue;
+        };
+        let value = match projection.transaction_value(transaction, id, *status, &prevouts) {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        let row = match output.push(&value) {
+            Ok(row) => row,
+            Err(response) => return response,
+        };
+        rendered.insert(id, row);
+    }
+    output.finish()
+}
+
+fn bulk_strings(body: &[u8], invalid: &'static str) -> Result<Vec<String>, Response> {
+    sonic_rs::from_slice::<BulkStrings>(body)
+        .map(|values| values.0)
+        .map_err(|_| bad_request(invalid))
+}
+
+struct BulkStrings(Vec<String>);
+
+impl<'de> serde::Deserialize<'de> for BulkStrings {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        de.deserialize_seq(Self(Vec::new()))
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for BulkStrings {
+    type Value = Self;
+
+    fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "an array of at most {MAX_BACKEND_BULK_ITEMS} strings"
+        )
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(mut self, mut seq: A) -> Result<Self, A::Error> {
+        while self.0.len() < MAX_BACKEND_BULK_ITEMS {
+            let Some(value) = seq.next_element()? else {
+                break;
+            };
+            self.0.push(value);
+        }
+        Ok(self)
+    }
 }
 
 fn internal_outspends_by_txid(ctx: &Context, body: &[u8]) -> Response {
-    let Ok(text_ids) = sonic_rs::from_slice::<Vec<String>>(body) else {
-        return bad_request("outspend request body must be a JSON array of txids");
+    let text_ids = match bulk_strings(body, "outspend request body must be a JSON array of txids") {
+        Ok(ids) => ids,
+        Err(response) => return response,
     };
     let projection = Projection::new(ctx);
-    text_ids
-        .into_iter()
-        .map(|id| {
-            Txid::from_str(&id).ok().map_or(Ok(Vec::new()), |id| {
-                projection
-                    .transaction(&id)?
-                    .map_or(Ok(Vec::new()), |(transaction, _, _)| {
-                        outspends_for_transaction(&projection, &transaction)
-                    })
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_or_else(|r| r, json_ok)
+    let mut output = BoundedJsonArray::new();
+    let mut rendered = std::collections::HashMap::<Txid, Range<usize>>::new();
+    for text_id in text_ids {
+        let Ok(id) = Txid::from_str(&text_id) else {
+            if let Err(response) = output.push(&Vec::<Outspend>::new()) {
+                return response;
+            }
+            continue;
+        };
+        if let Some(row) = rendered.get(&id) {
+            if let Err(response) = output.repeat(row.clone()) {
+                return response;
+            }
+            continue;
+        }
+        let transaction = match projection.transaction(&id) {
+            Ok(transaction) => transaction,
+            Err(response) => return response,
+        };
+        let outspends = match transaction {
+            Some((transaction, _, _)) => {
+                match outspends_for_transaction(&projection, &transaction) {
+                    Ok(outspends) => outspends,
+                    Err(response) => return response,
+                }
+            }
+            None => Vec::new(),
+        };
+        let row = match output.push(&outspends) {
+            Ok(row) => row,
+            Err(response) => return response,
+        };
+        rendered.insert(id, row);
+    }
+    output.finish()
 }
 
 fn internal_outspends_by_outpoint(ctx: &Context, body: &[u8]) -> Response {
-    let Ok(outpoints) = sonic_rs::from_slice::<Vec<String>>(body) else {
-        return bad_request("outspend request body must be a JSON array of outpoints");
+    let outpoints = match bulk_strings(
+        body,
+        "outspend request body must be a JSON array of outpoints",
+    ) {
+        Ok(outpoints) => outpoints,
+        Err(response) => return response,
     };
     let projection = Projection::new(ctx);
-    outpoints
-        .into_iter()
-        .map(|outpoint| internal_outspend(&projection, &outpoint))
-        .collect::<Result<Vec<_>, _>>()
-        .map_or_else(|r| r, json_ok)
+    let mut output = BoundedJsonArray::new();
+    let mut rendered = std::collections::HashMap::<String, Range<usize>>::new();
+    for outpoint in outpoints {
+        if let Some(row) = rendered.get(&outpoint) {
+            if let Err(response) = output.repeat(row.clone()) {
+                return response;
+            }
+            continue;
+        }
+        let value = match internal_outspend(&projection, &outpoint) {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        let row = match output.push(&value) {
+            Ok(row) => row,
+            Err(response) => return response,
+        };
+        rendered.insert(outpoint, row);
+    }
+    output.finish()
 }
 
 fn internal_outspend(
@@ -282,7 +537,10 @@ mod pagination_tests {
     use bitcoin_rs_mempool::MempoolEntry;
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
-    use super::{internal_mempool_txs, select_mempool_page};
+    use super::{
+        BoundedJsonArray, MAX_BACKEND_BULK_ITEMS, MAX_BATCH_BYTES, bulk_strings,
+        internal_mempool_txs, select_mempool_page,
+    };
     use crate::context::Context;
 
     fn fixture(times: &[u64]) -> (Context, Vec<(u64, Txid)>) {
@@ -336,6 +594,10 @@ mod pagination_tests {
             .collect()
     }
 
+    fn status(ctx: &Context, query: &str) -> u16 {
+        internal_mempool_txs(ctx, None, query).status
+    }
+
     #[test]
     fn bounded_pages_match_full_sort_for_every_cursor() {
         for times in [
@@ -349,7 +611,7 @@ mod pagination_tests {
             let cursors = std::iter::once(None)
                 .chain(expected.iter().map(|(_, txid)| Some(txid.to_string())));
             for (start, cursor) in cursors.enumerate() {
-                for limit in [0, 1, 2, 3, 8, 17, 18, 19, usize::MAX] {
+                for limit in [0, 1, 2, 3, 8, 17, 18, 19, MAX_BACKEND_BULK_ITEMS] {
                     let want: Vec<_> = expected
                         .iter()
                         .skip(start)
@@ -389,22 +651,83 @@ mod pagination_tests {
         }
     }
 
+    // API-09, WF-02
     #[test]
-    fn absent_invalid_and_duplicate_limits_keep_query_semantics() {
+    fn mempool_limits_default_to_one_page_and_reject_invalid_values() {
         let (ctx, expected) = fixture(&[2, 0, 1, 2]);
         let all: Vec<_> = expected.iter().map(|(_, txid)| *txid).collect();
+        for query in ["", "other=1"] {
+            assert_eq!(page(&ctx, None, query), all);
+        }
         for query in [
-            "",
             "max_txs=invalid",
             "max_txs=-1",
             "max_txs=184467440737095516160",
-            "other=1",
+            "max_txs=26",
+            "max_txs=invalid&max_txs=2",
         ] {
-            assert_eq!(page(&ctx, None, query), all);
+            assert_eq!(status(&ctx, query), 400, "query {query}");
         }
-        assert_eq!(page(&ctx, None, "max_txs=invalid&max_txs=2"), all[..2]);
         assert_eq!(page(&ctx, None, "max_txs=1&max_txs=2"), all[..1]);
         assert_eq!(page(&ctx, None, "max_txs=0&max_txs=2"), []);
+    }
+
+    // API-09, WF-02
+    #[test]
+    fn bulk_request_count_includes_duplicate_entries() {
+        let at_limit = vec!["duplicate"; MAX_BACKEND_BULK_ITEMS];
+        let body = sonic_rs::to_vec(&at_limit).expect("request JSON");
+        assert_eq!(
+            bulk_strings(&body, "invalid").expect("bounded request"),
+            at_limit
+        );
+        let over_limit = vec!["duplicate"; MAX_BACKEND_BULK_ITEMS + 1];
+        let body = sonic_rs::to_vec(&over_limit).expect("request JSON");
+        let response = bulk_strings(&body, "invalid").expect_err("oversized request");
+        assert_eq!(response.status, 400);
+        for invalid in [b"[null]".as_slice(), b"[] trailing", b"[1,"] {
+            assert_eq!(
+                bulk_strings(invalid, "invalid")
+                    .expect_err("invalid request")
+                    .status,
+                400
+            );
+        }
+    }
+
+    // API-09, WF-02
+    #[test]
+    fn transaction_batch_charges_only_distinct_source_bytes() {
+        let (ctx, ids) = fixture(&[1, 2]);
+        for (request, status) in [([ids[0].1, ids[0].1], 200), ([ids[0].1, ids[1].1], 503)] {
+            let body = sonic_rs::to_vec(&request.map(|id| id.to_string())).expect("request JSON");
+            let response = super::internal_transactions_scoped(
+                &ctx,
+                &body,
+                super::TransactionScope::MempoolOnly,
+                20,
+            );
+            assert_eq!(response.status, status);
+        }
+    }
+
+    // API-09, WF-02
+    #[test]
+    fn bounded_json_reuses_rows_and_refuses_oversized_output() {
+        let mut output = BoundedJsonArray::new();
+        let row = output.push(&"safe").expect("bounded row");
+        output.repeat(row).expect("bounded duplicate");
+        assert_eq!(output.finish().body, br#"["safe","safe"]"#);
+
+        let mut output = BoundedJsonArray::new();
+        let text = format!("{}🦀\n\"{}", "x".repeat(4095), "y".repeat(4096));
+        output.push(&text).expect("bounded string");
+        let decoded: Vec<String> = sonic_rs::from_slice(&output.finish().body).expect("valid JSON");
+        assert_eq!(decoded, [text]);
+        let mut output = BoundedJsonArray::new();
+        let oversized = "x".repeat(MAX_BATCH_BYTES);
+        let response = output.push(&oversized).expect_err("oversized response");
+        assert_eq!(response.status, 503);
     }
 
     #[test]
