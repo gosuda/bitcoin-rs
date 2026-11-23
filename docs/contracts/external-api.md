@@ -425,7 +425,12 @@ wallet interoperability remain unverified.
 - The next template read captures membership and fee revisions together.
 - `getblocktemplate` never carries a coinbase budget.
 - Typed `BlockTemplateRequest.coinbase_budget` is `None` for every RPC request.
-- Only the typed `MiningControl` embedder (experimental SV2 regtest adapter in `tools/stratum-sv2`) sets it.
+- Ordinary node templates reserve 8,000 WU for the block header, transaction count, and external coinbase by default. The configured `block_reserved_weight` is clamped to 2,000 through 4,000,000 WU, as in Core v31.1 `ClampOptions`.
+- Ordinary node templates reserve at least 400 coinbase sigop cost. The actual local coinbase cost is used when it is larger than either reserve.
+- Before cache publication, the node validates each newly assembled or prepared candidate through the chainstate proposal path. Invalid candidates return a rejection and are not served. Validation does not commit the block, require solved PoW, or check a signet solution.
+- A generation change during validation retries assembly. Mining cache and mempool locks are not held during chainstate validation.
+- `CandidateContext.coinbase_reserve` states this policy. A complete local coinbase can use `CoinbaseReserve::EXACT`; production templates use the immutable node configuration.
+- Only the typed `MiningControl` embedder (experimental SV2 regtest adapter in `tools/stratum-sv2`) sets a coinbase budget.
 - A budgeted candidate leaves that room in the coinbase with a budget-qualified id.
 - The ordinary candidate is used when it already admits the budget.
 - The qualifier is not RPC contract: RPC callers never receive it, and long-poll waits compare generations only.
@@ -628,7 +633,7 @@ wallet interoperability remain unverified.
 - Failure returns Core `-25` (`TestBlockValidity failed: {reason}`) where `{reason}` is the BIP22 `GetRejectReason` string (`API-19`).
 - This pre-check applies only to `Ordered` selection (`generateblock`).
 - An ordered candidate refused by the mining sigop preflight also returns this `-25` (`bad-blk-sigops`), not an operational `Failed`.
-- `generatetoaddress` (`Mempool`) matches Core `generateBlocks` and skips it.
+- `generatetoaddress` (`Mempool`) skips the ordered pre-check. Its fresh candidate passes the same assembly validation as a served template before solve.
 - The check calls `apply::validate_block` directly (`ApplyIntent::Propose` already skips hash-meets-target), not GBT `propose` (`API-18` vocabulary).
 - Shutdown and a closed-for-recovery chainstate stay `Unavailable`, not `TestBlockValidity`.
 ### `API-31`: `generateblock` multipath, ranged, and Expand errors

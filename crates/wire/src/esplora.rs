@@ -3193,7 +3193,8 @@ mod tests {
     #[test]
     fn backend_templates_share_expensive_admission_through_send() {
         use crate::mining::{
-            BlockTemplate, CandidateContext, FakeMiningControl, MiningRule, assemble_candidate,
+            BlockTemplate, CandidateContext, CoinbaseReserve, FakeMiningControl, MiningRule,
+            assemble_candidate,
         };
 
         let mut context = Context::new().with_esplora_query_limit(std::num::NonZeroUsize::MIN);
@@ -3214,6 +3215,7 @@ mod tests {
                 max_weight: 4_000_000,
                 max_size: 4_000_000,
                 max_sigops: 80_000,
+                coinbase_reserve: CoinbaseReserve::EXACT,
             },
             &context.mempool.gateway.pool().read(),
             &[0x51],
