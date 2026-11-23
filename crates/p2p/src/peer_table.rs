@@ -368,6 +368,7 @@ impl PeerTable {
         Some(crate::eviction::EvictionCandidate {
             addr,
             connected: lease.connected_at(),
+            minimum_ping: None,
             last_block: entry.announcement.useful_block_sequence,
             last_tx: entry.useful_tx_sequence,
             relevant_services: info.is_some_and(|info| {
