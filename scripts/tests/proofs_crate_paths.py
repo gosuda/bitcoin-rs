@@ -41,7 +41,14 @@ class ProofsCratePathsTest(unittest.TestCase):
             )
         environment = {
             key: os.environ[key]
-            for key in ("PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "ELAN_HOME", "KANI_HOME")
+            for key in (
+                "PATH",
+                "HOME",
+                "RUSTUP_HOME",
+                "CARGO_HOME",
+                "ELAN_HOME",
+                "KANI_HOME",
+            )
             if key in os.environ
         }
         environment.update(
@@ -210,12 +217,15 @@ else:
     run_models()
 """
 
+
 class ProofsJobLimitsTest(unittest.TestCase):
     def fixture(
         self, root: Path, jobs: str, expected: int, crate_count: int
     ) -> dict[str, str]:
         for tool in ("bash", "lake", "rg"):
-            self.assertIsNotNone(shutil.which(tool), f"Required real tool missing: {tool}")
+            self.assertIsNotNone(
+                shutil.which(tool), f"Required real tool missing: {tool}"
+            )
         scripts = root / "scripts"
         scripts.mkdir()
         for name in ("ci-pr.sh", "extract_lean.sh"):
@@ -231,7 +241,9 @@ class ProofsJobLimitsTest(unittest.TestCase):
         (lean / "Probe.lean").write_text(
             "theorem probe_identity (n : Nat) : n = n := rfl\n", encoding="utf-8"
         )
-        shutil.copy2(SCRIPTS.parent / "docs/lean/lean-toolchain", lean / "lean-toolchain")
+        shutil.copy2(
+            SCRIPTS.parent / "docs/lean/lean-toolchain", lean / "lean-toolchain"
+        )
         probe = root / "probe"
         (probe / "started").mkdir(parents=True)
         crates = tuple(f"crates/probe-{index:02}" for index in range(crate_count))
@@ -239,7 +251,14 @@ class ProofsJobLimitsTest(unittest.TestCase):
             (root / crate).mkdir(parents=True)
         environment = {
             key: os.environ[key]
-            for key in ("PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "ELAN_HOME", "KANI_HOME")
+            for key in (
+                "PATH",
+                "HOME",
+                "RUSTUP_HOME",
+                "CARGO_HOME",
+                "ELAN_HOME",
+                "KANI_HOME",
+            )
             if key in os.environ
         }
         environment.update(
@@ -265,22 +284,27 @@ class ProofsJobLimitsTest(unittest.TestCase):
             ("00009223372036854775807", 9223372036854775807, 2),
         )
         for jobs, expected, crate_count in cases:
-            with self.subTest(jobs=jobs), tempfile.TemporaryDirectory(
-                prefix="proofs-job-limits-"
-            ) as temporary:
+            with (
+                self.subTest(jobs=jobs),
+                tempfile.TemporaryDirectory(prefix="proofs-job-limits-") as temporary,
+            ):
                 root = Path(temporary)
                 environment = self.fixture(root, jobs, expected, crate_count)
                 status, output = run_proofs(root, environment)
                 self.assertEqual(status, 0, output)
                 self.assertEqual(
-                    (root / "probe/model-arguments").read_text(encoding="utf-8").splitlines(),
+                    (root / "probe/model-arguments")
+                    .read_text(encoding="utf-8")
+                    .splitlines(),
                     ["--jobs", str(expected)],
                 )
                 self.assertEqual(
                     int((root / "probe/first-cohort").read_text(encoding="utf-8")),
                     min(expected, crate_count),
                 )
-                self.assertEqual(len(tuple((root / "probe/started").iterdir())), crate_count)
+                self.assertEqual(
+                    len(tuple((root / "probe/started").iterdir())), crate_count
+                )
                 self.assertIn("==> ok: models: check_models", output)
 
     def test_invalid_limit_refuses_before_launching_proof_jobs(self) -> None:
@@ -299,9 +323,12 @@ class ProofsJobLimitsTest(unittest.TestCase):
             "18446744073709551616",
             "9" * 100,
         ):
-            with self.subTest(jobs=jobs), tempfile.TemporaryDirectory(
-                prefix="proofs-invalid-job-limit-"
-            ) as temporary:
+            with (
+                self.subTest(jobs=jobs),
+                tempfile.TemporaryDirectory(
+                    prefix="proofs-invalid-job-limit-"
+                ) as temporary,
+            ):
                 root = Path(temporary)
                 environment = self.fixture(root, jobs, 1, 2)
                 status, output = run_proofs(root, environment)
@@ -310,7 +337,6 @@ class ProofsJobLimitsTest(unittest.TestCase):
                 self.assertEqual(tuple((root / "probe/started").iterdir()), ())
                 self.assertFalse((root / "probe/model-arguments").exists())
                 self.assertFalse((root / "docs/lean/.lake").exists())
-
 
 
 if __name__ == "__main__":
