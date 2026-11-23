@@ -224,7 +224,14 @@ impl Candidate {
 }
 
 pub fn solve_block(block: &mut Block, max_tries: u64) -> Result<(), MiningError> {
-    for _ in 0..max_tries {
+    let mut remaining = max_tries;
+    solve_block_with_budget(block, &mut remaining)
+}
+
+pub fn solve_block_with_budget(block: &mut Block, remaining: &mut u64) -> Result<(), MiningError> {
+    let max_tries = *remaining;
+    while *remaining != 0 {
+        *remaining -= 1;
         let hash = Hash256::from(block.header.compute_hash());
         if compact_is_met_by(block.header.bits, hash) {
             return Ok(());
@@ -662,6 +669,42 @@ mod tests {
     type TestResult = Result<(), TestError>;
 
     const PAYOUT: &[u8] = &[0x51];
+
+    // API-30
+    #[test]
+    fn solving_consumes_one_attempt_per_hash_and_preserves_exhaustion() -> TestResult {
+        let mut block = Network::Regtest.genesis_block();
+        let nonce = block.header.nonce;
+        let mut remaining = 2;
+        solve_block_with_budget(&mut block, &mut remaining)?;
+        assert_eq!(remaining, 1);
+        assert_eq!(block.header.nonce, nonce);
+        solve_block_with_budget(&mut block, &mut remaining)?;
+        assert_eq!(remaining, 0);
+        assert_eq!(block.header.nonce, nonce);
+        assert!(matches!(
+            solve_block_with_budget(&mut block, &mut remaining),
+            Err(MiningError::Unsolved { tries: 0 })
+        ));
+        assert_eq!(block.header.nonce, nonce);
+
+        block.header.bits = CompactTarget::from_consensus(0);
+        block.header.nonce = u32::MAX;
+        remaining = 2;
+        assert!(matches!(
+            solve_block_with_budget(&mut block, &mut remaining),
+            Err(MiningError::Unsolved { tries: 2 })
+        ));
+        assert_eq!(remaining, 0);
+        assert_eq!(block.header.nonce, 1);
+        assert!(matches!(
+            solve_block_with_budget(&mut block, &mut remaining),
+            Err(MiningError::Unsolved { tries: 0 })
+        ));
+        assert_eq!(remaining, 0);
+        assert_eq!(block.header.nonce, 1);
+        Ok(())
+    }
 
     #[derive(Clone, Copy)]
     struct Limits {

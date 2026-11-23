@@ -285,7 +285,7 @@ wallet interoperability remain unverified.
 
 ### `API-05`: Solo-mining generate path
 
-- Owner: `MiningControl::generate` (`crates/wire/src/mining/control.rs`) via `MiningCoordinator::generate` (`crates/node/src/mining.rs`), assembling each block through `MiningService::assemble_fresh`.
+- Owner: `MiningControl::generate` (`crates/wire/src/mining/control.rs`) via `MiningCoordinator::generate` (`crates/node/src/mining.rs`), with fresh assembly in `MiningService`.
 - Each block is a fresh candidate (no GBT cache).
 - `generateblock` validates the unsolved block first (`API-30`).
 - Both generate paths solve and then either submit through the chainstate owner or dry-validate through `Chainstate::validate_block` (`ARCH-07`).
@@ -429,11 +429,19 @@ wallet interoperability remain unverified.
 - Ordinary node templates reserve at least 400 coinbase sigop cost. The actual local coinbase cost is used when it is larger than either reserve.
 - Before cache publication, the node validates each newly assembled or prepared candidate through the chainstate proposal path. Invalid candidates return a rejection and are not served. Validation does not commit the block, require solved PoW, or check a signet solution.
 - A generation change during validation retries assembly. Mining cache and mempool locks are not held during chainstate validation.
+- Joined ordinary and reusable budgeted requests share one validation result for a prepared candidate. A refusal reaches every joined request without cache publication.
+- Shutdown and a validation panic release joined requests. A later request can retry a failed flight.
 - `CandidateContext.coinbase_reserve` states this policy. A complete local coinbase can use `CoinbaseReserve::EXACT`; production templates use the immutable node configuration.
 - Only the typed `MiningControl` embedder (experimental SV2 regtest adapter in `tools/stratum-sv2`) sets a coinbase budget.
 - A budgeted candidate leaves that room in the coinbase with a budget-qualified id.
 - The ordinary candidate is used when it already admits the budget.
 - The qualifier is not RPC contract: RPC callers never receive it, and long-poll waits compare generations only.
+
+Proof: `mining::template::tests::ordinary_templates_reserve_external_coinbase_weight` and `ordinary_templates_reserve_external_coinbase_sigops` in `crates/wire/src/mining/template.rs` check both sides of the exact reserve limits.
+`mining::tests::templates_reject_missing_inputs_without_mutating_chainstate` in `crates/node/src/mining.rs` checks ordinary and budgeted refusal against full coin rows, CoinStats, pool entries, priorities, and revisions.
+`joined_prepared_requests_share_validation_and_its_refusal` in `crates/node/src/mining/coordinator.rs` uses a validation barrier to check one validation and the shared result.
+`interrupted_validation_releases_joiners_without_publishing_failure` checks panic recovery and shutdown refusal.
+`validation_generation_change_retries_before_propagating_rejection` checks that obsolete validation cannot publish a candidate.
 
 ### `API-12`: Mainnet template operational gates
 
@@ -634,8 +642,18 @@ wallet interoperability remain unverified.
 - This pre-check applies only to `Ordered` selection (`generateblock`).
 - An ordered candidate refused by the mining sigop preflight also returns this `-25` (`bad-blk-sigops`), not an operational `Failed`.
 - `generatetoaddress` (`Mempool`) skips the ordered pre-check. Its fresh candidate passes the same assembly validation as a served template before solve.
+- Mempool assembly retains the applied tip and commit, membership sequence, and fee-priority revision captured before selection.
+- A revision change during assembly or solve discards that result. The caller checks the same generation before submission.
+- A requested block has at most eight assembly attempts. Retries share its remaining nonce budget, including successful hashes discarded after a revision change.
 - The check calls `apply::validate_block` directly (`ApplyIntent::Propose` already skips hash-meets-target), not GBT `propose` (`API-18` vocabulary).
 - Shutdown and a closed-for-recovery chainstate stay `Unavailable`, not `TestBlockValidity`.
+
+Proof: `mining::tests::templates_reject_missing_inputs_without_mutating_chainstate` in `crates/node/src/mining.rs` checks fresh generation refusal without chain or pool changes.
+`fresh_mempool_validation_refuses_changed_membership_or_fee_revision` in `crates/node/src/mining/coordinator.rs` checks both revision changes after successful and failed validation.
+`generate_retries_changed_revisions_and_bounds_persistent_churn` checks fresh retry and the eight-attempt bound through `MiningCoordinator::generate`.
+`mining::template::tests::solving_consumes_one_attempt_per_hash_and_preserves_exhaustion` in `crates/wire/src/mining/template.rs` checks first-attempt success, zero budget, exhaustion, and nonce wrap.
+`generateblock_validity_wraps_bip22_reason` and `generateblock_validity_keeps_shutdown_operational` in `crates/node/src/mining.rs` retain the ordered error distinction.
+
 ### `API-31`: `generateblock` multipath, ranged, and Expand errors
 
 - Owner: `generateblock_payout_script` in `crates/wire/src/handlers/util.rs`.
