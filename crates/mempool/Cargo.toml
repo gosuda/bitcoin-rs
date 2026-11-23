@@ -44,3 +44,7 @@ bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 [[test]]
 name = "suite"
 path = "tests.rs"
+
+[[test]]
+name = "graph_walk_allocation"
+path = "graph_walk_allocation_tests.rs"
