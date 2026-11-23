@@ -9,7 +9,7 @@ permissions:
 
 concurrency:
   group: winning-header-driver-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -85,7 +85,9 @@ jobs:
         run: |
           set -euo pipefail
           qa_source="$(git rev-parse HEAD)"
-          qa_control="44f70fb2ecf7a1e64d564e2f341a303f40011bb3"
+          qa_control="2019a41836ffee19edcf77b1765594d6d0d6b724"
+          qa_body_control="ac9e8ba89b3b5ba61c5e1ca9fa00451a236dd7d8"
+          qa_continuity_control="4e209a2bc6fe4fb3f407bd197660c21cc07d767a"
           qa_evidence="$PWD/target/winning-header-driver-proof"
           qa_config="$RUNNER_TEMP/winning-header-nextest.toml"
           mkdir -p "$qa_evidence"
@@ -103,15 +105,17 @@ jobs:
           report-skipped = "none"
           TOML
           run_control() {
-            local label="$1" expected_status="$2" expected_failures="$3"
+            local label="$1" expected_status="$2" expected_failures="$3" target="$4" test_name="$5" marker="$6"
+            local cargo_target=(--lib)
+            if [[ "$target" == suite ]]; then cargo_target=(--test suite); fi
             local report="$PWD/target/nextest/header_driver_control/junit.xml"
             rm -f "$report"
             git rev-parse HEAD > "$qa_evidence/$label-source.txt"
             git diff > "$qa_evidence/$label-diff.patch"
             set +e
-            cargo nextest run --locked -p bitcoin-rs-node --test suite --no-default-features --features test-seam \
+            cargo nextest run --locked -p bitcoin-rs-node "${cargo_target[@]}" --no-default-features --features test-seam \
               --config-file "$qa_config" --profile header_driver_control --color never --no-tests fail --no-fail-fast \
-              -E 'test(=winning_header_driver::winning_header_driver_applies_deep_fork_and_recovers_durable_tip)' \
+              -E "test(=$test_name)" \
               2>&1 | tee "$qa_evidence/$label.log"
             local statuses=("${PIPESTATUS[@]}")
             set -e
@@ -120,28 +124,37 @@ jobs:
               printf 'unexpected nextest exit %s (expected %s), tee %s\n' "${statuses[0]}" "$expected_status" "${statuses[1]}" >&2
               return 1
             fi
-            node - "$report" "$expected_failures" "$qa_evidence/$label.log" "$expected_status" <<'NODE' | tee "$qa_evidence/$label-result.json"
+            node - "$report" "$expected_failures" "$qa_evidence/$label.log" "$expected_status" "$test_name" "$marker" <<'NODE' | tee "$qa_evidence/$label-result.json"
           const fs = require('node:fs');
-          const [path, failures, logPath, status] = process.argv.slice(2);
+          const [path, failures, logPath, status, expected, marker] = process.argv.slice(2);
           const xml = fs.readFileSync(path, 'utf8');
           const root = /<testsuites\b([^>]*)>/.exec(xml);
           if (!root) throw new Error('missing testsuites');
           const counts = Object.fromEntries([...root[1].matchAll(/\b(tests|failures|errors)="(\d+)"/g)].map(([, key, n]) => [key, Number(n)]));
           const names = [...xml.matchAll(/<testcase\b[^>]*\bname="([^"]+)"/g)].map(([, name]) => name);
-          const expected = 'winning_header_driver::winning_header_driver_applies_deep_fork_and_recovers_durable_tip';
           if (counts.tests !== 1 || counts.failures !== Number(failures) || counts.errors !== 0 || names.length !== 1 || names[0] !== expected || /<skipped\b/.test(xml)) throw new Error('unexpected test set/counts ' + JSON.stringify({counts, names}));
-          if (Number(failures) && !fs.readFileSync(logPath, 'utf8').includes('retention refusal must request its own retained fork anchor')) throw new Error('missing expected behavioral assertion');
+          if (Number(failures) && !fs.readFileSync(logPath, 'utf8').includes(marker)) throw new Error('missing expected behavioral assertion');
           console.log(JSON.stringify({name: expected, ...counts, nextestExit: Number(status)}));
           NODE
           }
-          git fetch --no-tags --depth=1 origin "$qa_control"
+          git fetch --no-tags --depth=1 origin "$qa_control" "$qa_body_control" "$qa_continuity_control"
           trap 'git checkout --detach "$qa_source"' EXIT
+          qa_fork_test='winning_header_driver::winning_header_driver_applies_deep_fork_and_recovers_durable_tip'
+          qa_body_test='p2p::sync::headers::winning_header_tests::body_carried_headers_preserve_a_winning_candidate'
+          qa_continuity_test='p2p::sync::headers::winning_header_tests::reorged_winning_continuations_restart_without_peer_blame'
           git checkout --detach "$qa_control"
-          run_control before-driver-fix 100 1
+          run_control before-driver-fix 100 1 suite "$qa_fork_test" 'retention refusal must request its own retained fork anchor'
           git checkout --detach "$qa_source"
-          run_control complete-driver 0 0
+          run_control complete-driver 0 0 suite "$qa_fork_test" ''
+          git checkout --detach "$qa_body_control"
+          run_control before-body-preservation 100 1 lib "$qa_body_test" 'right: 2000'
+          git checkout --detach "$qa_source"
+          run_control complete-body-preservation 0 0 lib "$qa_body_test" ''
+          git checkout --detach "$qa_continuity_control"
+          run_control before-continuity-resync 100 1 lib "$qa_continuity_test" 'a valid reorged continuation must keep its source connected'
+          git checkout --detach "$qa_source"
+          run_control complete-continuity-resync 0 0 lib "$qa_continuity_test" ''
           cargo nextest run --locked -p bitcoin-rs-chain --lib --features test-seam --no-tests fail --no-fail-fast \
-            -E 'test(header_admission::tests::) or test(chain::header_sync::candidate::tests::)' \
             2>&1 | tee "$qa_evidence/chain-tests.log"
           cargo clippy --locked -p bitcoin-rs-node --no-default-features --features test-seam --all-targets -- -D warnings \
             2>&1 | tee "$qa_evidence/clippy.log"
