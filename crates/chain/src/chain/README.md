@@ -5,8 +5,11 @@ selection, and reorganization planning. It tracks how far valid headers are know
 tip), independently of the apply frontier.
 
 `BlockTree` owns resident nodes in reusable private slab slots. Public `NodeId`s are
-monotonic logical identities. Reclamation removes an identity from lookup and never
-assigns it to another node. A stale identity returns `ChainError::UnknownNode`.
+monotonic logical identities within one tree lifetime. Reclamation removes an
+identity from lookup and never assigns it to another node in that tree. A reclaimed
+identity returns `ChainError::UnknownNode`. Startup recovery replaces the tree before
+node readers and reorg planners start. Embedders must not retain node identities or
+plans across that replacement; detached header candidates are cancelled.
 `lookup` and `node_by_hash` resolve header hashes, and the best tip is published as an
 atomically swappable `TipSnapshot` (`tip`, `tip_id`, `tip_height`) for
 lock-free readers. `accept_headers` admits a header batch after proof of work, the
