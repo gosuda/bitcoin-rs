@@ -1,0 +1,145 @@
+name: Formal tooling review verification
+on:
+  push:
+    branches: [stabilize/private-formal-tooling-review-20261124]
+permissions:
+  contents: read
+concurrency:
+  group: formal-tooling-review-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "2"
+jobs:
+  tooling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install exact verification tools
+        run: |
+          set -euo pipefail
+          mkdir -p target/verification-logs target/formal-tooling-review
+          git rev-parse HEAD | tee target/formal-tooling-review/source.txt
+          bash scripts/ci-setup.sh apt
+          sudo apt-get install -y -qq zstd unzip
+          formal_tools="$RUNNER_TEMP/formal-tools"
+          mkdir -p "$formal_tools"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            https://github.com/astral-sh/uv/releases/download/0.13.9/uv-x86_64-unknown-linux-gnu.tar.gz \
+            --output "$formal_tools/uv.tar.gz"
+          printf '%s  %s\n' a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5 "$formal_tools/uv.tar.gz" \
+            | sha256sum --check --strict
+          tar -xzf "$formal_tools/uv.tar.gz" -C "$formal_tools"
+          "$formal_tools/uv-x86_64-unknown-linux-gnu/uv" --version
+          printf '%s\n' "$formal_tools/uv-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$formal_tools/actionlint.tar.gz"
+          printf '%s  %s\n' 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$formal_tools/actionlint.tar.gz" \
+            | sha256sum --check --strict
+          mkdir -p "$formal_tools/actionlint"
+          tar -xzf "$formal_tools/actionlint.tar.gz" -C "$formal_tools/actionlint"
+          printf '%s\n' "$formal_tools/actionlint" >> "$GITHUB_PATH"
+      - name: Read register-owned Java identity with uv
+        id: formal-java
+        run: |
+          set -euo pipefail
+          version="$(uv run --no-project --python 3.11 python scripts/resolve_reference_identity.py java .)"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78
+        with:
+          distribution: temurin
+          java-version: ${{ steps.formal-java.outputs.version }}
+      - name: Verify actual registered JDK and model-checker identity
+        run: |
+          set -euo pipefail
+          export JAVA_HOME_25_X64="$JAVA_HOME"
+          "$JAVA_HOME/bin/java" -XshowSettings:properties -version 2>&1 \
+            | tee target/formal-tooling-review/actual-java-runtime.log
+          uv run --no-project --python 3.11 bash scripts/provision-ci-reference-fixtures.sh formal \
+            2>&1 | tee target/formal-tooling-review/actual-model-tool-identity.log
+      - name: Provision pinned Kani
+        run: |
+          set -euo pipefail
+          formal_tools="$RUNNER_TEMP/formal-tools"
+          mkdir -p "$formal_tools"
+          {
+            archive="$formal_tools/kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz"
+            curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --silent --show-error \
+              https://github.com/model-checking/kani/releases/download/kani-0.68.0/kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz \
+              --output "$archive"
+            printf '%s  %s\n' 32e2b484d73ede0bbf64a2cf0879c4259422497d8aec4ee67d448de9ae7843d3 "$archive" \
+              | sha256sum --check --strict
+            cargo install --locked kani-verifier --version 0.68.0 --root "$formal_tools/kani-proxy"
+            export KANI_HOME="$formal_tools/kani-home"
+            export PATH="$formal_tools/kani-proxy/bin:$PATH"
+            cargo kani setup --use-local-bundle "$archive"
+            printf 'KANI_HOME=%s\n' "$KANI_HOME" >> "$GITHUB_ENV"
+            printf '%s\n' "$formal_tools/kani-proxy/bin" >> "$GITHUB_PATH"
+            cargo kani --version
+            rustup run nightly-2026-08-21 rustc --version --verbose
+          } 2>&1 | tee target/verification-logs/setup-kani.log
+      - name: Provision pinned Lean
+        run: |
+          set -euo pipefail
+          formal_tools="$RUNNER_TEMP/formal-tools"
+          lean_archive="$formal_tools/lean-4.35.0-linux.tar.zst"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --silent --show-error \
+            https://github.com/leanprover/lean4/releases/download/v4.35.0/lean-4.35.0-linux.tar.zst \
+            --output "$lean_archive"
+          printf '%s  %s\n' 7289597a44543246c9227b8cae501767e095ce17f6d448b95fc4a8dc97268f6d "$lean_archive" \
+            | sha256sum --check --strict
+          tar --zstd -xf "$lean_archive" -C "$formal_tools"
+          "$formal_tools/lean-4.35.0-linux/bin/lean" --version
+          printf '%s\n' "$formal_tools/lean-4.35.0-linux/bin" >> "$GITHUB_PATH"
+      - name: Check syntax and format the extended stage regression
+        run: |
+          set -euo pipefail
+          bash -n scripts/ci-pr.sh scripts/provision-ci-reference-fixtures.sh scripts/verify-formal-tooling-review.sh
+          uvx --from ruff==0.17.6 ruff format scripts/tests/proofs_crate_paths.py
+          uvx --from ruff==0.17.6 ruff check --select E9,F63,F7,F82 \
+            scripts/resolve_reference_identity.py scripts/tests/test_check_models.py scripts/tests/proofs_crate_paths.py
+          actionlint -shellcheck= -pyflakes= .github/workflows/model-check-manual.yml .github/workflows/private-formal-tooling-review.yml
+      - name: Exercise real proof stages and behavioral negative controls
+        run: bash scripts/verify-formal-tooling-review.sh
+      - name: Check generated contracts and export the verified product
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 992ef469cfddfc87627893eb0afdcb2a292f20de
+          cargo run --locked -p contract-index -- --check
+          git diff --check
+          git add -u
+          git rm --cached -- .github/workflows/private-formal-tooling-review.yml scripts/verify-formal-tooling-review.sh
+          printf 'PRODUCT_TREE %s\n' "$(git write-tree)"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const cp = require('node:child_process');
+          const paths = cp.execFileSync('git', ['diff', '--cached', '--name-only', '-z', '992ef469cfddfc87627893eb0afdcb2a292f20de'], {encoding: 'utf8'}).split('\0').filter(Boolean);
+          for (const path of paths) {
+            if (!fs.existsSync(path)) throw new Error('Unexpected product deletion: ' + path);
+            const bytes = fs.readFileSync(path);
+            const sha = crypto.createHash('sha1').update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
+            console.log('PRODUCT_FILE ' + JSON.stringify({path, sha, size: bytes.length}));
+            for (let offset = 0; offset < bytes.length; offset += 12000) {
+              console.log('PRODUCT_CHUNK ' + JSON.stringify({path, offset, data: bytes.subarray(offset, offset + 12000).toString('base64')}));
+            }
+          }
+          NODE
+      - name: Preserve tooling evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: formal-tooling-review-${{ github.run_attempt }}
+          path: |
+            target/formal-tooling-review/**
+            target/verification-logs/**
+          if-no-files-found: warn
+          retention-days: 7
