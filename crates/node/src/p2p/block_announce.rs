@@ -2470,7 +2470,7 @@ mod tests {
         ))));
         let slot = RecentBlockSlot::new(Arc::clone(&memory));
         let chain = Arc::new(MockAnnounceChain::new(2));
-        let raw = bitcoin_rs_consensus::primitives::serialize(&tip_child_block(
+        let raw = bitcoin_rs_consensus::primitives::consensus_bytes(&tip_child_block(
             chain.block_hash_at(1),
             1200,
         ))
