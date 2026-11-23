@@ -456,7 +456,7 @@ impl Chainstate {
 #[cfg(all(test, feature = "test-seam"))]
 mod tests {
     use super::*;
-    use bitcoin_rs_consensus::primitives::{CompactTarget, Network};
+    use bitcoin_rs_consensus::primitives::{BlockImage, CompactTarget, Network};
     use bitcoin_rs_storage::utxo::UtxoSet;
     use crate::chain::header_sync::{HeaderCandidatePhase, block_work};
     use crate::chain::regtest_fixture::{self, mine_header_to_declared_target};
@@ -620,6 +620,14 @@ mod tests {
         let replacement = chain.begin_header_candidate(root, ChainWork::ZERO)?;
         assert!(!replacement.is_cancelled());
         assert!(matches!(chain.begin_header_candidate(root, ChainWork::ZERO), Err(HeaderAdmissionError::Candidate(HeaderCandidateError::Busy))));
+        let invalid_hash = Hash256::from(main[0].compute_hash());
+        let invalid_id = retained(&chain, invalid_hash)?;
+        chain.admit_headers(&branch(genesis, 32, 17, 1, genesis.bits)?)?;
+        for marker in 18..=20_u8 {
+            chain.admit_headers(&branch(genesis, 8, marker, 1, genesis.bits)?)?;
+        }
+        assert_eq!(chain.block_tree.read().node(invalid_id)?.status, NodeStatus::Invalid);
+        assert!(matches!(chain.admit_headers(&main[..1]), Err(HeaderAdmissionError::Rejected(ChainError::KnownInvalidHeader { hash })) if hash == invalid_hash));
         Ok(())
     }
 
@@ -649,6 +657,35 @@ mod tests {
         assert!(chain.block_tree.read().lookup(hash).is_none());
         assert!(matches!(chain.block_tree.read().node(id), Err(ChainError::UnknownNode { .. })));
         assert!(chain.block_tree.read().len() <= 33 + 8);
+        Ok(())
+    }
+
+    // RCV-01, SYNC-01, SYNC-07
+    #[test]
+    fn applied_ancestry_remains_available_when_other_headers_win() -> Result<(), TestError> {
+        let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        chain.set_header_side_cache_limit(8);
+        let genesis = Network::Regtest.genesis_block();
+        chain.lock_transition()?.into_transition().connect(&BlockImage::from_local(genesis.clone()))?;
+        let mut parent = genesis.block_hash();
+        for height in 1..=8 {
+            let block = regtest_fixture::mined_regtest_child_at(parent, height)?;
+            parent = block.block_hash();
+            chain.lock_transition()?.into_transition().connect(&BlockImage::from_local(block))?;
+        }
+        let applied = chain.applied_tip_snapshot().ok_or(TestError::Missing("applied tip"))?;
+        let winner = branch(genesis.header, 32, 21, 1, genesis.header.bits)?;
+        chain.admit_headers(&winner)?;
+        for marker in 22..=37_u8 {
+            chain.admit_headers(&branch(genesis.header, 8, marker, 1, genesis.header.bits)?)?;
+            let tree = chain.block_tree.read();
+            assert_eq!(tree.node(applied.tip_id)?.hash, applied.hash);
+            assert!(tree.node_at_height_from(applied.tip_id, 0).is_some());
+            assert!(tree.len() <= 33 + 8 + 8);
+        }
+        assert_eq!(chain.applied_tip_snapshot().ok_or(TestError::Missing("applied tip"))?.hash, applied.hash);
+        assert_eq!(best_hash(&chain)?, Hash256::from(winner[31].compute_hash()));
+        assert_eq!(chain.durable_commit_id(), 9);
         Ok(())
     }
 
