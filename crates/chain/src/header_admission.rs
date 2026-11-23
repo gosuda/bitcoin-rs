@@ -452,3 +452,294 @@ impl Chainstate {
         self.header_retention.side_limit.store(limit, std::sync::atomic::Ordering::Relaxed);
     }
 }
+
+#[cfg(all(test, feature = "test-seam"))]
+mod tests {
+    use super::*;
+    use bitcoin_rs_consensus::primitives::{BlockImage, CompactTarget, Network};
+    use bitcoin_rs_storage::utxo::UtxoSet;
+    use crate::chain::header_sync::{HeaderCandidatePhase, block_work};
+    use crate::chain::regtest_fixture::{self, mine_header_to_declared_target};
+    use crate::test_fixtures::handles;
+
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        Admission(#[from] HeaderAdmissionError),
+        #[error(transparent)]
+        Candidate(#[from] HeaderCandidateError),
+        #[error(transparent)]
+        Chain(#[from] ChainError),
+        #[error(transparent)]
+        Fixture(#[from] regtest_fixture::RegtestFixtureError),
+        #[error(transparent)]
+        Apply(#[from] ApplyError),
+        #[error(transparent)]
+        Invalidation(#[from] crate::reorg::InvalidationError),
+        #[error("expected {0}")]
+        Missing(&'static str),
+    }
+
+    fn branch(parent: Header, count: usize, marker: u8, spacing: u32, bits: CompactTarget) -> Result<Vec<Header>, TestError> {
+        let mut parent = parent;
+        let mut headers = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mut header = Header {
+                version: 4,
+                prev_blockhash: parent.compute_hash(),
+                merkle_root: Hash256::from_le_bytes(&[marker; 32]),
+                time: parent.time + spacing,
+                bits,
+                nonce: 0,
+            };
+            mine_header_to_declared_target(&mut header)?;
+            headers.push(header);
+            parent = header;
+        }
+        Ok(headers)
+    }
+
+    fn canonical_chain(height: usize, limit: usize) -> Result<(Chainstate, Vec<Header>), TestError> {
+        let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        chain.set_header_side_cache_limit(limit);
+        let genesis = Network::Regtest.genesis_block().header;
+        chain.admit_headers(&[genesis])?;
+        let main = branch(genesis, height, 1, 1, genesis.bits)?;
+        chain.admit_headers(&main)?;
+        Ok((chain, main))
+    }
+
+    fn best_hash(chain: &Chainstate) -> Result<Hash256, TestError> {
+        Ok(chain.block_tree.read().tip().ok_or(TestError::Missing("best header"))?.hash)
+    }
+
+    fn retained(chain: &Chainstate, hash: Hash256) -> Result<NodeId, TestError> {
+        chain.block_tree.read().lookup(hash).ok_or(TestError::Missing("resident header"))
+    }
+
+    // P2P-10, SYNC-03
+    #[test]
+    fn repeated_qualifying_minimum_difficulty_forks_have_a_finite_resident_bound() -> Result<(), TestError> {
+        let (chain, main) = canonical_chain(160, 160)?;
+        let genesis = Network::Regtest.genesis_block().header;
+        let best = chain.block_tree.read().tip().ok_or(TestError::Missing("best header"))?;
+        let threshold = best.chainwork.saturating_sub(block_work(&main[159]) * ChainWork::from(144_u32));
+        let mut first_leaf = None;
+        let mut peak = 0;
+        for marker in 2..=65_u8 {
+            let side = branch(genesis, 144, marker, 1, genesis.bits)?;
+            assert!(block_work(&genesis) * ChainWork::from(145_u32) >= threshold);
+            assert_eq!(chain.admit_headers(&side)?.accepted, 144);
+            let tree = chain.block_tree.read();
+            peak = peak.max(tree.len());
+            assert!(tree.len() <= 161 + 160);
+            if first_leaf.is_none() {
+                let hash = Hash256::from(side[143].compute_hash());
+                first_leaf = Some((tree.lookup(hash).ok_or(TestError::Missing("first side leaf"))?, hash));
+            }
+        }
+        assert_eq!(peak, 321);
+        let (old_id, old_hash) = first_leaf.ok_or(TestError::Missing("first side leaf"))?;
+        let tree = chain.block_tree.read();
+        assert!(tree.lookup(old_hash).is_none());
+        assert!(matches!(tree.node(old_id), Err(ChainError::UnknownNode { id }) if id == old_id));
+        assert_eq!(tree.tip().ok_or(TestError::Missing("best header"))?.hash, Hash256::from(main[159].compute_hash()));
+        Ok(())
+    }
+
+    // P2P-10, SYNC-02, SYNC-04, SYNC-06
+    #[test]
+    fn a_winning_fork_deeper_than_the_cache_is_validated_then_replayed() -> Result<(), TestError> {
+        let (chain, _) = canonical_chain(32, 8)?;
+        let genesis = Network::Regtest.genesis_block().header;
+        let side = branch(genesis, 33, 2, 1, genesis.bits)?;
+        chain.admit_headers(&side[..8])?;
+        let anchor = Hash256::from(side[7].compute_hash());
+        assert!(matches!(chain.admit_headers(&side[8..9]), Err(HeaderAdmissionError::Resource(HeaderResourceError::CandidateRequired { anchor: actual })) if actual == anchor));
+        assert_eq!(chain.block_tree.read().len(), 41);
+        let mut candidate = chain.begin_header_candidate(anchor, ChainWork::ZERO)?;
+        assert_eq!(candidate.receive(&side[8..], false)?, 25);
+        assert_eq!(candidate.phase(), HeaderCandidatePhase::Redownloading);
+        assert_eq!(chain.block_tree.read().len(), 41);
+        assert!(!candidate.has_verified_headers());
+        assert_eq!(candidate.receive(&side[8..], false)?, 25);
+        let mut accepted = 0;
+        while candidate.has_verified_headers() {
+            let outcome = chain.admit_verified_headers(&mut candidate, 3)?;
+            assert!(outcome.accepted > 0 && outcome.accepted <= 3);
+            accepted += outcome.accepted;
+        }
+        assert_eq!(accepted, 25);
+        assert_eq!(candidate.phase(), HeaderCandidatePhase::Finished);
+        assert_eq!(best_hash(&chain)?, Hash256::from(side[32].compute_hash()));
+        chain.maintain_header_retention()?;
+        assert!(chain.block_tree.read().len() <= 34 + 8);
+        let continuation = branch(side[32], 1, 2, 1, genesis.bits)?;
+        assert_eq!(chain.admit_headers(&continuation)?.accepted, 1);
+        Ok(())
+    }
+
+    // P2P-10, SYNC-03
+    #[test]
+    fn candidate_anchor_handoffs_cannot_raise_the_ordinary_cache_allowance() -> Result<(), TestError> {
+        let (chain, _) = canonical_chain(32, 8)?;
+        let genesis = Network::Regtest.genesis_block().header;
+        let side = branch(genesis, 9, 3, 1, genesis.bits)?;
+        chain.admit_headers(&side[..8])?;
+        let anchor = Hash256::from(side[7].compute_hash());
+        let mut first = chain.begin_header_candidate(anchor, ChainWork::ZERO)?;
+        for _ in 0..32 {
+            let next = chain.begin_header_candidate(anchor, ChainWork::ZERO)?;
+            first.finalize();
+            assert!(matches!(chain.admit_headers(&side[8..]), Err(HeaderAdmissionError::Resource(HeaderResourceError::CandidateRequired { .. }))));
+            assert_eq!(chain.block_tree.read().len(), 41);
+            assert!(chain.block_tree.read().lookup(anchor).is_some());
+            first = next;
+        }
+        Ok(())
+    }
+
+    // P2P-10, RCV-03, SYNC-03
+    #[test]
+    fn cancelled_candidate_buffers_keep_their_reservations_across_policy_restore() -> Result<(), TestError> {
+        let (chain, main) = canonical_chain(8, 8)?;
+        let genesis = Network::Regtest.genesis_block().header;
+        let root = Hash256::from(genesis.compute_hash());
+        let mut candidates = (0..4).map(|_| chain.begin_header_candidate(root, ChainWork::ZERO)).collect::<Result<Vec<_>, _>>()?;
+        crate::reorg::invalidate_and_republish(&chain, Hash256::from(main[0].compute_hash()), crate::reorg::InvalidationOrigin::Operator)?;
+        assert!(candidates.iter().all(HeaderCandidate::is_cancelled));
+        assert!(matches!(chain.begin_header_candidate(root, ChainWork::ZERO), Err(HeaderAdmissionError::Candidate(HeaderCandidateError::Busy))));
+        let mut restored = BlockTree::new();
+        crate::chain::accept_headers(&mut restored, &[genesis], Network::Regtest, u32::MAX, HeaderValidationMode::HistoricalReplay)?;
+        crate::chain::accept_headers(&mut restored, &main, Network::Regtest, u32::MAX, HeaderValidationMode::HistoricalReplay)?;
+        chain.header_retention.restore_operator_verdicts(&mut restored)?;
+        assert!(matches!(chain.begin_header_candidate(root, ChainWork::ZERO), Err(HeaderAdmissionError::Candidate(HeaderCandidateError::Busy))));
+        let invalid = restored.lookup(Hash256::from(main[0].compute_hash())).ok_or(TestError::Missing("invalidated root"))?;
+        assert_eq!(restored.node(invalid)?.status, NodeStatus::Invalid);
+        candidates.pop();
+        let replacement = chain.begin_header_candidate(root, ChainWork::ZERO)?;
+        assert!(!replacement.is_cancelled());
+        assert!(matches!(chain.begin_header_candidate(root, ChainWork::ZERO), Err(HeaderAdmissionError::Candidate(HeaderCandidateError::Busy))));
+        let invalid_hash = Hash256::from(main[0].compute_hash());
+        let invalid_id = retained(&chain, invalid_hash)?;
+        chain.admit_headers(&branch(genesis, 32, 17, 1, genesis.bits)?)?;
+        for marker in 18..=20_u8 {
+            chain.admit_headers(&branch(genesis, 8, marker, 1, genesis.bits)?)?;
+        }
+        assert_eq!(chain.block_tree.read().node(invalid_id)?.status, NodeStatus::Invalid);
+        assert!(matches!(chain.admit_headers(&main[..1]), Err(HeaderAdmissionError::Rejected(ChainError::KnownInvalidHeader { hash })) if hash == invalid_hash));
+        Ok(())
+    }
+
+    // SYNC-07, RCV-08
+    #[test]
+    fn operation_and_pending_applied_roots_survive_pressure_until_their_scope_ends() -> Result<(), TestError> {
+        let (chain, _) = canonical_chain(32, 8)?;
+        let genesis = Network::Regtest.genesis_block().header;
+        let side = branch(genesis, 8, 4, 1, genesis.bits)?;
+        chain.admit_headers(&side)?;
+        let hash = Hash256::from(side[7].compute_hash());
+        let id = retained(&chain, hash)?;
+        let lease = chain.header_retention.pin_operation(&chain.block_tree.read(), &[id])?;
+        for marker in 5..=12_u8 {
+            chain.admit_headers(&branch(genesis, 8, marker, 1, genesis.bits)?)?;
+            assert!(chain.block_tree.read().lookup(hash).is_some());
+            assert!(chain.block_tree.read().len() <= 33 + 8 + 8);
+        }
+        let pending = chain.header_role.begin_application();
+        chain.header_role.stage(hash);
+        drop(lease);
+        chain.admit_headers(&branch(genesis, 8, 13, 1, genesis.bits)?)?;
+        assert!(chain.block_tree.read().lookup(hash).is_some());
+        drop(pending);
+        chain.maintain_header_retention()?;
+        chain.admit_headers(&branch(genesis, 8, 14, 1, genesis.bits)?)?;
+        assert!(chain.block_tree.read().lookup(hash).is_none());
+        assert!(matches!(chain.block_tree.read().node(id), Err(ChainError::UnknownNode { .. })));
+        assert!(chain.block_tree.read().len() <= 33 + 8);
+        Ok(())
+    }
+
+    // RCV-01, SYNC-01, SYNC-07
+    #[test]
+    fn applied_ancestry_remains_available_when_other_headers_win() -> Result<(), TestError> {
+        let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        chain.set_header_side_cache_limit(8);
+        let genesis = Network::Regtest.genesis_block();
+        chain.lock_transition()?.into_transition().connect(&BlockImage::from_local(genesis.clone()))?;
+        let mut parent = genesis.block_hash();
+        for height in 1..=8 {
+            let block = regtest_fixture::mined_regtest_child_at(parent, height)?;
+            parent = block.block_hash();
+            chain.lock_transition()?.into_transition().connect(&BlockImage::from_local(block))?;
+        }
+        let applied = chain.applied_tip_snapshot().ok_or(TestError::Missing("applied tip"))?;
+        let winner = branch(genesis.header, 32, 21, 1, genesis.header.bits)?;
+        chain.admit_headers(&winner)?;
+        for marker in 22..=37_u8 {
+            chain.admit_headers(&branch(genesis.header, 8, marker, 1, genesis.header.bits)?)?;
+            let tree = chain.block_tree.read();
+            assert_eq!(tree.node(applied.tip_id)?.hash, applied.hash);
+            assert!(tree.node_at_height_from(applied.tip_id, 0).is_some());
+            assert!(tree.len() <= 33 + 8 + 8);
+        }
+        assert_eq!(chain.applied_tip_snapshot().ok_or(TestError::Missing("applied tip"))?.hash, applied.hash);
+        assert_eq!(best_hash(&chain)?, Hash256::from(winner[31].compute_hash()));
+        assert_eq!(chain.durable_commit_id(), 9);
+        Ok(())
+    }
+
+    // P2P-10, SYNC-02, SYNC-03, SYNC-06
+    #[test]
+    fn a_shorter_winner_acknowledges_its_prefix_before_cleanup_yields() -> Result<(), TestError> {
+        let chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        chain.set_header_side_cache_limit(8);
+        let mut anchor = Network::Regtest.genesis_block().header;
+        anchor.bits = CompactTarget::from_consensus(0x1f7f_ffff);
+        anchor.nonce = 0;
+        mine_header_to_declared_target(&mut anchor)?;
+        chain.block_tree.write().insert_header(anchor, NodeStatus::HeaderValid)?;
+        let main = branch(anchor, 14_000, 15, 1_201, CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS))?;
+        chain.admit_headers(&main)?;
+        let side = branch(anchor, 60, 16, 1, anchor.bits)?;
+        let old_best = chain.block_tree.read().tip().ok_or(TestError::Missing("long minimum-work branch"))?;
+        let winning_height = side.iter().scan(block_work(&anchor), |work, header| {
+            *work += block_work(header);
+            Some(*work)
+        }).position(|work| work > old_best.chainwork).ok_or(TestError::Missing("short winning prefix"))? + 1;
+        assert!(winning_height < side.len());
+        let mut candidate = chain.begin_header_candidate(Hash256::from(anchor.compute_hash()), ChainWork::ZERO)?;
+        candidate.receive(&side, false)?;
+        candidate.receive(&side, false)?;
+        let first = chain.admit_verified_headers(&mut candidate, 2_000)?;
+        assert_eq!(first.accepted, winning_height);
+        assert_eq!(first.announced_tip, Some(Hash256::from(side[winning_height - 1].compute_hash())));
+        assert_eq!(candidate.phase(), HeaderCandidatePhase::Redownloading);
+        assert!(candidate.has_verified_headers());
+        let after_first = chain.block_tree.read().len();
+        assert!(after_first > winning_height + 1 + 8 + 60);
+        assert!(matches!(chain.admit_headers(&side[winning_height..winning_height + 1]), Err(HeaderAdmissionError::Resource(HeaderResourceError::Reclaiming))));
+        let mut accepted = first.accepted;
+        let mut retries = 0;
+        while candidate.has_verified_headers() {
+            match chain.admit_verified_headers(&mut candidate, 2_000) {
+                Ok(outcome) => {
+                    assert!(outcome.accepted > 0);
+                    accepted += outcome.accepted;
+                }
+                Err(HeaderAdmissionError::Resource(HeaderResourceError::Reclaiming)) => {
+                    retries += 1;
+                    assert!(retries <= 3);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        assert_eq!(accepted, side.len());
+        assert!(retries > 0);
+        assert_eq!(candidate.phase(), HeaderCandidatePhase::Finished);
+        assert_eq!(best_hash(&chain)?, Hash256::from(side[59].compute_hash()));
+        chain.maintain_header_retention()?;
+        assert!(chain.block_tree.read().len() <= 61 + 8);
+        Ok(())
+    }
+}

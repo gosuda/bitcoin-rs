@@ -2422,6 +2422,8 @@ mod test_fixtures {
         #[error(transparent)]
         Chain(#[from] crate::chain::ChainError),
         #[error(transparent)]
+        HeaderAdmission(#[from] crate::HeaderAdmissionError),
+        #[error(transparent)]
         RegtestFixture(#[from] crate::chain::regtest_fixture::RegtestFixtureError),
         #[error(transparent)]
         Consensus(#[from] bitcoin_rs_consensus::ConsensusError),
