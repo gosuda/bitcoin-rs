@@ -6,11 +6,13 @@ use bitcoin_rs_chain::chain::NodeStatus;
 use bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_consensus::primitives::{
     Block, BlockHash, CompactTarget, ConsensusEncode, Hash256, Header, Network, Tx, TxOut,
-    consensus_bytes, deserialize, u64_to_f64,
+    deserialize, u64_to_f64,
 };
 
 #[cfg(test)]
-use bitcoin_rs_consensus::primitives::{Amount, LockTime, Script, Sequence, Witness};
+use bitcoin_rs_consensus::primitives::{
+    Amount, LockTime, Script, Sequence, Witness, consensus_bytes,
+};
 use corepc_types::v31::{self, ChainTips, ChainTipsStatus};
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
 
