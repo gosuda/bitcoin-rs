@@ -435,28 +435,32 @@ The crash and error points produce exactly these results:
 
 ### Checkpoint header artifact and side branches
 
-- The checkpoint header artifact restores the block tree, not only the active chain.
-- `crates/chain/src/checkpoint/headers.rs` owns its layout.
+- The checkpoint header artifact restores the selected active ancestry and a bounded resident side prefix.
+- `crates/chain/src/checkpoint/headers.rs` owns its layout and replay.
 - The manifest-bound artifact SHA-256 authenticates every byte.
 - No other file persists branch state.
-- Version 2 is written: the active ancestry of the selected best tip, then non-`Invalid` tree nodes off that ancestry.
-- Tree nodes off that ancestry MUST not exceed the chainwork of the selected best tip.
-- Their parent MUST be retained (`BlockTree::replayable_side_nodes`), in insertion order.
-- Invalid subtrees and branches heavier than the selected tip are excluded whole.
+- Version 2 is written: the active ancestry of the selected best tip, then at most `HEADER_SIDE_CACHE_LIMIT` eligible non-`Invalid` side nodes.
+- `crates/chain/src/header_admission.rs` owns that limit, currently 65,536.
+- The writer takes a topological prefix of `BlockTree::replayable_side_nodes`; each parent is on the selected active ancestry or earlier in that prefix.
+- Side nodes MUST not exceed the selected best tip's chainwork. Invalid subtrees and branches heavier than the selected tip are excluded whole.
+- This bounds the side records written, not the work or temporary enumeration needed to select them from the resident tree.
 - The restored tree selects the same best and applied tips as an active-only restore.
 - Manifest `header_count` and both chain commitments still cover only the active ancestry.
-- Restore replays the side section after the authenticated active section through the same historical contextual header validation.
-- Each side header MUST add one new node under a restored valid parent.
-- Each side header MUST not displace the best tip.
-- A wrong length, duplicate or orphan header, failed validation, displaced tip, or manifest/artifact version mismatch is a corrupt checkpoint.
-- Side nodes restore as header-valid with unknown chain transaction counts.
-- Replay keeps their relative insertion order, which the stale-tip retainer uses as learn order.
-- Version 1 (active ancestry only) remains readable and restores no side branches.
-- The next publication writes version 2.
+- A legacy version-2 artifact MAY contain more side records than the current resident limit. Recovery MUST authenticate the complete artifact and logically validate every side record before returning `RestoredHeaders`.
+- Each side record MUST have a new hash, a valid parent on the active ancestry or among earlier validated side records, valid proof of work and historical contextual rules, and work that does not displace the selected best tip.
+- Logical validation uses the shared `HeaderValidationContext`. A parent beyond the resident prefix is resolved through its already validated compact context; parent validity does not require retaining that parent's tree node.
+- Recovery retains only the first `HEADER_SIDE_CACHE_LIMIT` side records as resident nodes, preserving their relative insertion order and ancestor closure. Later records are fully validated without extending that resident prefix.
+- A wrong length, duplicate or orphan header, failed header validation, displaced tip, or manifest/artifact version mismatch is a corrupt checkpoint.
+- Resident side nodes restore as header-valid with unknown chain transaction counts.
+- Oversized legacy sections use an anonymous temporary context index. Its file length is bounded by seven times the artifact byte length, and each hash lookup has a finite probe bound. The index is discarded on every exit and is not a durable branch authority.
+- Temporary-index creation, I/O, or detected record-validation failures refuse the restore attempt as `HeaderCheckpointError::TemporaryIndex(std::io::Error)`. They are local recovery I/O failures, not evidence that the authenticated input artifact is corrupt. No partially validated restored tree is returned.
+- Scratch record checksums detect checked inconsistencies. Complete erasure of a record to the all-zero empty representation is not distinguishable from an unused slot; these checks do not establish detection of arbitrary storage corruption.
+- Version 1 (active ancestry only) remains readable and restores no side branches. The next publication writes version 2.
 - No datadir epoch changes and no existing checkpoint is rewritten or deleted on load.
-- A binary that predates version 2 refuses a version-2 checkpoint as corrupt.
-- Downgrade needs a fresh resync into a separate datadir.
-- Replay reuses a restored node with the record hash and parent instead of inserting a duplicate, as block connection does.
+- A binary that predates version 2 refuses a version-2 checkpoint as corrupt. Downgrade needs a fresh resync into a separate datadir.
+- Block replay reuses a restored node with the record hash and parent instead of inserting a duplicate. A nonresident side header must be validated again before its retained body participates in a new branch transition.
+- Clause-local proofs in `checkpoint/headers.rs`: `side_publication_retains_a_bounded_topological_prefix` and `repeated_winning_forks_do_not_expand_selected_checkpoint_side_publication` cover publication; `legacy_side_replay_validates_nonresident_parents_before_returning_a_bounded_tree` and `legacy_records_beyond_the_resident_limit_keep_context_duplicate_and_orphan_checks` cover full logical replay; `retained_side_prefix_can_extend_to_a_valid_heavier_branch_after_restart` covers continued admission.
+- Scratch-index proofs in the same owner are `temporary_context_index_bounds_space_handles_collisions_and_detects_damage` and `temporary_context_index_rejects_zero_ordinal_with_nonzero_payload`. Their injected damage cases do not prove detection of complete record erasure.
 
 ## Verification boundaries
 
