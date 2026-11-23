@@ -157,14 +157,14 @@ rayon = { version = ">=1.12, <2" }
 # tinyvec: no default features; explicitly enable alloc.
 tinyvec     = { version = ">=1.11, <2", default-features = false, features = ["alloc"] }
 # smallvec 1.x stable (2.0 is alpha). No default features; enable union + const_*.
-smallvec    = { version = ">=1.15.1, <2", default-features = false, features = [
+smallvec    = { version = ">=1.15.2, <2", default-features = false, features = [
     "union", "const_generics", "const_new",
 ] }
 compact_str = { version = ">=0.9, <1", default-features = false, features = ["std"] }
 
 # --- Zero-copy / compression --------------------------------------------------
 bytemuck = { version = ">=1.25, <2", default-features = false, features = ["derive"] }
-bytes    = { version = ">=1.11, <2", default-features = false }
+bytes    = { version = ">=1.11.1, <2", default-features = false }
 zerocopy = { version = "0.8.57", default-features = false, features = ["derive", "std"] }
 
 # --- Storage backends ---------------------------------------------------------
