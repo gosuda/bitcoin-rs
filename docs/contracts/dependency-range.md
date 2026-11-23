@@ -93,10 +93,15 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The DEP-01 lanes run `check bans` only.
 
 ## Selected range prerequisites
+- `bytes` is bounded at `>=1.11.1, <2`. SurrealKV requires `bytes 1.11.1` or later.
+- `smallvec` is bounded at `>=1.15.2, <2`. `parking_lot_core 0.10.0` requires `smallvec 1.15.2` or later.
+- The root lock and maximum endpoint use `lz4_flex 0.12.3` through SurrealKV. `deny.toml` `[bans].skip` exempts that exact version; direct `lz4_flex 0.13.1` remains unskipped.
+- `windows-link 0.100.0` comes from `generator 0.8.12` through `windows-core 0.100.0`. `deny.toml` `[bans].skip` exempts `0.100.0`; `0.2.1` remains unskipped.
 - `bitcoin_hashes 1.2.0` requires `bitcoin-internals 0.6.0` directly and `bitcoin-internals 0.7.0` through `bitcoin-consensus-encoding 1.3`; only that exact-version split is approved, with `deny.toml` `[bans].skip` pinning `bitcoin-internals@0.6.0`.
 - `base64` is bounded to `>=0.23.1, <0.24` with defaults disabled and `std` (including `alloc`) enabled.
 - `simd-unsafe` remains disabled.
 - `secp256k1` is bounded to `>=0.33.1, <0.34` with `std`, `alloc`, `recovery`, `rand`, and `global-context` enabled. Bitcoin's exact `secp256k1 0.29.100` and `secp256k1-sys 0.10.1` reference line is an approved split, pinned in `deny.toml` `[bans].skip`; it approves no other version.
+- The separate `fuzz/Cargo.lock` retains Bitcoin's `secp256k1 0.29.1`. Its exact exception in `deny.toml` `[bans].skip` preserves the direct `0.33.1` anchor when the same policy checks that workspace.
 - The metrics exporter's `base64 0.22.1` is an approved exact-version duplicate, not approval for other versions.
 - `proptest` is bounded at `>=1.12, <1.13` and `proptest-state-machine` is pinned at `=0.9.0` in the root `Cargo.toml` `[workspace.dependencies]`.
 - Version `1.12` moves to the `rand_core 0.10` and `rand_xorshift 0.5` family, so the lock carries `rand_core@0.10.1` beside `rand_core@0.9.5` from the selected `rand 0.9` family.
@@ -108,7 +113,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The entry describes this `syn` pin only.
 - It does not approve other splits.
 - The minimal lane resolves `bitcoin` 0.32.9, which retains `bitcoin-internals` 0.3.0 beside 0.6.0 and 0.7.0; only that exact-version split is approved, with `deny.toml` `[bans].skip` pinning `bitcoin-internals@0.3.0`.
-- The minimal all-features lane resolves `object` 0.39.1 through `ar_archive_writer` in the USDT probe chain and `object` 0.40.0 through `backtrace` in minimized `tokio`; only that exact-version split is approved, with `deny.toml` `[bans].skip` pinning both versions.
+- The minimal all-features lane resolves `object` 0.39.1 through `ar_archive_writer` in the USDT probe chain and `object` 0.40.0 through `backtrace` in minimized `tokio`. `deny.toml` `[bans].skip` exempts only `0.39.1`; `0.40.0` remains the unskipped anchor.
 - The `secp256k1@0.28.2`, `secp256k1-sys@0.9.2`, and `bitcoin_hashes@0.13.1` exceptions in `deny.toml` `[bans]` are exact-version pins for the `noise_sv2 2.1.0` SV2 chain.
 - This policy matches the `syn` pin above, including their RustCrypto transport companions.
 - When the pinned SRI release family moves, update those exceptions to the exact resolved versions in the same change.
