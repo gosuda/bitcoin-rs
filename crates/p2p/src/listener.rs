@@ -1562,23 +1562,24 @@ fn run_connected_session(
     loop_result
 }
 
+fn is_transaction_inventory(item: &bitcoin::p2p::message_blockdata::Inventory) -> bool {
+    use bitcoin::p2p::message_blockdata::Inventory;
+    matches!(
+        item,
+        Inventory::Transaction(_) | Inventory::WitnessTransaction(_) | Inventory::WTx(_)
+    ) || matches!(
+        item,
+        Inventory::Unknown { inv_type, .. } if *inv_type == crate::packages::MSG_ANCPKGINFO
+    )
+}
+
 fn enforce_relay_role(
     role: crate::peer_info::PeerRole,
     message: crate::Message,
 ) -> Result<Option<crate::Message>, crate::wire::PeerError> {
-    use bitcoin::p2p::message_blockdata::Inventory;
     if role.relays_transactions() {
         return Ok(Some(message));
     }
-    let is_transaction = |item: &Inventory| {
-        matches!(
-            item,
-            Inventory::Transaction(_) | Inventory::WitnessTransaction(_) | Inventory::WTx(_)
-        ) || matches!(
-            item,
-            Inventory::Unknown { inv_type, .. } if *inv_type == crate::packages::MSG_ANCPKGINFO
-        )
-    };
     if matches!(message, crate::Message::Tx(_)) {
         return Err(crate::wire::PeerError::Protocol(
             "transaction sent in violation of protocol",
@@ -1597,14 +1598,14 @@ fn enforce_relay_role(
         ));
     }
     if let crate::Message::Inv(items) = &message
-        && items.iter().any(&is_transaction)
+        && items.iter().any(is_transaction_inventory)
     {
         return Err(crate::wire::PeerError::Protocol(
             "transaction inv sent in violation of protocol",
         ));
     }
     if let crate::Message::GetData(mut items) = message {
-        items.retain(|item| !is_transaction(item));
+        items.retain(|item| !is_transaction_inventory(item));
         if items.is_empty() {
             tracing::trace!("p2p dropping transaction getdata from block-relay-only peer");
             return Ok(None);
@@ -2369,15 +2370,25 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
         }
         let sink = ProductionSink::new(lease, reply);
+        let reads_transaction_inventory = match &message {
+            crate::Message::GetData(items) => items.iter().any(is_transaction_inventory),
+            crate::Message::GetPkgTxns(_) => true,
+            _ => false,
+        };
+        let last_inv_sequence = if reads_transaction_inventory {
+            shared
+                .tx_policy
+                .as_ref()
+                .and_then(|policy| policy.transaction_serving_sequence(lease.source(endpoint)))
+        } else {
+            None
+        };
         let dispatched = crate::dispatch::dispatch_inbound_full(
             peer,
             &message,
             shared.chain_query.as_deref(),
             shared.tx_inventory.as_deref(),
-            shared
-                .tx_policy
-                .as_ref()
-                .and_then(|policy| policy.transaction_serving_sequence(lease.source(endpoint))),
+            last_inv_sequence,
             &tx_relay_open,
             &|| sink.headroom(),
             &mut |response| sink.send(response),
@@ -2749,13 +2760,18 @@ fn resume_parked_getdata<S>(
     let mut send = |response: crate::Message| sink.send(response);
     let compact_version = peer.compact_blocks.servable_version();
     let mut not_found = Vec::new();
-    let tail = crate::dispatch::serve_getdata(
-        shared.chain_query.as_deref(),
-        shared.tx_inventory.as_deref(),
+    let last_inv_sequence = if peer.pending_getdata.iter().any(is_transaction_inventory) {
         shared
             .tx_policy
             .as_ref()
-            .and_then(|policy| policy.transaction_serving_sequence(source)),
+            .and_then(|policy| policy.transaction_serving_sequence(source))
+    } else {
+        None
+    };
+    let tail = crate::dispatch::serve_getdata(
+        shared.chain_query.as_deref(),
+        shared.tx_inventory.as_deref(),
+        last_inv_sequence,
         compact_version,
         &peer.pending_getdata,
         &mut not_found,
