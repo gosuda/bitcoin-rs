@@ -2,8 +2,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::p2p::sync::chain::{
-    HeaderAdmission, HistoricalAdvance, ReorgError, SyncChain, SyncChainError,
-    WindowApplyDisposition, WindowCommitError,
+    HeaderAdmission, HeaderAdmissionError, HeaderAdmissionOutcome, HeaderCandidate,
+    HistoricalAdvance, ReorgError, SyncChain, SyncChainError, WindowApplyDisposition,
+    WindowCommitError,
 };
 use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Header, Network};
 use bitcoin_rs_p2p::{InboundHeaders, PeerTable};
@@ -212,7 +213,35 @@ impl SyncChain for NodeSyncChain {
             Err(bitcoin_rs_chain::HeaderAdmissionError::Refused(error)) => {
                 HeaderAdmission::Refused(bitcoin_rs_chain::chain::HeaderRefusal::from_cause(&error))
             }
+            Err(bitcoin_rs_chain::HeaderAdmissionError::Resource(error)) => {
+                HeaderAdmission::Refused(bitcoin_rs_chain::chain::HeaderRefusal::from_resource(
+                    &error,
+                ))
+            }
+            Err(bitcoin_rs_chain::HeaderAdmissionError::Candidate(error)) => {
+                HeaderAdmission::Refused(bitcoin_rs_chain::chain::HeaderRefusal::from_cause(&error))
+            }
         }
+    }
+
+    fn begin_header_candidate(
+        &self,
+        anchor: Hash256,
+        minimum_work: bitcoin_rs_consensus::header_rules::ChainWork,
+    ) -> Result<HeaderCandidate, HeaderAdmissionError> {
+        self.handles.begin_header_candidate(anchor, minimum_work)
+    }
+
+    fn admit_verified_headers(
+        &self,
+        candidate: &mut HeaderCandidate,
+        maximum: usize,
+    ) -> Result<HeaderAdmissionOutcome, HeaderAdmissionError> {
+        self.handles.admit_verified_headers(candidate, maximum)
+    }
+
+    fn maintain_header_retention(&self) -> Result<usize, HeaderAdmissionError> {
+        self.handles.maintain_header_retention()
     }
 
     fn check_body_binding(&self, block: &BlockImage) -> Result<(), SyncChainError> {

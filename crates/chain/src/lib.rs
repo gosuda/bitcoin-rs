@@ -1,8 +1,8 @@
 #[cfg(any(test, feature = "test-seam"))]
 use crate::chain::TransitionDomain;
 use crate::chain::{
-    BlockTree, BlockTreeReader, ChainError, ChainTxCount, TipReader, TipSnapshot,
-    TransitionAuthority, TransitionAuthorityGuard,
+    BlockTree, BlockTreeReader, ChainTxCount, TipReader, TipSnapshot, TransitionAuthority,
+    TransitionAuthorityGuard,
 };
 pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
@@ -10,8 +10,8 @@ use assumeutxo::commit_error;
 use bitcoin_rs_consensus::ScriptExecutionCache;
 use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_consensus::latch::{LatchReader, LatchWriter};
+use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network, OutPoint, TxOut, Txid};
-use bitcoin_rs_consensus::primitives::{Hash256, Header};
 use bitcoin_rs_storage::DurableHeadStore;
 pub use bitcoin_rs_storage::KvUndoStore;
 pub use bitcoin_rs_storage::UndoStore;
@@ -32,6 +32,8 @@ mod block_spends;
 mod connect;
 mod disconnect;
 mod durable;
+mod header_admission;
+pub use header_admission::{HeaderAdmissionError, HeaderAdmissionOutcome, HeaderResourceError};
 #[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 pub mod fuzzing {
@@ -725,22 +727,6 @@ pub struct ChainstateSnapshot {
     pub chain_tx_count: ChainTxCount,
 }
 
-#[derive(Debug)]
-pub struct HeaderAdmissionOutcome {
-    pub accepted: usize,
-    pub announced_tip: Option<Hash256>,
-    pub active_height: Option<i32>,
-    pub demoted_tip: Option<Hash256>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum HeaderAdmissionError {
-    #[error("header admission refused: {0}")]
-    Refused(ApplyError),
-    #[error(transparent)]
-    Rejected(ChainError),
-}
-
 pub type PowValidBlockHook = Arc<dyn Fn(&BlockImage, Hash256, u32) + Send + Sync>;
 
 pub type TipStagedHook = Arc<dyn Fn(&TipSnapshot, &BlockImage) + Send + Sync>;
@@ -751,6 +737,8 @@ pub struct Chainstate {
     pub(crate) chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     pub(crate) applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     pub(crate) block_tree: Arc<RwLock<BlockTree>>,
+    pub(crate) header_retention: Arc<header_admission::HeaderRetention>,
+    pub(crate) header_role: Arc<header_admission::HeaderRoleRetention>,
     pub(crate) utxo: Arc<UtxoSet>,
     pub(crate) coin_stats: Arc<bitcoin_rs_storage::utxo::stats::CoinStatsListener>,
     pub(crate) chain_events: Arc<crate::events::ChainEventPublisher>,
@@ -878,6 +866,7 @@ impl Chainstate {
         {
             let _gate = self.tip_notification.gate.lock();
             self.applied_tip.store(Some(Arc::new(tip.clone())));
+            self.header_role.published(tip.hash);
             self.tip_notification.changed.notify_all();
         }
         self.chain_events.record(kind, tip.height, tip.hash);
@@ -893,6 +882,10 @@ impl Chainstate {
         assume_valid_gate.evaluate(&parts.block_tree);
         let block_tree = Arc::new(RwLock::new(parts.block_tree));
         let applied_tip = Arc::new(ArcSwapOption::new(parts.restored_applied_tip.map(Arc::new)));
+        let role = Arc::new(RwLock::new(parts.role));
+        let header_retention = Arc::new(header_admission::HeaderRetention::default());
+        let header_role =
+            header_retention.register_role(Arc::clone(&applied_tip), Arc::clone(&role));
         let ibd = Arc::new(crate::chain::InitialBlockDownload::new(
             TipReader::new(Arc::clone(&applied_tip)),
             BlockTreeReader::new(Arc::clone(&block_tree)),
@@ -902,6 +895,8 @@ impl Chainstate {
             chain_tip,
             applied_tip,
             block_tree,
+            header_retention,
+            header_role,
             utxo: parts.utxo,
             coin_stats: parts.coin_stats,
             chain_events: parts.chain_events,
@@ -930,7 +925,7 @@ impl Chainstate {
             prevout_charge: None,
             history: parts.history,
             ibd,
-            role: Arc::new(RwLock::new(parts.role)),
+            role,
         }
     }
 
@@ -945,6 +940,7 @@ impl Chainstate {
 
     pub(crate) fn set_role(&self, role: ChainstateRole) {
         let _transition = self.chain_transition.lock();
+        let _tree = self.block_tree.read();
         *self.role.write() = role;
     }
 
@@ -970,9 +966,11 @@ impl Chainstate {
     {
         let _guard = self.admission.enter()?;
         let _transition = self.chain_transition.lock();
-        let tip_snapshot = {
+        let (tip_snapshot, _header_retention) = {
             let tree = self.block_tree.read();
-            Self::snapshot_base_tip(&tree, pinned)?
+            let tip = Self::snapshot_base_tip(&tree, pinned)?;
+            let retention = self.header_retention.pin_operation(&tree, &[tip.tip_id])?;
+            (tip, retention)
         };
         let prior = self.durable_head.load().inspect_err(|_| {
             self.fail_closed_for_recovery();
@@ -1193,6 +1191,13 @@ impl Chainstate {
                 .map_err(crate::assumeutxo::commit_error)?;
         }
         let applied_tip = Arc::new(ArcSwapOption::new(restored_tip.map(Arc::new)));
+        let role = Arc::new(RwLock::new(ChainstateRole::Historical {
+            base_height,
+            base_hash,
+        }));
+        let header_role = self
+            .header_retention
+            .register_role(Arc::clone(&applied_tip), Arc::clone(&role));
         let chain_tip = Arc::new(arc_swap::ArcSwapOption::empty());
         let assume_valid_gate = Arc::new(AssumeValidGate::new(self.network, 0));
         let ibd = Arc::new(crate::chain::InitialBlockDownload::new(
@@ -1205,6 +1210,8 @@ impl Chainstate {
             chain_tip,
             applied_tip,
             block_tree: Arc::clone(&self.block_tree),
+            header_retention: Arc::clone(&self.header_retention),
+            header_role,
             utxo: Arc::new(historical_utxo),
             coin_stats: historical_coin_stats,
             chain_events: Arc::new(crate::events::ChainEventPublisher::detached(
@@ -1235,10 +1242,7 @@ impl Chainstate {
             prevout_charge: self.prevout_charge.clone(),
             history: self.history.clone(),
             ibd,
-            role: Arc::new(RwLock::new(ChainstateRole::Historical {
-                base_height,
-                base_hash,
-            })),
+            role,
         };
         Ok(Arc::new(historical))
     }
@@ -1424,43 +1428,6 @@ impl Chainstate {
         self.block_body_store.clone()
     }
 
-    pub fn admit_headers(
-        &self,
-        headers: &[Header],
-    ) -> core::result::Result<HeaderAdmissionOutcome, HeaderAdmissionError> {
-        let _transition = self
-            .lock_transition()
-            .map_err(HeaderAdmissionError::Refused)?;
-        let mut tree = self.block_tree.write();
-        let acceptance = crate::chain::accept_headers(
-            &mut tree,
-            headers,
-            self.network,
-            crate::chain::current_unix_seconds(),
-            crate::chain::HeaderValidationMode::LiveAdmission,
-        );
-        self.assume_valid_gate.evaluate(&tree);
-        let crate::chain::AcceptHeaders { ids, demoted_tip } =
-            acceptance.map_err(HeaderAdmissionError::Rejected)?;
-        let announced_tip = ids
-            .last()
-            .and_then(|id| tree.node(*id).ok())
-            .map(|node| node.hash);
-        let active_height = tree
-            .tip()
-            .zip(announced_tip)
-            .and_then(|(active_tip, hash)| {
-                tree.active_height_of(active_tip.tip_id, hash)
-                    .and_then(|height| i32::try_from(height).ok())
-            });
-        Ok(HeaderAdmissionOutcome {
-            accepted: ids.len(),
-            announced_tip,
-            active_height,
-            demoted_tip,
-        })
-    }
-
     pub fn set_capture_flags(&mut self, rawtx: bool, block_bytes: bool) {
         self.capture_rawtx = rawtx;
         self.capture_block_bytes = block_bytes;
@@ -1564,6 +1531,10 @@ impl Chainstate {
         coin_stats: Arc<bitcoin_rs_storage::utxo::stats::CoinStatsListener>,
         chain_events: Arc<crate::events::ChainEventPublisher>,
     ) -> Self {
+        let role = Arc::new(RwLock::new(ChainstateRole::Ordinary));
+        let header_retention = Arc::new(header_admission::HeaderRetention::default());
+        let header_role =
+            header_retention.register_role(Arc::clone(&applied_tip), Arc::clone(&role));
         let assume_valid_gate = Arc::new(AssumeValidGate::new(network, 0));
         assume_valid_gate.evaluate(&block_tree.read());
         let ibd = Arc::new(crate::chain::InitialBlockDownload::new(
@@ -1590,6 +1561,8 @@ impl Chainstate {
             chain_tip,
             applied_tip,
             block_tree,
+            header_retention,
+            header_role,
             utxo,
             coin_stats,
             chain_events,
@@ -1622,7 +1595,7 @@ impl Chainstate {
                     bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
                 ),
             ),
-            role: Arc::new(RwLock::new(ChainstateRole::Ordinary)),
+            role,
             ibd,
         }
     }
@@ -2372,6 +2345,7 @@ mod test_fixtures {
     }
 
     pub(crate) fn seed_genesis(handles: &Chainstate) -> Result<TipSnapshot, ApplyError> {
+        let _pending_headers = handles.header_role.begin_application();
         let genesis = Network::Regtest.genesis_block();
         let tip = crate::connect::applied_header_tip(
             handles,
@@ -2455,6 +2429,8 @@ mod test_fixtures {
         #[error(transparent)]
         Chain(#[from] crate::chain::ChainError),
         #[error(transparent)]
+        HeaderAdmission(#[from] crate::HeaderAdmissionError),
+        #[error(transparent)]
         RegtestFixture(#[from] crate::chain::regtest_fixture::RegtestFixtureError),
         #[error(transparent)]
         Consensus(#[from] bitcoin_rs_consensus::ConsensusError),
@@ -2484,8 +2460,6 @@ mod test_fixtures {
         Checkpoint(#[from] crate::CheckpointError),
         #[error(transparent)]
         HeaderCheckpoint(#[from] crate::checkpoint::headers::HeaderCheckpointError),
-        #[error(transparent)]
-        HeaderAdmission(#[from] crate::HeaderAdmissionError),
         #[error(transparent)]
         CheckpointSetup(#[from] crate::CheckpointSetupError),
         #[error(transparent)]

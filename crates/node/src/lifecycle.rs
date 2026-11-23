@@ -750,6 +750,7 @@ pub(crate) fn start_node(
     let coordinator = Arc::new(crate::MiningCoordinator::new(
         state.mempool_reader(),
         Arc::clone(&chainstate),
+        state.block_memory(),
         state.stable_read(),
         state.chain_followers(),
         final_payout_script(state.config()),
@@ -1050,6 +1051,210 @@ mod tests {
             assert!(response.starts_with(expected), "{response}");
         }
         node.shutdown_blocking()?;
+        Ok(())
+    }
+
+    // BUD-02, P2P-01
+    #[test]
+    fn startup_shares_recent_block_serving_and_ingress_memory() -> Result<(), TestError> {
+        use bitcoin::hashes::Hash;
+        use bitcoin::p2p::message_blockdata::Inventory;
+        use bitcoin_rs_chain::chain::regtest_fixture;
+        use bitcoin_rs_consensus::primitives::{Amount, Network, Script, TxOut, unix_time_secs};
+        use bitcoin_rs_p2p::handshake::run_inbound_handshake;
+        use bitcoin_rs_p2p::test_support::message_channel;
+        use bitcoin_rs_p2p::wire::{read_message, write_message};
+        use bitcoin_rs_p2p::{Message, Peer, PeerLease};
+        use bitcoin_rs_storage::budget::BudgetOwner;
+
+        fn read_reply(
+            peer: &mut Peer<TcpStream>,
+            accept: impl Fn(&Message) -> bool,
+        ) -> Result<Message, TestError> {
+            let deadline = std::time::Instant::now() + WITNESS_BOUND;
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(TestError::Timeout("startup peer reply"));
+                }
+                peer.stream.set_read_timeout(Some(remaining))?;
+                let (message, _) = read_message(&mut peer.stream, peer.magic)?;
+                if accept(&message) {
+                    return Ok(message);
+                }
+                match message {
+                    Message::Ping(nonce) => {
+                        peer.send(&Message::Pong(nonce))?;
+                    }
+                    Message::GetHeaders(_) => {
+                        peer.send(&Message::Headers(Vec::new()))?;
+                    }
+                    Message::GetData(items) => {
+                        peer.send(&Message::NotFound(items))?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let mut config = isolated_config(dir.path());
+        config.p2p.connect = vec![listener.local_addr()?.to_string()];
+        config.p2p.dns_seeds_enabled = false;
+        config.p2p.v2_transport = false;
+        let magic = bitcoin::p2p::Magic::from_bytes(config.p2p.magic);
+        let node = start_node(config, RuntimeInputs::default(), false)?;
+        let deadline = std::time::Instant::now() + WITNESS_BOUND;
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(TestError::Timeout("startup outbound peer"));
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        stream.set_read_timeout(Some(WITNESS_BOUND))?;
+        stream.set_write_timeout(Some(WITNESS_BOUND))?;
+        let mut peer = Peer::new(stream, magic);
+        let (outbound, _outbound_rx) = message_channel();
+        let lease = PeerLease::new_inbound(outbound);
+        run_inbound_handshake(
+            &mut peer,
+            1,
+            0,
+            bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+            bitcoin_rs_consensus::primitives::USER_AGENT,
+            &lease,
+            std::time::Instant::now() + WITNESS_BOUND,
+        )?;
+
+        let now = u32::try_from(unix_time_secs())?;
+        let first = BlockImage::from_local(regtest_fixture::mined_regtest_child_at_time(
+            Network::Regtest.genesis_block().block_hash(),
+            now,
+            1,
+        )?);
+        node.state.apply_block(&first)?;
+        assert!(
+            !node
+                .state
+                .chainstate()
+                .ibd_latch()
+                .is_active(u64::from(now), Network::Regtest,)
+        );
+        let budget = node.state.budget();
+        assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), 0);
+        let second = BlockImage::from_local(regtest_fixture::mined_regtest_child_at_time(
+            first.block_hash(),
+            now + 1,
+            2,
+        )?);
+        node.state.apply_block(&second)?;
+        let second_charge = budget.charged_bytes(BudgetOwner::StagedImages);
+        assert!(second_charge >= u64::try_from(second.retained_heap_bytes())?);
+        let second_tx = second.tx(0).materialize();
+        let second_item =
+            Inventory::Transaction(bitcoin::Txid::from_byte_array(*second_tx.txid().as_bytes()));
+        assert!(node.state.mempool_gateway().read().is_empty());
+        peer.send(&Message::GetData(vec![second_item]))?;
+        assert_eq!(
+            read_reply(&mut peer, |message| matches!(
+                message,
+                Message::Tx(_) | Message::NotFound(_)
+            ))?,
+            Message::Tx(second_tx)
+        );
+
+        let mut third =
+            regtest_fixture::mined_regtest_child_at_time(second.block_hash(), now + 2, 3)?;
+        third.txs[0].outputs.extend((0..16).map(|_| TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: Script::new(),
+        }));
+        third.header.merkle_root = regtest_fixture::merkle_root(&third.txs)
+            .ok_or(TestError::Missing("startup block merkle root"))?;
+        third.header.nonce = 0;
+        regtest_fixture::mine_block_to_declared_target(&mut third)?;
+        let third = BlockImage::from_local(third);
+        let heap_growth = third
+            .retained_heap_bytes()
+            .checked_sub(second.retained_heap_bytes())
+            .ok_or(TestError::ExpectationFailed("larger retained block layout"))?;
+        assert!(heap_growth > 0);
+        node.state.apply_block(&third)?;
+        let third_charge = budget.charged_bytes(BudgetOwner::StagedImages);
+        assert_eq!(third_charge, second_charge + u64::try_from(heap_growth)?);
+        let third_tx = third.tx(0).materialize();
+        let third_item =
+            Inventory::Transaction(bitcoin::Txid::from_byte_array(*third_tx.txid().as_bytes()));
+        peer.send(&Message::GetData(vec![third_item]))?;
+        assert_eq!(
+            read_reply(&mut peer, |message| matches!(
+                message,
+                Message::Tx(_) | Message::NotFound(_)
+            ))?,
+            Message::Tx(third_tx)
+        );
+        peer.send(&Message::GetData(vec![second_item]))?;
+        assert_eq!(
+            read_reply(&mut peer, |message| matches!(
+                message,
+                Message::Tx(_) | Message::NotFound(_)
+            ))?,
+            Message::NotFound(vec![second_item])
+        );
+        assert!(node.state.mempool_gateway().read().is_empty());
+
+        let mut frame = Vec::new();
+        write_message(
+            &mut frame,
+            magic,
+            &Message::BlockBytes(third.bytes().clone()),
+        )?;
+        let split = frame.len() - 1;
+        peer.stream.write_all(&frame[..split])?;
+        let partial_body = u64::try_from(third.bytes().len() - 1)?;
+        let deadline = std::time::Instant::now() + WITNESS_BOUND;
+        while budget.charged_bytes(BudgetOwner::PeerReceive) < partial_body {
+            if std::time::Instant::now() >= deadline {
+                return Err(TestError::Timeout("partial frame charged to node ingress"));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::StagedImages),
+            third_charge
+        );
+        peer.stream.write_all(&frame[split..])?;
+        peer.send(&Message::Ping(0x0053_5441_5254_5550))?;
+        assert_eq!(
+            read_reply(&mut peer, |message| matches!(
+                message,
+                Message::Pong(0x0053_5441_5254_5550)
+            ))?,
+            Message::Pong(0x0053_5441_5254_5550)
+        );
+        let deadline = std::time::Instant::now() + WITNESS_BOUND;
+        while budget.charged_bytes(BudgetOwner::PeerReceive) != 0
+            || budget.charged_bytes(BudgetOwner::StagedImages) != third_charge
+        {
+            if std::time::Instant::now() >= deadline {
+                return Err(TestError::Timeout("completed duplicate frame released"));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        peer.stream.shutdown(Shutdown::Both)?;
+        drop(peer);
+        drop(lease);
+        node.shutdown_blocking()?;
+        assert_eq!(budget.charged_bytes(BudgetOwner::PeerReceive), 0);
+        assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), 0);
         Ok(())
     }
 
@@ -2261,6 +2466,7 @@ mod tests {
         let coordinator = Arc::new(crate::MiningCoordinator::new(
             state.mempool_reader(),
             state.chainstate(),
+            state.block_memory(),
             state.stable_read(),
             state.chain_followers(),
             super::final_payout_script(state.config()),

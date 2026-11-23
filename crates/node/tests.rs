@@ -1574,6 +1574,7 @@ mod mining {
             MiningCoordinator::new(
                 state.mempool_reader(),
                 state.chainstate(),
+                state.block_memory(),
                 state.stable_read(),
                 state.chain_followers(),
                 state.config().mining.payout_script.clone(),
@@ -2719,6 +2720,7 @@ mod mining {
             let mining = Arc::new(MiningCoordinator::new(
                 state.mempool_reader(),
                 state.chainstate(),
+                state.block_memory(),
                 state.stable_read(),
                 state.chain_followers(),
                 state.config().mining.payout_script.clone(),
@@ -2892,6 +2894,7 @@ mod mining {
             let mining = Arc::new(MiningCoordinator::new(
                 state.mempool_reader(),
                 state.chainstate(),
+                state.block_memory(),
                 state.stable_read(),
                 state.chain_followers(),
                 state.config().mining.payout_script.clone(),
@@ -3625,6 +3628,7 @@ mod mining {
             let mining = MiningCoordinator::new(
                 state.mempool_reader(),
                 state.chainstate(),
+                state.block_memory(),
                 state.stable_read(),
                 state.chain_followers(),
                 payout,
@@ -9142,6 +9146,353 @@ mod tx_ingress_e2e {
             OBSERVE_TIMEOUT,
         )?;
         assert!(!harness.tx_in_mempool(&child_txid));
+        Ok(())
+    }
+}
+
+mod winning_header_driver {
+    use bitcoin::hashes::Hash;
+    use bitcoin::p2p::message_blockdata::Inventory;
+    use bitcoin_rs_chain::chain::regtest_fixture;
+    use bitcoin_rs_consensus::primitives::{Block, BlockImage, Hash256};
+    use bitcoin_rs_node::state::NodeState;
+    use bitcoin_rs_node::test_support::TestError;
+    use bitcoin_rs_node::{Network, NodeConfig};
+    use bitcoin_rs_p2p::test_support::{
+        MessageReceiver, message_channel, synthetic_peer, test_addr,
+    };
+    use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerLease, PeerSource, PeerTable};
+    use crossbeam_channel::{Sender, unbounded};
+    use std::sync::Arc;
+
+    struct HeaderPeer {
+        source: PeerSource,
+        peers: Arc<PeerTable>,
+        outbound: MessageReceiver,
+        headers: Sender<InboundHeaders>,
+        blocks: Sender<InboundBlock>,
+    }
+
+    impl HeaderPeer {
+        fn connect(
+            state: &NodeState,
+            height: i32,
+        ) -> Result<(bitcoin_rs_node::BlockSync, Self), TestError> {
+            let peers = Arc::new(PeerTable::new());
+            let endpoint = test_addr(28421, 0)?;
+            let (sender, outbound) = message_channel();
+            let lease = PeerLease::new(sender);
+            peers.register(endpoint, lease.clone());
+            peers.publish_info(endpoint, &lease, synthetic_peer(endpoint, height));
+            let source = lease.source(endpoint.endpoint());
+            let (headers, inbound_headers_rx) = unbounded();
+            let (blocks, inbound_blocks_rx) = unbounded();
+            let sync = bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
+                handles: state.chainstate(),
+                followers: state.chain_followers(),
+                peer_table: Arc::clone(&peers),
+                inbound_headers_rx,
+                inbound_blocks_rx,
+                ibd: state.chainstate().ibd_latch(),
+                assumeutxo: None,
+                budget: state.budget(),
+            });
+            let peer = Self {
+                source,
+                peers,
+                outbound,
+                headers,
+                blocks,
+            };
+            Ok((sync, peer))
+        }
+
+        fn answer(
+            &self,
+            fork: &[Block],
+            end: usize,
+            body_floor: usize,
+        ) -> Result<Vec<Hash256>, TestError> {
+            let mut locators = Vec::new();
+            for message in self.outbound.try_iter() {
+                match message {
+                    Message::GetHeaders(request) => {
+                        let first = request.locator_hashes.first().ok_or("empty locator")?;
+                        locators.push(Hash256::from_le_bytes(first.as_byte_array()));
+                        let start = request
+                            .locator_hashes
+                            .iter()
+                            .find_map(|hash| {
+                                let hash = Hash256::from_le_bytes(hash.as_byte_array());
+                                if hash == Network::Regtest.genesis_block_hash() {
+                                    Some(0)
+                                } else {
+                                    fork.iter()
+                                        .position(|block| block.block_hash().0 == hash)
+                                        .map(|index| index + 1)
+                                }
+                            })
+                            .ok_or("locator has no retained fork anchor")?;
+                        assert!(start <= end && end <= fork.len());
+                        self.headers
+                            .send(InboundHeaders {
+                                headers: fork[start..end]
+                                    .iter()
+                                    .map(|block| block.header)
+                                    .collect(),
+                                source: Some(self.source),
+                                wire_response: true,
+                            })
+                            .map_err(|_| TestError::message("header response queue closed"))?;
+                    }
+                    Message::GetData(items) => {
+                        for item in items {
+                            let hash = match item {
+                                Inventory::Block(hash) | Inventory::WitnessBlock(hash) => {
+                                    Hash256::from_le_bytes(hash.as_byte_array())
+                                }
+                                _ => {
+                                    return Err(TestError::message("unexpected body request type"));
+                                }
+                            };
+                            let (index, block) = fork
+                                .iter()
+                                .enumerate()
+                                .find(|(_, block)| block.block_hash().0 == hash)
+                                .ok_or("requested body is outside the advertised fork")?;
+                            if index + 1 < body_floor {
+                                continue;
+                            }
+                            let mut inbound = InboundBlock::from_local(block.clone());
+                            inbound.source = Some(self.source);
+                            self.blocks
+                                .send(inbound)
+                                .map_err(|_| TestError::message("body response queue closed"))?;
+                        }
+                    }
+                    _ => return Err(TestError::message("unexpected sync message")),
+                }
+            }
+            Ok(locators)
+        }
+    }
+
+    // P2P-10, SYNC-01, SYNC-02, SYNC-05
+    #[test]
+    fn winning_header_driver_applies_deep_fork_and_recovers_durable_tip() -> Result<(), TestError> {
+        let directory = tempfile::tempdir()?;
+        let mut config = NodeConfig::default_for_network(Network::Regtest);
+        config.data_dir = directory.path().join("winning-header-node");
+        config.p2p.listen.clear();
+        let state = NodeState::open(config.clone(), None)?;
+        let genesis = Network::Regtest.genesis_block();
+        state.apply_block(&BlockImage::from_local(genesis.clone()))?;
+        let mut main = Vec::new();
+        let mut parent = genesis.block_hash();
+        for height in 1..=32 {
+            let block = regtest_fixture::mined_regtest_child_at(parent, height)?;
+            parent = block.block_hash();
+            state.apply_block(&BlockImage::from_local(block.clone()))?;
+            main.push(block);
+        }
+        let _ = state.publish_checkpoint()?;
+        state.chainstate().set_header_side_cache_limit(8);
+        let original_tip = state
+            .chainstate()
+            .applied_tip_snapshot()
+            .ok_or("missing main tip")?;
+        let mut fork = Vec::new();
+        let mut parent = genesis.block_hash();
+        for height in 1..=35 {
+            let mut block = regtest_fixture::mined_regtest_child_at(parent, height)?;
+            block.header.time += 64;
+            block.header.nonce = 0;
+            regtest_fixture::mine_block_to_declared_target(&mut block)?;
+            parent = block.block_hash();
+            fork.push(block);
+        }
+
+        let (sync, peer) = HeaderPeer::connect(&state, 34)?;
+        let source = peer.source;
+        peer.headers
+            .send(InboundHeaders {
+                headers: fork[..33].iter().map(|block| block.header).collect(),
+                source: Some(source),
+                wire_response: true,
+            })
+            .map_err(|_| TestError::message("initial header queue closed"))?;
+        sync.tick();
+        assert_eq!(
+            peer.answer(&fork, 33, 1)?,
+            vec![fork[7].block_hash().0],
+            "retention refusal must request its own retained fork anchor"
+        );
+        assert!(state.chainstate().block_tree_reader().read().len() <= 41);
+        assert_eq!(
+            state.chainstate().applied_tip_snapshot().as_deref(),
+            Some(original_tip.as_ref())
+        );
+
+        sync.tick();
+        assert_eq!(peer.answer(&fork, 33, 1)?, vec![fork[7].block_hash().0]);
+        assert!(state.chainstate().block_tree_reader().read().len() <= 41);
+        assert_eq!(
+            state
+                .chainstate()
+                .header_tip()
+                .ok_or("missing main header")?
+                .hash,
+            original_tip.hash
+        );
+
+        sync.tick();
+        assert_eq!(
+            state
+                .chainstate()
+                .header_tip()
+                .ok_or("missing winning header")?
+                .hash,
+            fork[32].block_hash().0
+        );
+        assert_eq!(peer.answer(&fork, 34, 1)?, vec![fork[32].block_hash().0]);
+        assert!(peer.peers.is_current(source));
+        for _ in 0..128 {
+            sync.tick();
+            let _ = peer.answer(&fork, 34, 1)?;
+            if state
+                .chainstate()
+                .applied_tip_snapshot()
+                .is_some_and(|tip| tip.hash == fork[33].block_hash().0)
+            {
+                break;
+            }
+        }
+        let applied = state
+            .chainstate()
+            .applied_tip_snapshot()
+            .ok_or("missing applied fork")?;
+        assert_eq!(
+            (applied.height, applied.hash),
+            (34, fork[33].block_hash().0)
+        );
+        sync.tick();
+        assert!(state.chainstate().block_tree_reader().read().len() <= 43);
+        let expected_utxo = state
+            .chainstate()
+            .utxo_reader()
+            .with_stable_view(|view| view.hash_serialized_3())??;
+        drop(sync);
+        drop(peer);
+        drop(state);
+
+        let resumed = NodeState::open(config.clone(), None)?;
+        let restored = resumed
+            .chainstate()
+            .applied_tip_snapshot()
+            .ok_or("missing durable fork")?;
+        assert_eq!(
+            (restored.height, restored.hash),
+            (34, fork[33].block_hash().0)
+        );
+        assert_eq!(
+            resumed
+                .chainstate()
+                .header_tip()
+                .ok_or("missing restored header")?
+                .hash,
+            restored.hash
+        );
+        assert_eq!(
+            resumed
+                .chainstate()
+                .utxo_reader()
+                .with_stable_view(|view| view.hash_serialized_3())??,
+            expected_utxo
+        );
+        let _ = resumed.publish_checkpoint()?;
+        resumed.apply_block(&BlockImage::from_local(fork[34].clone()))?;
+        drop(resumed);
+        let reopened = NodeState::open(config.clone(), None)?;
+        assert_eq!(
+            reopened
+                .chainstate()
+                .applied_tip_snapshot()
+                .ok_or("missing continued fork")?
+                .hash,
+            fork[34].block_hash().0
+        );
+        reopened.chainstate().set_header_side_cache_limit(8);
+        reopened
+            .chainstate()
+            .maintain_header_retention()
+            .map_err(|error| TestError::message(error.to_string()))?;
+        assert!(
+            reopened
+                .chainstate()
+                .block_tree_reader()
+                .read()
+                .lookup(main[31].block_hash().0)
+                .is_none(),
+            "the old applied branch header must be evicted before body rediscovery"
+        );
+        let mut parent = main[31].block_hash();
+        for height in 33..=36 {
+            let block = regtest_fixture::mined_regtest_child_at(parent, height)?;
+            parent = block.block_hash();
+            main.push(block);
+        }
+        let (rediscovery_sync, rediscovery_peer) = HeaderPeer::connect(&reopened, 36)?;
+        rediscovery_peer
+            .headers
+            .send(InboundHeaders {
+                headers: main.iter().map(|block| block.header).collect(),
+                source: Some(rediscovery_peer.source),
+                wire_response: true,
+            })
+            .map_err(|_| TestError::message("rediscovery header queue closed"))?;
+        for _ in 0..128 {
+            rediscovery_sync.tick();
+            let _ = rediscovery_peer.answer(&main, 36, 33)?;
+            if reopened
+                .chainstate()
+                .applied_tip_snapshot()
+                .is_some_and(|tip| tip.hash == main[35].block_hash().0)
+            {
+                break;
+            }
+        }
+        let reused = reopened
+            .chainstate()
+            .applied_tip_snapshot()
+            .ok_or("missing rediscovered main tip")?;
+        assert_eq!(
+            (reused.height, reused.hash),
+            (36, main[35].block_hash().0),
+            "revalidated evicted headers must reuse their retained body bytes"
+        );
+        let reused_utxo = reopened
+            .chainstate()
+            .utxo_reader()
+            .with_stable_view(|view| view.hash_serialized_3())??;
+        drop(rediscovery_sync);
+        drop(rediscovery_peer);
+        drop(reopened);
+        let recovered = NodeState::open(config, None)?;
+        assert_eq!(
+            recovered
+                .chainstate()
+                .applied_tip_snapshot()
+                .ok_or("missing durable rediscovered tip")?
+                .hash,
+            main[35].block_hash().0
+        );
+        assert_eq!(
+            recovered
+                .chainstate()
+                .utxo_reader()
+                .with_stable_view(|view| view.hash_serialized_3())??,
+            reused_utxo
+        );
         Ok(())
     }
 }

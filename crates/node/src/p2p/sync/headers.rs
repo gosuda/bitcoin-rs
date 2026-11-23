@@ -17,11 +17,15 @@ use super::peers::outranks;
 use super::peers::shared_active_height;
 use super::peers::sync_peer_candidate;
 use super::requests::COMPACT_RELAY_NEAR_TIP_BLOCKS;
-use super::{BlockSync, SchedulerState};
+use super::{BlockSync, HeaderSyncMode, SchedulerState};
 use crate::p2p::download_window::SyncPeer;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
-use bitcoin_rs_chain::chain::{BlockTree, ChainError, NodeId, NodeStatus, validate_pow};
+use bitcoin_rs_chain::chain::{
+    BlockTree, ChainError, HeaderCandidate, HeaderCandidateError, HeaderCandidatePhase,
+    HeaderContextError, NodeId, NodeStatus, validate_pow,
+};
+use bitcoin_rs_chain::{HeaderAdmissionError, HeaderResourceError};
 use bitcoin_rs_consensus::header_rules::ChainWork;
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Header;
@@ -70,6 +74,15 @@ impl BlockSync {
         let mut total_headers = 0_usize;
         let mut credit_refresh_needed = false;
         let mut direct_fetch: Vec<(PeerSource, Hash256)> = Vec::new();
+        let mut replay_remaining = MAX_HEADERS_PER_TICK;
+        if let Err(error) = self.chain.maintain_header_retention() {
+            tracing::debug!(%error, "block sync: header retention maintenance deferred");
+        }
+        self.drain_winning_headers(
+            &mut replay_remaining,
+            &mut direct_fetch,
+            &mut credit_refresh_needed,
+        );
         for _ in 0..MAX_HEADER_BATCHES_PER_TICK {
             if total_headers >= MAX_HEADERS_PER_TICK {
                 break;
@@ -96,7 +109,7 @@ impl BlockSync {
                         .lock()
                         .headers_sync
                         .get(&source)
-                        .is_some_and(|owned| owned.presync.is_some())
+                        .is_some_and(|owned| owned.mode.is_some())
                 });
 
             if !feeds_live_sync
@@ -138,6 +151,12 @@ impl BlockSync {
                 &mut credit_refresh_needed,
             );
         }
+        self.drain_winning_headers(
+            &mut replay_remaining,
+            &mut direct_fetch,
+            &mut credit_refresh_needed,
+        );
+        self.resume_owned_header_requests();
         self.post_headers_drain(credit_refresh_needed, direct_fetch, total_headers);
     }
 
@@ -321,6 +340,40 @@ impl BlockSync {
         source: Option<PeerSource>,
         error: &bitcoin_rs_chain::chain::HeaderRefusal,
     ) {
+        if let (Some(source), Some(anchor)) = (source, error.candidate_anchor()) {
+            let already_verifying = self
+                .scheduler
+                .lock()
+                .headers_sync
+                .get(&source)
+                .is_some_and(|owned| matches!(&owned.mode, Some(HeaderSyncMode::Winning(_))));
+            if already_verifying {
+                self.resume_owned_header_requests();
+                return;
+            }
+            self.clear_header_request_for(source);
+            self.clear_header_mode_for(source);
+            match self
+                .chain
+                .begin_header_candidate(anchor, self.chain.minimum_chain_work())
+            {
+                Ok(candidate) => {
+                    let locator = candidate.locator();
+                    let height = candidate.height();
+                    if self.peer_table.is_current(source) {
+                        self.scheduler
+                            .lock()
+                            .headers_sync
+                            .entry(source)
+                            .or_default()
+                            .mode = Some(HeaderSyncMode::Winning(candidate));
+                        self.send_presync_getheaders(source, locator, height);
+                    }
+                }
+                Err(error) => self.settle_winning_header_error(source, error),
+            }
+            return;
+        }
         let now = Instant::now();
         let mut last = self.refused_rerequest_at.lock();
         if last.is_none_or(|last| now.duration_since(last) >= HEADER_REQUEST_TIMEOUT) {
@@ -357,12 +410,12 @@ impl BlockSync {
             if let Some(request) = owned.request.as_mut() {
                 request.state = HeaderRequestState::Answered;
             }
-            owned.presync = None;
+            owned.mode = None;
         }
         let prune = scheduler
             .headers_sync
             .get(&source)
-            .is_some_and(|owned| owned.request.is_none() && owned.presync.is_none());
+            .is_some_and(|owned| owned.request.is_none() && owned.mode.is_none());
         if prune {
             scheduler.headers_sync.remove(&source);
         }
@@ -384,7 +437,7 @@ impl BlockSync {
         if scheduler
             .headers_sync
             .get(&source)
-            .is_some_and(|owned| owned.presync.is_none())
+            .is_some_and(|owned| owned.mode.is_none())
         {
             scheduler.headers_sync.remove(&source);
         }
@@ -393,16 +446,16 @@ impl BlockSync {
         }
     }
 
-    fn clear_presync_for(&self, source: PeerSource) -> Option<HeadersSyncState> {
+    fn clear_header_mode_for(&self, source: PeerSource) -> Option<HeaderSyncMode> {
         let mut scheduler = self.scheduler.lock();
         let state = scheduler
             .headers_sync
             .get_mut(&source)
-            .and_then(|owned| owned.presync.take());
+            .and_then(|owned| owned.mode.take());
         if scheduler
             .headers_sync
             .get(&source)
-            .is_some_and(|owned| owned.request.is_none() && owned.presync.is_none())
+            .is_some_and(|owned| owned.request.is_none() && owned.mode.is_none())
         {
             scheduler.headers_sync.remove(&source);
         }
@@ -425,7 +478,9 @@ impl BlockSync {
             .filter_map(|(source, owned)| {
                 let request = owned.request?;
                 (request.state == HeaderRequestState::AwaitingResponse
-                    && (below_floor || owned.presync.is_some())
+                    && !owned.has_local_replay()
+                    && !owned.has_cancelled_candidate()
+                    && (below_floor || owned.mode.is_some())
                     && now.saturating_duration_since(request.requested_at) >= request.timeout())
                 .then_some(*source)
             })
@@ -718,7 +773,7 @@ impl BlockSync {
             scheduler
                 .headers_sync
                 .get(&source)
-                .is_some_and(|owned| owned.presync.is_some())
+                .is_some_and(|owned| owned.mode.is_some())
         };
         if has_presync {
             return GetheadersOutcome::Suppressed;
@@ -791,6 +846,25 @@ impl BlockSync {
         locator: Vec<Hash256>,
         kind: HeaderRequestKind,
     ) -> GetheadersOutcome {
+        let (our_height, locator, finished_candidate) = {
+            let scheduler = self.scheduler.lock();
+            let owned = scheduler.headers_sync.get(&source);
+            if owned.is_some_and(|owned| owned.has_local_replay()) {
+                return GetheadersOutcome::Suppressed;
+            }
+            match owned.and_then(|owned| owned.mode.as_ref()) {
+                Some(HeaderSyncMode::Winning(candidate)) if candidate.is_cancelled() => {
+                    return GetheadersOutcome::Suppressed;
+                }
+                Some(mode) => (
+                    mode.height(),
+                    mode.locator(),
+                    matches!(mode, HeaderSyncMode::Winning(candidate)
+                        if candidate.phase() == HeaderCandidatePhase::Finished),
+                ),
+                None => (our_height, locator, false),
+            }
+        };
         let Some(locator_tip_hash) = locator.first().copied() else {
             return GetheadersOutcome::Failed;
         };
@@ -857,6 +931,9 @@ impl BlockSync {
                 return GetheadersOutcome::Failed;
             }
         }
+        if finished_candidate {
+            self.clear_header_mode_for(source);
+        }
         tracing::debug!(
             peer_addr = ?source.endpoint,
             our_height,
@@ -886,7 +963,7 @@ impl BlockSync {
         match request.state {
             HeaderRequestState::ResponseQueued => true,
             HeaderRequestState::AwaitingResponse
-                if below_floor || owned.presync.is_some() || unexpired =>
+                if below_floor || owned.mode.is_some() || unexpired =>
             {
                 true
             }
@@ -913,7 +990,7 @@ impl BlockSync {
         }
         if headers.is_empty() {
             if wire_response && let Some(source) = source {
-                self.clear_presync_for(source);
+                self.clear_header_mode_for(source);
             }
             return Some(self.chain.admit_headers(headers));
         }
@@ -934,16 +1011,21 @@ impl BlockSync {
                 scheduler
                     .headers_sync
                     .get_mut(&source)
-                    .and_then(|owned| owned.presync.take())
+                    .and_then(|owned| owned.mode.take())
             };
-            let mut state = if let Some(state) = parked {
-                state
-            } else {
-                let Some((anchor, minimum_work)) = self.presync_anchor(headers) else {
-                    return Some(self.chain.admit_headers(headers));
-                };
-                let params = anchor.network.headers_sync_params();
-                HeadersSyncState::new(anchor, minimum_work, params, presync_salt())
+            let mut state = match parked {
+                Some(HeaderSyncMode::Winning(candidate)) => {
+                    self.receive_winning_headers(source, candidate, headers, batch_len);
+                    return None;
+                }
+                Some(HeaderSyncMode::LowWork(state)) => state,
+                None => {
+                    let Some((anchor, minimum_work)) = self.presync_anchor(headers) else {
+                        return Some(self.chain.admit_headers(headers));
+                    };
+                    let params = anchor.network.headers_sync_params();
+                    HeadersSyncState::new(anchor, minimum_work, params, presync_salt())
+                }
             };
             let outcome = Self::advance_presync_state(&mut state, headers, batch_len);
             if self.peer_table.is_current(source) {
@@ -952,15 +1034,15 @@ impl BlockSync {
                     .headers_sync
                     .entry(source)
                     .or_default()
-                    .presync = Some(state);
+                    .mode = Some(HeaderSyncMode::LowWork(state));
             }
             outcome
         };
         if outcome.finished {
-            self.clear_presync_for(source);
+            self.clear_header_mode_for(source);
         }
         if let Some(error) = outcome.failure {
-            self.clear_presync_for(source);
+            self.clear_header_mode_for(source);
             self.settle_presync_fault(source, error);
             return None;
         }
@@ -970,23 +1052,192 @@ impl BlockSync {
             self.peer_table
                 .note_headers_progress(source, outcome.height);
         }
-        if outcome.request_more {
-            self.send_presync_getheaders(source, outcome.locator, outcome.height);
-        }
         if !outcome.ready_headers.is_empty() {
             let admission = self.chain.admit_headers(&outcome.ready_headers);
             if let HeaderAdmission::Refused(error) = admission {
-                let dropped = self.clear_presync_for(source);
+                let dropped = self.clear_header_mode_for(source);
                 if let Some(mut state) = dropped {
                     state.finalize();
                 }
                 self.request_ancestry_after_refusal(Some(source), &error);
                 return None;
             }
+            if outcome.request_more && matches!(admission, HeaderAdmission::Accepted { .. }) {
+                self.send_presync_getheaders(source, outcome.locator, outcome.height);
+            }
             return Some(admission);
+        }
+        if outcome.request_more {
+            self.send_presync_getheaders(source, outcome.locator, outcome.height);
         }
         None
     }
+    fn receive_winning_headers(
+        &self,
+        source: PeerSource,
+        mut candidate: HeaderCandidate,
+        headers: &[Header],
+        batch_len: usize,
+    ) {
+        if !candidate.has_verified_headers()
+            && let Err(error) = candidate.receive(
+                headers,
+                batch_len >= bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT,
+            )
+        {
+            self.settle_winning_header_error(source, error.into());
+            return;
+        }
+        self.peer_table
+            .note_headers_progress(source, candidate.height());
+        if self.peer_table.is_current(source) {
+            self.scheduler
+                .lock()
+                .headers_sync
+                .entry(source)
+                .or_default()
+                .mode = Some(HeaderSyncMode::Winning(candidate));
+        }
+    }
+
+    fn drain_winning_headers(
+        &self,
+        remaining: &mut usize,
+        direct_fetch: &mut Vec<(PeerSource, Hash256)>,
+        credit_refresh_needed: &mut bool,
+    ) {
+        let sources: Vec<_> = self
+            .scheduler
+            .lock()
+            .headers_sync
+            .iter()
+            .filter_map(|(source, owned)| {
+                matches!(&owned.mode, Some(HeaderSyncMode::Winning(_))).then_some(*source)
+            })
+            .collect();
+        for source in sources {
+            let Some(mode) = self.clear_header_mode_for(source) else {
+                continue;
+            };
+            let HeaderSyncMode::Winning(mut candidate) = mode else {
+                self.scheduler
+                    .lock()
+                    .headers_sync
+                    .entry(source)
+                    .or_default()
+                    .mode = Some(mode);
+                continue;
+            };
+            if !self.peer_table.is_current(source) {
+                continue;
+            }
+            if candidate.is_cancelled() {
+                self.settle_winning_header_error(source, HeaderCandidateError::Cancelled.into());
+                continue;
+            }
+            let mut failed = None;
+            while candidate.has_verified_headers() && *remaining > 0 {
+                let maximum = (*remaining).min(bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT);
+                match self.chain.admit_verified_headers(&mut candidate, maximum) {
+                    Ok(outcome) => {
+                        assert!(outcome.accepted > 0 && outcome.accepted <= maximum);
+                        *remaining -= outcome.accepted;
+                        self.handle_header_admission(
+                            HeaderAdmission::Accepted {
+                                accepted: outcome.accepted,
+                                announced_tip: outcome.announced_tip,
+                                active_height: outcome.active_height,
+                                demoted_tip: outcome.demoted_tip,
+                            },
+                            Some(source),
+                            true,
+                            outcome.accepted,
+                            direct_fetch,
+                            credit_refresh_needed,
+                        );
+                    }
+                    Err(
+                        HeaderAdmissionError::Candidate(
+                            HeaderCandidateError::Busy | HeaderCandidateError::NoVerifiedBatch,
+                        )
+                        | HeaderAdmissionError::Resource(HeaderResourceError::Reclaiming),
+                    ) => break,
+                    Err(error) => {
+                        failed = Some(error);
+                        break;
+                    }
+                }
+            }
+            if let Some(error) = failed {
+                self.settle_winning_header_error(source, error);
+            } else if self.peer_table.is_current(source) {
+                self.scheduler
+                    .lock()
+                    .headers_sync
+                    .entry(source)
+                    .or_default()
+                    .mode = Some(HeaderSyncMode::Winning(candidate));
+            }
+        }
+    }
+
+    fn resume_owned_header_requests(&self) {
+        let pending: Vec<_> = self
+            .scheduler
+            .lock()
+            .headers_sync
+            .iter()
+            .filter_map(|(source, owned)| {
+                if owned.request.is_some() || owned.has_local_replay() {
+                    return None;
+                }
+                let mode = owned.mode.as_ref()?;
+                if matches!(mode, HeaderSyncMode::Winning(candidate) if candidate.is_cancelled()) {
+                    return None;
+                }
+                Some((*source, mode.locator(), mode.height()))
+            })
+            .collect();
+        for (source, locator, height) in pending {
+            self.send_presync_getheaders(source, locator, height);
+        }
+    }
+
+    fn settle_winning_header_error(&self, source: PeerSource, error: HeaderAdmissionError) {
+        let peer_fault = match &error {
+            HeaderAdmissionError::Candidate(HeaderCandidateError::Chain(
+                ChainError::NonContinuousHeader { .. },
+            ))
+            | HeaderAdmissionError::Candidate(HeaderCandidateError::Validation(
+                HeaderContextError::Chain(ChainError::NonContinuousHeader { .. }),
+            )) => false,
+            HeaderAdmissionError::Rejected(error)
+            | HeaderAdmissionError::Candidate(HeaderCandidateError::Chain(error))
+            | HeaderAdmissionError::Candidate(HeaderCandidateError::Validation(
+                HeaderContextError::Chain(error),
+            )) => is_peer_fault(error),
+            HeaderAdmissionError::Refused(_)
+            | HeaderAdmissionError::Resource(_)
+            | HeaderAdmissionError::Candidate(_) => false,
+        };
+        self.scheduler.lock().clear_headers_sync_for(source);
+        if peer_fault {
+            if self.peer_table.disconnect_source(source) {
+                self.scheduler
+                    .lock()
+                    .window
+                    .mark_peer_unresponsive(source, Instant::now());
+            }
+            tracing::warn!(peer_addr = ?source.endpoint, %error,
+                "block sync: peer served invalid winning-candidate headers");
+        } else {
+            self.request_ancestry_after_refusal(
+                Some(source),
+                &bitcoin_rs_chain::chain::HeaderRefusal::from_cause(&error),
+            );
+        }
+    }
+
     fn body_carried_header_needs_admission(&self, headers: &[Header]) -> bool {
         let [header] = headers else {
             return self.stale_tip_page_needs_admission(headers);
@@ -1240,6 +1491,30 @@ mod stale_tip_routing_tests {
     }
 
     impl SyncChain for RoutingStubChain {
+        fn begin_header_candidate(
+            &self,
+            anchor: Hash256,
+            _minimum_work: ChainWork,
+        ) -> Result<bitcoin_rs_chain::chain::HeaderCandidate, bitcoin_rs_chain::HeaderAdmissionError>
+        {
+            Err(bitcoin_rs_chain::chain::HeaderCandidateError::AnchorUnavailable { anchor }.into())
+        }
+
+        fn admit_verified_headers(
+            &self,
+            _candidate: &mut bitcoin_rs_chain::chain::HeaderCandidate,
+            _maximum: usize,
+        ) -> Result<bitcoin_rs_chain::HeaderAdmissionOutcome, bitcoin_rs_chain::HeaderAdmissionError>
+        {
+            Err(bitcoin_rs_chain::chain::HeaderCandidateError::WrongChainstate.into())
+        }
+
+        fn maintain_header_retention(
+            &self,
+        ) -> Result<usize, bitcoin_rs_chain::HeaderAdmissionError> {
+            Ok(0)
+        }
+
         fn network(&self) -> Network {
             self.network
         }
@@ -1568,5 +1843,521 @@ mod stale_tip_routing_tests {
             control_saw_getdata,
             "the unowned control announcement must direct-fetch its body"
         );
+    }
+}
+
+#[cfg(test)]
+mod winning_header_tests {
+    use super::*;
+    use crate::test_support::TestError;
+    use arc_swap::ArcSwapOption;
+    use bitcoin_rs_chain::chain::{NodeStatus, regtest_fixture};
+    use bitcoin_rs_p2p::connection::SharedOutboundBudget;
+    use bitcoin_rs_p2p::test_support::{
+        MessageReceiver, hog, message_channel, synthetic_peer, test_addr,
+    };
+    use bitcoin_rs_p2p::{PeerLease, PeerTable};
+    use bitcoin_rs_storage::utxo::UtxoSet;
+    use bitcoin_rs_storage::utxo::stats::{CoinStats, CoinStatsListener};
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct WinningFixture {
+        sync: BlockSync,
+        chain: Arc<bitcoin_rs_chain::Chainstate>,
+        source: PeerSource,
+        outbound: MessageReceiver,
+        aggregate: Arc<SharedOutboundBudget>,
+        inbound_headers: crossbeam_channel::Sender<InboundHeaders>,
+        fork: Vec<Header>,
+    }
+
+    fn headers(count: u32, marker: u8) -> Result<Vec<Header>, TestError> {
+        let mut parent = bitcoin_rs_consensus::primitives::Network::Regtest
+            .genesis_block()
+            .block_hash();
+        let mut headers = Vec::with_capacity(usize::try_from(count)?);
+        for height in 1..=count {
+            let mut header = regtest_fixture::mined_regtest_header(parent, height)?;
+            header.merkle_root = Hash256::from_le_bytes(&[marker; 32]);
+            header.nonce = 0;
+            regtest_fixture::mine_header_to_declared_target(&mut header)?;
+            parent = header.compute_hash();
+            headers.push(header);
+        }
+        Ok(headers)
+    }
+
+    fn fixture(main_height: u32, fork_height: u32) -> Result<WinningFixture, TestError> {
+        let network = bitcoin_rs_consensus::primitives::Network::Regtest;
+        let mut tree = BlockTree::new();
+        tree.insert_header(network.genesis_block().header, NodeStatus::HeaderValid)?;
+        let applied = tree.tip();
+        bitcoin_rs_chain::chain::accept_headers(
+            &mut tree,
+            &headers(main_height, 1)?,
+            network,
+            bitcoin_rs_chain::chain::current_unix_seconds(),
+            bitcoin_rs_chain::chain::HeaderValidationMode::LiveAdmission,
+        )?;
+        let tip = tree.tip_handle();
+        let stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
+        let mut utxo = UtxoSet::new();
+        utxo.track_coin_stats((*stats).clone());
+        let chain = Arc::new(bitcoin_rs_chain::Chainstate::new(
+            network,
+            tip,
+            Arc::new(ArcSwapOption::new(applied)),
+            Arc::new(RwLock::new(tree)),
+            Arc::new(utxo),
+            stats,
+            Arc::new(bitcoin_rs_chain::events::ChainEventPublisher::detached(0)),
+        ));
+        chain.set_header_side_cache_limit(8);
+        let peers = Arc::new(PeerTable::new());
+        let aggregate = Arc::new(SharedOutboundBudget::with_limits(4096, 0));
+        let (sender, outbound) = message_channel();
+        let lease = PeerLease::new(sender).with_shared_budget(&aggregate);
+        let endpoint = test_addr(28371, 0)?;
+        peers.register(endpoint, lease.clone());
+        peers.publish_info(
+            endpoint,
+            &lease,
+            synthetic_peer(endpoint, i32::try_from(fork_height)?),
+        );
+        let source = lease.source(endpoint.endpoint());
+        let (inbound_headers, inbound_headers_rx) = crossbeam_channel::unbounded();
+        let (_, inbound_blocks_rx) = crossbeam_channel::unbounded();
+        let sync = crate::sync::block_sync(crate::sync::BlockSyncInputs {
+            handles: Arc::clone(&chain),
+            followers: crate::chain_effects::ChainFollowers::noop(),
+            peer_table: peers,
+            inbound_headers_rx,
+            inbound_blocks_rx,
+            ibd: chain.ibd_latch(),
+            assumeutxo: None,
+            budget: Arc::new(crate::budget::NodeBudget::from_chainstate_cache_budget(
+                bitcoin_rs_storage::split_chainstate_cache_budget(64 << 20),
+                1,
+            )),
+        });
+        Ok(WinningFixture {
+            sync,
+            chain,
+            source,
+            outbound,
+            aggregate,
+            inbound_headers,
+            fork: headers(fork_height, 2)?,
+        })
+    }
+
+    fn candidate(fixture: &WinningFixture) -> Result<HeaderCandidate, TestError> {
+        fixture
+            .chain
+            .begin_header_candidate(
+                bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash(),
+                ChainWork::ZERO,
+            )
+            .map_err(|error| TestError::message(error.to_string()))
+    }
+
+    fn receive(
+        candidate: &mut HeaderCandidate,
+        headers: &[Header],
+        full: bool,
+    ) -> Result<(), TestError> {
+        candidate
+            .receive(headers, full)
+            .map(|_| ())
+            .map_err(|error| TestError::message(error.to_string()))
+    }
+
+    fn install(fixture: &WinningFixture, candidate: HeaderCandidate) {
+        fixture
+            .sync
+            .scheduler
+            .lock()
+            .headers_sync
+            .entry(fixture.source)
+            .or_default()
+            .mode = Some(HeaderSyncMode::Winning(candidate));
+    }
+
+    fn first_locator(outbound: &MessageReceiver) -> Option<Hash256> {
+        outbound.try_iter().find_map(|message| match message {
+            Message::GetHeaders(request) => request
+                .locator_hashes
+                .first()
+                .map(|hash| Hash256::from_le_bytes(hash.as_byte_array())),
+            _ => None,
+        })
+    }
+
+    // P2P-10, P2P-07, SYNC-01
+    #[test]
+    fn winning_replay_admits_at_most_four_thousand_headers_per_tick() -> Result<(), TestError> {
+        let fixture = fixture(5_000, 6_000)?;
+        let mut candidate = candidate(&fixture)?;
+        for page in fixture.fork.chunks(2_000) {
+            receive(&mut candidate, page, true)?;
+        }
+        assert_eq!(candidate.phase(), HeaderCandidatePhase::Redownloading);
+        for page in fixture.fork.chunks(2_000) {
+            receive(&mut candidate, page, true)?;
+        }
+        assert!(candidate.has_verified_headers());
+        install(&fixture, candidate);
+        let before = fixture.chain.block_tree_reader().read().len();
+        fixture.sync.drain_inbound_headers();
+        assert_eq!(
+            fixture.chain.block_tree_reader().read().len() - before,
+            4_000
+        );
+        let scheduler = fixture.sync.scheduler.lock();
+        let owned = scheduler
+            .headers_sync
+            .get(&fixture.source)
+            .ok_or("missing local replay")?;
+        assert!(owned.has_local_replay());
+        assert!(owned.request.is_none());
+        drop(scheduler);
+        assert!(fixture.outbound.is_empty());
+        fixture.sync.drain_inbound_headers();
+        assert_eq!(
+            fixture
+                .chain
+                .header_tip()
+                .ok_or("missing winning tip")?
+                .height,
+            6_000
+        );
+        assert_eq!(
+            first_locator(&fixture.outbound),
+            Some(Hash256::from(fixture.fork[5_999].compute_hash()))
+        );
+        Ok(())
+    }
+
+    // P2P-10, SYNC-01
+    #[test]
+    fn authenticated_fifo_wait_does_not_expire_as_network_silence() -> Result<(), TestError> {
+        let fixture = fixture(2, 3)?;
+        let mut first = candidate(&fixture)?;
+        receive(&mut first, &fixture.fork, false)?;
+        let mut waiting = candidate(&fixture)?;
+        receive(&mut waiting, &fixture.fork, false)?;
+        receive(&mut waiting, &fixture.fork, false)?;
+        install(&fixture, waiting);
+        fixture.sync.drain_inbound_headers();
+        assert!(
+            fixture
+                .sync
+                .scheduler
+                .lock()
+                .headers_sync
+                .get(&fixture.source)
+                .is_some_and(|owned| owned.has_local_replay() && owned.request.is_none())
+        );
+        let now = Instant::now() + Duration::from_mins(30);
+        fixture.sync.retire_timed_out_header_syncs(now);
+        for elapsed in [0, 21, 24] {
+            let now = now + Duration::from_mins(elapsed);
+            let frontier = fixture
+                .sync
+                .observe_frontier(fixture.sync.observe_chain_frontier(), now);
+            fixture.sync.sweep_chain_sync(&frontier, now);
+        }
+        assert!(fixture.sync.peer_table.is_current(fixture.source));
+        assert!(
+            fixture
+                .sync
+                .scheduler
+                .lock()
+                .chain_sync
+                .get(&fixture.source)
+                .is_none()
+        );
+        assert!(fixture.outbound.is_empty());
+        drop(first);
+        fixture.sync.drain_inbound_headers();
+        assert_eq!(
+            fixture
+                .chain
+                .header_tip()
+                .ok_or("missing replay tip")?
+                .height,
+            3
+        );
+        Ok(())
+    }
+
+    // P2P-10
+    #[test]
+    fn winning_network_wait_expires_with_no_authenticated_prefix() -> Result<(), TestError> {
+        for incomplete_redownload in [false, true] {
+            let fixture = fixture(2_000, 4_000)?;
+            let mut candidate = candidate(&fixture)?;
+            if incomplete_redownload {
+                for page in fixture.fork.chunks(2_000) {
+                    receive(&mut candidate, page, true)?;
+                }
+                receive(&mut candidate, &fixture.fork[..2_000], true)?;
+                assert_eq!(candidate.phase(), HeaderCandidatePhase::Redownloading);
+            }
+            assert!(!candidate.has_verified_headers());
+            install(&fixture, candidate);
+            fixture.sync.resume_owned_header_requests();
+            assert!(first_locator(&fixture.outbound).is_some());
+            assert!(
+                fixture
+                    .sync
+                    .scheduler
+                    .lock()
+                    .headers_sync
+                    .get(&fixture.source)
+                    .is_some_and(|owned| !owned.has_local_replay() && owned.request.is_some())
+            );
+            fixture.sync.retire_timed_out_header_syncs(
+                Instant::now() + HEADER_REQUEST_TIMEOUT + Duration::from_secs(1),
+            );
+            assert!(!fixture.sync.peer_table.is_current(fixture.source));
+            assert!(
+                !fixture
+                    .sync
+                    .scheduler
+                    .lock()
+                    .headers_sync
+                    .contains_key(&fixture.source)
+            );
+        }
+        Ok(())
+    }
+
+    // P2P-10, BUD-02
+    #[test]
+    fn saturated_winning_request_retries_its_own_locator() -> Result<(), TestError> {
+        let fixture = fixture(2_000, 2_001)?;
+        let mut candidate = candidate(&fixture)?;
+        receive(&mut candidate, &fixture.fork[..2_000], true)?;
+        assert_eq!(candidate.phase(), HeaderCandidatePhase::Verifying);
+        install(&fixture, candidate);
+        let hold = hog(&fixture.aggregate, 4096);
+        fixture.sync.resume_owned_header_requests();
+        assert!(fixture.outbound.is_empty());
+        assert!(
+            fixture
+                .sync
+                .scheduler
+                .lock()
+                .headers_sync
+                .get(&fixture.source)
+                .is_some_and(|owned| owned.mode.is_some() && owned.request.is_none())
+        );
+        assert_eq!(
+            fixture.sync.send_getheaders(
+                fixture.source,
+                2_000,
+                2_001,
+                fixture.sync.build_locator(),
+            ),
+            GetheadersOutcome::Failed
+        );
+        assert!(fixture.sync.peer_table.is_current(fixture.source));
+        drop(hold);
+        fixture.sync.resume_owned_header_requests();
+        assert_eq!(
+            first_locator(&fixture.outbound),
+            Some(Hash256::from(fixture.fork[1_999].compute_hash()))
+        );
+        assert!(
+            fixture
+                .sync
+                .scheduler
+                .lock()
+                .headers_sync
+                .get(&fixture.source)
+                .is_some_and(|owned| owned.mode.is_some() && owned.request.is_some())
+        );
+        Ok(())
+    }
+    // P2P-06, P2P-10
+    #[test]
+    fn body_carried_headers_preserve_a_winning_candidate() -> Result<(), TestError> {
+        let fixture = fixture(2_000, 2_001)?;
+        let mut candidate = candidate(&fixture)?;
+        receive(&mut candidate, &fixture.fork[..2_000], true)?;
+        install(&fixture, candidate);
+        fixture.sync.resume_owned_header_requests();
+        let expected = Hash256::from(fixture.fork[1_999].compute_hash());
+        assert_eq!(first_locator(&fixture.outbound), Some(expected));
+        let genesis = bitcoin_rs_consensus::primitives::Network::Regtest
+            .genesis_block()
+            .header;
+        for header in std::iter::once(genesis).chain(fixture.fork[..9].iter().copied()) {
+            fixture
+                .inbound_headers
+                .send(InboundHeaders {
+                    headers: vec![header],
+                    source: Some(fixture.source),
+                    wire_response: false,
+                })
+                .map_err(|_| TestError::message("body-header queue closed"))?;
+        }
+        fixture.sync.drain_inbound_headers();
+        let scheduler = fixture.sync.scheduler.lock();
+        let owned = scheduler
+            .headers_sync
+            .get(&fixture.source)
+            .ok_or("missing winning owner")?;
+        let Some(HeaderSyncMode::Winning(candidate)) = owned.mode.as_ref() else {
+            return Err(TestError::message(
+                "body traffic discarded the winning owner",
+            ));
+        };
+        assert_eq!(candidate.phase(), HeaderCandidatePhase::Verifying);
+        assert_eq!(candidate.height(), 2_000);
+        assert_eq!(candidate.locator().first(), Some(&expected));
+        assert_eq!(
+            owned.request.map(|request| request.locator_tip_hash),
+            Some(expected)
+        );
+        assert!(fixture.outbound.is_empty());
+        Ok(())
+    }
+
+    // P2P-10, SYNC-01
+    #[test]
+    fn reorged_winning_continuations_restart_without_peer_blame() -> Result<(), TestError> {
+        for redownload in [false, true] {
+            let fixture = fixture(2_000, 4_000)?;
+            let mut candidate = candidate(&fixture)?;
+            receive(&mut candidate, &fixture.fork[..2_000], true)?;
+            if redownload {
+                receive(&mut candidate, &fixture.fork[2_000..], true)?;
+                receive(&mut candidate, &fixture.fork[..2_000], true)?;
+            }
+            let expected = Hash256::from(fixture.fork[1_999].compute_hash());
+            install(&fixture, candidate);
+            fixture.sync.resume_owned_header_requests();
+            assert_eq!(first_locator(&fixture.outbound), Some(expected));
+            let (alternative, active_hash) = {
+                let reader = fixture.chain.block_tree_reader();
+                let tree = reader.read();
+                let tip = tree.tip().ok_or("missing active branch")?;
+                let first = tree
+                    .node_at_height_from(tip.tip_id, 1)
+                    .ok_or("missing alternate header")?;
+                (tree.node(first)?.header, tip.hash)
+            };
+            fixture
+                .inbound_headers
+                .send(InboundHeaders {
+                    headers: vec![alternative],
+                    source: Some(fixture.source),
+                    wire_response: true,
+                })
+                .map_err(|_| TestError::message("alternate header queue closed"))?;
+            fixture.sync.drain_inbound_headers();
+            assert!(
+                fixture.sync.peer_table.is_current(fixture.source),
+                "a valid reorged continuation must keep its source connected"
+            );
+            assert_eq!(first_locator(&fixture.outbound), Some(active_hash));
+            assert!(
+                fixture
+                    .sync
+                    .scheduler
+                    .lock()
+                    .headers_sync
+                    .get(&fixture.source)
+                    .is_some_and(|owned| owned.mode.is_none() && owned.request.is_some())
+            );
+            assert_eq!(
+                fixture
+                    .chain
+                    .header_tip()
+                    .ok_or("missing unchanged tip")?
+                    .hash,
+                active_hash
+            );
+        }
+        Ok(())
+    }
+
+    // P2P-10, SYNC-01
+    #[test]
+    fn locally_cancelled_candidate_drops_its_old_network_deadline() -> Result<(), TestError> {
+        struct NoBodyChanges;
+        impl bitcoin_rs_chain::reorg::ReorgObserver for NoBodyChanges {
+            fn disconnected(&mut self, _: &bitcoin_rs_chain::DisconnectOutcome) {
+                panic!("header-only invalidation disconnected a body");
+            }
+            fn connected(
+                &mut self,
+                _: &bitcoin_rs_consensus::primitives::BlockImage,
+                _: &bitcoin_rs_chain::ConnectOutcome,
+            ) {
+                panic!("header-only invalidation connected a body");
+            }
+            fn reconsider_disconnected(
+                &mut self,
+                _: &bitcoin_rs_consensus::primitives::BlockImage,
+            ) {
+                panic!("header-only invalidation reconsidered a body");
+            }
+        }
+        let fixture = fixture(2, 3)?;
+        install(&fixture, candidate(&fixture)?);
+        fixture.sync.resume_owned_header_requests();
+        assert!(first_locator(&fixture.outbound).is_some());
+        let invalidated = {
+            let reader = fixture.chain.block_tree_reader();
+            let tree = reader.read();
+            let tip = tree.tip().ok_or("missing main branch")?;
+            let first = tree
+                .node_at_height_from(tip.tip_id, 1)
+                .ok_or("missing invalidation root")?;
+            tree.node(first)?.hash
+        };
+        bitcoin_rs_chain::reorg::invalidate_block(
+            &fixture.chain,
+            &mut NoBodyChanges,
+            invalidated,
+            |_, outcome| outcome,
+        )
+        .map_err(|error| TestError::message(error.to_string()))?;
+        assert!(
+            fixture
+                .sync
+                .scheduler
+                .lock()
+                .headers_sync
+                .get(&fixture.source)
+                .is_some_and(|owned| owned.has_cancelled_candidate() && owned.request.is_some())
+        );
+        fixture.sync.retire_timed_out_header_syncs(
+            Instant::now() + HEADER_REQUEST_TIMEOUT + Duration::from_secs(1),
+        );
+        assert!(
+            fixture.sync.peer_table.is_current(fixture.source),
+            "local candidate cancellation must not blame its peer"
+        );
+        fixture.sync.drain_inbound_headers();
+        assert_eq!(
+            first_locator(&fixture.outbound),
+            Some(bitcoin_rs_consensus::primitives::Network::Regtest.genesis_block_hash())
+        );
+        assert!(
+            fixture
+                .sync
+                .scheduler
+                .lock()
+                .headers_sync
+                .get(&fixture.source)
+                .is_some_and(|owned| owned.mode.is_none() && owned.request.is_some())
+        );
+        Ok(())
     }
 }

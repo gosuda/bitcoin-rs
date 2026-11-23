@@ -1,10 +1,11 @@
 pub use bitcoin_rs_chain::WindowApplyDisposition;
 pub use bitcoin_rs_chain::assumeutxo::HistoricalAdvance;
 use bitcoin_rs_chain::chain::BlockTree;
-pub use bitcoin_rs_chain::chain::HeaderAdmission;
 use bitcoin_rs_chain::chain::NodeId;
 use bitcoin_rs_chain::chain::TipSnapshot;
+pub use bitcoin_rs_chain::chain::{HeaderAdmission, HeaderCandidate, HeaderCandidateError};
 pub use bitcoin_rs_chain::reorg::ReorgError;
+pub use bitcoin_rs_chain::{HeaderAdmissionError, HeaderAdmissionOutcome};
 use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_consensus::primitives::Header;
 use bitcoin_rs_consensus::primitives::Network;
@@ -93,6 +94,20 @@ pub trait SyncChain: Send + Sync {
     fn bootstrap_genesis(&self);
 
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission;
+
+    fn begin_header_candidate(
+        &self,
+        anchor: Hash256,
+        minimum_work: bitcoin_rs_consensus::header_rules::ChainWork,
+    ) -> Result<HeaderCandidate, HeaderAdmissionError>;
+
+    fn admit_verified_headers(
+        &self,
+        candidate: &mut HeaderCandidate,
+        maximum: usize,
+    ) -> Result<HeaderAdmissionOutcome, HeaderAdmissionError>;
+
+    fn maintain_header_retention(&self) -> Result<usize, HeaderAdmissionError>;
 
     fn minimum_chain_work(&self) -> bitcoin_rs_consensus::header_rules::ChainWork {
         bitcoin_rs_consensus::header_rules::ChainWork::from_be_bytes(

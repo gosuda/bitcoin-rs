@@ -149,9 +149,18 @@ pub struct RestoredState {
 /// resident UtxoSet is replaced but never seeds the engine.
 pub fn install_restored_state(
     chain: &mut crate::Chainstate,
-    restored: RestoredState,
+    mut restored: RestoredState,
     mode: crate::ValidationMode,
 ) -> Result<(), RecoveryError> {
+    chain
+        .header_retention
+        .restore_operator_verdicts(&mut restored.initial.tree)?;
+    if let Some(applied) = &restored.initial.applied_tip {
+        let node = restored.initial.tree.node(applied.tip_id)?;
+        if node.status == crate::chain::NodeStatus::Invalid {
+            return Err(crate::chain::ChainError::KnownInvalidHeader { hash: applied.hash }.into());
+        }
+    }
     install_engine_checkpoint(chain, restored.engine.as_ref())?;
     chain.validation_mode = mode;
     chain.coin_stats = std::sync::Arc::new(
@@ -161,7 +170,11 @@ pub fn install_restored_state(
     let mut utxo = restored.initial.utxo;
     utxo.track_coin_stats((*chain.coin_stats).clone());
     chain.utxo = std::sync::Arc::new(utxo);
-    *chain.block_tree.write() = restored.initial.tree;
+    {
+        let mut tree = chain.block_tree.write();
+        *tree = restored.initial.tree;
+        chain.reevaluate_assume_valid_with(&tree);
+    }
     let tip_arc = restored.initial.applied_tip.map(std::sync::Arc::new);
     chain.applied_tip.store(tip_arc.clone());
     chain.chain_tip.store(tip_arc);

@@ -28,10 +28,20 @@ where
     O: ReorgObserver + ?Sized,
     S: FnMut(&mut O, core::result::Result<(), ReorgError>) -> core::result::Result<(), ReorgError>,
 {
-    if let Err(error) = invalidation_root(handles, hash).map(|_| ()) {
-        return settle_reorg_without_transition(handles, observer, Err(error), &mut settle)
-            .map(|()| InvalidationOutcome::default());
-    }
+    let _header_retention = match (|| {
+        let root = invalidation_root(handles, hash)?;
+        let tree = handles.block_tree.read();
+        handles
+            .header_retention
+            .pin_operation(&tree, &[root])
+            .map_err(|source| ReorgError::Unavailable(Box::new(source)))
+    })() {
+        Ok(retention) => retention,
+        Err(error) => {
+            return settle_reorg_without_transition(handles, observer, Err(error), &mut settle)
+                .map(|()| InvalidationOutcome::default());
+        }
+    };
 
     let transition = match handles.begin_transition() {
         Ok(transition) => transition,
@@ -69,7 +79,7 @@ where
         if progress.disconnected == prepared.disconnect_nodes.len()
             && !outcome.as_ref().is_err_and(ReorgError::requires_recovery)
         {
-            invalidated = invalidate_and_republish(handles, hash)?;
+            invalidated = invalidate_and_republish(handles, hash, InvalidationOrigin::Operator)?;
         }
         if outcome.as_ref().is_err_and(ReorgError::requires_recovery) {
             outcome
@@ -125,9 +135,15 @@ impl From<InvalidationError> for ReorgError {
     }
 }
 
+pub(super) enum InvalidationOrigin {
+    Consensus,
+    Operator,
+}
+
 pub(super) fn invalidate_and_republish(
     handles: &Chainstate,
     hash: Hash256,
+    origin: InvalidationOrigin,
 ) -> core::result::Result<InvalidationOutcome, InvalidationError> {
     let mut tree = handles.block_tree.write();
     let root = tree
@@ -137,6 +153,12 @@ pub(super) fn invalidate_and_republish(
         .invalidate_subtree(root)
         .map_err(InvalidationError::Plan)?;
     let tip = tree.tip().ok_or(InvalidationError::NoValidTip)?;
+    match origin {
+        InvalidationOrigin::Consensus => handles.header_retention.cancel_candidates(),
+        InvalidationOrigin::Operator => handles
+            .header_retention
+            .remember_operator_invalidation(hash),
+    }
     handles.publish_chain_tip(Some(tip), &tree);
     Ok(invalidated)
 }
@@ -335,6 +357,7 @@ struct PreparedBranches {
     connect: Vec<LoadedBranchBody>,
     missing_connect: Option<(Hash256, u32)>,
     retention: Option<bitcoin_rs_storage::RetentionLease>,
+    _header_retention: Option<crate::header_admission::HeaderRetentionLease>,
 }
 
 impl PreparedBranches {
@@ -362,7 +385,22 @@ where
             connect: Vec::new(),
             missing_connect: None,
             retention: None,
+            _header_retention: None,
         });
+    };
+    let header_retention = {
+        let tree = handles.block_tree.read();
+        let roots = plan
+            .disconnect
+            .first()
+            .into_iter()
+            .chain(plan.connect.last())
+            .copied()
+            .collect::<Vec<_>>();
+        handles
+            .header_retention
+            .pin_operation(&tree, &roots)
+            .map_err(|source| ReorgError::Unavailable(Box::new(source)))?
     };
     let disconnect_nodes = branch_nodes(handles, &plan.disconnect)?;
     let connect_nodes = branch_nodes(handles, &plan.connect)?;
@@ -383,6 +421,7 @@ where
         connect,
         missing_connect,
         retention,
+        _header_retention: Some(header_retention),
     })
 }
 
@@ -812,7 +851,11 @@ where
                 invalid: invalidated,
                 demoted_tip,
             } = if disposition == crate::WindowApplyDisposition::Permanent {
-                match invalidate_and_republish(transition.chainstate(), body.hash) {
+                match invalidate_and_republish(
+                    transition.chainstate(),
+                    body.hash,
+                    InvalidationOrigin::Consensus,
+                ) {
                     Ok(outcome) => outcome,
                     Err(invalidation) => {
                         let handles = transition.chainstate();
@@ -950,6 +993,63 @@ mod tests {
         fn connected(&mut self, _: &BlockImage, _: &ConnectOutcome) {}
 
         fn reconsider_disconnected(&mut self, _: &BlockImage) {}
+    }
+
+    // REO-01, SYNC-05, SYNC-07
+    #[test]
+    fn reclaimed_preflight_target_refuses_without_aliasing_a_new_branch()
+    -> crate::test_fixtures::TestResult {
+        use crate::chain::{ChainError, regtest_fixture};
+        use crate::test_fixtures::{TestError, seed_genesis};
+
+        let chain = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        chain.set_header_side_cache_limit(1);
+        let genesis = seed_genesis(&chain)?;
+        let first = regtest_fixture::mined_regtest_header(genesis.hash.into(), 1)?;
+        let second = regtest_fixture::mined_regtest_header(first.compute_hash(), 2)?;
+        chain.admit_headers(&[first, second])?;
+        let mut side = first;
+        side.merkle_root = Hash256::from_le_bytes(&[41; 32]);
+        side.nonce = 0;
+        regtest_fixture::mine_header_to_declared_target(&mut side)?;
+        chain.admit_headers(&[side])?;
+        let old_hash = Hash256::from(side.compute_hash());
+        let old_id = chain
+            .block_tree
+            .read()
+            .lookup(old_hash)
+            .ok_or(TestError::Missing("side header"))?;
+        let plan = current_reorg_plan(&chain, old_id)?.ok_or(TestError::Missing("side plan"))?;
+        let mut replacement = side;
+        replacement.merkle_root = Hash256::from_le_bytes(&[42; 32]);
+        replacement.nonce = 0;
+        regtest_fixture::mine_header_to_declared_target(&mut replacement)?;
+        chain.admit_headers(&[replacement])?;
+        {
+            let tree = chain.block_tree.read();
+            assert!(tree.lookup(old_hash).is_none());
+            let new_id = tree
+                .lookup(Hash256::from(replacement.compute_hash()))
+                .ok_or(TestError::Missing("replacement side header"))?;
+            assert_ne!(new_id, old_id);
+        }
+        let error = match prepare_branches(&chain, Some(&plan), &mut |_| None) {
+            Ok(_) => return Err(TestError::UnexpectedSuccess("reclaimed preflight target")),
+            Err(error) => error,
+        };
+        assert!(!error.requires_recovery());
+        assert!(
+            matches!(error, ReorgError::Unavailable(source) if matches!(*source, ApplyError::Chain(ChainError::UnknownNode { id }) if id == old_id))
+        );
+        assert!(!chain.is_closed_for_recovery());
+        assert_eq!(
+            chain
+                .applied_tip_snapshot()
+                .ok_or(TestError::Missing("applied genesis"))?
+                .hash,
+            genesis.hash
+        );
+        Ok(())
     }
 
     #[test]

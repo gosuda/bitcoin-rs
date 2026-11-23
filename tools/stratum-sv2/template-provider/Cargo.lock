@@ -269,6 +269,7 @@ dependencies = [
  "sha2 0.11.1",
  "slab",
  "sonic-rs",
+ "tempfile",
  "thiserror",
  "tracing",
 ]

@@ -199,10 +199,49 @@ impl SchedulerState {
     }
 }
 
+enum HeaderSyncMode {
+    LowWork(headers_presync::HeadersSyncState),
+    Winning(bitcoin_rs_chain::chain::HeaderCandidate),
+}
+
+impl HeaderSyncMode {
+    fn locator(&self) -> Vec<Hash256> {
+        match self {
+            Self::LowWork(state) => state.next_locator(),
+            Self::Winning(candidate) => candidate.locator(),
+        }
+    }
+
+    fn height(&self) -> u32 {
+        match self {
+            Self::LowWork(state) => state.sync_height(),
+            Self::Winning(candidate) => candidate.height(),
+        }
+    }
+
+    fn finalize(&mut self) {
+        match self {
+            Self::LowWork(state) => state.finalize(),
+            Self::Winning(candidate) => candidate.finalize(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct PeerHeadersSync {
     request: Option<HeaderRequest>,
-    presync: Option<headers_presync::HeadersSyncState>,
+    mode: Option<HeaderSyncMode>,
+}
+
+impl PeerHeadersSync {
+    fn has_cancelled_candidate(&self) -> bool {
+        matches!(&self.mode, Some(HeaderSyncMode::Winning(candidate)) if candidate.is_cancelled())
+    }
+
+    fn has_local_replay(&self) -> bool {
+        matches!(&self.mode, Some(HeaderSyncMode::Winning(candidate))
+            if !candidate.is_cancelled() && candidate.has_verified_headers())
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1311,6 +1350,30 @@ mod tests {
     struct RefusingChain(Arc<TestChain>);
 
     impl SyncChain for RefusingChain {
+        fn begin_header_candidate(
+            &self,
+            anchor: Hash256,
+            minimum_work: ChainWork,
+        ) -> Result<bitcoin_rs_chain::chain::HeaderCandidate, bitcoin_rs_chain::HeaderAdmissionError>
+        {
+            self.0.begin_header_candidate(anchor, minimum_work)
+        }
+
+        fn admit_verified_headers(
+            &self,
+            candidate: &mut bitcoin_rs_chain::chain::HeaderCandidate,
+            maximum: usize,
+        ) -> Result<bitcoin_rs_chain::HeaderAdmissionOutcome, bitcoin_rs_chain::HeaderAdmissionError>
+        {
+            self.0.admit_verified_headers(candidate, maximum)
+        }
+
+        fn maintain_header_retention(
+            &self,
+        ) -> Result<usize, bitcoin_rs_chain::HeaderAdmissionError> {
+            self.0.maintain_header_retention()
+        }
+
         fn network(&self) -> Network {
             self.0.network()
         }
@@ -8846,7 +8909,10 @@ mod tests {
                 .lock()
                 .headers_sync
                 .get(&source)
-                .and_then(|owned| owned.presync.as_ref())
+                .and_then(|owned| match owned.mode.as_ref() {
+                    Some(super::super::HeaderSyncMode::LowWork(state)) => Some(state),
+                    Some(super::super::HeaderSyncMode::Winning(_)) | None => None,
+                })
                 .map(read)
         }
 
@@ -9018,7 +9084,7 @@ mod tests {
                     .lock()
                     .headers_sync
                     .get(&second)
-                    .is_some_and(|owned| owned.presync.is_some()),
+                    .is_some_and(|owned| owned.mode.is_some()),
                 "a live presync cursor shares the request's lifecycle entry",
             );
 
@@ -9038,7 +9104,7 @@ mod tests {
                     .lock()
                     .headers_sync
                     .get(&second)
-                    .is_some_and(|owned| owned.request.is_some() && owned.presync.is_none()),
+                    .is_some_and(|owned| owned.request.is_some() && owned.mode.is_none()),
                 "an empty answer clears only the nested presync state",
             );
             Ok(())
@@ -9091,7 +9157,7 @@ mod tests {
                     .lock()
                     .headers_sync
                     .get(&source)
-                    .is_some_and(|owned| owned.request.is_some() && owned.presync.is_some()),
+                    .is_some_and(|owned| owned.request.is_some() && owned.mode.is_some()),
                 "the presync continuation and request share one lifecycle entry",
             );
             let _ = rx.try_iter().collect::<Vec<_>>();
@@ -9438,7 +9504,7 @@ mod tests {
                     .lock()
                     .headers_sync
                     .get(&source)
-                    .is_some_and(|owned| owned.request.is_some() && owned.presync.is_some()),
+                    .is_some_and(|owned| owned.request.is_some() && owned.mode.is_some()),
                 "the redownload request and validation cursor share one lifecycle entry",
             );
             assert_competing_requests_suppressed(&sync, source, &rx, competing_locator, 9)?;
@@ -9512,7 +9578,7 @@ mod tests {
                     .lock()
                     .headers_sync
                     .get(&source_c)
-                    .is_some_and(|owned| owned.request.is_some() && owned.presync.is_some()),
+                    .is_some_and(|owned| owned.request.is_some() && owned.mode.is_some()),
             );
             let (addr_d, _lease_d, rx_d) = connect(&peers, 9724, 100_000);
             let source_d = current_source(&peers, addr_d);
@@ -9582,7 +9648,7 @@ mod tests {
                     .lock()
                     .headers_sync
                     .get(&old_source)
-                    .is_some_and(|owned| owned.request.is_some() && owned.presync.is_some()),
+                    .is_some_and(|owned| owned.request.is_some() && owned.mode.is_some()),
                 "the predecessor has both lifecycle facts before replacement",
             );
 
@@ -9618,7 +9684,7 @@ mod tests {
                     .lock()
                     .headers_sync
                     .get(&replacement)
-                    .is_some_and(|owned| owned.request.is_some() && owned.presync.is_some()),
+                    .is_some_and(|owned| owned.request.is_some() && owned.mode.is_some()),
                 "the replacement owns its request and presync together",
             );
             let replacement_request = pending_request(&sync, replacement)
@@ -15877,6 +15943,30 @@ mod tests {
     }
 
     impl SyncChain for TreeReadHook {
+        fn begin_header_candidate(
+            &self,
+            anchor: Hash256,
+            minimum_work: ChainWork,
+        ) -> Result<bitcoin_rs_chain::chain::HeaderCandidate, bitcoin_rs_chain::HeaderAdmissionError>
+        {
+            self.chain.begin_header_candidate(anchor, minimum_work)
+        }
+
+        fn admit_verified_headers(
+            &self,
+            candidate: &mut bitcoin_rs_chain::chain::HeaderCandidate,
+            maximum: usize,
+        ) -> Result<bitcoin_rs_chain::HeaderAdmissionOutcome, bitcoin_rs_chain::HeaderAdmissionError>
+        {
+            self.chain.admit_verified_headers(candidate, maximum)
+        }
+
+        fn maintain_header_retention(
+            &self,
+        ) -> Result<usize, bitcoin_rs_chain::HeaderAdmissionError> {
+            self.chain.maintain_header_retention()
+        }
+
         fn network(&self) -> Network {
             self.chain.network()
         }
@@ -16234,6 +16324,30 @@ pub(crate) mod test_support {
     }
 
     impl SyncChain for TestChain {
+        fn begin_header_candidate(
+            &self,
+            anchor: Hash256,
+            _minimum_work: ChainWork,
+        ) -> Result<bitcoin_rs_chain::chain::HeaderCandidate, bitcoin_rs_chain::HeaderAdmissionError>
+        {
+            Err(bitcoin_rs_chain::chain::HeaderCandidateError::AnchorUnavailable { anchor }.into())
+        }
+
+        fn admit_verified_headers(
+            &self,
+            _candidate: &mut bitcoin_rs_chain::chain::HeaderCandidate,
+            _maximum: usize,
+        ) -> Result<bitcoin_rs_chain::HeaderAdmissionOutcome, bitcoin_rs_chain::HeaderAdmissionError>
+        {
+            Err(bitcoin_rs_chain::chain::HeaderCandidateError::WrongChainstate.into())
+        }
+
+        fn maintain_header_retention(
+            &self,
+        ) -> Result<usize, bitcoin_rs_chain::HeaderAdmissionError> {
+            Ok(0)
+        }
+
         fn historical_base(&self) -> Option<Hash256> {
             self.historical.lock().back().map(|(_, hash)| *hash)
         }

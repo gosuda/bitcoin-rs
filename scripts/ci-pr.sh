@@ -357,7 +357,7 @@ proofs_stage() {
       local models_start
       models_start=$SECONDS
       echo "==> models: check_models"
-      python3 scripts/check_models.py > "$models_log" 2>&1 &
+      python3 scripts/check_models.py --jobs "$kani_jobs" > "$models_log" 2>&1 &
       local models_pid
       models_pid=$!
       pending_pids+=("$models_pid")

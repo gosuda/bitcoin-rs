@@ -1,3 +1,10 @@
+mod candidate;
+pub(crate) mod context;
+
+pub use candidate::{HeaderCandidate, HeaderCandidateError, HeaderCandidatePhase};
+pub(crate) use candidate::{HeaderCandidateBudget, MAX_HEADER_CANDIDATES, VerifiedHeaderTarget};
+pub use context::HeaderContextError;
+
 use bitcoin_rs_consensus::MAX_TIMEWARP;
 use bitcoin_rs_consensus::primitives::{CompactTarget, Hash256, Network};
 
@@ -11,7 +18,7 @@ use crate::chain::{
 };
 use bitcoin_rs_consensus::header_rules::{BlockHeader, ChainWork};
 
-const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
+pub(crate) const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeaderValidationMode {
@@ -34,6 +41,7 @@ pub enum HeaderAdmission {
 #[error("{cause}")]
 pub struct HeaderRefusal {
     cause: String,
+    candidate_anchor: Option<Hash256>,
 }
 
 impl HeaderRefusal {
@@ -41,7 +49,26 @@ impl HeaderRefusal {
     pub fn from_cause(cause: &dyn core::fmt::Display) -> Self {
         Self {
             cause: cause.to_string(),
+            candidate_anchor: None,
         }
+    }
+
+    #[must_use]
+    pub fn from_resource(cause: &crate::HeaderResourceError) -> Self {
+        let candidate_anchor = match cause {
+            crate::HeaderResourceError::CandidateRequired { anchor } => Some(*anchor),
+            crate::HeaderResourceError::Reclaiming
+            | crate::HeaderResourceError::CapacityOverflow => None,
+        };
+        Self {
+            cause: cause.to_string(),
+            candidate_anchor,
+        }
+    }
+
+    #[must_use]
+    pub fn candidate_anchor(&self) -> Option<Hash256> {
+        self.candidate_anchor
     }
 }
 
@@ -72,6 +99,93 @@ pub fn demoted_tip_after_rejection(tree: &BlockTree, pre_tip: Option<Hash256>) -
     Some(pre_hash)
 }
 
+pub(crate) enum PreparedHeader<'a> {
+    Existing(NodeId),
+    New(ValidatedHeader<'a>),
+}
+
+pub(crate) struct ValidatedHeader<'a> {
+    header: &'a BlockHeader,
+    hash: Hash256,
+    parent: Option<NodeId>,
+    chainwork: ChainWork,
+}
+
+impl ValidatedHeader<'_> {
+    pub(crate) fn parent(&self) -> Option<NodeId> {
+        self.parent
+    }
+
+    pub(crate) fn chainwork(&self) -> ChainWork {
+        self.chainwork
+    }
+}
+
+impl PreparedHeader<'_> {
+    pub(crate) fn insert(self, tree: &mut BlockTree) -> Result<Inserted, ChainError> {
+        match self {
+            Self::Existing(id) => Ok(Inserted {
+                id,
+                demoted_tip: None,
+            }),
+            Self::New(validated) => tree.insert_header_with_hash(
+                *validated.header,
+                validated.hash,
+                NodeStatus::HeaderValid,
+            ),
+        }
+    }
+}
+
+pub(crate) fn prepare_header<'a>(
+    tree: &BlockTree,
+    header: &'a BlockHeader,
+    network: Network,
+    now_secs: u32,
+    mode: HeaderValidationMode,
+) -> Result<PreparedHeader<'a>, ChainError> {
+    let hash = Hash256::from(header.compute_hash());
+    if let Some(existing_id) = tree.lookup(hash) {
+        if tree.node(existing_id)?.status == NodeStatus::Invalid {
+            return Err(ChainError::KnownInvalidHeader { hash });
+        }
+        return Ok(PreparedHeader::Existing(existing_id));
+    }
+    validate_pow(header, hash, network)?;
+    if tree.is_empty() {
+        if hash != network.genesis_block_hash() {
+            return Err(ChainError::MissingParent {
+                prev_hash: Hash256::from(header.prev_blockhash),
+            });
+        }
+        return Ok(PreparedHeader::New(ValidatedHeader {
+            header,
+            hash,
+            parent: None,
+            chainwork: block_work(header),
+        }));
+    }
+    let prev_hash = Hash256::from(header.prev_blockhash);
+    let parent_id = tree
+        .lookup(prev_hash)
+        .ok_or(ChainError::MissingParent { prev_hash })?;
+    let parent = tree.node(parent_id)?;
+    if parent.status == NodeStatus::Invalid {
+        return Err(ChainError::InvalidParent { parent: parent_id });
+    }
+    validate_contextual_header(tree, parent_id, header, network, now_secs, mode)?;
+    let chainwork = parent
+        .chainwork
+        .checked_add(block_work(header))
+        .ok_or(ChainError::ChainworkOverflow { hash })?;
+    Ok(PreparedHeader::New(ValidatedHeader {
+        header,
+        hash,
+        parent: Some(parent_id),
+        chainwork,
+    }))
+}
+
 pub fn accept_headers(
     tree: &mut BlockTree,
     headers: &[BlockHeader],
@@ -84,35 +198,7 @@ pub fn accept_headers(
         demoted_tip: None,
     };
     for header in headers {
-        let hash = Hash256::from(header.compute_hash());
-        if let Some(existing_id) = tree.lookup(hash) {
-            if matches!(tree.node(existing_id)?.status, NodeStatus::Invalid) {
-                return Err(ChainError::KnownInvalidHeader { hash });
-            }
-            accepted.ids.push(existing_id);
-            continue;
-        }
-        validate_pow(header, hash, network)?;
-        if tree.is_empty() {
-            if hash != network.genesis_block_hash() {
-                return Err(ChainError::MissingParent {
-                    prev_hash: Hash256::from(header.prev_blockhash),
-                });
-            }
-            let inserted = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
-            accepted.push_inserted(inserted);
-            continue;
-        }
-        let prev_hash = Hash256::from(header.prev_blockhash);
-        let parent_id = match tree.lookup(prev_hash) {
-            Some(parent_id) => parent_id,
-            None => return Err(ChainError::MissingParent { prev_hash }),
-        };
-        if tree.node(parent_id)?.status == NodeStatus::Invalid {
-            return Err(ChainError::InvalidParent { parent: parent_id });
-        }
-        validate_contextual_header(tree, parent_id, header, network, now_secs, mode)?;
-        let inserted = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
+        let inserted = prepare_header(tree, header, network, now_secs, mode)?.insert(tree)?;
         accepted.push_inserted(inserted);
     }
     Ok(accepted)
@@ -148,6 +234,26 @@ pub fn validate_contextual_header(
     let median = tree
         .median_time_past_at(parent_id)
         .ok_or(ChainError::UnknownNode { id: parent_id })?;
+    validate_time_and_version(
+        header,
+        height,
+        parent.header.time,
+        median,
+        network,
+        now_secs,
+        mode,
+    )
+}
+
+fn validate_time_and_version(
+    header: &BlockHeader,
+    height: u32,
+    parent_time: u32,
+    median: u32,
+    network: Network,
+    now_secs: u32,
+    mode: HeaderValidationMode,
+) -> Result<(), ChainError> {
     if header.time <= median {
         return Err(ChainError::TimestampTooEarly {
             hash: Hash256::from(header.compute_hash()),
@@ -157,7 +263,7 @@ pub fn validate_contextual_header(
     }
 
     if network.enforce_bip94()
-        && let Some(minimum) = minimum_candidate_time(parent.header.time, height, network)
+        && let Some(minimum) = minimum_candidate_time(parent_time, height, network)
         && header.time < minimum
     {
         return Err(ChainError::TimewarpAttack {
@@ -227,15 +333,22 @@ pub fn validate_header_nbits(
     network: Network,
 ) -> Result<(), ChainError> {
     let expected = next_work_required(tree, parent_id, header.time, network)?;
-    let actual = header.bits;
-    if actual == expected {
-        return Ok(());
-    }
     let height = tree
         .node(parent_id)?
         .height
         .checked_add(1)
         .ok_or(ChainError::HeightOverflow { parent: parent_id })?;
+    validate_nbits(header.bits, expected, height)
+}
+
+fn validate_nbits(
+    actual: CompactTarget,
+    expected: CompactTarget,
+    height: u32,
+) -> Result<(), ChainError> {
+    if actual == expected {
+        return Ok(());
+    }
     Err(ChainError::NbitsMismatch {
         actual: actual.to_consensus(),
         expected: expected.to_consensus(),
@@ -281,16 +394,8 @@ fn expected_non_retarget_bits(
     candidate_time: u32,
 ) -> Result<CompactTarget, ChainError> {
     let parent = tree.node(parent_id)?;
-    if !network.allow_min_difficulty_blocks() {
-        return Ok(parent.header.bits);
-    }
-
-    let min_difficulty_time = parent
-        .header
-        .time
-        .saturating_add(network.target_spacing_seconds().saturating_mul(2));
-    if candidate_time > min_difficulty_time {
-        return Ok(pow_limit_bits(network));
+    if let Some(bits) = immediate_non_retarget_bits(network, &parent.header, candidate_time) {
+        return Ok(bits);
     }
 
     let pow_limit = pow_limit_bits(network);
@@ -308,6 +413,21 @@ fn expected_non_retarget_bits(
         };
         cursor_id = previous_id;
     }
+}
+
+fn immediate_non_retarget_bits(
+    network: Network,
+    parent: &BlockHeader,
+    candidate_time: u32,
+) -> Option<CompactTarget> {
+    if !network.allow_min_difficulty_blocks() {
+        return Some(parent.bits);
+    }
+
+    let min_difficulty_time = parent
+        .time
+        .saturating_add(network.target_spacing_seconds().saturating_mul(2));
+    (candidate_time > min_difficulty_time).then(|| pow_limit_bits(network))
 }
 
 fn expected_retarget_bits(
@@ -331,23 +451,47 @@ fn expected_retarget_bits(
         return Ok(prev_node.header.bits);
     };
     let anchor_node = tree.node(anchor_id)?;
+    Ok(calculate_retarget_bits(
+        network,
+        &prev_node.header,
+        RetargetAnchor::from_header(&anchor_node.header),
+    ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RetargetAnchor {
+    time: u32,
+    bits: CompactTarget,
+}
+
+impl RetargetAnchor {
+    fn from_header(header: &BlockHeader) -> Self {
+        Self {
+            time: header.time,
+            bits: header.bits,
+        }
+    }
+}
+
+fn calculate_retarget_bits(
+    network: Network,
+    parent: &BlockHeader,
+    anchor: RetargetAnchor,
+) -> CompactTarget {
     let expected_timespan = network.target_timespan_seconds();
     if expected_timespan == 0 {
-        return Ok(prev_node.header.bits);
+        return parent.bits;
     }
 
-    let actual_timespan = prev_node
-        .header
-        .time
-        .saturating_sub(anchor_node.header.time);
+    let actual_timespan = parent.time.saturating_sub(anchor.time);
     let min_timespan = expected_timespan / 4;
     let max_timespan = expected_timespan.saturating_mul(4);
     let actual_clamped = actual_timespan.clamp(min_timespan, max_timespan);
 
     let base_target = if network.enforce_bip94() {
-        anchor_node.header.bits
+        anchor.bits
     } else {
-        prev_node.header.bits
+        parent.bits
     };
     let prev_target = compact_to_target(base_target);
     let actual_u256 = ChainWork::from(actual_clamped);
@@ -356,13 +500,13 @@ fn expected_retarget_bits(
     let quotient = prev_target / expected_u256;
     let remainder = prev_target % expected_u256;
     let Some(scaled_quotient) = quotient.checked_mul(actual_u256) else {
-        return Ok(pow_limit_bits(network));
+        return pow_limit_bits(network);
     };
     let scaled_remainder = remainder.saturating_mul(actual_u256) / expected_u256;
     let new_target = scaled_quotient
         .saturating_add(scaled_remainder)
         .min(max_target);
-    Ok(target_to_compact(new_target))
+    target_to_compact(new_target)
 }
 
 fn pow_limit_bits(network: Network) -> CompactTarget {
@@ -1057,6 +1201,75 @@ mod retarget_rule_tests {
     const TARGET_TIMESPAN: u32 = 14 * 24 * 60 * 60;
     const TESTNET_POW_LIMIT_BITS: u32 = 0x1d00_ffff;
 
+    use super::context::{
+        HeaderContextError as CompactContextError, HeaderValidationContext as CompactHeaderContext,
+    };
+
+    fn core_next_bits(history: &[BlockHeader], candidate_time: u32, network: Network) -> u32 {
+        let height = u32::try_from(history.len()).expect("fixture height fits u32");
+        let parent = history.last().expect("fixture contains its root");
+        if height.is_multiple_of(RETARGET_INTERVAL) {
+            if network.pow_no_retargeting() {
+                return parent.bits.to_consensus();
+            }
+            let interval = usize::try_from(RETARGET_INTERVAL).expect("2016 fits usize");
+            let first = history[history.len() - interval];
+            let base_bits = if network.enforce_bip94() {
+                first.bits
+            } else {
+                parent.bits
+            };
+            return core_calculate_next_work_required(
+                parent.time,
+                base_bits.to_consensus(),
+                first.time,
+            );
+        }
+        if !network.allow_min_difficulty_blocks() {
+            return parent.bits.to_consensus();
+        }
+        let limit = core_get_compact(network.max_target());
+        if candidate_time > parent.time.saturating_add(1200) {
+            return limit;
+        }
+        for (index, header) in history.iter().enumerate().rev() {
+            let height = u32::try_from(index).expect("fixture height fits u32");
+            if height.is_multiple_of(RETARGET_INTERVAL) || header.bits.to_consensus() != limit {
+                return header.bits.to_consensus();
+            }
+        }
+        unreachable!("the genesis entry is a period boundary")
+    }
+
+    fn assert_compact_rejection(
+        tree: &BlockTree,
+        parent_id: NodeId,
+        context: &mut CompactHeaderContext,
+        header: BlockHeader,
+        now_secs: u32,
+        expected: ChainError,
+    ) {
+        let before = context.clone();
+        let tree_result = super::validate_contextual_header(
+            tree,
+            parent_id,
+            &header,
+            context.network,
+            now_secs,
+            HeaderValidationMode::LiveAdmission,
+        );
+        assert_eq!(tree_result, Err(expected));
+        assert_eq!(
+            context.accept_contextual_header(
+                &header,
+                now_secs,
+                HeaderValidationMode::LiveAdmission,
+            ),
+            tree_result.map_err(CompactContextError::Chain),
+        );
+        assert_eq!(*context, before);
+    }
+
     fn header_with(prev: BlockHash, time: u32, bits: u32, nonce: u32) -> BlockHeader {
         BlockHeader {
             version: 4,
@@ -1202,6 +1415,11 @@ mod retarget_rule_tests {
             got, want,
             "side-chain retarget must anchor on the shared height-0 block"
         );
+        let context = CompactHeaderContext::from_tree(&tree, retarget_parent, network)?;
+        assert_eq!(
+            context.next_bits(0).expect("fixture height").to_consensus(),
+            want
+        );
         Ok(())
     }
 
@@ -1226,6 +1444,11 @@ mod retarget_rule_tests {
         assert_eq!(
             got, want,
             "BIP94 scales the anchor block's bits, not the last block's"
+        );
+        let context = CompactHeaderContext::from_tree(&tree, tip, network)?;
+        assert_eq!(
+            context.next_bits(0).expect("fixture height").to_consensus(),
+            want
         );
         Ok(())
     }
@@ -1257,6 +1480,302 @@ mod retarget_rule_tests {
 
         let early = next_work_required(&tree, tip_id, times[7] + 60, network)?.to_consensus();
         assert_eq!(early, 0x1b04_04cb);
+        let context = CompactHeaderContext::from_tree(&tree, tip_id, network)?;
+        for (offset, expected) in [
+            (1201, TESTNET_POW_LIMIT_BITS),
+            (1200, 0x1b04_04cb),
+            (60, 0x1b04_04cb),
+        ] {
+            assert_eq!(
+                context
+                    .next_bits(times[7] + offset)
+                    .expect("fixture height")
+                    .to_consensus(),
+                expected,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn compact_context_matches_full_ancestry_across_two_difficulty_periods()
+    -> Result<(), CompactContextError> {
+        for network in [
+            Network::Mainnet,
+            Network::Testnet3,
+            Network::Testnet4,
+            Network::Regtest,
+        ] {
+            let genesis = network.genesis_block().header;
+            let mut tree = BlockTree::new();
+            let mut parent_id = tree.insert_header(genesis, NodeStatus::HeaderValid)?;
+            let mut context = CompactHeaderContext::from_tree(&tree, parent_id, network)?;
+            let mut history = vec![genesis];
+            for height in 1..=2 * RETARGET_INTERVAL + 12 {
+                context =
+                    CompactHeaderContext::decode_snapshot(network, &context.encode_snapshot())?;
+                let parent = *history.last().expect("fixture root");
+                let delayed =
+                    height % 61 < 3 || height % RETARGET_INTERVAL == RETARGET_INTERVAL - 1;
+                let time = parent.time + if delayed { 1201 } else { 1 };
+                let expected_bits = core_next_bits(&history, time, network);
+                assert_eq!(
+                    next_work_required(&tree, parent_id, time, network)?.to_consensus(),
+                    expected_bits,
+                    "full ancestry at {network:?} height {height}",
+                );
+                assert_eq!(
+                    context.next_bits(time)?.to_consensus(),
+                    expected_bits,
+                    "compact context at {network:?} height {height}",
+                );
+                let header = header_with(parent.compute_hash(), time, expected_bits, height);
+                let full = super::validate_contextual_header(
+                    &tree,
+                    parent_id,
+                    &header,
+                    network,
+                    time,
+                    HeaderValidationMode::LiveAdmission,
+                );
+                assert_eq!(full, Ok(()));
+                assert_eq!(
+                    context.accept_contextual_header(
+                        &header,
+                        time,
+                        HeaderValidationMode::LiveAdmission
+                    ),
+                    full.map_err(CompactContextError::Chain),
+                );
+                parent_id = tree.insert_header(header, NodeStatus::HeaderValid)?;
+                history.push(header);
+                assert_eq!(context.height, height);
+                assert_eq!(context.chainwork, tree.node(parent_id)?.chainwork);
+                assert_eq!(
+                    Some(context.median_time_past()),
+                    tree.median_time_past_at(parent_id)
+                );
+                if [1, 5, 10, 11, 2015, 2016, 2020, 4031, 4032].contains(&height) {
+                    let resumed = CompactHeaderContext::from_tree(&tree, parent_id, network)?;
+                    assert_eq!(resumed.next_bits(time + 1)?, context.next_bits(time + 1)?);
+                    assert_eq!(resumed.median_time_past(), context.median_time_past());
+                    assert_eq!(resumed.period_anchor, context.period_anchor);
+                    assert_eq!(resumed.last_nonminimum_bits, context.last_nonminimum_bits);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn compact_context_preserves_state_on_timestamp_difficulty_and_version_rejection()
+    -> Result<(), CompactContextError> {
+        let network = Network::Regtest;
+        let genesis = network.genesis_block().header;
+        let mut tree = BlockTree::new();
+        let mut parent_id = tree.insert_header(genesis, NodeStatus::HeaderValid)?;
+        let mut context = CompactHeaderContext::from_tree(&tree, parent_id, network)?;
+        for height in 1..=1352 {
+            let time = genesis.time + height * 600;
+            let header = header_with(context.parent.compute_hash(), time, 0x207f_ffff, height);
+            if height == 12 {
+                let median = genesis.time + 6 * 600;
+                let early = BlockHeader {
+                    time: median,
+                    ..header
+                };
+                assert_compact_rejection(
+                    &tree,
+                    parent_id,
+                    &mut context,
+                    early,
+                    time,
+                    ChainError::TimestampTooEarly {
+                        hash: Hash256::from(early.compute_hash()),
+                        timestamp: median,
+                        median,
+                    },
+                );
+                let future = BlockHeader {
+                    time: time + 7201,
+                    ..header
+                };
+                assert_compact_rejection(
+                    &tree,
+                    parent_id,
+                    &mut context,
+                    future,
+                    time,
+                    ChainError::TimestampTooFarAhead {
+                        hash: Hash256::from(future.compute_hash()),
+                        timestamp: time + 7201,
+                        max_allowed: time + 7200,
+                    },
+                );
+                let wrong_bits = BlockHeader {
+                    bits: CompactTarget::from_consensus(0x207f_fffe),
+                    ..header
+                };
+                assert_compact_rejection(
+                    &tree,
+                    parent_id,
+                    &mut context,
+                    wrong_bits,
+                    time,
+                    ChainError::NbitsMismatch {
+                        actual: 0x207f_fffe,
+                        expected: 0x207f_ffff,
+                        height,
+                    },
+                );
+                let mut replay = context.clone();
+                replay.accept_contextual_header(
+                    &future,
+                    0,
+                    HeaderValidationMode::HistoricalReplay,
+                )?;
+                super::validate_contextual_header(
+                    &tree,
+                    parent_id,
+                    &future,
+                    network,
+                    0,
+                    HeaderValidationMode::HistoricalReplay,
+                )?;
+            }
+            for (activation, stale, required) in [(500, 1, 2), (1251, 2, 3), (1351, 3, 4)] {
+                if height == activation {
+                    assert_compact_rejection(
+                        &tree,
+                        parent_id,
+                        &mut context,
+                        BlockHeader {
+                            version: stale,
+                            ..header
+                        },
+                        time,
+                        ChainError::BadVersion {
+                            version: stale,
+                            required,
+                            height,
+                        },
+                    );
+                }
+            }
+            context.accept_contextual_header(&header, time, HeaderValidationMode::LiveAdmission)?;
+            super::validate_contextual_header(
+                &tree,
+                parent_id,
+                &header,
+                network,
+                time,
+                HeaderValidationMode::LiveAdmission,
+            )?;
+            parent_id = tree.insert_header(header, NodeStatus::HeaderValid)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn compact_context_enforces_bip94_timewarp_floor_before_advancing_period()
+    -> Result<(), CompactContextError> {
+        let network = Network::Testnet4;
+        let first_time = 1_600_000_000;
+        let mut tree = BlockTree::new();
+        let mut parent = BlockHash::default();
+        let mut parent_id = NodeId::new(0);
+        for height in 0..RETARGET_INTERVAL {
+            let header = chain_header(
+                &mut parent,
+                first_time + height * 600,
+                TESTNET_POW_LIMIT_BITS,
+                height,
+            );
+            parent_id = tree.insert_header(header, NodeStatus::HeaderValid)?;
+        }
+        let mut context = CompactHeaderContext::from_tree(&tree, parent_id, network)?;
+        let parent_time = first_time + (RETARGET_INTERVAL - 1) * 600;
+        let expected_bits =
+            core_calculate_next_work_required(parent_time, TESTNET_POW_LIMIT_BITS, first_time);
+        let header = header_with(parent, parent_time - 601, expected_bits, RETARGET_INTERVAL);
+        assert_compact_rejection(
+            &tree,
+            parent_id,
+            &mut context,
+            header,
+            parent_time,
+            ChainError::TimewarpAttack {
+                height: RETARGET_INTERVAL,
+                timestamp: parent_time - 601,
+                minimum: parent_time - 600,
+            },
+        );
+        let boundary = BlockHeader {
+            time: parent_time - 600,
+            ..header
+        };
+        context.accept_contextual_header(
+            &boundary,
+            parent_time,
+            HeaderValidationMode::LiveAdmission,
+        )?;
+        super::validate_contextual_header(
+            &tree,
+            parent_id,
+            &boundary,
+            network,
+            parent_time,
+            HeaderValidationMode::LiveAdmission,
+        )?;
+        assert_eq!(context.period_anchor.time, parent_time - 600);
+        assert_eq!(context.period_anchor.bits.to_consensus(), expected_bits);
+        Ok(())
+    }
+
+    #[test]
+    fn compact_context_rejects_discontinuity_and_overflow_without_mutation()
+    -> Result<(), CompactContextError> {
+        let network = Network::Regtest;
+        let genesis = network.genesis_block().header;
+        let mut tree = BlockTree::new();
+        let parent_id = tree.insert_header(genesis, NodeStatus::HeaderValid)?;
+        let mut context = CompactHeaderContext::from_tree(&tree, parent_id, network)?;
+        let time = genesis.time + 600;
+        let header = header_with(genesis.compute_hash(), time, 0x207f_ffff, 1);
+        let orphan = BlockHeader {
+            prev_blockhash: BlockHash::default(),
+            ..header
+        };
+        let before = context.clone();
+        assert_eq!(
+            context.accept_contextual_header(&orphan, time, HeaderValidationMode::LiveAdmission),
+            Err(CompactContextError::Chain(
+                ChainError::NonContinuousHeader {
+                    expected_prev: Hash256::from(genesis.compute_hash()),
+                    actual_prev: Hash256::default(),
+                }
+            )),
+        );
+        assert_eq!(context, before);
+        context.chainwork = !ChainWork::ZERO;
+        let before = context.clone();
+        assert_eq!(
+            context.accept_contextual_header(&header, time, HeaderValidationMode::LiveAdmission),
+            Err(CompactContextError::Chain(ChainError::ChainworkOverflow {
+                hash: Hash256::from(header.compute_hash()),
+            })),
+        );
+        assert_eq!(context, before);
+        context.height = u32::MAX;
+        let before = context.clone();
+        assert_eq!(
+            context.accept_contextual_header(&header, time, HeaderValidationMode::LiveAdmission),
+            Err(CompactContextError::HeightOverflow {
+                parent: Hash256::from(genesis.compute_hash())
+            }),
+        );
+        assert_eq!(context, before);
+        assert!(core::mem::size_of::<CompactHeaderContext>() <= 256);
         Ok(())
     }
 

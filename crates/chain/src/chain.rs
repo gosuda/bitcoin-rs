@@ -223,9 +223,10 @@ pub use deployment::{
     softfork_state,
 };
 pub use header_sync::{
-    AcceptHeaders, HeaderAdmission, HeaderRefusal, HeaderValidationMode, accept_headers,
-    block_work, compact_is_met_by, compact_to_target, current_unix_seconds,
-    permitted_difficulty_transition, validate_contextual_header, validate_pow,
+    AcceptHeaders, HeaderAdmission, HeaderCandidate, HeaderCandidateError, HeaderCandidatePhase,
+    HeaderContextError, HeaderRefusal, HeaderValidationMode, accept_headers, block_work,
+    compact_is_met_by, compact_to_target, current_unix_seconds, permitted_difficulty_transition,
+    validate_contextual_header, validate_pow,
 };
 pub use ibd::InitialBlockDownload;
 pub use node::{BlockTreeNode, NodeId, NodeStatus};
@@ -266,7 +267,7 @@ pub struct AncestryBudgetExceeded;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ChainError {
-    #[error("block-tree node index {index} does not fit in NodeId")]
+    #[error("block-tree logical node ID capacity exhausted (index {index})")]
     NodeIdOverflow { index: usize },
     #[error("unknown block-tree node {id:?}")]
     UnknownNode { id: NodeId },

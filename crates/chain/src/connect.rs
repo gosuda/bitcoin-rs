@@ -3046,7 +3046,9 @@ pub(super) fn apply_block_admitted<'b>(
     intent: ApplyIntent,
     publication: PublishMode<'_>,
 ) -> core::result::Result<ApplyFinish, ApplyError> {
+    let _pending_headers = handles.header_role.begin_application();
     let header = payload.header();
+    handles.header_retention.check_operator_header(&header)?;
     let total_started = quanta::Instant::now();
     let block_hash = payload.block_hash().0;
     let prev_hash = header.prev_blockhash.0;
@@ -3527,6 +3529,7 @@ pub(super) fn applied_header_tip(
             "cumulative chain transaction count overflowed; marking it unknown"
         );
     }
+    handles.header_role.stage(block_hash);
     Ok(TipSnapshot {
         tip_id: node_id,
         height: node.height,
