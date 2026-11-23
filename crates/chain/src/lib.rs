@@ -1,7 +1,7 @@
 #[cfg(any(test, feature = "test-seam"))]
 use crate::chain::TransitionDomain;
 use crate::chain::{
-    BlockTree, BlockTreeReader, ChainError, ChainTxCount, TipReader, TipSnapshot,
+    BlockTree, BlockTreeReader, ChainTxCount, TipReader, TipSnapshot,
     TransitionAuthority, TransitionAuthorityGuard,
 };
 pub use crate::error::{ApplyError, DisconnectError};
@@ -11,7 +11,7 @@ use bitcoin_rs_consensus::ScriptExecutionCache;
 use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_consensus::latch::{LatchReader, LatchWriter};
 use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network, OutPoint, TxOut, Txid};
-use bitcoin_rs_consensus::primitives::{Hash256, Header};
+use bitcoin_rs_consensus::primitives::Hash256;
 use bitcoin_rs_storage::DurableHeadStore;
 pub use bitcoin_rs_storage::KvUndoStore;
 pub use bitcoin_rs_storage::UndoStore;
