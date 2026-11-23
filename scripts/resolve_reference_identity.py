@@ -1,9 +1,10 @@
 """Emit the pinned reference-fixture identity tuple for this host.
 
-usage: scripts/resolve_reference_identity.py {core|formal} <repo-root>
+usage: scripts/resolve_reference_identity.py {core|formal|java} <repo-root>
 
 core   -> core_version, archive, archive_sha256, bitcoind_sha256, version_output
 formal -> version, archive, archive_sha256, jar_sha256, version
+java   -> Java release and build number
 
 One value per line on stdout; exits nonzero with the reason on stderr when the
 manifest pins no artifact for the host platform. The platform-to-archive
@@ -122,9 +123,29 @@ def load_manifest(path):
     return _toml_lite(path.read_text())
 
 
-if len(sys.argv) != 3 or sys.argv[1] not in ("core", "formal"):
-    raise SystemExit(f"usage: {Path(sys.argv[0]).name} {{core|formal}} <repo-root>")
+def java_runtime_version(root: Path) -> str:
+    contract = (root / "docs/contracts/formal-verification.md").read_text(
+        encoding="utf-8"
+    )
+    rows = re.findall(r"^[ \t]*\|[ \t]*Java[ \t]*\|[^\r\n]*$", contract, re.MULTILINE)
+    if len(rows) != 1:
+        raise SystemExit("formal Java runtime identity missing or ambiguous")
+    version = re.fullmatch(
+        r"\| Java \| release and build `([0-9]+(?:\.[0-9]+)*\+[0-9]+)` \|",
+        rows[0],
+    )
+    if version is None:
+        raise SystemExit("formal Java runtime identity is malformed")
+    return version[1]
+
+
+if len(sys.argv) != 3 or sys.argv[1] not in ("core", "formal", "java"):
+    raise SystemExit(f"usage: {Path(sys.argv[0]).name} {{core|formal|java}} <repo-root>")
 mode, root = sys.argv[1], Path(sys.argv[2])
+
+if mode == "java":
+    print(java_runtime_version(root))
+    raise SystemExit(0)
 
 reference = load_manifest(root / "crates/wire/core-compat.toml")["reference"]
 
