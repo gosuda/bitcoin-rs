@@ -25,7 +25,7 @@ Handshake order: outbound sends `version`, `wtxidrelay` (BIP339), `sendaddrv2` (
 | `feature` | negotiated | BIP434 draft, BIP324 short ID 37, no Core equivalent. Minimal `CompactSize` framing; id 4 to 80 bytes, data at most 512 bytes, else invalid decoded payload; only a valid `BIP332` (one-byte 0/1) is retained per peer with first-valid-wins; unknown ids and invalid data for known ids are ignored; this node advertises printable ASCII (`0x20..=0x7e`) only. |
 | `sendpackages`, `ancpkginfo`, `getpkgtxns`, `pkgtxns` | negotiated, opt-in | BIP331 draft, no Core equivalent (`packages.rs`). `sendpackages` is one LE u64; list messages carry a minimal `CompactSize` count of 1 to 100, then wtxids (`ancpkginfo`, `getpkgtxns`) or witness txs (`pkgtxns`); `ancpkginfo` rejects a repeated wtxid. Relay is the intersection of known bits both sides sent, active only post-handshake with peer `wtxidrelay` pre-`verack` and `fRelay` in its `version`; first peer `sendpackages` wins, `0`/unknown bits ignored, post-`verack` `sendpackages` changes nothing. `ancpkginfo` needs the `ANC` bit and `getpkgtxns`/`pkgtxns` need `PKGTXNS`, else `Misbehavior`; `getdata` for `MSG_PKGTXNS` is `Misbehavior` (notfound-only, never served); `inv` of a package-only type is `Misbehavior`. Received `pkgtxns` stays raw (at most `MAX_MESSAGE_PAYLOAD`), parsed only by the charging consumer. |
 | `staletip` | negotiated, opt-in | BIP332 draft, no Core equivalent (`staletip.rs`); 12-byte name on both transports, no BIP324 short ID. Over-header-limit payload ignored without punishment; other malformed payloads are invalid decoded payloads. Relayed only when the node enabled it, the peer negotiated `BIP332`, and IBD is inactive. |
-| `ping`, `pong` | originated, served, ignored | `ping` answered with `pong` echoing the nonce on ready peers. This node also originates `ping` on every message-loop connection (VERSION-only feeler connections exit before the message loop and never probe): the first on the first message-loop pass after the handshake completes (both inbound and outbound establishments), matching Core 31.1's `MaybeSendPing` with `m_ping_start` epoch-initialized; then one probe per `PING_INTERVAL` (2 min) of send-or-receive silence, with a fresh nonce per probe; locally or aggregate-refused probes stay owed (the "Queue accounting" paragraph below owns the refusal, owed-probe, and control-lane rules). Deviations: Core pings unconditionally every 2 min on busy links, this node probes only on silence; no pong-nonce matching, so Core's pong-specific timeout (`net_processing.cpp`) is unenforced — liveness stays the `TIMEOUT_INTERVAL` (20 min) silence expiry (Core's `InactivityCheck` shape), with each side's silence judged from real progress: receive silence from the last decoded inbound message, send silence from the connection's last actual socket write (the writer's stream accounting feeds the clock; a queued-but-unwritten probe — or any admitted frame — is not send activity); no latency telemetry kept; `pong` body unused. |
+| `ping`, `pong` | originated, served, consumed | Ready peers get `pong` with the received `ping` nonce. Each message-loop connection owes its first probe on the first pass after the handshake. VERSION-only feelers exit before that loop. Each admitted probe has a nonzero nonce. Only one probe can be outstanding. A matching `pong` settles it and supplies a nonnegative elapsed time to the connection's minimum-ping eviction protection (P2P-08). An unsolicited or nonzero mismatched `pong` changes no probe. A zero mismatched nonce settles the probe without a sample. Refused probes stay owed under the queue rules below. Later probes require `PING_INTERVAL` (2 min) since the previous probe and send-or-receive silence. Core also probes busy links. Core's separate unanswered-ping timeout is not enforced here. Liveness retains `TIMEOUT_INTERVAL` (20 min) silence expiry. Receive silence starts at the last decoded inbound message. Send silence starts at the last actual socket write. A queued probe is not send activity. |
 | `inv` | consumed | Bound 50,000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). Missing tx vectors enter the connection-bound owner; only the selected eligible source gets `getdata`; `wtxidrelay` peers get `MSG_WTX` with actual wtxid, others `MSG_TX`; `NODE_WITNESS` sources get `MSG_WITNESS_TX` requests, others `MSG_TX`. IBD never requests tx vectors. Block vectors are never answered with body `getdata` (P2P-07). Outbound block announce falls back to single-block `inv` (`MSG_BLOCK`) past `MAX_BLOCKS_TO_ANNOUNCE` (8) behind the tip. |
 | `getdata` | served | Bound 50,000. `MSG_BLOCK` streams stripped stored blocks, `MSG_WITNESS_BLOCK` witness-preserved (BIP144); tx from the mempool only and within the admission-sequence cutoff of the last successfully queued transaction `inv` on that connection (no cutoff, a later admission, or a held orphan answers `notfound`; deviation: no answer from the most recent block); block-relay-only peers get tx vectors removed; `MSG_TX` stripped, `MSG_WITNESS_TX`/`MSG_WTX` witness form. `MSG_CMPCT_BLOCK` within 5 of the applied tip gets `cmpctblock`, deeper gets the full witness `block`. Misses trail as one `notfound`; items served in request order. Saturation pauses, never disconnects: no free item slot (4,096 queued) or no room for one worst-case block under the 64 MiB cap; parked `notfound` reserved at exact length; a 20-minute request or hold, or a dead writer, ends the session (aggregate-refused time excluded). |
 | `notfound` | tx fallback | Matching tx request releases only its actual source and reconsiders retained alternatives; block entries ignored; same 50,000 bound. |
@@ -383,13 +383,26 @@ Proof for header ingress:
 - Failed spawns release the reservation.
 - Protection order follows Core:
   - Four by process-keyed netgroup hash.
+  - Eight by lowest minimum ping time.
   - Four most-recent mempool-accepted tx deliverers.
   - Up to eight wanted-service block-relay-only most-recent committed-block deliverers.
   - Four most-recent committed-block deliverers.
-  - Half of the rest by uptime.
-  - Up to a quarter of candidates localhost-reserved.
+  - Half of the rest by uptime, with up to half of this protection reserved for I2P, local, and onion connections.
+- The reserved quota is shared among nonempty classes, with smaller classes first.
+- Equal class sizes use the fixed order I2P, local, onion, as in Core with the unsupported CJDNS class absent.
+- Each pass shares the remaining quota equally, with a minimum allocation of one per class, and stops when the quota is filled.
+- A class with fewer connections releases its unused share to the remaining classes.
+- Each class protects its longest-connected candidates.
+- Any unused reserved quota returns to general uptime protection.
+- Anonymous Tor circuits count as onion connections, never as the proxy's local IP address.
+- CJDNS is unsupported. Ordinary IPv6 ULA addresses do not receive CJDNS protection.
+- `Keepalive` owns one outstanding nonce and its admission instant.
+- `PeerTable` owns the minimum successful elapsed time for each exact live connection.
+- A matching reply with zero elapsed time is a valid sample. Negative elapsed time settles the probe without changing the minimum.
+- An unknown minimum ping has lower protection priority than every measured minimum.
+- A slower later sample cannot increase the minimum.
+- A replacement connection starts with no sample. A callback from a replaced or cancelled connection cannot update it.
 - Then evict the newest connection of the largest-remaining netgroup.
-- Deviation: no minimum-ping protection (no ping RTT measured), recorded in policy §7 item 12.
 - `set_network_active` and conditional socket registration share the table write lock.
 - Disable-first admits nothing (no lease, replacement, or capacity mutation).
 - Register-first cancels the admitted lease for its owner to remove.
@@ -409,6 +422,16 @@ Proof for header ingress:
 - Manual dials and feelers bypass the prefilter.
 - Advertised set follows prune (`init.cpp`): `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED` when `storage.prune_target_mb > 0`.
 - Both handshake paths use `P2pServiceConfig::local_services`.
+
+Proof:
+- `eviction::tests::network_ratio_matches_core_v31_1_vectors` uses retained-candidate sets from Core v31.1 `src/test/net_peer_eviction_tests.cpp` for supported network classes.
+- It repeats each set with reversed input order and anonymous Tor identities.
+- `eight_lowest_minimum_pings_protect_connections` and `zero_ping_is_measured_and_unknown_ping_is_not_fast` check the minimum-ping stage against Core's eight-connection rule.
+- `absent_network_groups_leave_half_protected_by_uptime` checks empty classes and small candidate sets.
+- `listener::keepalive_tests` checks matching, stale, zero, and negative-time Pong settlement and one outstanding probe.
+- `peer_table::tests` checks the connection minimum and rejects callbacks after replacement or cancellation.
+- `matching_wire_pong_protects_the_live_inbound_connection` checks the listener-to-table path through a real socket and an inbound eviction.
+- These are local behavioral proofs. They do not establish complete Core peer-lifecycle parity. Policy §7 items 11 and 12 own the remaining differences.
 
 ### `P2P-09`: Block-body service eligibility
 
@@ -500,7 +523,7 @@ Proof for header ingress:
 - Peer lifecycle boundary: header-request planning and getdata fan-out run in `BlockSync` behind the node `SyncChain` seam.
 - Node owns applied-chain mutation.
 - `P2pService` holds no shadow window.
-- Inbound eviction lacks Core's minimum-ping protection (no ping RTT measured); policy §7 item 12.
+- Inbound eviction retains the service, recency, block-credit, and discouragement differences in policy §7 item 12.
 
 ## Verification boundaries
 
