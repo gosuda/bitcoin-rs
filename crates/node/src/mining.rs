@@ -861,6 +861,87 @@ mod tests {
 
     // API-11, API-30, SYNC-05
     #[test]
+    fn fresh_submission_observes_fee_changes_while_waiting_for_admission()
+    -> Result<(), crate::test_support::TestError> {
+        use bitcoin_rs_consensus::primitives::{BlockImage, Network};
+        use bitcoin_rs_wire::mining::{CoinbaseReserve, GenerateRequest, solve_block};
+        use std::{sync::mpsc, time::Duration};
+
+        let directory = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
+        config.data_dir = directory.path().join("node");
+        config.p2p.listen.clear();
+        let state = crate::state::NodeState::open(config, None)?;
+        state.apply_block(&BlockImage::from_local(Network::Regtest.genesis_block()))?;
+        let mining = super::MiningCoordinator::new(
+            state.mempool_reader(),
+            state.chainstate(),
+            state.stable_read(),
+            state.chain_followers(),
+            vec![0x51],
+            CoinbaseReserve::default(),
+        );
+        let generation = mining.service.live_generation_key();
+        let mut candidate = mining
+            .service
+            .assemble_fresh_for_generation(generation, &[0x51])?
+            .into_unsolved_block()?;
+        solve_block(&mut candidate, GenerateRequest::DEFAULT_MAX_TRIES)?;
+        let payload = BlockImage::from_local(candidate);
+        let gateway = state.mempool_gateway();
+        let before_gate = gateway
+            .stable_generation()
+            .ok_or(crate::test_support::TestError::Missing("open admission"))?;
+        let before_tip = state
+            .chainstate()
+            .applied_tip_snapshot()
+            .map(|tip| tip.hash);
+        let result = std::thread::scope(|scope| {
+            let mut pool = gateway.pool().write();
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (locked_tx, locked_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            gateway.install_begin_chain_change_probes(
+                entered_tx,
+                locked_tx,
+                resume_rx,
+                Box::new(|| true),
+            );
+            let submitted = scope.spawn(|| mining.submit(&payload, Some(generation)));
+            entered_rx.recv_timeout(Duration::from_secs(10))?;
+            assert_eq!(gateway.stable_generation(), Some(before_gate));
+            pool.prioritise(Txid::from(Hash256::from_le_bytes(&[92; 32])), 900)?;
+            drop(pool);
+            assert!(locked_rx.recv_timeout(Duration::from_secs(10))?);
+            resume_tx.send(()).map_err(|_| {
+                crate::test_support::TestError::ChannelSend("resume chain admission")
+            })?;
+            submitted.join().map_err(|_| {
+                crate::test_support::TestError::ExpectationFailed("submission thread panicked")
+            })
+        })?;
+        assert!(matches!(result, Err(error) if error.is_template_generation_race()));
+        assert_eq!(
+            state
+                .chainstate()
+                .applied_tip_snapshot()
+                .map(|tip| tip.hash),
+            before_tip
+        );
+        assert_eq!(gateway.stable_generation(), Some(before_gate + 2));
+        let fresh = mining.service.live_generation_key();
+        assert_ne!(fresh, generation);
+        assert!(
+            mining
+                .service
+                .assemble_fresh_for_generation(fresh, &[0x51])
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    // API-11, API-30, SYNC-05
+    #[test]
     fn templates_reject_missing_inputs_without_mutating_chainstate()
     -> Result<(), crate::test_support::TestError> {
         use bitcoin_rs_consensus::primitives::{
