@@ -67,6 +67,18 @@ pub struct BlockImage {
     hash: BlockHash,
 }
 
+// INVARIANT: the backing allocation is dropped before its receipt.
+struct OwnedBlockBacking<T> {
+    bytes: Bytes,
+    _receipt: T,
+}
+
+impl<T> AsRef<[u8]> for OwnedBlockBacking<T> {
+    fn as_ref(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+}
+
 #[cfg(any(test, feature = "test-seam"))]
 static BLOCK_IMAGE_MATERIALIZATIONS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<usize, usize>>,
@@ -181,6 +193,46 @@ impl BlockImage {
         let bytes = Bytes::from(consensus_bytes(&block));
         Self::from_raw(bytes)
             .unwrap_or_else(|_| unreachable!("locally serialized block must parse cleanly"))
+    }
+
+    /// Attach a receipt to the raw allocation until its final byte clone is dropped.
+    ///
+    /// Unique backing is normalized in place and reserves its full allocation capacity.
+    /// Shared backing reserves an exact-sized copy before allocating it. The callback
+    /// runs once and must keep the requested bytes accounted for through the returned
+    /// receipt. A refusal consumes the input without returning an image. Layout and
+    /// identity allocations are moved unchanged and require their own reservation.
+    pub fn with_owned_backing<T, E, F>(self, reserve: F) -> Result<Self, E>
+    where
+        T: Send + 'static,
+        F: FnOnce(usize) -> Result<T, E>,
+    {
+        let Self {
+            bytes,
+            layout,
+            identities,
+            hash,
+        } = self;
+        let (bytes, receipt) = match bytes.try_into_mut() {
+            Ok(bytes) => {
+                let bytes = Vec::<u8>::from(bytes);
+                let receipt = reserve(bytes.capacity())?;
+                (Bytes::from(bytes), receipt)
+            }
+            Err(bytes) => {
+                let receipt = reserve(bytes.len())?;
+                (Bytes::from(Box::<[u8]>::from(bytes.as_ref())), receipt)
+            }
+        };
+        Ok(Self {
+            bytes: Bytes::from_owner(OwnedBlockBacking {
+                bytes,
+                _receipt: receipt,
+            }),
+            layout,
+            identities,
+            hash,
+        })
     }
 
     #[must_use]
@@ -796,6 +848,180 @@ mod tests {
         let extra_txs_cap = block.txs.capacity() - 3;
         let expected_after_reserve = expected_block + extra_txs_cap * core::mem::size_of::<Tx>();
         assert_eq!(block.retained_heap_bytes(), expected_after_reserve);
+    }
+
+    struct BackingReceipt {
+        released: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        bytes: usize,
+    }
+
+    impl Drop for BackingReceipt {
+        fn drop(&mut self) {
+            self.released
+                .fetch_add(self.bytes, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+
+    // BUD-01, BUD-06
+    #[test]
+    fn owned_backing_reuses_unique_capacity_and_preserves_decoded_metadata() -> Result<()> {
+        let fixture = read_test_fixture("0.bin")?;
+        let mut raw = Vec::with_capacity(fixture.len() + 37);
+        raw.extend_from_slice(&fixture);
+        let capacity = raw.capacity();
+        let pointer = raw.as_ptr();
+        let image = BlockImage::from_raw(bytes::Bytes::from(raw))?;
+        let layout_pointer = image.layout().txs().as_ptr();
+        let identities_pointer = image.identities().as_ptr();
+        let hash = image.block_hash();
+        let reserved = std::cell::Cell::new(0);
+        let image = image.with_owned_backing(|bytes| {
+            reserved.set(bytes);
+            Ok::<_, TestError>(())
+        })?;
+        assert_eq!(reserved.get(), capacity);
+        assert_eq!(image.bytes().as_ptr(), pointer);
+        assert_eq!(image.bytes().as_ref(), fixture.as_slice());
+        assert_eq!(image.layout().txs().as_ptr(), layout_pointer);
+        assert_eq!(image.identities().as_ptr(), identities_pointer);
+        assert_eq!(image.block_hash(), hash);
+        Ok(())
+    }
+
+    // BUD-01, BUD-06
+    #[test]
+    fn owned_backing_normalizes_unique_slices_before_charging_capacity() -> Result<()> {
+        let fixture = read_test_fixture("0.bin")?;
+        let prefix = 64;
+        let mut raw = Vec::with_capacity(prefix + fixture.len() + 53);
+        raw.resize(prefix, 0x55);
+        raw.extend_from_slice(&fixture);
+        raw.extend_from_slice(&[0xaa; 17]);
+        let capacity = raw.capacity();
+        let pointer = raw.as_ptr();
+        let raw = bytes::Bytes::from(raw).slice(prefix..prefix + fixture.len());
+        assert!(raw.is_unique());
+        let image = BlockImage::from_raw(raw)?;
+        let reserved = std::cell::Cell::new(0);
+        let image = image.with_owned_backing(|bytes| {
+            reserved.set(bytes);
+            Ok::<_, TestError>(())
+        })?;
+        assert_eq!(reserved.get(), capacity);
+        assert_eq!(image.bytes().as_ptr(), pointer);
+        assert_eq!(image.bytes().as_ref(), fixture.as_slice());
+        Ok(())
+    }
+
+    // BUD-01, BUD-06
+    #[test]
+    fn owned_backing_copies_shared_bytes_into_a_separate_exact_reservation() -> Result<()> {
+        let fixture = read_test_fixture("0.bin")?;
+        let shared = bytes::Bytes::from(fixture.clone());
+        let image = BlockImage::from_raw(shared.clone())?;
+        let reserved = std::cell::Cell::new(0);
+        let image = image.with_owned_backing(|bytes| {
+            reserved.set(bytes);
+            assert_eq!(shared.as_ref(), fixture.as_slice());
+            Ok::<_, TestError>(())
+        })?;
+        assert_eq!(reserved.get(), fixture.len());
+        assert_ne!(image.bytes().as_ptr(), shared.as_ptr());
+        assert_eq!(image.bytes().as_ref(), fixture.as_slice());
+        assert_eq!(shared.as_ref(), fixture.as_slice());
+        Ok(())
+    }
+
+    // BUD-01, BUD-06
+    #[test]
+    fn owned_backing_reserves_a_copy_before_releasing_a_previous_receipt() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fixture = read_test_fixture("0.bin")?;
+        let released = Arc::new(AtomicUsize::new(0));
+        let mut raw = Vec::with_capacity(fixture.len() + 41);
+        raw.extend_from_slice(&fixture);
+        let capacity = raw.capacity();
+        let image = BlockImage::from_raw(bytes::Bytes::from(raw))?
+            .with_owned_backing(|bytes| {
+                Ok::<_, TestError>(BackingReceipt {
+                    released: Arc::clone(&released),
+                    bytes,
+                })
+            })?;
+        let previous_pointer = image.bytes().as_ptr();
+        let reserved = std::cell::Cell::new(0);
+        let image = image.with_owned_backing(|bytes| {
+            assert_eq!(released.load(Ordering::Acquire), 0);
+            reserved.set(bytes);
+            Ok::<_, TestError>(())
+        })?;
+        assert_eq!(reserved.get(), fixture.len());
+        assert_eq!(released.load(Ordering::Acquire), capacity);
+        assert_ne!(image.bytes().as_ptr(), previous_pointer);
+        assert_eq!(image.bytes().as_ref(), fixture.as_slice());
+        Ok(())
+    }
+
+    // BUD-06
+    #[test]
+    fn owned_backing_refusal_preserves_the_error_and_releases_the_consumed_input() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let raw = read_test_fixture("0.bin")?;
+        let capacity = raw.capacity();
+        let released = Arc::new(AtomicUsize::new(0));
+        let image = BlockImage::from_raw(bytes::Bytes::from(raw))?
+            .with_owned_backing(|bytes| {
+                Ok::<_, TestError>(BackingReceipt {
+                    released: Arc::clone(&released),
+                    bytes,
+                })
+            })?;
+        let expected = image.bytes().len();
+        let refused = image.with_owned_backing::<(), _, _>(|bytes| {
+            assert_eq!(bytes, expected);
+            assert_eq!(released.load(Ordering::Acquire), 0);
+            Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+        });
+        let error = refused.err().ok_or("reservation must be refused")?;
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(released.load(Ordering::Acquire), capacity);
+        Ok(())
+    }
+
+    // BUD-06
+    #[test]
+    fn owned_backing_receipt_follows_the_final_raw_slice() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fixture = read_test_fixture("0.bin")?;
+        let mut raw = Vec::with_capacity(fixture.len() + 29);
+        raw.extend_from_slice(&fixture);
+        let capacity = raw.capacity();
+        let released = Arc::new(AtomicUsize::new(0));
+        let image = BlockImage::from_raw(bytes::Bytes::from(raw))?
+            .with_owned_backing(|bytes| {
+                Ok::<_, TestError>(BackingReceipt {
+                    released: Arc::clone(&released),
+                    bytes,
+                })
+            })?;
+        let image_clone = image.clone();
+        let raw = image.bytes().clone();
+        let final_slice = raw.slice(80..81);
+        drop(image);
+        drop(image_clone);
+        assert_eq!(released.load(Ordering::Acquire), 0);
+        drop(raw);
+        assert_eq!(released.load(Ordering::Acquire), 0);
+        assert_eq!(final_slice.as_ref(), &fixture[80..81]);
+        drop(final_slice);
+        assert_eq!(released.load(Ordering::Acquire), capacity);
+        Ok(())
     }
 
     #[test]
