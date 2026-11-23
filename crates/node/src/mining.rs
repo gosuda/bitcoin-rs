@@ -26,7 +26,6 @@ use bitcoin_rs_wire::mining::BlockTemplateMode;
 use bitcoin_rs_wire::mining::BlockTemplateRequest;
 use bitcoin_rs_wire::mining::BlockTemplateResult;
 use bitcoin_rs_wire::mining::BlockValidationResult;
-#[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_wire::mining::Candidate;
 use bitcoin_rs_wire::mining::CandidateContext;
 use bitcoin_rs_wire::mining::ChainContextSource;
@@ -90,6 +89,7 @@ impl MiningCoordinator {
             Arc::new(ChainContextAdapter {
                 block_tree,
                 network,
+                chainstate: Arc::clone(&chainstate),
             }),
             coinbase_script,
             coinbase_reserve,
@@ -375,9 +375,19 @@ impl MempoolSnapshotSource for MempoolAdapter {
 struct ChainContextAdapter {
     block_tree: BlockTreeReader,
     network: Network,
+    chainstate: Arc<Chainstate>,
 }
 
 impl ChainContextSource for ChainContextAdapter {
+    fn validate_candidate(&self, candidate: &Candidate) -> Result<(), MiningControlError> {
+        let block = candidate.into_unsolved_block().map_err(|error| {
+            MiningControlError::Failed(CompactString::from(error.to_string()))
+        })?;
+        self.chainstate
+            .validate_block(&BlockImage::from_local(block))
+            .map_err(|error| test_block_validity_error(&error))
+    }
+
     fn resolve_mining_context(
         &self,
         tip: &TipSnapshot,
@@ -729,7 +739,8 @@ mod tests {
         };
         use bitcoin_rs_mempool::MempoolEntry;
         use bitcoin_rs_wire::mining::{
-            BlockTemplateMode, BlockTemplateRequest, CoinbaseBudget, CoinbaseReserve, MiningControl,
+            BlockTemplateMode, BlockTemplateRequest, CoinbaseBudget, CoinbaseReserve,
+            GenerateRequest, GenerateSelection, MiningControl,
         };
         use std::sync::Arc;
 
@@ -799,6 +810,17 @@ mod tests {
             assert_eq!(tip.hash, Network::Regtest.genesis_block_hash());
             assert!(state.mempool().read().entry_id_by_txid(&txid).is_some());
         }
+        assert!(matches!(
+            mining.generate(GenerateRequest {
+                payout: vec![0x51],
+                count: 1,
+                max_tries: 0,
+                selection: GenerateSelection::Mempool,
+                submit: false,
+            }),
+            Err(MiningControlError::Rejected(reason))
+                if reason == "TestBlockValidity failed: bad-txns-inputs-missingorspent"
+        ));
         state.mempool().write().clear();
         mining.publish_generation();
         mining.get_block_template(request(None))?;
