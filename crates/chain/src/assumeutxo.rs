@@ -364,14 +364,14 @@ fn reset_rolled_back_chainstate(active: &Chainstate) -> Result<(), AssumeUtxoErr
     active.chain_tip.store(None);
     {
         let mut tree = active.block_tree.write();
-        *tree = crate::chain::BlockTree::new();
-        if tree.is_empty() {
-            tree.insert_header(
-                active.network.genesis_block().header,
-                NodeStatus::HeaderValid,
-            )
+        let mut restored = crate::chain::BlockTree::new();
+        restored.insert_header(
+            active.network.genesis_block().header,
+            NodeStatus::HeaderValid,
+        ).map_err(crate::error::ApplyError::from)?;
+        active.header_retention.restore_operator_verdicts(&mut restored)
             .map_err(crate::error::ApplyError::from)?;
-        }
+        *tree = restored;
     }
     active
         .coin_stats
@@ -2053,6 +2053,33 @@ mod tests {
             set.insert_parsed_record(record);
         }
         Ok(set)
+    }
+
+    // P2P-10, RCV-03, SYNC-03
+    #[test]
+    fn activation_rollback_cancels_header_candidates_without_replacing_their_budget() -> TestResult {
+        let fixture = Fixture::new()?;
+        let root = Network::Regtest.genesis_block_hash();
+        let invalid = fixture.blocks[1].block_hash().0;
+        fixture.active.header_retention.remember_operator_invalidation(invalid);
+        let mut candidates = (0..4)
+            .map(|_| fixture.active.begin_header_candidate(root, ChainWork::ZERO))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(candidates.iter().all(|candidate| !candidate.is_cancelled()));
+        super::reset_rolled_back_chainstate(&fixture.active)?;
+        assert!(candidates.iter().all(crate::chain::HeaderCandidate::is_cancelled));
+        assert!(matches!(
+            fixture.active.begin_header_candidate(root, ChainWork::ZERO),
+            Err(crate::HeaderAdmissionError::Candidate(crate::chain::HeaderCandidateError::Busy))
+        ));
+        assert!(matches!(
+            fixture.active.admit_headers(&[fixture.blocks[1].header]),
+            Err(crate::HeaderAdmissionError::Rejected(crate::chain::ChainError::KnownInvalidHeader { hash })) if hash == invalid
+        ));
+        candidates.pop();
+        let replacement = fixture.active.begin_header_candidate(root, ChainWork::ZERO)?;
+        assert!(!replacement.is_cancelled());
+        Ok(())
     }
 
     #[test]
