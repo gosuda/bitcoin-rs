@@ -635,6 +635,7 @@ mod config_layered {
         let payout = UserConfig {
             mining: MiningOverrides {
                 payout_address: Some(ADDRESS.to_owned()),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -656,6 +657,7 @@ mod config_layered {
             network: Some(NetworkSelection::Regtest),
             mining: MiningOverrides {
                 payout_address: Some("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_owned()),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -2496,6 +2498,7 @@ mod mining {
                 network: Some(NetworkSelection::Regtest),
                 mining: MiningOverrides {
                     payout_address: Some(ADDRESS.to_owned()),
+                    ..Default::default()
                 },
                 ..Default::default()
             };
