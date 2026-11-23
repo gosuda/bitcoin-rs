@@ -4536,8 +4536,7 @@ mod tests {
     }
 
 
-    // MPL-02
-    // P2P-01
+    // MPL-02, P2P-01
     #[test]
     fn relay_lookup_compares_admission_epochs_across_sequence_rollover() -> Result<(), MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());

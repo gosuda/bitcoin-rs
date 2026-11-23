@@ -286,7 +286,8 @@ impl NodeTxPolicy {
                 continue;
             }
             if let Some(current) = peer.pending.get_mut(&request.wtxid) {
-                if request.sequence > current.sequence {
+                let advance = request.sequence.wrapping_sub(current.sequence);
+                if (1..(1_u64 << 63)).contains(&advance) {
                     *current = request;
                 }
             } else if peer.pending.len() < MAX_PENDING_PER_PEER && total < MAX_PENDING {
@@ -1253,7 +1254,6 @@ mod tests {
     }
 
     // P2P-01
-    // TXR-09
     #[test]
     fn remote_inventory_cannot_authorize_transaction_serving() {
         let table = NodeTxPolicy::default();
@@ -1285,7 +1285,6 @@ mod tests {
     }
 
     // P2P-01
-    // TXR-09
     #[test]
     fn replacement_connection_does_not_inherit_inventory_cutoff() {
         let table = NodeTxPolicy::default();
@@ -1319,7 +1318,6 @@ mod tests {
     }
 
     // P2P-01
-    // TXR-09
     #[test]
     fn relay_inv_saturated_requeues() {
         let table = NodeTxPolicy::default();
@@ -1403,6 +1401,63 @@ mod tests {
         );
         assert_eq!(inventory(&other_rx).len(), 2);
         assert_eq!(gateway.read().stats().txs, 2);
+    }
+
+    // MPL-02, P2P-01
+    #[test]
+    fn wrapped_admission_replaces_pending_relay_and_rejects_stale_callbacks() {
+        let table = NodeTxPolicy::default();
+        let gateway = gateway();
+        let now = Instant::now();
+        let mut rng = StdRng::seed_from_u64(34);
+        let (_, rx) = connect(
+            &table, 1, false, true, bitcoin_rs_p2p::PeerRole::FullRelay, true,
+        );
+        let current = insert(&gateway, &transaction(1, None), 10_000);
+        assert_eq!(current.sequence, 1);
+        table.queue_transaction_relay(
+            RelayRequest { sequence: u64::MAX - 1, ..current }, now, &mut rng,
+        );
+        table.queue_transaction_relay(current, now, &mut rng);
+        table.queue_transaction_relay(
+            RelayRequest { sequence: u64::MAX, ..current }, now, &mut rng,
+        );
+        table.poll_transaction_relay(&gateway, now + Duration::from_secs(31), false, &mut rng);
+        assert_eq!(
+            inventory(&rx),
+            vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(*current.wtxid.as_bytes()))]
+        );
+    }
+
+    // MPL-02, P2P-01
+    #[test]
+    fn duplicate_and_half_range_relay_callbacks_preserve_pending_request() {
+        let table = NodeTxPolicy::default();
+        let gateway = gateway();
+        let now = Instant::now();
+        let mut rng = StdRng::seed_from_u64(35);
+        let (source, rx) = connect(
+            &table, 1, false, true, bitcoin_rs_p2p::PeerRole::FullRelay, true,
+        );
+        let current = insert(&gateway, &transaction(1, None), 10_000);
+        table.queue_transaction_relay(current, now, &mut rng);
+        for sequence in [
+            current.sequence,
+            current.sequence.wrapping_add(1_u64 << 63),
+        ] {
+            table.queue_transaction_relay(
+                RelayRequest { sequence, source: Some(u64::MAX), ..current }, now, &mut rng,
+            );
+            let policy = table.tx_policy.lock();
+            let pending = &policy.relay[&source].pending[&current.wtxid];
+            assert_eq!(pending.sequence, current.sequence);
+            assert_eq!(pending.source, current.source);
+        }
+        table.poll_transaction_relay(&gateway, now + Duration::from_secs(31), false, &mut rng);
+        assert_eq!(
+            inventory(&rx),
+            vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(*current.wtxid.as_bytes()))]
+        );
     }
 
     #[test]
