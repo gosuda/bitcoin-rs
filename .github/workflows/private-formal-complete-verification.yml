@@ -97,7 +97,6 @@ jobs:
     timeout-minutes: 90
     env:
       RUSTUP_TOOLCHAIN: "1.99.0"
-      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       EXPECTED_PRODUCT_TREE: ${{ needs.assemble.outputs.product_tree }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -151,6 +150,7 @@ jobs:
           mkdir -p target/integration-native
           git write-tree > target/integration-native/product-tree.txt
           bash scripts/ci-setup.sh apt msrv nextest 2>&1 | tee target/integration-native/setup.log
+          export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
           cargo nextest run --locked -p bitcoin-rs-node --lib --no-default-features --features test-seam --no-tests fail --no-fail-fast \
             -E 'test(=mining::tests::local_generated_backing_stays_charged_until_last_reader) | test(=mining::tests::local_submissions_account_backing_and_witness_rebuilds) | test(=mining::tests::local_submission_budget_refusal_preserves_state_and_duplicate_results) | test(=snapshot::tests::snapshot_settlement_refusal_after_durable_activation_keeps_admission_closed) | test(=lifecycle::tests::startup_shares_recent_block_serving_and_ingress_memory)' \
             2>&1 | tee target/integration-native/owner-tests.log
