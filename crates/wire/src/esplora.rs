@@ -39,12 +39,14 @@ pub(crate) fn respond<R>(
     request: Request<'_>,
     send: impl FnOnce(Response) -> R,
 ) -> R {
-    let bulk = surface == Surface::Backend
+    let backend_expensive = surface == Surface::Backend
         && match request {
-            Request::Get(_) => admission::is_backend_bulk_get(path),
+            Request::Get(_) => admission::is_backend_expensive_get(path),
             Request::Post(_) => admission::is_backend_bulk_post(path),
         };
-    let permit = if bulk || (matches!(request, Request::Get(_)) && admission::is_expensive(path)) {
+    let permit = if backend_expensive
+        || (matches!(request, Request::Get(_)) && admission::is_expensive(path))
+    {
         let Some(permit) = handler.context().esplora_admission.try_acquire() else {
             return send(crate::rest::service_unavailable(
                 "expensive Esplora query limit reached",
@@ -66,7 +68,7 @@ pub(crate) fn respond<R>(
             }
         }
     };
-    if !bulk {
+    if !backend_expensive {
         drop(permit);
     }
     send(response)
