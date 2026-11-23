@@ -41,11 +41,37 @@ pub enum HeaderAdmissionError {
     #[error("header admission refused: {0}")]
     Refused(#[source] ApplyError),
     #[error(transparent)]
-    Rejected(#[from] ChainError),
+    Rejected(ChainError),
     #[error(transparent)]
     Resource(#[from] HeaderResourceError),
     #[error(transparent)]
     Candidate(#[from] HeaderCandidateError),
+}
+
+impl From<ChainError> for HeaderAdmissionError {
+    fn from(error: ChainError) -> Self {
+        match error {
+            ChainError::NodeIdOverflow { .. } => HeaderResourceError::CapacityOverflow.into(),
+            error @ (ChainError::UnknownNode { .. }
+            | ChainError::DuplicateHeader { .. }
+            | ChainError::KnownInvalidHeader { .. }
+            | ChainError::MissingParent { .. }
+            | ChainError::InvalidParent { .. }
+            | ChainError::BadVersion { .. }
+            | ChainError::TimewarpAttack { .. }
+            | ChainError::NonContinuousHeader { .. }
+            | ChainError::ZeroTarget { .. }
+            | ChainError::TargetExceedsLimit { .. }
+            | ChainError::TargetBitsOverflow { .. }
+            | ChainError::InvalidPow { .. }
+            | ChainError::NbitsMismatch { .. }
+            | ChainError::ChainworkOverflow { .. }
+            | ChainError::HeightOverflow { .. }
+            | ChainError::NoCommonAncestor { .. }
+            | ChainError::TimestampTooEarly { .. }
+            | ChainError::TimestampTooFarAhead { .. }) => Self::Rejected(error),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -197,9 +223,6 @@ impl HeaderRetention {
 
     fn plan(&self, tree: &BlockTree) -> Result<RetentionPlan, HeaderAdmissionError> {
         let mut pins = self.pins.lock();
-        if pins.replay.is_some_and(|replay| self.candidates.active_replay() != Some(replay.candidate)) {
-            pins.replay = None;
-        }
         let best = tree.tip_id();
         let mut roots = Vec::new();
         for role in pins.roles.iter().filter_map(Weak::upgrade) {
@@ -226,8 +249,25 @@ impl HeaderRetention {
             }
         }
         let required = pins.ancestry.count(tree, &required_roots)?;
-        let ordinary_limit = required.checked_add(self.side_limit()).ok_or(HeaderResourceError::CapacityOverflow)?;
-        required_roots.extend(self.candidates.anchors().into_iter().flatten().filter_map(|hash| tree.lookup(hash)));
+        let side_limit = self.side_limit();
+        let ordinary_limit = required.checked_add(side_limit).ok_or(HeaderResourceError::CapacityOverflow)?;
+        let mut anchor_ancestry = 0_usize;
+        for hash in self.candidates.anchors().into_iter().flatten() {
+            let Some(id) = tree.lookup(hash) else {
+                self.candidates.cancel_anchor(hash);
+                continue;
+            };
+            let added = additional_ancestry(tree, id, &required_roots)?;
+            if added > side_limit - anchor_ancestry {
+                self.candidates.cancel_anchor(hash);
+                continue;
+            }
+            anchor_ancestry += added;
+            required_roots.push(id);
+        }
+        if pins.replay.is_some_and(|replay| self.candidates.active_replay() != Some(replay.candidate)) {
+            pins.replay = None;
+        }
         if let Some(replay) = pins.replay { required_roots.push(retained_id(tree, replay.prefix)?); }
         Ok(RetentionPlan { protected: required_roots, ordinary_limit, replay: pins.replay })
     }
@@ -257,24 +297,31 @@ impl RequiredAncestry {
             self.roots.copy_from_slice(roots);
             return Ok(self.count);
         }
-        let mut count = 0_u64;
+        let mut count = 0_usize;
         for (index, id) in roots.iter().enumerate() {
-            let height = tree.node(*id)?.height;
-            let added = if index == 0 { u64::from(height) + 1 } else {
-                let mut shared_height = 0;
-                for previous in &roots[..index] {
-                    let common = tree.find_common_ancestor(*id, *previous).ok_or(ChainError::UnknownNode { id: *id })?;
-                    shared_height = shared_height.max(tree.node(common)?.height);
-                }
-                u64::from(height - shared_height)
-            };
+            let added = additional_ancestry(tree, *id, &roots[..index])?;
             count = count.checked_add(added).ok_or(HeaderResourceError::CapacityOverflow)?;
         }
-        self.count = usize::try_from(count).map_err(|_| HeaderResourceError::CapacityOverflow)?;
+        self.count = count;
         self.roots.clear();
         self.roots.extend_from_slice(roots);
         Ok(self.count)
     }
+}
+
+fn additional_ancestry(tree: &BlockTree, id: NodeId, retained: &[NodeId]) -> Result<usize, HeaderAdmissionError> {
+    let height = tree.node(id)?.height;
+    let added = if retained.is_empty() {
+        u64::from(height) + 1
+    } else {
+        let mut shared_height = 0;
+        for previous in retained {
+            let common = tree.find_common_ancestor(id, *previous).ok_or(ChainError::UnknownNode { id })?;
+            shared_height = shared_height.max(tree.node(common)?.height);
+        }
+        u64::from(height - shared_height)
+    };
+    usize::try_from(added).map_err(|_| HeaderResourceError::CapacityOverflow.into())
 }
 
 pub(crate) struct HeaderRetentionLease {
@@ -330,6 +377,7 @@ impl Chainstate {
                     Some((id, target)) if plan.replay.is_some_and(|active| active.candidate == id && active.target == target) => {
                         usize::try_from(target.tip.height - target.anchor.height).map_err(|_| HeaderResourceError::CapacityOverflow)?
                     }
+                    Some(_) if plan.replay.is_none() => return Err(HeaderCandidateError::Cancelled.into()),
                     Some(_) => return Err(HeaderCandidateError::WrongChainstate.into()),
                     None => 0,
                 };
@@ -419,6 +467,7 @@ impl Chainstate {
             }
             let mut removals = RECLAIM_PER_ADMISSION;
             let plan = self.header_retention.plan(&tree)?;
+            if candidate.is_cancelled() { return Err(HeaderCandidateError::Cancelled.into()); }
             if plan.replay.is_none() {
                 removals -= tree.reclaim_leaves(&plan.protected, plan.ordinary_limit, removals)?;
                 if tree.len() > plan.ordinary_limit { return Err(HeaderResourceError::Reclaiming.into()); }
@@ -609,6 +658,94 @@ mod tests {
             assert!(chain.block_tree.read().lookup(anchor).is_some());
             first = next;
         }
+        Ok(())
+    }
+
+
+    // P2P-10, SYNC-02, SYNC-03, SYNC-06
+    #[test]
+    fn disappearing_operation_roots_cancel_over_budget_anchors_and_allow_fresh_replay() -> Result<(), TestError> {
+        for active_replay in [false, true] {
+            let (chain, old) = canonical_chain(128, 8)?;
+            let genesis = Network::Regtest.genesis_block().header;
+            let root = Hash256::from(genesis.compute_hash());
+            let anchor = Hash256::from(old[127].compute_hash());
+            let old_id = retained(&chain, anchor)?;
+            let lease = chain.header_retention.pin_operation(&chain.block_tree.read(), &[old_id])?;
+            let main = branch(genesis, 256, 40, 1, genesis.bits)?;
+            let mut main_candidate = authenticated_candidate(&chain, root, &main)?;
+            assert_eq!(chain.admit_verified_headers(&mut main_candidate, 2_000)?.accepted, 256);
+            let invalid_header = branch(genesis, 1, 42, 1, genesis.bits)?[0];
+            let invalid_hash = Hash256::from(invalid_header.compute_hash());
+            chain.admit_headers(&[invalid_header])?;
+            crate::reorg::invalidate_and_republish(&chain, invalid_hash, crate::reorg::InvalidationOrigin::Operator)?;
+            let invalid_id = retained(&chain, invalid_hash)?;
+            let continuation = branch(old[127], 129, 41, 1, genesis.bits)?;
+            let mut candidate = authenticated_candidate(&chain, anchor, &continuation)?;
+            if active_replay {
+                assert_eq!(chain.admit_verified_headers(&mut candidate, 16)?.accepted, 16);
+                assert!(chain.header_retention.pins.lock().replay.is_some());
+            }
+            drop(lease);
+            assert_eq!(chain.maintain_header_retention()?, if active_replay { 136 } else { 120 });
+            assert!(candidate.is_cancelled());
+            assert!(chain.header_retention.pins.lock().replay.is_none());
+            assert!(chain.block_tree.read().lookup(anchor).is_none());
+            assert_eq!(chain.block_tree.read().len(), 258 + 8);
+            assert_eq!(chain.block_tree.read().node(invalid_id)?.status, NodeStatus::Invalid);
+            assert!(chain.applied_tip_snapshot().is_none());
+            assert!(matches!(chain.admit_headers(&[invalid_header]), Err(HeaderAdmissionError::Rejected(ChainError::KnownInvalidHeader { hash })) if hash == invalid_hash));
+
+            let waiting = (0..3).map(|_| chain.begin_header_candidate(root, ChainWork::ZERO)).collect::<Result<Vec<_>, _>>()?;
+            assert!(matches!(chain.begin_header_candidate(root, ChainWork::ZERO), Err(HeaderAdmissionError::Candidate(HeaderCandidateError::Busy))));
+            assert!(matches!(chain.admit_verified_headers(&mut candidate, 2_000), Err(HeaderAdmissionError::Candidate(HeaderCandidateError::Cancelled))));
+            let mut retry_headers = old;
+            retry_headers.extend(continuation);
+            let mut retry = authenticated_candidate(&chain, root, &retry_headers)?;
+            assert_eq!(chain.admit_verified_headers(&mut retry, 2_000)?.accepted, 257);
+            assert_eq!(retry.phase(), HeaderCandidatePhase::Finished);
+            chain.maintain_header_retention()?;
+            assert_eq!(best_hash(&chain)?, Hash256::from(retry_headers[256].compute_hash()));
+            assert!(chain.block_tree.read().len() <= 259 + 8);
+            assert_eq!(chain.block_tree.read().node(invalid_id)?.status, NodeStatus::Invalid);
+            assert!(chain.applied_tip_snapshot().is_none());
+            assert!(waiting.iter().all(|candidate| !candidate.is_cancelled()));
+        }
+        Ok(())
+    }
+
+    // P2P-10, SYNC-03
+    #[test]
+    fn candidate_anchors_share_the_cache_in_creation_order_after_operation_roots_leave() -> Result<(), TestError> {
+        let (chain, _) = canonical_chain(32, 8)?;
+        let genesis = Network::Regtest.genesis_block().header;
+        let root = Hash256::from(genesis.compute_hash());
+        let first = branch(genesis, 8, 43, 1, genesis.bits)?;
+        chain.admit_headers(&first)?;
+        let first_id = retained(&chain, Hash256::from(first[7].compute_hash()))?;
+        let first_lease = chain.header_retention.pin_operation(&chain.block_tree.read(), &[first_id])?;
+        let second = branch(genesis, 8, 44, 1, genesis.bits)?;
+        chain.admit_headers(&second)?;
+        let second_id = retained(&chain, Hash256::from(second[7].compute_hash()))?;
+        let second_lease = chain.header_retention.pin_operation(&chain.block_tree.read(), &[second_id])?;
+
+        let oldest = chain.begin_header_candidate(Hash256::from(first[4].compute_hash()), ChainWork::ZERO)?;
+        let mut nonfitting = chain.begin_header_candidate(Hash256::from(second[4].compute_hash()), ChainWork::ZERO)?;
+        let extension = chain.begin_header_candidate(Hash256::from(first[7].compute_hash()), ChainWork::ZERO)?;
+        let duplicate = chain.begin_header_candidate(Hash256::from(first[7].compute_hash()), ChainWork::ZERO)?;
+        drop(first_lease);
+        drop(second_lease);
+        assert_eq!(chain.maintain_header_retention()?, 8);
+        assert_eq!(chain.block_tree.read().len(), 33 + 8);
+        assert!(!oldest.is_cancelled());
+        assert!(nonfitting.is_cancelled());
+        assert!(!extension.is_cancelled());
+        assert!(!duplicate.is_cancelled());
+        assert!(chain.block_tree.read().node(first_id).is_ok());
+        assert!(matches!(chain.block_tree.read().node(second_id), Err(ChainError::UnknownNode { .. })));
+        assert!(matches!(chain.begin_header_candidate(root, ChainWork::ZERO), Err(HeaderAdmissionError::Candidate(HeaderCandidateError::Busy))));
+        nonfitting.finalize();
+        assert!(!chain.begin_header_candidate(root, ChainWork::ZERO)?.is_cancelled());
         Ok(())
     }
 

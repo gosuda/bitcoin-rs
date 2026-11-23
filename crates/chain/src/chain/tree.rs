@@ -1288,7 +1288,7 @@ mod tests {
     // SYNC-03, SYNC-05
     #[test]
     fn exhausted_logical_ids_refuse_insert_before_mutation_even_with_free_slots()
-    -> Result<(), TestError> {
+    -> crate::test_fixtures::TestResult {
         let (mut tree, main) = linear_chain(2)?;
         tree.next_node_id = Some(NodeId::new(u32::MAX - 1));
         let first = extend(&mut tree, main[0], 100)?;
@@ -1323,6 +1323,36 @@ mod tests {
             }
         }
         assert!(matches!(tree.node(first), Err(ChainError::UnknownNode { id }) if id == first));
+        #[cfg(feature = "test-seam")]
+        {
+            use std::sync::Arc;
+            use bitcoin_rs_consensus::primitives::Network;
+            use bitcoin_rs_storage::utxo::UtxoSet;
+            use crate::chain::regtest_fixture::mined_regtest_child_at;
+            use crate::{HeaderAdmissionError, HeaderResourceError};
+
+            let chain = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));
+            let genesis = Network::Regtest.genesis_block();
+            chain.admit_headers(&[genesis.header])?;
+            chain.block_tree.write().next_node_id = Some(NodeId::new(u32::MAX));
+            let last_block = mined_regtest_child_at(genesis.block_hash(), 1)?;
+            chain.admit_headers(&[last_block.header])?;
+            let last_hash = Hash256::from(last_block.block_hash());
+            let refused = mined_regtest_child_at(last_block.block_hash(), 2)?;
+            let refused_hash = Hash256::from(refused.block_hash());
+            for _ in 0..2 {
+                assert!(matches!(
+                    chain.admit_headers(&[refused.header]),
+                    Err(HeaderAdmissionError::Resource(HeaderResourceError::CapacityOverflow))
+                ));
+                let tree = chain.block_tree.read();
+                assert_eq!(tree.len(), 2);
+                assert_eq!(tree.next_node_id, None);
+                assert_eq!(tree.tip_id(), Some(NodeId::new(u32::MAX)));
+                assert_eq!(tree.node(NodeId::new(u32::MAX))?.hash, last_hash);
+                assert_eq!(tree.lookup(refused_hash), None);
+            }
+        }
         Ok(())
     }
 
