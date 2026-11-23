@@ -2446,9 +2446,7 @@ mod mining {
         use bitcoin_rs_node::test_support::TestError;
 
         type Result<T, E = TestError> = core::result::Result<T, E>;
-        use bitcoin_rs_consensus::primitives::{
-            Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
-        };
+        use bitcoin_rs_consensus::primitives::{Hash256, Tx};
         use bitcoin_rs_node::{
             MiningCoordinator, MiningOverrides, Network, NetworkSelection, UserConfig, resolve,
             state::NodeState,
@@ -2785,9 +2783,10 @@ mod mining {
 
         #[test]
         fn last_candidate_counts_include_the_coinbase() -> Result<()> {
-            use bitcoin_rs_mempool::MempoolEntry;
+            use super::support::{SEED_BLOCKS, seed_chain, seed_coinbase_spend};
 
             let (state, mining) = regtest_mining()?;
+            seed_chain(&state, SEED_BLOCKS)?;
             mining.publish_generation();
             let empty = expect_template(mining.get_block_template(template_request(None))?);
             let empty_info = mining.mining_info()?;
@@ -2797,25 +2796,7 @@ mod mining {
                 Some(1)
             );
 
-            let tx = Tx {
-                version: 2,
-                lock_time: LockTime::ZERO,
-                inputs: vec![TxIn {
-                    previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x42; 32])), 0),
-                    script_sig: Script::new(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::new(),
-                }],
-                outputs: vec![TxOut {
-                    value: Amount::from_sat(1_000),
-                    script_pubkey: Script::from_bytes(vec![0x51]),
-                }],
-            };
-            {
-                let mempool = state.mempool();
-                let mut guard = mempool.write();
-                guard.insert_entry(MempoolEntry::new(Arc::new(tx), 120, 10_000, 1, 1, 0))?;
-            }
+            admit_to_mempool(&state, &seed_coinbase_spend())?;
             mining.publish_generation();
             let one = expect_template(mining.get_block_template(template_request(None))?);
             let one_info = mining.mining_info()?;
