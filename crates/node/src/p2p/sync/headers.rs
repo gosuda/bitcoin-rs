@@ -1864,7 +1864,7 @@ mod winning_header_tests {
         let endpoint = test_addr(28371, 0)?;
         peers.register(endpoint, lease.clone());
         peers.publish_info(endpoint, &lease, synthetic_peer(endpoint, i32::try_from(fork_height)?));
-        let source = lease.source(endpoint);
+        let source = lease.source(endpoint.endpoint());
         let (inbound_headers, inbound_headers_rx) = crossbeam_channel::unbounded();
         let (_, inbound_blocks_rx) = crossbeam_channel::unbounded();
         let sync = crate::sync::block_sync(crate::sync::BlockSyncInputs {

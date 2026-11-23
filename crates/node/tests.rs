@@ -9249,7 +9249,7 @@ mod winning_header_driver {
         let lease = PeerLease::new(sender);
         peers.register(endpoint, lease.clone());
         peers.publish_info(endpoint, &lease, synthetic_peer(endpoint, 34));
-        let source = lease.source(endpoint);
+        let source = lease.source(endpoint.endpoint());
         let (headers, inbound_headers_rx) = unbounded();
         let (blocks, inbound_blocks_rx) = unbounded();
         let sync = bitcoin_rs_node::sync::block_sync(bitcoin_rs_node::sync::BlockSyncInputs {
