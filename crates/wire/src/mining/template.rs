@@ -701,6 +701,60 @@ mod tests {
         Ok(pool)
     }
 
+
+    // API-11
+    #[test]
+    fn ordinary_templates_reserve_external_coinbase_sigops() -> TestResult {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        for label in 1..=5 {
+            let tx = witnessed_tx(label);
+            let vsize = u32::try_from(tx.vsize())?;
+            pool.insert_entry(MempoolEntry::new(
+                Arc::new(tx),
+                vsize,
+                10_000,
+                0,
+                0,
+                16_000,
+            ))?;
+        }
+        let candidate = assemble(
+            &context(
+                true,
+                Limits {
+                    sigops: 80_000,
+                    ..GENEROUS
+                },
+            ),
+            &pool,
+            None,
+        )?;
+        assert_eq!(candidate.transactions.len(), 4);
+        assert!(used(&candidate)?.2 + 400 <= 80_000);
+        Ok(())
+    }
+
+    // API-11
+    #[test]
+    fn ordinary_templates_reserve_external_coinbase_weight() -> TestResult {
+        let candidate = assemble(
+            &context(
+                true,
+                Limits {
+                    weight: 8_000,
+                    ..GENEROUS
+                },
+            ),
+            &pool_with_tx(0)?,
+            None,
+        )?;
+        assert!(candidate.transactions.is_empty());
+        Ok(())
+    }
+
     fn assemble(
         context: &CandidateContext,
         pool: &Mempool,

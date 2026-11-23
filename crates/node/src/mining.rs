@@ -717,6 +717,91 @@ mod tests {
     use bitcoin_rs_wire::mining::MiningControlError;
     use compact_str::CompactString;
 
+
+    // API-11, SYNC-05
+    #[test]
+    fn templates_reject_missing_inputs_without_mutating_chainstate()
+    -> Result<(), crate::test_support::TestError> {
+        use bitcoin_rs_consensus::primitives::{
+            Amount, BlockImage, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut, Witness,
+        };
+        use bitcoin_rs_mempool::MempoolEntry;
+        use bitcoin_rs_wire::mining::{
+            BlockTemplateMode, BlockTemplateRequest, CoinbaseBudget, MiningControl,
+        };
+        use std::sync::Arc;
+
+        let directory = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
+        config.data_dir = directory.path().join("node");
+        config.p2p.listen.clear();
+        let state = crate::state::NodeState::open(config, None)?;
+        let _ = state.apply_block(&BlockImage::from_local(Network::Regtest.genesis_block()))?;
+        let mining = super::MiningCoordinator::new(
+            state.mempool_reader(),
+            state.chainstate(),
+            state.stable_read(),
+            state.chain_followers(),
+            vec![0x51],
+        );
+        let request = |coinbase_budget| BlockTemplateRequest {
+            mode: BlockTemplateMode::Template,
+            capabilities: Vec::new(),
+            rules: Vec::new(),
+            long_poll_id: None,
+            coinbase_budget,
+        };
+        mining.get_block_template(request(None))?;
+        let missing = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[1; 32])), 0),
+                script_sig: Vec::new().into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51].into(),
+            }],
+            lock_time: LockTime::ZERO,
+        };
+        let txid = missing.txid();
+        let vsize = u32::try_from(missing.vsize())?;
+        state.mempool().write().insert_entry(MempoolEntry::new(
+            Arc::new(missing),
+            vsize,
+            10_000,
+            0,
+            0,
+            0,
+        ))?;
+        mining.publish_generation();
+        for budget in [
+            None,
+            Some(CoinbaseBudget {
+                additional_size: 1_000,
+                additional_sigops: 100,
+            }),
+        ] {
+            assert!(matches!(
+                mining.get_block_template(request(budget)),
+                Err(MiningControlError::Rejected(reason))
+                    if reason == "TestBlockValidity failed: bad-txns-inputs-missingorspent"
+            ));
+            let tip = state
+                .chainstate()
+                .applied_tip_snapshot()
+                .ok_or_else(|| crate::test_support::TestError::message("missing applied tip"))?;
+            assert_eq!(tip.hash, Network::Regtest.genesis_block_hash());
+            assert!(state.mempool().read().entry_id_by_txid(&txid).is_some());
+        }
+        state.mempool().write().clear();
+        mining.publish_generation();
+        mining.get_block_template(request(None))?;
+        Ok(())
+    }
+
     #[test]
     fn operational_failures_are_not_block_rejections() {
         fn failures() -> Vec<ApplyError> {
