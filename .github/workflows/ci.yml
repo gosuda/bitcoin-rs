@@ -28,7 +28,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install existing CI prerequisites
-        run: bash scripts/ci-setup.sh apt nextest
+        run: |
+          bash scripts/ci-setup.sh apt nextest
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq jq
+          fi
       - name: Select the pinned Rust toolchain
         run: |
           if ! rustup run 1.100.0 rustc -V >/dev/null 2>&1; then

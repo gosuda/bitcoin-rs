@@ -21,7 +21,7 @@ git diff --exit-code "$baseline_revision" "$current_revision" -- \
 printf 'OPTIMIZATION_EVIDENCE_ENVIRONMENT_BEGIN\n'
 printf 'baseline_revision=%s\ncurrent_revision=%s\nworkflow_revision=%s\n' \
     "$baseline_revision" "$current_revision" "$(git rev-parse HEAD)"
-printf 'cargo_profile=test\ncargo_build_jobs=%s\n' "${CARGO_BUILD_JOBS:-default}"
+printf 'test_profile=test\nbenchmark_profile=release\ncargo_build_jobs=%s\n' "${CARGO_BUILD_JOBS:-default}"
 rustc -Vv
 cargo -V
 uname -m
@@ -114,16 +114,22 @@ run_regressions() {
 run_example() {
     local phase=$1 tree=$2 package=$3 name=$4 mode=$5
     shift 5
-    local executable="$CARGO_TARGET_DIR/debug/examples/$name"
+    local artifacts="$evidence_dir/$phase-$name-$mode-artifacts.jsonl"
+    local executable
     local rustc_arguments=()
     if [[ "$mode" == allocations ]]; then
         rustc_arguments+=(--cfg count_allocations)
     fi
     (
         cd "$tree"
-        cargo rustc --locked --profile test -p "$package" --example "$name" "$@" \
-            -- --check-cfg 'cfg(count_allocations)' "${rustc_arguments[@]}"
+        cargo rustc --locked --profile release -p "$package" --example "$name" "$@" \
+            --message-format=json-render-diagnostics \
+            -- --check-cfg 'cfg(count_allocations)' "${rustc_arguments[@]}" > "$artifacts"
     )
+    executable=$(jq -er --arg name "$name" -s \
+        '[.[] | select(.reason == "compiler-artifact" and .target.name == $name and .executable != null and .profile.test == false and .profile.opt_level == "3")] | if length == 1 then .[0].executable else error("expected exactly one Cargo executable") end' \
+        "$artifacts")
+    [[ -x "$executable" ]]
     printf 'OPTIMIZATION_EVIDENCE_BENCH_BEGIN phase=%s name=%s mode=%s\n' \
         "$phase" "$name" "$mode"
     "$executable"
