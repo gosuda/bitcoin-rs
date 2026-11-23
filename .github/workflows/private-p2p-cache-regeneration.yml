@@ -1,0 +1,79 @@
+name: Private P2P cache regeneration
+
+on:
+  push:
+    branches: [stabilize/private-p2p-cache-regeneration-20261124]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  regenerate:
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d
+      - name: Format and regenerate contract evidence
+        run: |
+          set -euo pipefail
+          rustup component add rustfmt
+          cargo fmt --all
+          cargo run --locked -p contract-index -- --root .
+          cargo fmt --all -- --check
+          cargo run --locked -p contract-index -- --root . --check
+          git diff --check
+      - name: Export exact generated product tree
+        run: |
+          uv run --no-project python - <<'PY'
+          import hashlib
+          import json
+          import subprocess
+          from pathlib import Path
+
+          workflow: str = ".github/workflows/private-p2p-cache-regeneration.yml"
+          changed: str = subprocess.run(
+              ["git", "diff", "--name-only"], check=True, text=True, capture_output=True
+          ).stdout
+          paths: set[str] = set(changed.splitlines()) | {
+              "crates/node/src/p2p/block_announce.rs",
+              "docs/contracts/p2p-wire.md",
+              "docs/contracts/evidence-index.md",
+              "docs/contracts/README.md",
+          }
+          chunk_size: int = 12000
+          for name in sorted(paths):
+              path: Path = Path(name)
+              data: bytes = path.read_bytes()
+              content: str = data.decode("utf-8")
+              prefix: bytes = f"blob {len(data)}".encode("ascii") + bytes([0])
+              sha: str = hashlib.sha1(prefix + data).hexdigest()
+              parts: int = max(1, (len(content) + chunk_size - 1) // chunk_size)
+              print("P2P_REGEN_FILE " + json.dumps({"path": name, "sha": sha, "parts": parts}))
+              for part in range(parts):
+                  print("P2P_REGEN_PART " + json.dumps({
+                      "path": name,
+                      "part": part,
+                      "content": content[part * chunk_size:(part + 1) * chunk_size],
+                  }))
+          subprocess.run(["git", "add", "--all"], check=True)
+          subprocess.run(["git", "update-index", "--force-remove", workflow], check=True)
+          product_tree: str = subprocess.run(
+              ["git", "write-tree"], check=True, text=True, capture_output=True
+          ).stdout.strip()
+          source_head: str = subprocess.run(
+              ["git", "rev-parse", "HEAD"], check=True, text=True, capture_output=True
+          ).stdout.strip()
+          print("P2P_REGEN_RESULT " + json.dumps({
+              "source_head": source_head,
+              "product_tree": product_tree,
+              "changed_paths": changed.splitlines(),
+          }))
+          PY

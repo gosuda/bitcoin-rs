@@ -472,6 +472,9 @@ impl BlockAnnouncer {
         if self.in_ibd() {
             return Vec::new();
         }
+        if height <= self.state.lock().highest_fast_announce {
+            return Vec::new();
+        }
         let prepared = match self.recent.as_ref() {
             Some(slot) => match slot.prepare(block) {
                 Ok(held) => Some((slot, held)),
@@ -2515,6 +2518,14 @@ mod tests {
 
         let pressure = memory.try_reserve(memory.ledger().capacity() - retained - raw_bytes)?;
         let next = BlockImage::from_local(tip_child_block(first_hash, 1800));
+        for height in [1, 2] {
+            assert!(
+                announcer
+                    .announce_pow_valid(&next, next.block_hash().into(), height)
+                    .is_empty()
+            );
+        }
+        assert_eq!(probe.calls.load(Ordering::Relaxed), 0);
         assert!(
             announcer
                 .announce_pow_valid(&next, next.block_hash().into(), 3)
