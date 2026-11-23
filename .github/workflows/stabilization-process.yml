@@ -1,0 +1,44 @@
+name: Stabilization process verification
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  RUST_BACKTRACE: "1"
+
+jobs:
+  sequence:
+    if: github.head_ref == 'stabilize/process-verification-20261124'
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 60
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 0a6fbda199240c7187d11657acd2d020dde43680
+          persist-credentials: false
+      - run: bash scripts/ci-setup.sh apt nextest
+      - name: Provision and verify pinned Core
+        run: bash scripts/provision-ci-reference-fixtures.sh core
+      - name: Build the production node
+        run: cargo build --locked -p bitcoin-rs
+      - name: Verify reorganization notification order and restart recovery
+        run: |
+          test "$(git rev-parse HEAD)" = "0a6fbda199240c7187d11657acd2d020dde43680"
+          BITCOIN_RS_REFERENCE_BITCOIND="$PWD/target/reference-core-31.1/bitcoin-31.1/bin/bitcoind" \
+          BITCOIN_RS_NODE="$PWD/target/debug/bitcoin-rs" \
+          cargo nextest run --locked --no-fail-fast -p bitcoin-rs-wire --features zmq,pool,pool-sv2 --test suite -E 'test(=reorg_notifications::sequence_reports_exact_disconnect_connect_order)'
+      - name: Show process evidence after a failure
+        if: failure()
+        run: |
+          if test -d target/process-harness/e2e; then
+            find target/process-harness/e2e -type f -maxdepth 4 -print
+          fi
