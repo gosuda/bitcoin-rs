@@ -15,7 +15,7 @@ env:
 
 jobs:
   ranges:
-    if: github.head_ref == 'stabilize/dependency-range-20261124'
+    if: github.head_ref == 'stabilize/dependency-range-20261124' && github.event.pull_request.head.sha == '1704949b4b9fb3fe9ce48f04fb6362a46bb08092'
     runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 120
     env:
@@ -76,3 +76,16 @@ jobs:
           persist-credentials: false
       - run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
       - run: python3 scripts/check_book_links.py
+
+  reserve-regression:
+    if: github.head_ref == 'stabilize/dependency-range-20261124'
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: f6cd9fbcbafa485b77022aa5333c8c4d2cdf1995
+          persist-credentials: false
+      - run: bash scripts/ci-setup.sh apt
+      - name: Reproduce external coinbase reserve defects
+        run: cargo test --locked -p bitcoin-rs-wire --lib ordinary_templates_reserve_external_coinbase
