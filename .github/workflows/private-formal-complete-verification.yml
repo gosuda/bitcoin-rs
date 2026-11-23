@@ -41,8 +41,8 @@ jobs:
           set -euo pipefail
           git config user.name "Stabilization verification"
           git config user.email "stabilization-verification@users.noreply.github.com"
-          git fetch --no-tags origin 0d0594a058be188ad8c6aead4d2ba8e493a8d06c 26b405bf372694fd4fdcf795ca94db7be8ff929b 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78
-          for integration_source in 0d0594a058be188ad8c6aead4d2ba8e493a8d06c 26b405bf372694fd4fdcf795ca94db7be8ff929b 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78; do
+          git fetch --no-tags origin 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78
+          for integration_source in 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78; do
             if ! git merge --no-ff --no-edit "$integration_source"; then
               conflict_paths="$(git diff --name-only --diff-filter=U)"
               test -n "$conflict_paths"
@@ -91,6 +91,83 @@ jobs:
           }
           NODE
 
+  native:
+    needs: assemble
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 90
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      EXPECTED_PRODUCT_TREE: ${{ needs.assemble.outputs.product_tree }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Assemble and export the complete product tree
+        id: assemble
+        run: |
+          set -euo pipefail
+          git config user.name "Stabilization verification"
+          git config user.email "stabilization-verification@users.noreply.github.com"
+          git fetch --no-tags origin 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78
+          for integration_source in 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78; do
+            if ! git merge --no-ff --no-edit "$integration_source"; then
+              conflict_paths="$(git diff --name-only --diff-filter=U)"
+              test -n "$conflict_paths"
+              while IFS= read -r conflict_path; do
+                case "$conflict_path" in
+                  docs/contracts/evidence-index.md|docs/contracts/README.md) ;;
+                  *) git diff -- "$conflict_path"; exit 1 ;;
+                esac
+              done <<< "$conflict_paths"
+              git checkout --ours -- docs/contracts/evidence-index.md docs/contracts/README.md
+              cargo run --locked -p contract-index
+              git add docs/contracts/evidence-index.md docs/contracts/README.md
+              git commit --no-edit
+            fi
+          done
+          rustup component add rustfmt --toolchain stable
+          cargo +stable fmt --all
+          cargo run --locked -p contract-index
+          cargo run --locked -p contract-index -- --check
+          cargo metadata --manifest-path tools/ldk/Cargo.toml --format-version 1 > /dev/null
+          cargo metadata --locked --manifest-path tools/ldk/Cargo.toml --format-version 1 > /dev/null
+          cargo metadata --manifest-path tools/stratum-sv2/template-provider/Cargo.toml --format-version 1 > /dev/null
+          cargo metadata --locked --manifest-path tools/stratum-sv2/template-provider/Cargo.toml --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.lock
+          git diff --check
+          git add -u
+          git rm --cached -- .github/workflows/private-formal-complete-verification.yml .github/workflows/private-winning-header-driver.yml
+          if [[ -n "${EXPECTED_PRODUCT_TREE:-}" ]]; then test "$(git write-tree)" = "$EXPECTED_PRODUCT_TREE"; fi
+          printf 'product_tree=%s\n' "$(git write-tree)" >> "$GITHUB_OUTPUT"
+          mkdir -p target/verification-logs
+          git write-tree > target/verification-logs/product-tree.txt
+          printf 'PRODUCT_TREE %s\n' "$(git write-tree)"
+
+      - name: Exercise the integrated node owners and retained-body recovery
+        run: |
+          set -euo pipefail
+          mkdir -p target/integration-native
+          git write-tree > target/integration-native/product-tree.txt
+          bash scripts/ci-setup.sh apt msrv nextest 2>&1 | tee target/integration-native/setup.log
+          cargo nextest run --locked -p bitcoin-rs-node --lib --no-default-features --features test-seam --no-tests fail --no-fail-fast \
+            -E 'test(=mining::tests::local_generated_backing_stays_charged_until_last_reader) | test(=mining::tests::local_submissions_account_backing_and_witness_rebuilds) | test(=mining::tests::local_submission_budget_refusal_preserves_state_and_duplicate_results) | test(=snapshot::tests::snapshot_settlement_refusal_after_durable_activation_keeps_admission_closed) | test(=lifecycle::tests::startup_shares_recent_block_serving_and_ingress_memory)' \
+            2>&1 | tee target/integration-native/owner-tests.log
+          cargo nextest run --locked -p bitcoin-rs-node --test suite --no-default-features --features test-seam --no-tests fail --no-fail-fast \
+            -E 'test(=winning_header_driver::winning_header_driver_applies_deep_fork_and_recovers_durable_tip)' \
+            2>&1 | tee target/integration-native/body-rediscovery.log
+          cargo clippy --locked -p bitcoin-rs-node --all-targets --no-default-features --features test-seam -- -D warnings \
+            2>&1 | tee target/integration-native/clippy.log
+      - name: Preserve integrated native evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: integrated-native-${{ github.run_attempt }}
+          path: target/integration-native/**
+          if-no-files-found: warn
+          retention-days: 7
+
   proofs:
     needs: assemble
     runs-on: depot-ubuntu-24.04-8
@@ -112,8 +189,8 @@ jobs:
           set -euo pipefail
           git config user.name "Stabilization verification"
           git config user.email "stabilization-verification@users.noreply.github.com"
-          git fetch --no-tags origin 0d0594a058be188ad8c6aead4d2ba8e493a8d06c 26b405bf372694fd4fdcf795ca94db7be8ff929b 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78
-          for integration_source in 0d0594a058be188ad8c6aead4d2ba8e493a8d06c 26b405bf372694fd4fdcf795ca94db7be8ff929b 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78; do
+          git fetch --no-tags origin 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78
+          for integration_source in 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78; do
             if ! git merge --no-ff --no-edit "$integration_source"; then
               conflict_paths="$(git diff --name-only --diff-filter=U)"
               test -n "$conflict_paths"
