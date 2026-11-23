@@ -355,6 +355,7 @@ pub(super) fn outspends_for_transaction(
     projection: &Projection<'_>,
     transaction: &Tx,
 ) -> Result<Vec<Outspend>, Response> {
+    let txid = transaction.txid();
     transaction
         .outputs
         .iter()
@@ -362,7 +363,7 @@ pub(super) fn outspends_for_transaction(
         .map(|(vout, _)| {
             let vout =
                 u32::try_from(vout).map_err(|_| internal_error("output index is too large"))?;
-            outspend(projection, OutPoint::new(transaction.txid(), vout))
+            outspend(projection, OutPoint::new(txid, vout))
         })
         .collect()
 }
