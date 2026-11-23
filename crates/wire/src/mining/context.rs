@@ -8,7 +8,7 @@ use bitcoin_rs_consensus::{LocktimeRule, locktime_cutoff};
 use bitcoin_rs_mempool::{MempoolMiningSnapshot, MutationResult, RemovalReason};
 
 use super::control::{AvailableMiningRule, GenerateSelection, MiningControlError};
-use super::template::{CandidateContext, CoinbaseBudget, SelectedBody};
+use super::template::{Candidate, CandidateContext, CoinbaseBudget, SelectedBody};
 
 #[derive(Debug)]
 pub struct PreparedTemplateBody {
@@ -60,6 +60,8 @@ pub trait MempoolSnapshotSource: Send + Sync {
 }
 
 pub trait ChainContextSource: Send + Sync {
+    fn validate_candidate(&self, candidate: &Candidate) -> Result<(), MiningControlError>;
+
     fn resolve_mining_context(
         &self,
         tip: &TipSnapshot,

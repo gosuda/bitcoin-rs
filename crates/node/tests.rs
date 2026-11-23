@@ -635,6 +635,7 @@ mod config_layered {
         let payout = UserConfig {
             mining: MiningOverrides {
                 payout_address: Some(ADDRESS.to_owned()),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -656,6 +657,7 @@ mod config_layered {
             network: Some(NetworkSelection::Regtest),
             mining: MiningOverrides {
                 payout_address: Some("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_owned()),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -1575,6 +1577,7 @@ mod mining {
                 state.stable_read(),
                 state.chain_followers(),
                 state.config().mining.payout_script.clone(),
+                state.config().mining.coinbase_reserve,
             )
         }
 
@@ -2443,9 +2446,7 @@ mod mining {
         use bitcoin_rs_node::test_support::TestError;
 
         type Result<T, E = TestError> = core::result::Result<T, E>;
-        use bitcoin_rs_consensus::primitives::{
-            Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
-        };
+        use bitcoin_rs_consensus::primitives::{Hash256, Tx};
         use bitcoin_rs_node::{
             MiningCoordinator, MiningOverrides, Network, NetworkSelection, UserConfig, resolve,
             state::NodeState,
@@ -2495,6 +2496,7 @@ mod mining {
                 network: Some(NetworkSelection::Regtest),
                 mining: MiningOverrides {
                     payout_address: Some(ADDRESS.to_owned()),
+                    ..Default::default()
                 },
                 ..Default::default()
             };
@@ -2720,6 +2722,7 @@ mod mining {
                 state.stable_read(),
                 state.chain_followers(),
                 state.config().mining.payout_script.clone(),
+                state.config().mining.coinbase_reserve,
             ));
             mining.publish_generation();
             let current = expect_template(mining.get_block_template(template_request(None))?);
@@ -2780,9 +2783,10 @@ mod mining {
 
         #[test]
         fn last_candidate_counts_include_the_coinbase() -> Result<()> {
-            use bitcoin_rs_mempool::MempoolEntry;
+            use super::support::{SEED_BLOCKS, seed_chain, seed_coinbase_spend};
 
             let (state, mining) = regtest_mining()?;
+            seed_chain(&state, SEED_BLOCKS)?;
             mining.publish_generation();
             let empty = expect_template(mining.get_block_template(template_request(None))?);
             let empty_info = mining.mining_info()?;
@@ -2792,25 +2796,7 @@ mod mining {
                 Some(1)
             );
 
-            let tx = Tx {
-                version: 2,
-                lock_time: LockTime::ZERO,
-                inputs: vec![TxIn {
-                    previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x42; 32])), 0),
-                    script_sig: Script::new(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::new(),
-                }],
-                outputs: vec![TxOut {
-                    value: Amount::from_sat(1_000),
-                    script_pubkey: Script::from_bytes(vec![0x51]),
-                }],
-            };
-            {
-                let mempool = state.mempool();
-                let mut guard = mempool.write();
-                guard.insert_entry(MempoolEntry::new(Arc::new(tx), 120, 10_000, 1, 1, 0))?;
-            }
+            admit_to_mempool(&state, &seed_coinbase_spend())?;
             mining.publish_generation();
             let one = expect_template(mining.get_block_template(template_request(None))?);
             let one_info = mining.mining_info()?;
@@ -2909,6 +2895,7 @@ mod mining {
                 state.stable_read(),
                 state.chain_followers(),
                 state.config().mining.payout_script.clone(),
+                state.config().mining.coinbase_reserve,
             ));
             mining.publish_generation();
             let current = expect_template(mining.get_block_template(template_request(None))?);
@@ -3641,6 +3628,7 @@ mod mining {
                 state.stable_read(),
                 state.chain_followers(),
                 payout,
+                state.config().mining.coinbase_reserve,
             );
             let mut inputs = Vec::new();
             for _ in 0..6 {

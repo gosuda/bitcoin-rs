@@ -121,8 +121,9 @@ skip = [
     { crate = "base64@0.22.1", reason = "metrics-exporter-prometheus 0.18 requires base64 0.22" },
     { crate = "bitcoin_hashes@0.14.101", reason = "bitcoin 0.32.102 reference implementation" },
     { crate = "bitcoin-internals@0.6.0", reason = "bitcoin_hashes 1.2.0 requires 0.6 beside bitcoin-consensus-encoding 1.3.0 requiring 0.7" },
-    { crate = "secp256k1@0.29.1", reason = "bitcoin 0.32.102 reference implementation" },
-    { crate = "secp256k1-sys@0.10.1", reason = "secp256k1 0.29.1 via bitcoin 0.32.102" },
+    { crate = "bitcoin-internals@0.3.0", reason = "bitcoin 0.32.9 minimal floor" },
+    { crate = "secp256k1@0.29.100", reason = "bitcoin 0.32.102 reference implementation" },
+    { crate = "secp256k1-sys@0.10.1", reason = "secp256k1 0.29.100 via bitcoin 0.32.102" },
     # zmq 0.10 (zmq-sys build chain) pins the bitflags 1.x line.
     { crate = "bitflags@1.3.2", reason = "zmq 0.10" },
     # rand 0.8 (secp256k1 0.29 rand-std, also via bitcoin rand-std) vs 0.9 ecosystem.
@@ -161,12 +162,15 @@ skip = [
     { crate = "redox_syscall@0.5.18", reason = "parking_lot_core 0.9" },
     # bitcoin 0.32 pins hex-conservative 0.2; miniscript uses 1.x.
     # surrealkv 1.x pins lz4_flex 0.12 while workspace pins 0.13.
-    { crate = "lz4_flex@0.12.2", reason = "surrealkv 1.x pins lz4_flex 0.12" },
+    { crate = "lz4_flex@0.12.3", reason = "surrealkv 1.x pins lz4_flex 0.12" },
     { crate = "hex-conservative@0.2.3", reason = "bitcoin 0.32 pin" },
     # metrics-util 0.20 (via metrics-exporter-prometheus 0.18) pins quanta 0.12
     # for internal recency timing; the workspace moved to 0.13. quanta is not
     # exposed in metrics-util's public API, so the copies never cross.
     { crate = "quanta@0.12.6", reason = "metrics-util 0.20 via metrics-exporter-prometheus 0.18" },
+    # tokio's backtrace and the usdt probe chain's ar_archive_writer pin disjoint object lines in the minimal all-features graph.
+    { crate = "object@0.39.1", reason = "ar_archive_writer 0.5.5 via psm in the usdt probe chain" },
+    { crate = "object@0.40.0", reason = "backtrace 0.3.77 via the tokio 1.36.0 minimal floor" },
     # cap-std 4 stack: fs-set-times 0.20 pins io-lifetimes 2, cap-std uses 3.
     { crate = "io-lifetimes@2.0.4", reason = "fs-set-times 0.20" },
     # system-deps 6 (zmq/rocksdb build chain) pins the toml 0.8 stack.
@@ -174,8 +178,8 @@ skip = [
     { crate = "toml@0.8.23", reason = "system-deps 6 build dep" },
     { crate = "toml_datetime@0.6.11", reason = "toml 0.8 via system-deps" },
     { crate = "winnow@0.7.15", reason = "toml_edit 0.22 via toml 0.8" },
-    # syn 3.0 pulled by newer proc-macro crates; workspace pins syn 2.0.
-    { crate = "syn@3.0.9", reason = "proc-macro crate chain" },
+    # syn 3.0 pulled by bindgen via the rust-rocksdb build chain; workspace pins syn 2.0.
+    { crate = "syn@3.0.10", reason = "bindgen 0.73 via rust-rocksdb build chain" },
     # windows-only metadata targets; multiple versions pinned by different win crates.
     { crate = "windows-sys@0.59.0", reason = "windows-only split" },
     { crate = "windows-sys@0.60.2", reason = "windows-only split" },
@@ -188,6 +192,7 @@ skip = [
     { crate = "windows_x86_64_gnu@0.52.6", reason = "windows-only split" },
     { crate = "windows_x86_64_gnullvm@0.52.6", reason = "windows-only split" },
     { crate = "windows_x86_64_msvc@0.52.6", reason = "windows-only split" },
+    { crate = "windows-link@0.100.0", reason = "generator 0.8.12 via loom pulls the windows 0.100 line" },
 ]
 
 [sources]

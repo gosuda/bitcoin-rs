@@ -222,13 +222,11 @@ fn push_live_ops(
             .spent_coin(&txid, vout)
             .ok_or(IndexError::MissingSpentCoin { txid, vout, height })?;
         let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&txid)), vout);
+        let scripthash = ScriptHash::from_script_bytes(coin.script);
         deletes.push(LiveOp::Delete {
-            row: crate::types::ScriptLiveRow::new(
-                ScriptHash::from_script_bytes(coin.script),
-                &outpoint,
-            ),
+            row: crate::types::ScriptLiveRow::new(scripthash, &outpoint),
             coin: crate::types::ScriptLiveCoin::new(
-                ScriptHash::from_script_bytes(coin.script),
+                scripthash,
                 coin.value,
                 coin.height,
                 coin.coinbase,
@@ -244,13 +242,11 @@ fn push_live_ops(
         };
         let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&creation.txid)), creation.vout);
         if let Some(old_coin) = created_lookup.spent_coin(&creation.txid, creation.vout) {
+            let old_scripthash = ScriptHash::from_script_bytes(old_coin.script);
             rows.live_ops.push(LiveOp::Delete {
-                row: crate::types::ScriptLiveRow::new(
-                    ScriptHash::from_script_bytes(old_coin.script),
-                    &outpoint,
-                ),
+                row: crate::types::ScriptLiveRow::new(old_scripthash, &outpoint),
                 coin: crate::types::ScriptLiveCoin::new(
-                    ScriptHash::from_script_bytes(old_coin.script),
+                    old_scripthash,
                     old_coin.value,
                     old_coin.height,
                     old_coin.coinbase,

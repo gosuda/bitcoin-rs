@@ -753,6 +753,7 @@ pub(crate) fn start_node(
         state.stable_read(),
         state.chain_followers(),
         final_payout_script(state.config()),
+        state.config().mining.coinbase_reserve,
     ));
     let sequence_wake: Arc<dyn bitcoin_rs_wire::mining::MempoolSequenceWake> = coordinator.clone();
     let mining_control: Arc<dyn bitcoin_rs_wire::mining::MiningControl> = coordinator;
@@ -2263,6 +2264,7 @@ mod tests {
             state.stable_read(),
             state.chain_followers(),
             super::final_payout_script(state.config()),
+            state.config().mining.coinbase_reserve,
         ));
         let mining_control: Arc<dyn bitcoin_rs_wire::mining::MiningControl> = coordinator;
         let mut bindings = bind_rpc(state, &mining_control, state.block_body_source()?)?;
