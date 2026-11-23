@@ -428,7 +428,7 @@ wallet interoperability remain unverified.
 - Before cache publication, the node validates each newly assembled or prepared candidate through the chainstate proposal path. Invalid candidates return a rejection and are not served. Validation does not commit the block, require solved PoW, or check a signet solution.
 - A generation change during validation retries assembly. Mining cache and mempool locks are not held during chainstate validation.
 - `CandidateContext.coinbase_reserve` states this policy. A complete local coinbase can use `CoinbaseReserve::EXACT`; production templates use the immutable node configuration.
-- Only the typed `MiningControl` embedder (experimental SV2 regtest adapter in `tools/stratum-sv2`) sets it.
+- Only the typed `MiningControl` embedder (experimental SV2 regtest adapter in `tools/stratum-sv2`) sets a coinbase budget.
 - A budgeted candidate leaves that room in the coinbase with a budget-qualified id.
 - The ordinary candidate is used when it already admits the budget.
 - The qualifier is not RPC contract: RPC callers never receive it, and long-poll waits compare generations only.

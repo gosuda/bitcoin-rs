@@ -21,9 +21,9 @@ use bitcoin_rs_mempool::RemovalReason;
 use bitcoin_rs_mempool::SnapshotEntry;
 use bitcoin_rs_wire::mining::{
     AppliedTipSource, AvailableMiningRule, BlockTemplate, Candidate, CandidateContext,
-    ChainContextSource, CoinbaseBudget, CoinbaseReserve, GenerateSelection, GenerateTx, LastCandidateInfo,
-    MempoolSnapshotSource, MiningCapability, MiningControlError, MiningInfo, MiningRule,
-    SignetMiningInfo, TemplateId, TemplateMutation, assemble_ordered_candidate,
+    ChainContextSource, CoinbaseBudget, CoinbaseReserve, GenerateSelection, GenerateTx,
+    LastCandidateInfo, MempoolSnapshotSource, MiningCapability, MiningControlError, MiningInfo,
+    MiningRule, SignetMiningInfo, TemplateId, TemplateMutation, assemble_ordered_candidate,
     difficulty_for_bits, finish_candidate,
 };
 use compact_str::CompactString;
@@ -3677,11 +3677,7 @@ mod tests {
                 }
             }))
         };
-        let service = service_with_chain(
-            Some(tip.clone()),
-            Arc::new(StaticPool::new(5, 2)),
-            chain,
-        );
+        let service = service_with_chain(Some(tip.clone()), Arc::new(StaticPool::new(5, 2)), chain);
         service.stage_tip(
             &tip,
             &BlockImage::from_local(Network::Regtest.genesis_block()),
@@ -3763,8 +3759,7 @@ mod tests {
                 let state = service.state.lock();
                 assert_eq!(state.cache.len(), 1);
                 assert!(state.cache.keys().all(|key| {
-                    key.generation.mempool_sequence == 6
-                        && key.generation.fee_delta_sequence == 3
+                    key.generation.mempool_sequence == 6 && key.generation.fee_delta_sequence == 3
                 }));
             }
 

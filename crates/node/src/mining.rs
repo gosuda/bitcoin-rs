@@ -380,9 +380,9 @@ struct ChainContextAdapter {
 
 impl ChainContextSource for ChainContextAdapter {
     fn validate_candidate(&self, candidate: &Candidate) -> Result<(), MiningControlError> {
-        let block = candidate.into_unsolved_block().map_err(|error| {
-            MiningControlError::Failed(CompactString::from(error.to_string()))
-        })?;
+        let block = candidate
+            .into_unsolved_block()
+            .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
         self.chainstate
             .validate_block(&BlockImage::from_local(block))
             .map_err(|error| test_block_validity_error(&error))
