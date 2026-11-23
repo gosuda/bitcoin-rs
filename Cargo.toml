@@ -164,7 +164,7 @@ compact_str = { version = ">=0.9, <1", default-features = false, features = ["st
 
 # --- Zero-copy / compression --------------------------------------------------
 bytemuck = { version = ">=1.25, <2", default-features = false, features = ["derive"] }
-bytes    = { version = ">=1.11, <2", default-features = false }
+bytes    = { version = ">=1.11.1, <2", default-features = false }
 zerocopy = { version = "0.8.57", default-features = false, features = ["derive", "std"] }
 
 # --- Storage backends ---------------------------------------------------------
