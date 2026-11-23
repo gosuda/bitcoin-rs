@@ -666,6 +666,7 @@ impl MiningService {
             self.discard_preparation(key.tip_hash);
             return Ok(None);
         }
+        self.validate_candidate_for_key(key, &ready.candidate)?;
         let cache_key = CandidateKey::ordinary(key);
         let mut state = self.state.lock();
         if let Some(cached) = state.cache_get(&cache_key) {
@@ -808,7 +809,20 @@ impl MiningService {
                 "assembled candidate template id does not match candidate key",
             )));
         }
+        self.validate_candidate_for_key(generation, &candidate)?;
         Ok(Arc::new(candidate))
+    }
+
+    fn validate_candidate_for_key(
+        &self,
+        key: GenerationKey,
+        candidate: &Candidate,
+    ) -> Result<(), MiningControlError> {
+        let validated = self.chain.validate_candidate(candidate);
+        if self.live_generation_key() != key {
+            return Err(generation_race());
+        }
+        validated
     }
 
     fn budgeted_candidate(
@@ -930,7 +944,7 @@ impl MiningService {
             MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
         })?;
         let context = self.candidate_context(&tip)?;
-        match selection {
+        let candidate = match selection {
             GenerateSelection::Mempool => {
                 let body = self
                     .mempool
@@ -950,7 +964,19 @@ impl MiningService {
             GenerateSelection::Mempool => {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             }
-        })
+        })?;
+        if matches!(selection, GenerateSelection::Mempool) {
+            let validated = self.chain.validate_candidate(&candidate);
+            if self
+                .applied_tip
+                .applied_tip()
+                .is_none_or(|current| current.hash != tip.hash)
+            {
+                return Err(generation_race());
+            }
+            validated?;
+        }
+        Ok(candidate)
     }
 }
 
@@ -2353,6 +2379,10 @@ mod tests {
         }
 
         impl ChainContextSource for Sources {
+            fn validate_candidate(&self, _candidate: &Candidate) -> Result<(), MiningControlError> {
+                Ok(())
+            }
+
             fn resolve_mining_context(
                 &self,
                 tip: &TipSnapshot,
@@ -3004,6 +3034,10 @@ mod tests {
     struct UnresolvedChain;
 
     impl ChainContextSource for UnresolvedChain {
+        fn validate_candidate(&self, _candidate: &Candidate) -> Result<(), MiningControlError> {
+            Ok(())
+        }
+
         fn resolve_mining_context(
             &self,
             _tip: &TipSnapshot,
@@ -3034,6 +3068,10 @@ mod tests {
     struct ResolvedChain;
 
     impl ChainContextSource for ResolvedChain {
+        fn validate_candidate(&self, _candidate: &Candidate) -> Result<(), MiningControlError> {
+            Ok(())
+        }
+
         fn resolve_mining_context(
             &self,
             tip: &TipSnapshot,
@@ -3433,6 +3471,10 @@ mod tests {
     }
 
     impl ChainContextSource for CountingChain {
+        fn validate_candidate(&self, _candidate: &Candidate) -> Result<(), MiningControlError> {
+            Ok(())
+        }
+
         fn resolve_mining_context(
             &self,
             tip: &TipSnapshot,
