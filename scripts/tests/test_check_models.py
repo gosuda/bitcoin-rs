@@ -669,16 +669,58 @@ class ModelEvidenceTests(unittest.TestCase):
             "sleep 300 &\n"
             "child=$!\n"
             "echo $child > tlc_child.pid\n"
-            "sleep 15\n",
+            "sleep 300\n",
             encoding="utf-8",
         )
         java_cmd.chmod(0o755)
         module = dataclasses.replace(self.module(0), checker="tlc")
-        with patch.dict(os.environ, {"JAVA": str(java_cmd)}):
-            records = check_models.run_tlc_module(self.root, self.toolchain, module, 5)
+        with check_models.LIVE_SESSIONS_LOCK:
+            before = set(check_models.LIVE_SESSIONS)
+        outcome: dict[str, object] = {}
+
+        def run() -> None:
+            try:
+                with patch.dict(os.environ, {"JAVA": str(java_cmd)}):
+                    outcome["records"] = check_models.run_tlc_module(
+                        self.root, self.toolchain, module, 60
+                    )
+            except Exception as exc:
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        deadline = time.monotonic() + 10.0
+        child_pid = None
+        pgid = None
+        while time.monotonic() < deadline and (child_pid is None or pgid is None):
+            if child_pid is None:
+                for candidate in sorted(self.root.glob("target/apalache/**/tlc_child.pid")):
+                    try:
+                        child_pid = int(candidate.read_text())
+                    except (OSError, ValueError):
+                        continue
+                    break
+            if pgid is None:
+                with check_models.LIVE_SESSIONS_LOCK:
+                    new_sessions = check_models.LIVE_SESSIONS - before
+                if len(new_sessions) == 1:
+                    pgid = next(iter(new_sessions))
+            if child_pid is None or pgid is None:
+                time.sleep(0.01)
+        try:
+            self.assertIsNotNone(child_pid, "mock java never wrote tlc_child.pid")
+            self.assertIsNotNone(pgid, "execute_process never registered the session")
+        finally:
+            with check_models.LIVE_SESSIONS_LOCK:
+                leaked = check_models.LIVE_SESSIONS - before
+            for session in leaked:
+                check_models.kill_session(session, signal.SIGKILL)
+            worker.join(timeout=10)
+        self.assertFalse(worker.is_alive())
+        if "error" in outcome:
+            raise outcome["error"]
+        records = outcome["records"]
         self.assertEqual(records["safety"]["evidence_rc"], 14)
-        pid_file = next(self.root.glob("target/apalache/**/tlc_child.pid"))
-        child_pid = int(pid_file.read_text())
         deadline = time.monotonic() + 5.0
         state = None
         reaped = False
