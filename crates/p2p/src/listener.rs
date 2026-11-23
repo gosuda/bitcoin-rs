@@ -2982,6 +2982,24 @@ fn reserve_compact_materialization(
     credit
 }
 
+fn retain_compact_image(
+    mut materialization: crate::inbound::block_memory::BlockMemoryCredit,
+    image: bitcoin_rs_consensus::primitives::BlockImage,
+) -> Result<
+    (
+        bitcoin_rs_consensus::primitives::BlockImage,
+        crate::inbound::block_memory::BlockMemoryCredit,
+    ),
+    crate::wire::PeerError,
+> {
+    if !image.bytes().is_unique() {
+        return Err(std::io::Error::other("compact block backing is not exclusively owned").into());
+    }
+    let image = image.with_owned_backing(|bytes| materialization.split_off(bytes))?;
+    materialization.retain(image.retained_heap_bytes())?;
+    Ok((image, materialization))
+}
+
 /// The caller retains the source decoder credit until its message and raw bytes are disposed.
 /// A completed image receives a separate credit that follows the forwarded image.
 pub fn process_compact_wire_message(
@@ -3010,7 +3028,7 @@ pub fn process_compact_wire_message(
         return;
     }
 
-    let mut materialization = match reserve_compact_materialization(
+    let materialization = match reserve_compact_materialization(
         compact_reconstruction,
         message,
         shared,
@@ -3043,19 +3061,20 @@ pub fn process_compact_wire_message(
     if compact_reconstruction.pending_len() == 0 {
         compact_reconstruction.memory_credit = None;
     }
-    let produced_credit = if let crate::compact_blocks::Outcome::Complete(image) = &outcome {
-        if let Err(error) = materialization.retain(
-            image
-                .bytes()
-                .len()
-                .saturating_add(image.retained_heap_bytes()),
-        ) {
-            tracing::error!(peer_addr = %peer_addr, %error, "compact reconstruction exceeded ingress reservation");
-            return;
+    let (outcome, produced_credit) = match outcome {
+        crate::compact_blocks::Outcome::Complete(image) => {
+            match retain_compact_image(materialization, image) {
+                Ok((image, credit)) => (
+                    crate::compact_blocks::Outcome::Complete(image),
+                    Some(credit),
+                ),
+                Err(error) => {
+                    tracing::error!(peer_addr = %peer_addr, %error, "compact reconstruction image reservation refused");
+                    return;
+                }
+            }
         }
-        Some(materialization)
-    } else {
-        None
+        outcome => (outcome, None),
     };
     let announced_header = if let crate::Message::CmpctBlock(cmpct) = message
         && !matches!(outcome, crate::compact_blocks::Outcome::Complete(_))
@@ -9450,6 +9469,47 @@ mod aggregate_budget_tests {
 
     // BUD-01, BUD-06
     #[test]
+    fn compact_completion_refuses_shared_or_underestimated_backing() -> CompactTestResult {
+        for refusal in ["shared", "raw", "metadata"] {
+            let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+            let encoded = bitcoin::consensus::serialize(&block);
+            assert_eq!(encoded.len(), 285);
+            let mut backing = Vec::with_capacity(293);
+            backing.extend_from_slice(&encoded);
+            let raw = bytes::Bytes::from(backing);
+            let Message::Block(image) = crate::wire::decode_payload("block", &raw)? else {
+                return Err(CompactIngressTestError::UnexpectedCommand);
+            };
+            let alias = (refusal == "shared").then(|| raw.clone());
+            drop(raw);
+            assert_eq!(image.bytes().is_unique(), refusal != "shared");
+            let reserved = match refusal {
+                "shared" => 293 + image.retained_heap_bytes(),
+                "raw" => 292,
+                "metadata" => 292 + image.retained_heap_bytes(),
+                _ => unreachable!(),
+            };
+            let shared = shared_with(ScriptedChain { blocks: Vec::new() });
+            let ledger = shared.block_memory.ledger();
+            let credit = shared.block_memory.try_reserve(reserved)?;
+            let error = super::retain_compact_image(credit, image)
+                .err()
+                .ok_or(CompactIngressTestError::Missing("compact allocation refusal"))?;
+            assert!(matches!(crate::PeerError::inbound(error), crate::PeerError::Io(_)));
+            assert!(
+                ledger.try_take(ledger.capacity()),
+                "{refusal}: refusal releases every part of the original reservation"
+            );
+            ledger.give_back(ledger.capacity());
+            if let Some(alias) = alias {
+                assert_eq!(alias.as_ref(), encoded.as_slice());
+            }
+        }
+        Ok(())
+    }
+
+    // BUD-01, BUD-06
+    #[test]
     fn compact_forward_backpressure_keeps_source_and_image_charged() -> CompactTestResult {
         for (completion, deliver) in [
             ("cmpctblock", true),
@@ -9508,7 +9568,9 @@ mod aggregate_budget_tests {
             let Message::Block(image) = crate::wire::decode_payload("block", &payload)? else {
                 return Err(CompactIngressTestError::UnexpectedCommand);
             };
-            let image_bytes = image.bytes().len() + image.retained_heap_bytes();
+            assert_eq!(payload.len(), 285, "the regtest genesis wire length");
+            let backing_bytes = 293;
+            let image_bytes = backing_bytes + image.retained_heap_bytes();
             drop(image);
             let mut frame = Vec::new();
             crate::wire::write_message(&mut frame, MAGIC, &message)?;
@@ -9575,7 +9637,15 @@ mod aggregate_budget_tests {
                     "forwarding observer result",
                 ))??;
             let downstream_bytes = used_bytes();
+            let raw = inbound
+                .as_ref()
+                .map(|inbound| inbound.payload().bytes().clone());
+            let final_slice = raw.as_ref().map(|raw| raw.slice(80..81));
             drop(inbound);
+            let retained_raw_bytes = used_bytes();
+            drop(raw);
+            let retained_slice_bytes = used_bytes();
+            drop(final_slice);
             assert_eq!(
                 blocked_bytes,
                 source_bytes + image_bytes,
@@ -9585,6 +9655,16 @@ mod aggregate_budget_tests {
                 downstream_bytes,
                 if deliver { image_bytes } else { 0 },
                 "{completion}: source disposal leaves only the delivered image charged"
+            );
+            assert_eq!(
+                retained_raw_bytes,
+                if deliver { backing_bytes } else { 0 },
+                "{completion}: dropping the inbound wrapper releases only image metadata"
+            );
+            assert_eq!(
+                retained_slice_bytes,
+                if deliver { backing_bytes } else { 0 },
+                "{completion}: the final byte slice retains the full backing charge"
             );
             assert!(
                 ledger.try_take(ledger.capacity()),

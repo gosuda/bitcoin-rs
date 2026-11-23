@@ -485,6 +485,7 @@ Proof: `mining::template::tests::ordinary_templates_reserve_external_coinbase_we
 
 - Owner: `decode_submitted_block` in `crates/wire/src/handlers/mining.rs`.
 - Admission stays on the single `MiningControl::submit_block(BlockImage)`.
+- The node receives the same `BlockMemory` owner used by network ingress. It accounts the submitted raw allocation and metadata before commit admission. Unique buffers retain their allocation; shared buffers receive a separately reserved copy. A budget refusal returns operational `Unavailable` before chain or pool mutation. Proof: `mining::tests::local_submissions_account_backing_and_witness_rebuilds` and `local_submission_budget_refusal_preserves_state_and_duplicate_results` in `crates/node/src/mining.rs` check ownership, witness rebuilding, refused state, and resumed submission.
 - The decoder hex-decodes the input and runs one shared decode via `BlockImage::from_prefix`.
 - It retains only the consumed prefix and discards the remainder.
 - Invalid hex or an incomplete block returns Core `-22` (`Block decode failed`, Core `DecodeHexBlk`).
@@ -522,7 +523,7 @@ Proof: `mining::template::tests::ordinary_templates_reserve_external_coinbase_we
 - Any other tree entry (including a header-only tip) returns `duplicate-inconclusive`.
 - `submitblock` matches Core v31 `ProcessNewBlock`: a previously connected scripts-valid body (including after a later reorg) is `duplicate`.
 - A header admitted by `submitheader` still receives the body.
-- Duplicate classification holds the chain-transition lock through apply.
+- A precheck under the chain-transition lock can return an existing committed duplicate before allocating. New bodies release that precheck lock before memory reservation, then repeat duplicate classification under the transition lock held through apply. Proof: `mining::tests::local_submission_budget_refusal_preserves_state_and_duplicate_results` in `crates/node/src/mining.rs` checks that a committed duplicate remains `duplicate` when image admission is full.
 - Concurrent submissions of one body cannot race into a previous-tip refusal.
 
 ### `API-19`: BIP22 reject reasons
@@ -648,6 +649,7 @@ Proof: `mining::template::tests::ordinary_templates_reserve_external_coinbase_we
 - A requested block has at most eight assembly attempts. Retries share its remaining nonce budget, including successful hashes discarded after a revision change.
 - The check calls `apply::validate_block` directly (`ApplyIntent::Propose` already skips hash-meets-target), not GBT `propose` (`API-18` vocabulary).
 - Shutdown and a closed-for-recovery chainstate stay `Unavailable`, not `TestBlockValidity`.
+- Local serialization reserves the conservative raw-plus-layout bound on the existing node ledger before allocation. The raw receipt follows any early-relay byte clone; local metadata releases with its image owner. A memory refusal stays operational `Unavailable`. Proof: `mining::tests::local_generated_backing_stays_charged_until_last_reader` in `crates/node/src/mining.rs` checks the actual generation path through commit and the final raw slice.
 
 Proof: `mining::tests::templates_reject_missing_inputs_without_mutating_chainstate` in `crates/node/src/mining.rs` checks fresh generation refusal without chain or pool changes.
 `fresh_mempool_validation_refuses_changed_membership_or_fee_revision` in `crates/node/src/mining/coordinator.rs` checks both revision changes after successful and failed validation.
