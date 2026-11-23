@@ -731,7 +731,7 @@ pub(crate) fn start_node(
     guard.services.shutdown_forwarder = injected_shutdown_forwarder;
     let block_body_source = state.block_body_source()?;
     let chainstate = state.chainstate();
-    let recent_block = crate::p2p::RecentBlockSlot::default();
+    let recent_block = crate::p2p::RecentBlockSlot::new(state.block_memory());
     let p2p_chain_query: Arc<dyn bitcoin_rs_p2p::ChainQuery> = Arc::new(
         crate::p2p::ActiveChainQuery::new(
             chainstate.block_tree_reader(),
