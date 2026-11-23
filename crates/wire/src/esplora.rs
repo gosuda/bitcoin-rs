@@ -3194,12 +3194,11 @@ mod tests {
             BlockTemplate, CandidateContext, FakeMiningControl, MiningRule, assemble_candidate,
         };
 
-        let mut context =
-            Context::new().with_esplora_query_limit(std::num::NonZeroUsize::MIN);
+        let mut context = Context::new().with_esplora_query_limit(std::num::NonZeroUsize::MIN);
         context.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
         let candidate = assemble_candidate(
             &CandidateContext {
-                previous_block_hash: Hash256::ZERO,
+                previous_block_hash: Hash256::default(),
                 height: 1,
                 version: 0x2000_0000,
                 bits: CompactTarget::from_consensus(0x207f_ffff),
