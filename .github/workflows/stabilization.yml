@@ -40,3 +40,42 @@ jobs:
       - name: Show resolved graph
         if: always()
         run: cargo tree --locked --all-features --duplicates
+
+  owner-evidence:
+    if: github.head_ref == 'stabilize/dependency-range-20261124'
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - owner: api
+            commit: 460f71e303910723053d14b57a239e92bcbf1b85
+          - owner: mining
+            commit: f6cd9fbcbafa485b77022aa5333c8c4d2cdf1995
+          - owner: p2p
+            commit: a9867cf48effb954e164f740267375bb4504b96f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.commit }}
+          persist-credentials: false
+      - name: Generate contract evidence and format source
+        run: |
+          cargo run --locked -p contract-index
+          cargo fmt --all
+          git diff --binary
+          while IFS= read -r -d '' path; do
+            printf 'GENERATED_FILE %s %s\n' "$(git hash-object "$path")" "$path"
+          done < <(git diff --name-only -z)
+  scripts:
+    if: github.head_ref == 'stabilize/dependency-range-20261124'
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+      - run: python3 scripts/check_book_links.py
