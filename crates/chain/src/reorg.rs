@@ -979,6 +979,48 @@ mod tests {
         fn reconsider_disconnected(&mut self, _: &BlockImage) {}
     }
 
+    // REO-01, SYNC-05, SYNC-07
+    #[test]
+    fn reclaimed_preflight_target_refuses_without_aliasing_a_new_branch() -> crate::test_fixtures::TestResult {
+        use crate::chain::{ChainError, regtest_fixture};
+        use crate::test_fixtures::{TestError, seed_genesis};
+
+        let chain = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        chain.set_header_side_cache_limit(1);
+        let genesis = seed_genesis(&chain)?;
+        let first = regtest_fixture::mined_regtest_header(genesis.hash.into(), 1)?;
+        let second = regtest_fixture::mined_regtest_header(first.compute_hash(), 2)?;
+        chain.admit_headers(&[first, second])?;
+        let mut side = first;
+        side.merkle_root = Hash256::from_le_bytes(&[41; 32]);
+        side.nonce = 0;
+        regtest_fixture::mine_header_to_declared_target(&mut side)?;
+        chain.admit_headers(&[side])?;
+        let old_hash = Hash256::from(side.compute_hash());
+        let old_id = chain.block_tree.read().lookup(old_hash).ok_or(TestError::Missing("side header"))?;
+        let plan = current_reorg_plan(&chain, old_id)?.ok_or(TestError::Missing("side plan"))?;
+        let mut replacement = side;
+        replacement.merkle_root = Hash256::from_le_bytes(&[42; 32]);
+        replacement.nonce = 0;
+        regtest_fixture::mine_header_to_declared_target(&mut replacement)?;
+        chain.admit_headers(&[replacement])?;
+        {
+            let tree = chain.block_tree.read();
+            assert!(tree.lookup(old_hash).is_none());
+            let new_id = tree.lookup(Hash256::from(replacement.compute_hash())).ok_or(TestError::Missing("replacement side header"))?;
+            assert_ne!(new_id, old_id);
+        }
+        let error = match prepare_branches(&chain, Some(&plan), &mut |_| None) {
+            Ok(_) => return Err(TestError::UnexpectedSuccess("reclaimed preflight target")),
+            Err(error) => error,
+        };
+        assert!(!error.requires_recovery());
+        assert!(matches!(error, ReorgError::Unavailable(source) if matches!(*source, ApplyError::Chain(ChainError::UnknownNode { id }) if id == old_id)));
+        assert!(!chain.is_closed_for_recovery());
+        assert_eq!(chain.applied_tip_snapshot().ok_or(TestError::Missing("applied genesis"))?.hash, genesis.hash);
+        Ok(())
+    }
+
     #[test]
     fn fatal_pretransition_settlement_closes_admission() {
         let handles = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));
