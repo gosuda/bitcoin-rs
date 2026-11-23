@@ -1,0 +1,209 @@
+name: Stabilization publication trees
+on:
+  push:
+    branches: [stabilize/private-publication-trees-20261124]
+permissions:
+  contents: read
+concurrency:
+  group: publication-trees-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  RUSTUP_TOOLCHAIN: "1.99.0"
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "2"
+jobs:
+  root-cache:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Build product trees with Git and the actual generators
+        run: |
+          set -euo pipefail
+          git config user.name "Stabilization verification"
+          git config user.email "stabilization-verification@users.noreply.github.com"
+          git fetch --no-tags origin 043cc2c4be2cc2cec44875816dc2de265880ff64 07f7ad9d2de2a23802845a0404dabb0fc6327e78 0d0594a058be188ad8c6aead4d2ba8e493a8d06c 8daedcd969e1c3f5a6fa51303d5005e77b0abfd0 3a2fa513021562a923977bc02467cf1ab94524e5
+          rustup component add rustfmt --toolchain stable
+          merge_source() {
+            local source="$1"
+            if ! git merge --no-ff --no-edit "$source"; then
+              local conflicts
+              conflicts="$(git diff --name-only --diff-filter=U)"
+              test -n "$conflicts"
+              while IFS= read -r path; do
+                case "$path" in
+                  docs/contracts/evidence-index.md|docs/contracts/README.md) ;;
+                  *) git diff -- "$path"; exit 1 ;;
+                esac
+              done <<< "$conflicts"
+              git checkout --ours -- docs/contracts/evidence-index.md docs/contracts/README.md
+              cargo run --locked -p contract-index
+              git add docs/contracts/evidence-index.md docs/contracts/README.md
+              git commit --no-edit
+            fi
+          }
+          export_product() {
+            local phase="$1" base="$2"
+            cargo +stable fmt --all
+            cargo run --locked -p contract-index
+            cargo run --locked -p contract-index -- --check
+            git diff --check
+            git add -u
+            test -z "$(git ls-files '.github/workflows/private-*.yml')"
+            printf 'PRODUCT_PHASE %s\nPRODUCT_TREE %s\n' "$phase" "$(git write-tree)"
+            node - "$base" <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const cp = require('node:child_process');
+          const base = process.argv[2];
+          const paths = cp.execFileSync('git', ['diff', '--cached', '--name-only', '-z', base], {encoding:'utf8'}).split('\0').filter(Boolean);
+          for (const path of paths) {
+            if (!fs.existsSync(path)) throw new Error('unexpected deletion: ' + path);
+            const bytes = fs.readFileSync(path);
+            const sha = crypto.createHash('sha1').update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
+            console.log('PRODUCT_FILE ' + JSON.stringify({path, sha, size:bytes.length}));
+            for (let offset=0; offset<bytes.length; offset+=12000) console.log('PRODUCT_CHUNK ' + JSON.stringify({path, offset, data:bytes.subarray(offset,offset+12000).toString('base64')}));
+          }
+          NODE
+            if ! git diff --cached --quiet; then git commit -m "Regenerate the $phase product evidence"; fi
+          }
+          git switch --detach 1debbca74ab7466ac4ee38f14602b987df8e9943
+          merge_source 043cc2c4be2cc2cec44875816dc2de265880ff64
+          export_product root 1debbca74ab7466ac4ee38f14602b987df8e9943
+          merge_source 5ebd5abc6f5f1528f6ddda121202bec6d5b8f313
+          merge_source 07f7ad9d2de2a23802845a0404dabb0fc6327e78
+          export_product cache 5ebd5abc6f5f1528f6ddda121202bec6d5b8f313
+          
+  raw:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Build product trees with Git and the actual generators
+        run: |
+          set -euo pipefail
+          git config user.name "Stabilization verification"
+          git config user.email "stabilization-verification@users.noreply.github.com"
+          git fetch --no-tags origin 043cc2c4be2cc2cec44875816dc2de265880ff64 07f7ad9d2de2a23802845a0404dabb0fc6327e78 0d0594a058be188ad8c6aead4d2ba8e493a8d06c 8daedcd969e1c3f5a6fa51303d5005e77b0abfd0 3a2fa513021562a923977bc02467cf1ab94524e5
+          rustup component add rustfmt --toolchain stable
+          merge_source() {
+            local source="$1"
+            if ! git merge --no-ff --no-edit "$source"; then
+              local conflicts
+              conflicts="$(git diff --name-only --diff-filter=U)"
+              test -n "$conflicts"
+              while IFS= read -r path; do
+                case "$path" in
+                  docs/contracts/evidence-index.md|docs/contracts/README.md) ;;
+                  *) git diff -- "$path"; exit 1 ;;
+                esac
+              done <<< "$conflicts"
+              git checkout --ours -- docs/contracts/evidence-index.md docs/contracts/README.md
+              cargo run --locked -p contract-index
+              git add docs/contracts/evidence-index.md docs/contracts/README.md
+              git commit --no-edit
+            fi
+          }
+          export_product() {
+            local phase="$1" base="$2"
+            cargo +stable fmt --all
+            cargo run --locked -p contract-index
+            cargo run --locked -p contract-index -- --check
+            git diff --check
+            git add -u
+            test -z "$(git ls-files '.github/workflows/private-*.yml')"
+            printf 'PRODUCT_PHASE %s\nPRODUCT_TREE %s\n' "$phase" "$(git write-tree)"
+            node - "$base" <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const cp = require('node:child_process');
+          const base = process.argv[2];
+          const paths = cp.execFileSync('git', ['diff', '--cached', '--name-only', '-z', base], {encoding:'utf8'}).split('\0').filter(Boolean);
+          for (const path of paths) {
+            if (!fs.existsSync(path)) throw new Error('unexpected deletion: ' + path);
+            const bytes = fs.readFileSync(path);
+            const sha = crypto.createHash('sha1').update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
+            console.log('PRODUCT_FILE ' + JSON.stringify({path, sha, size:bytes.length}));
+            for (let offset=0; offset<bytes.length; offset+=12000) console.log('PRODUCT_CHUNK ' + JSON.stringify({path, offset, data:bytes.subarray(offset,offset+12000).toString('base64')}));
+          }
+          NODE
+            if ! git diff --cached --quiet; then git commit -m "Regenerate the $phase product evidence"; fi
+          }
+          git switch --detach 5ebd5abc6f5f1528f6ddda121202bec6d5b8f313
+          merge_source 043cc2c4be2cc2cec44875816dc2de265880ff64
+          merge_source 07f7ad9d2de2a23802845a0404dabb0fc6327e78
+          merge_source 0d0594a058be188ad8c6aead4d2ba8e493a8d06c
+          export_product raw 5ebd5abc6f5f1528f6ddda121202bec6d5b8f313
+          
+  final-docs:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Build product trees with Git and the actual generators
+        run: |
+          set -euo pipefail
+          git config user.name "Stabilization verification"
+          git config user.email "stabilization-verification@users.noreply.github.com"
+          git fetch --no-tags origin 043cc2c4be2cc2cec44875816dc2de265880ff64 07f7ad9d2de2a23802845a0404dabb0fc6327e78 0d0594a058be188ad8c6aead4d2ba8e493a8d06c 8daedcd969e1c3f5a6fa51303d5005e77b0abfd0 3a2fa513021562a923977bc02467cf1ab94524e5
+          rustup component add rustfmt --toolchain stable
+          merge_source() {
+            local source="$1"
+            if ! git merge --no-ff --no-edit "$source"; then
+              local conflicts
+              conflicts="$(git diff --name-only --diff-filter=U)"
+              test -n "$conflicts"
+              while IFS= read -r path; do
+                case "$path" in
+                  docs/contracts/evidence-index.md|docs/contracts/README.md) ;;
+                  *) git diff -- "$path"; exit 1 ;;
+                esac
+              done <<< "$conflicts"
+              git checkout --ours -- docs/contracts/evidence-index.md docs/contracts/README.md
+              cargo run --locked -p contract-index
+              git add docs/contracts/evidence-index.md docs/contracts/README.md
+              git commit --no-edit
+            fi
+          }
+          export_product() {
+            local phase="$1" base="$2"
+            cargo +stable fmt --all
+            cargo run --locked -p contract-index
+            cargo run --locked -p contract-index -- --check
+            git diff --check
+            git add -u
+            test -z "$(git ls-files '.github/workflows/private-*.yml')"
+            printf 'PRODUCT_PHASE %s\nPRODUCT_TREE %s\n' "$phase" "$(git write-tree)"
+            node - "$base" <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const cp = require('node:child_process');
+          const base = process.argv[2];
+          const paths = cp.execFileSync('git', ['diff', '--cached', '--name-only', '-z', base], {encoding:'utf8'}).split('\0').filter(Boolean);
+          for (const path of paths) {
+            if (!fs.existsSync(path)) throw new Error('unexpected deletion: ' + path);
+            const bytes = fs.readFileSync(path);
+            const sha = crypto.createHash('sha1').update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
+            console.log('PRODUCT_FILE ' + JSON.stringify({path, sha, size:bytes.length}));
+            for (let offset=0; offset<bytes.length; offset+=12000) console.log('PRODUCT_CHUNK ' + JSON.stringify({path, offset, data:bytes.subarray(offset,offset+12000).toString('base64')}));
+          }
+          NODE
+            if ! git diff --cached --quiet; then git commit -m "Regenerate the $phase product evidence"; fi
+          }
+          git switch --detach 8daedcd969e1c3f5a6fa51303d5005e77b0abfd0
+          merge_source 3a2fa513021562a923977bc02467cf1ab94524e5
+          export_product final 5ebd5abc6f5f1528f6ddda121202bec6d5b8f313
+          
