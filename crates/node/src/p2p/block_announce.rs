@@ -481,7 +481,7 @@ impl BlockAnnouncer {
                 return Vec::new();
             }
             state.highest_fast_announce = height;
-            self.recent.store(hash, Arc::new(block.clone()));
+            self.recent.store(Arc::new(block.clone()));
         }
         let mut sent = Vec::new();
         for session in self.ready_sessions() {
@@ -2413,15 +2413,24 @@ mod tests {
         }
     }
 
+    // P2P-01
     #[test]
     fn early_announce_sends_one_cmpctblock_to_parent_known_hb_peer() {
         let chain = Arc::new(MockAnnounceChain::new(2));
         let table = Arc::new(PeerTable::new());
+        let recent = RecentBlockSlot::default();
+        let query = crate::p2p::ActiveChainQuery::new(
+            BlockTreeReader::new(Arc::new(RwLock::new(BlockTree::new()))),
+            TipReader::new(Arc::new(ArcSwapOption::empty())),
+            Network::Regtest,
+        )
+        .with_recent_block(recent.clone());
         let announcer = BlockAnnouncer::new(
             Arc::clone(&table),
             Arc::clone(&chain) as Arc<dyn ChainQuery>,
             BlockAnnounceConfig::default(),
-        );
+        )
+        .with_recent_block(recent);
 
         let addr = test_addr(1301);
         let (_lease, rx) = setup_peer(&table, &announcer, addr, false);
@@ -2449,8 +2458,15 @@ mod tests {
         let received = rx.try_recv().expect("peer received the early send");
         assert!(matches!(received, Message::CmpctBlock(_)));
         assert_eq!(announcer.peer_known_block(addr), Some(hash));
+        assert_eq!(
+            query.recent_transaction(bitcoin_rs_p2p::inv::TransactionId::Txid(
+                block.txs[0].txid(),
+            )),
+            Some(block.txs[0].clone())
+        );
     }
 
+    // P2P-01
     #[test]
     fn early_announce_same_height_sends_nothing() {
         let chain = Arc::new(MockAnnounceChain::new(2));
@@ -2475,10 +2491,15 @@ mod tests {
         );
         while rx.try_recv().is_ok() {}
 
+        let mut same_height = block;
+        same_height.header.nonce = 1;
+        let other_hash = Hash256::from(same_height.block_hash());
+        assert_ne!(hash, other_hash);
         assert_eq!(
-            announcer.announce_pow_valid(&BlockImage::from_local(block.clone()), hash, 2),
+            announcer.announce_pow_valid(&BlockImage::from_local(same_height), other_hash, 2),
             []
         );
+        assert_eq!(announcer.recent.load().map(|(held, _)| held), Some(hash));
         assert!(rx.try_recv().is_err());
     }
 

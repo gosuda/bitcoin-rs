@@ -1614,6 +1614,127 @@ mod dispatch_tests {
         Ok(())
     }
 
+    // P2P-01
+    #[test]
+    fn recent_block_getdata_preserves_privacy_and_broadcast_state() -> Result<(), PeerError> {
+        use bitcoin_rs_chain::chain::{BlockTree, BlockTreeReader, TipReader};
+        use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network};
+
+        for orphan in [false, true] {
+            for in_recent_block in [false, true] {
+                for cutoff in [None, Some(0)] {
+                    for kind in 0..3 {
+                        let (gateway, tx) = gateway_holding_witness_tx(orphan);
+                        let sequence = gateway.read().sequence_number();
+                        let txid = bitcoin::Txid::from_byte_array(*tx.txid().as_bytes());
+                        let wtxid = bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes());
+                        let item = match kind {
+                            0 => Inventory::Transaction(txid),
+                            1 => Inventory::WitnessTransaction(txid),
+                            _ => Inventory::WTx(wtxid),
+                        };
+                        let genesis = Network::Regtest.genesis_block();
+                        let image = Arc::new(BlockImage::from_local(Block {
+                            header: genesis.header,
+                            txs: vec![
+                                genesis.txs[0].clone(),
+                                if in_recent_block {
+                                    (*tx).clone()
+                                } else {
+                                    dummy_tx(0xa5)
+                                },
+                            ],
+                        }));
+                        let slot = super::RecentBlockSlot::default();
+                        slot.store(image);
+                        let query = super::ActiveChainQuery::new(
+                            BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(
+                                BlockTree::new(),
+                            ))),
+                            TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty())),
+                            Network::Regtest,
+                        )
+                        .with_recent_block(slot);
+                        let inventory = RefTxInventory(&gateway);
+                        let mut not_found = Vec::new();
+                        assert_eq!(
+                            serve_getdata(
+                                Some(&query),
+                                Some(&inventory),
+                                cutoff,
+                                None,
+                                &[item],
+                                &mut not_found,
+                                &|| false,
+                                &mut |_| panic!("a saturated reply must stay parked"),
+                            )?,
+                            vec![item]
+                        );
+                        assert!(not_found.is_empty());
+                        let expected = if in_recent_block {
+                            let mut body = (*tx).clone();
+                            if kind == 0 {
+                                for input in &mut body.inputs {
+                                    input.witness.clear();
+                                }
+                            }
+                            Message::Tx(body)
+                        } else {
+                            Message::NotFound(vec![item])
+                        };
+                        let mut attempted = Vec::new();
+                        assert!(
+                            serve_getdata(
+                                Some(&query),
+                                Some(&inventory),
+                                cutoff,
+                                None,
+                                &[item],
+                                &mut not_found,
+                                &|| true,
+                                &mut |message| {
+                                    attempted.push(message);
+                                    Err(PeerError::Io(std::io::ErrorKind::BrokenPipe.into()))
+                                },
+                            )
+                            .is_err()
+                        );
+                        assert_eq!(attempted, vec![expected.clone()]);
+                        assert_eq!(
+                            gateway.read().unbroadcast_transactions().count(),
+                            usize::from(!orphan)
+                        );
+                        let mut delivered = Vec::new();
+                        assert!(
+                            serve_getdata(
+                                Some(&query),
+                                Some(&inventory),
+                                cutoff,
+                                None,
+                                &[item],
+                                &mut not_found,
+                                &|| true,
+                                &mut |message| {
+                                    delivered.push(message);
+                                    Ok(())
+                                },
+                            )?
+                            .is_empty()
+                        );
+                        assert_eq!(delivered, vec![expected]);
+                        assert_eq!(
+                            gateway.read().unbroadcast_transactions().count(),
+                            usize::from(!orphan && !in_recent_block)
+                        );
+                        assert_eq!(gateway.read().sequence_number(), sequence);
+                        assert_eq!(gateway.orphan_count(), usize::from(orphan));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn gateway_inventory_filters_and_serves_txid_and_wtxid() -> Result<(), PeerError> {
         let gateway = MempoolGateway::new(
@@ -2649,10 +2770,7 @@ mod loopback_serving_tests {
         )?);
         let held_hash = held.block_hash();
         let slot = RecentBlockSlot::default();
-        slot.store(
-            Hash256::from(held_hash),
-            Arc::new(BlockImage::from_local((*held).clone())),
-        );
+        slot.store(Arc::new(BlockImage::from_local((*held).clone())));
         let chain = chain_over(&[genesis, tip], slot)?;
         assert_eq!(
             chain.active_height(held_hash),

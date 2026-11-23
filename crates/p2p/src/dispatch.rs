@@ -11,7 +11,8 @@ use bitcoin_rs_consensus::primitives::{
 use crate::fsm::step;
 use crate::handshake::{feature_messages, negotiated_features};
 use crate::inv::{
-    inventory_block_hash, inventory_tx_hash, is_within_inventory_bound, request_witness,
+    TransactionId, inventory_block_hash, inventory_tx_hash, is_within_inventory_bound,
+    request_witness,
 };
 use crate::packages::{
     AncPkgInfo, GetPkgTxns, MSG_ANCPKGINFO, MSG_PKGTXNS, PKG_RELAY_ANC, PKG_RELAY_PKGTXNS, PkgTxns,
@@ -65,6 +66,10 @@ pub enum StaleTipHeaders {
 }
 
 pub trait ChainQuery: Send + Sync {
+    fn recent_transaction(&self, _id: TransactionId) -> Option<Tx> {
+        None
+    }
+
     fn compact_filters_ready(&self) -> bool {
         false
     }
@@ -635,9 +640,15 @@ pub fn serve_getdata(
                     not_found,
                 )?
             }
-            (_, Some(inv)) => {
-                serve_tx_item(inv, last_inv_sequence, item, headroom, send, not_found)?
-            }
+            (_, Some(inv)) => serve_tx_item(
+                inv,
+                chain,
+                last_inv_sequence,
+                item,
+                headroom,
+                send,
+                not_found,
+            )?,
             (_, None) => serve_block_item(chain, compact_version, item, headroom, send, not_found)?,
         };
         if !served {
@@ -656,6 +667,7 @@ pub fn serve_getdata(
 
 fn serve_tx_item(
     inv: &dyn TxInventory,
+    chain: Option<&dyn ChainQuery>,
     last_inv_sequence: Option<u64>,
     item: &Inventory,
     headroom: &dyn Fn() -> bool,
@@ -665,32 +677,33 @@ fn serve_tx_item(
     if !headroom() {
         return Ok(false);
     }
-    let Some(last_inv_sequence) = last_inv_sequence else {
-        not_found.push(*item);
-        return Ok(true);
-    };
     let found = match item {
         Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
             let native = Txid::from(Hash256::from_le_bytes(txid.as_byte_array()));
-            inv.get_tx(native, last_inv_sequence).map(|mut tx| {
-                let wtxid = tx.wtxid();
-                if matches!(item, Inventory::Transaction(_)) {
-                    for input in &mut tx.inputs {
-                        input.witness.clear();
-                    }
-                }
-                (wtxid, tx)
-            })
+            last_inv_sequence
+                .and_then(|sequence| inv.get_tx(native, sequence))
+                .or_else(|| {
+                    chain.and_then(|query| query.recent_transaction(TransactionId::Txid(native)))
+                })
         }
         Inventory::WTx(wtxid) => {
             let native = Wtxid::from(Hash256::from_le_bytes(wtxid.as_byte_array()));
-            inv.get_tx_by_wtxid(native, last_inv_sequence)
-                .map(|tx| (native, tx))
+            last_inv_sequence
+                .and_then(|sequence| inv.get_tx_by_wtxid(native, sequence))
+                .or_else(|| {
+                    chain.and_then(|query| query.recent_transaction(TransactionId::Wtxid(native)))
+                })
         }
         _ => None,
     };
     match found {
-        Some((wtxid, tx)) => {
+        Some(mut tx) => {
+            let wtxid = tx.wtxid();
+            if matches!(item, Inventory::Transaction(_)) {
+                for input in &mut tx.inputs {
+                    input.witness.clear();
+                }
+            }
             let marks = BroadcastMarks::mark(inv, &[wtxid]);
             send(Message::Tx(tx))?;
             marks.commit();
