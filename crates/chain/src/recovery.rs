@@ -168,7 +168,11 @@ pub fn install_restored_state(
     let mut utxo = restored.initial.utxo;
     utxo.track_coin_stats((*chain.coin_stats).clone());
     chain.utxo = std::sync::Arc::new(utxo);
-    *chain.block_tree.write() = restored.initial.tree;
+    {
+        let mut tree = chain.block_tree.write();
+        *tree = restored.initial.tree;
+        chain.reevaluate_assume_valid_with(&tree);
+    }
     let tip_arc = restored.initial.applied_tip.map(std::sync::Arc::new);
     chain.applied_tip.store(tip_arc.clone());
     chain.chain_tip.store(tip_arc);
