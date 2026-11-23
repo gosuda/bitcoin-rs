@@ -692,8 +692,10 @@ impl MempoolGateway {
         }
     }
 
+    /// Requires empty membership under the caller's active chain-change fence.
     pub fn snapshot_changed(&self) {
-        let _pool = self.pool.read();
+        let mut pool = self.pool.write();
+        pool.settle_for_snapshot();
         let mut lifecycle = self.lifecycle.lock();
         lifecycle.clear_rejects();
         lifecycle.orphans.mark_all_ready();

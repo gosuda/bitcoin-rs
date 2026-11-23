@@ -1233,6 +1233,7 @@ mod tests {
         Ok(())
     }
 
+    // MPL-04, MPS-03, SNP-07
     #[test]
     fn successful_snapshot_import_preserves_nonresident_fee_prioritisation() -> Result<(), TestError>
     {
@@ -1253,6 +1254,8 @@ mod tests {
         assert_eq!(gateway.prioritised_transactions(), expected);
         assert!(gateway.read().is_empty());
         let sequence = gateway.read().sequence_number();
+        let fee_sequence = gateway.read().fee_delta_sequence_number();
+        assert_ne!(gateway.read().settled_at_commit(), 0);
         state.snapshots.import(&core_path)?;
         assert_eq!(
             gateway.prioritised_transactions(),
@@ -1261,6 +1264,8 @@ mod tests {
         );
         assert!(gateway.read().is_empty());
         assert_eq!(gateway.read().sequence_number(), sequence);
+        assert_eq!(gateway.read().fee_delta_sequence_number(), fee_sequence);
+        assert_eq!(gateway.read().settled_at_commit(), 0);
         assert!(gateway.stable_generation().is_some());
         assert_eq!(
             state
@@ -1270,6 +1275,59 @@ mod tests {
             Some(200)
         );
         assert!(state.chainstate().role().is_assumed_active());
+        Ok(())
+    }
+
+    // API-11, API-30, MPS-03, SNP-07, SYNC-05
+    #[test]
+    fn mining_resumes_after_snapshot_replaces_a_settled_tip() -> Result<(), TestError> {
+        use bitcoin_rs_wire::mining::{
+            BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, GenerateRequest,
+            GenerateSelection, MiningControl,
+        };
+
+        let dir = tempfile::tempdir()?;
+        let (state, core_path) = snapshot_inputs(dir.path())?;
+        let mining = crate::mining::MiningCoordinator::new(
+            state.mempool_reader(),
+            state.chainstate(),
+            state.stable_read(),
+            state.chain_followers(),
+            vec![0x51],
+            state.config().mining.coinbase_reserve,
+        );
+        assert_ne!(state.mempool_gateway().read().settled_at_commit(), 0);
+        state.snapshots.import(&core_path)?;
+        let template = mining.get_block_template(BlockTemplateRequest {
+            mode: BlockTemplateMode::Template,
+            capabilities: Vec::new(),
+            rules: Vec::new(),
+            long_poll_id: None,
+            coinbase_budget: None,
+        })?;
+        let BlockTemplateResult::Template(template) = template else {
+            return Err(TestError::ExpectationFailed("snapshot mining template"));
+        };
+        assert_eq!(template.candidate.height, 201);
+        for submit in [false, true] {
+            let generated = mining.generate(GenerateRequest {
+                payout: vec![0x51],
+                count: 1,
+                max_tries: GenerateRequest::DEFAULT_MAX_TRIES,
+                selection: GenerateSelection::Mempool,
+                submit,
+            })?;
+            assert_eq!(generated.len(), 1);
+            assert_eq!(
+                state
+                    .chainstate()
+                    .applied_tip_snapshot()
+                    .map(|tip| tip.height),
+                Some(if submit { 201 } else { 200 })
+            );
+            assert!(state.mempool_gateway().stable_generation().is_some());
+        }
+        assert_ne!(state.mempool_gateway().read().settled_at_commit(), 0);
         Ok(())
     }
 
