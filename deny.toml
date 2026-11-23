@@ -161,7 +161,6 @@ skip = [
     { crate = "parking_lot_core@0.9.12", reason = "dashmap 6.2 and parking_lot 0.12" },
     { crate = "redox_syscall@0.5.18", reason = "parking_lot_core 0.9" },
     # bitcoin 0.32 pins hex-conservative 0.2; miniscript uses 1.x.
-    # surrealkv 1.x pins lz4_flex 0.12 while workspace pins 0.13.
     { crate = "lz4_flex@0.12.3", reason = "surrealkv 1.x pins lz4_flex 0.12" },
     { crate = "hex-conservative@0.2.3", reason = "bitcoin 0.32 pin" },
     # metrics-util 0.20 (via metrics-exporter-prometheus 0.18) pins quanta 0.12
