@@ -2,7 +2,7 @@ mod candidate;
 pub(crate) mod context;
 
 pub use candidate::{HeaderCandidate, HeaderCandidateError, HeaderCandidatePhase};
-pub(crate) use candidate::{HeaderCandidateBudget, VerifiedHeaderTarget};
+pub(crate) use candidate::{HeaderCandidateBudget, MAX_HEADER_CANDIDATES, VerifiedHeaderTarget};
 pub use context::HeaderContextError;
 
 use bitcoin_rs_consensus::MAX_TIMEWARP;

@@ -55,7 +55,9 @@ The tree reclaims unpinned leaves first. This preserves the complete ancestry of
 every required root. An admission or maintenance call removes at most 4,000
 leaves. Slab compaction and hash-map shrinking can make a linear pass after
 capacity falls by more than half. This is a removal bound, not a bound on total
-CPU work.
+CPU work. The owner reuses ancestry decisions while required roots and
+candidate anchors remain equivalent. Root changes can still require ancestry
+walks.
 
 `HeaderCandidate` permits a winning fork to exceed the side-cache allowance.
 Its first pass checks every header's proof of work and contextual rules with
