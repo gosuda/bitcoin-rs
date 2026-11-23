@@ -44,14 +44,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - owner: api
-            commit: 460f71e303910723053d14b57a239e92bcbf1b85
-          - owner: http
-            commit: 6de04fce5807d790d0cd7940665fc76580dcca9f
           - owner: mining
-            commit: f6cd9fbcbafa485b77022aa5333c8c4d2cdf1995
-          - owner: p2p
-            commit: a9867cf48effb954e164f740267375bb4504b96f
+            commit: 6b706b36ee4b19869b92633e8fedc1f2543f1280
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -66,7 +60,7 @@ jobs:
             printf 'GENERATED_FILE %s %s\n' "$(git hash-object "$path")" "$path"
           done < <(git diff --name-only -z)
   scripts:
-    if: github.head_ref == 'stabilize/dependency-range-20261124'
+    if: github.head_ref == 'stabilize/dependency-range-20261124' && github.event.pull_request.head.sha == '08229e20fd583c47bfd6ce6a265ec48189fd94b1'
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -78,7 +72,7 @@ jobs:
       - run: python3 scripts/check_book_links.py
 
   reserve-regression:
-    if: github.head_ref == 'stabilize/dependency-range-20261124'
+    if: github.head_ref == 'stabilize/dependency-range-20261124' && github.event.pull_request.head.sha == '08229e20fd583c47bfd6ce6a265ec48189fd94b1'
     runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 45
     steps:
