@@ -26,12 +26,41 @@ pub struct CandidateContext {
     pub current_time: u32,
     pub locktime_cutoff: u32,
     pub staged_parent_mtp: u32,
+    pub coinbase_reserve: CoinbaseReserve,
     pub network: Network,
     pub csv_active: bool,
     pub segwit_active: bool,
     pub max_weight: u64,
     pub max_size: u64,
     pub max_sigops: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CoinbaseReserve {
+    pub weight: u64,
+    pub sigops: u64,
+}
+
+impl CoinbaseReserve {
+    pub const EXACT: Self = Self {
+        weight: 0,
+        sigops: 0,
+    };
+    pub const DEFAULT_WEIGHT: u64 = 8_000;
+
+    #[must_use]
+    pub fn external(weight: u64) -> Self {
+        Self {
+            weight: weight.clamp(2_000, bitcoin_rs_consensus::MAX_BLOCK_WEIGHT),
+            sigops: 400,
+        }
+    }
+}
+
+impl Default for CoinbaseReserve {
+    fn default() -> Self {
+        Self::external(Self::DEFAULT_WEIGHT)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -270,12 +299,6 @@ pub(crate) struct FixedReservation {
 }
 
 impl FixedReservation {
-    pub(crate) const ZERO: Self = Self {
-        weight: 0,
-        size: 0,
-        sigops: 0,
-    };
-
     pub(crate) fn checked_add(self, other: Self) -> Result<Self, MiningError> {
         Ok(Self {
             weight: checked_sum(self.weight, other.weight, "weight")?,
@@ -380,10 +403,21 @@ fn reserve(
             .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?,
         sigops: u64::from(transaction_sigop_cost(&reservation, &[], VerifyFlags::NONE)),
     };
-    let growth = budget
-        .map(|budget| coinbase_growth(&reservation, budget))
-        .transpose()?
-        .unwrap_or(FixedReservation::ZERO);
+    let growth = match budget {
+        Some(budget) => coinbase_growth(&reservation, budget)?,
+        None => {
+            let weight = context.coinbase_reserve.weight.saturating_sub(checked_sum(
+                fixed.weight,
+                4,
+                "weight",
+            )?);
+            FixedReservation {
+                weight,
+                size: weight.div_ceil(4),
+                sigops: context.coinbase_reserve.sigops.saturating_sub(fixed.sigops),
+            }
+        }
+    };
     Ok(Reservation {
         fixed,
         growth,
@@ -657,6 +691,7 @@ mod tests {
             current_time: 2,
             locktime_cutoff: 1,
             staged_parent_mtp: 1,
+            coinbase_reserve: CoinbaseReserve::EXACT,
             network: Network::Regtest,
             csv_active: true,
             segwit_active,
@@ -699,6 +734,58 @@ mod tests {
             sigop_cost,
         ))?;
         Ok(pool)
+    }
+
+    // API-11
+    #[test]
+    fn ordinary_templates_reserve_external_coinbase_sigops() -> TestResult {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        for label in 1..=5 {
+            let tx = witnessed_tx(label);
+            let vsize = u32::try_from(tx.vsize())?;
+            pool.insert_entry(MempoolEntry::new(Arc::new(tx), vsize, 10_000, 0, 0, 16_000))?;
+        }
+        let candidate = assemble(
+            &CandidateContext {
+                coinbase_reserve: CoinbaseReserve::default(),
+                ..context(
+                    true,
+                    Limits {
+                        sigops: 80_000,
+                        ..GENEROUS
+                    },
+                )
+            },
+            &pool,
+            None,
+        )?;
+        assert_eq!(candidate.transactions.len(), 4);
+        assert!(used(&candidate)?.2 + 400 <= 80_000);
+        Ok(())
+    }
+
+    // API-11
+    #[test]
+    fn ordinary_templates_reserve_external_coinbase_weight() -> TestResult {
+        let candidate = assemble(
+            &CandidateContext {
+                coinbase_reserve: CoinbaseReserve::default(),
+                ..context(
+                    true,
+                    Limits {
+                        weight: 8_000,
+                        ..GENEROUS
+                    },
+                )
+            },
+            &pool_with_tx(0)?,
+            None,
+        )?;
+        assert!(candidate.transactions.is_empty());
+        Ok(())
     }
 
     fn assemble(

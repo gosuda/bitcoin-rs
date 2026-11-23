@@ -535,6 +535,7 @@ pub struct ValidationConfig {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MiningConfig {
     pub payout_script: Vec<u8>,
+    pub coinbase_reserve: bitcoin_rs_wire::mining::CoinbaseReserve,
 }
 
 #[derive(Clone, Debug)]
@@ -897,6 +898,9 @@ pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig, ConfigError> {
     let selection = settings.network.unwrap_or(NetworkSelection::Mainnet);
     let mut config = NodeConfig::materialize(&settings, selection);
     config.pool = resolve_pool(&settings)?;
+    if let Some(weight) = settings.mining.reserved_weight {
+        config.mining.coinbase_reserve = bitcoin_rs_wire::mining::CoinbaseReserve::external(weight);
+    }
     if config.pool.is_some() && settings.mining.payout_address.is_none() {
         return Err(ConfigError::PoolPayoutAddressMissing);
     }
@@ -1195,8 +1199,37 @@ mod tests {
             },
             mining: crate::options::MiningOverrides {
                 payout_address: Some("1BoatSLRHtKNngkdXEeobR76b53LETtpyT".to_owned()),
+                ..Default::default()
             },
             ..Default::default()
+        }
+    }
+
+    // API-11
+    #[test]
+    fn mining_coinbase_reserve_defaults_and_clamps_weight() {
+        let default = resolved(&[]);
+        assert_eq!(default.mining.coinbase_reserve.weight, 8_000);
+        assert_eq!(default.mining.coinbase_reserve.sigops, 400);
+        for (requested, expected) in [
+            (0, 2_000),
+            (1_999, 2_000),
+            (2_000, 2_000),
+            (8_000, 8_000),
+            (4_000_000, 4_000_000),
+            (4_000_001, 4_000_000),
+            (u64::MAX, 4_000_000),
+        ] {
+            let layer = UserConfig {
+                mining: crate::options::MiningOverrides {
+                    reserved_weight: Some(requested),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let config = resolved(&[&layer]);
+            assert_eq!(config.mining.coinbase_reserve.weight, expected);
+            assert_eq!(config.mining.coinbase_reserve.sigops, 400);
         }
     }
 

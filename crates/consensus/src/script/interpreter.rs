@@ -472,7 +472,8 @@ fn verify_script<'a>(
         &mut weight,
         None,
     )?;
-    let redeem_stack = stack.clone();
+    let redeem_stack = (flags.contains(VerifyFlags::P2SH) && crate::script::is_p2sh(script_pubkey))
+        .then(|| stack.clone());
     eval::eval_script(
         &mut stack,
         script_pubkey,
@@ -504,8 +505,7 @@ fn verify_script<'a>(
         }
     }
 
-    let is_p2sh = flags.contains(VerifyFlags::P2SH) && crate::script::is_p2sh(script_pubkey);
-    if is_p2sh {
+    if let Some(redeem_stack) = redeem_stack {
         if !is_push_only(script_sig) {
             return Err(invalid(ScriptErrCode::SigPushonly));
         }

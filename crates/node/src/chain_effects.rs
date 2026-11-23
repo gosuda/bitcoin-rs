@@ -1016,6 +1016,7 @@ mod tests {
             state.stable_read(),
             followers,
             Vec::new(),
+            state.config().mining.coinbase_reserve,
         );
 
         assert_eq!(
