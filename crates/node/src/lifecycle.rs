@@ -1140,10 +1140,13 @@ mod tests {
             1,
         )?);
         node.state.apply_block(&first)?;
-        assert!(!node.state.chainstate().ibd_latch().is_active(
-            u64::from(now),
-            Network::Regtest,
-        ));
+        assert!(
+            !node
+                .state
+                .chainstate()
+                .ibd_latch()
+                .is_active(u64::from(now), Network::Regtest,)
+        );
         let budget = node.state.budget();
         assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), 0);
         let second = BlockImage::from_local(regtest_fixture::mined_regtest_child_at_time(
@@ -1155,9 +1158,8 @@ mod tests {
         let second_charge = budget.charged_bytes(BudgetOwner::StagedImages);
         assert!(second_charge >= u64::try_from(second.retained_heap_bytes())?);
         let second_tx = second.tx(0).materialize();
-        let second_item = Inventory::Transaction(bitcoin::Txid::from_byte_array(
-            *second_tx.txid().as_bytes(),
-        ));
+        let second_item =
+            Inventory::Transaction(bitcoin::Txid::from_byte_array(*second_tx.txid().as_bytes()));
         assert!(node.state.mempool_gateway().read().is_empty());
         peer.send(&Message::GetData(vec![second_item]))?;
         assert_eq!(
@@ -1168,11 +1170,8 @@ mod tests {
             Message::Tx(second_tx)
         );
 
-        let mut third = regtest_fixture::mined_regtest_child_at_time(
-            second.block_hash(),
-            now + 2,
-            3,
-        )?;
+        let mut third =
+            regtest_fixture::mined_regtest_child_at_time(second.block_hash(), now + 2, 3)?;
         third.txs[0].outputs.extend((0..16).map(|_| TxOut {
             value: Amount::from_sat(0),
             script_pubkey: Script::new(),
@@ -1191,9 +1190,8 @@ mod tests {
         let third_charge = budget.charged_bytes(BudgetOwner::StagedImages);
         assert_eq!(third_charge, second_charge + u64::try_from(heap_growth)?);
         let third_tx = third.tx(0).materialize();
-        let third_item = Inventory::Transaction(bitcoin::Txid::from_byte_array(
-            *third_tx.txid().as_bytes(),
-        ));
+        let third_item =
+            Inventory::Transaction(bitcoin::Txid::from_byte_array(*third_tx.txid().as_bytes()));
         peer.send(&Message::GetData(vec![third_item]))?;
         assert_eq!(
             read_reply(&mut peer, |message| matches!(
@@ -1213,7 +1211,11 @@ mod tests {
         assert!(node.state.mempool_gateway().read().is_empty());
 
         let mut frame = Vec::new();
-        write_message(&mut frame, magic, &Message::BlockBytes(third.bytes().clone()))?;
+        write_message(
+            &mut frame,
+            magic,
+            &Message::BlockBytes(third.bytes().clone()),
+        )?;
         let split = frame.len() - 1;
         peer.stream.write_all(&frame[..split])?;
         let partial_body = u64::try_from(third.bytes().len() - 1)?;
@@ -1224,7 +1226,10 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), third_charge);
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::StagedImages),
+            third_charge
+        );
         peer.stream.write_all(&frame[split..])?;
         peer.send(&Message::Ping(0x0053_5441_5254_5550))?;
         assert_eq!(
