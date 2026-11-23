@@ -4170,7 +4170,7 @@ impl Mempool {
     }
 
     fn collect_ancestors(&self, seeds: Vec<EntryId>) -> Vec<EntryId> {
-        let mut seen = VisitSet::new();
+        let mut seen: HashSet<EntryId> = HashSet::new();
         let mut stack = seeds;
         while let Some(id) = stack.pop() {
             if !seen.insert(id) {
@@ -4180,13 +4180,13 @@ impl Mempool {
                 stack.extend_from_slice(&links.parents);
             }
         }
-        let mut ancestors = seen.members().to_vec();
+        let mut ancestors: Vec<EntryId> = seen.into_iter().collect();
         ancestors.sort_unstable();
         ancestors
     }
 
     fn collect_descendants(&self, id: EntryId, out: &mut Vec<EntryId>, include_root: bool) {
-        let mut seen = VisitSet::new();
+        let mut seen: HashSet<EntryId> = HashSet::new();
         for existing in out.iter() {
             seen.insert(*existing);
         }
