@@ -9,7 +9,7 @@ permissions:
 
 concurrency:
   group: stabilization-formal-complete-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -35,6 +35,58 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: Assemble and export the complete product tree
+        run: |
+          set -euo pipefail
+          git config user.name "Stabilization verification"
+          git config user.email "stabilization-verification@users.noreply.github.com"
+          git fetch --no-tags origin 0d0594a058be188ad8c6aead4d2ba8e493a8d06c 26b405bf372694fd4fdcf795ca94db7be8ff929b 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78
+          for integration_source in 0d0594a058be188ad8c6aead4d2ba8e493a8d06c 26b405bf372694fd4fdcf795ca94db7be8ff929b 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78; do
+            if ! git merge --no-ff --no-edit "$integration_source"; then
+              conflict_paths="$(git diff --name-only --diff-filter=U)"
+              test -n "$conflict_paths"
+              while IFS= read -r conflict_path; do
+                case "$conflict_path" in
+                  docs/contracts/evidence-index.md|docs/contracts/README.md) ;;
+                  *) git diff -- "$conflict_path"; exit 1 ;;
+                esac
+              done <<< "$conflict_paths"
+              git checkout --ours -- docs/contracts/evidence-index.md docs/contracts/README.md
+              cargo run --locked -p contract-index
+              git add docs/contracts/evidence-index.md docs/contracts/README.md
+              git commit --no-edit
+            fi
+          done
+          cargo fmt --all
+          cargo run --locked -p contract-index
+          cargo run --locked -p contract-index -- --check
+          cargo metadata --manifest-path tools/ldk/Cargo.toml --format-version 1 > /dev/null
+          cargo metadata --locked --manifest-path tools/ldk/Cargo.toml --format-version 1 > /dev/null
+          cargo metadata --manifest-path tools/stratum-sv2/template-provider/Cargo.toml --format-version 1 > /dev/null
+          cargo metadata --locked --manifest-path tools/stratum-sv2/template-provider/Cargo.toml --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.lock
+          git diff --check
+          git add -u
+          git rm --cached -- .github/workflows/private-formal-complete-verification.yml
+          mkdir -p target/verification-logs
+          git write-tree > target/verification-logs/product-tree.txt
+          printf 'PRODUCT_TREE %s\n' "$(git write-tree)"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const cp = require('node:child_process');
+          const paths = cp.execFileSync('git', ['diff', '--cached', '--name-only', '-z', '5ebd5abc6f5f1528f6ddda121202bec6d5b8f313'], { encoding: 'utf8' }).split('\0').filter(Boolean);
+          for (const path of paths) {
+            if (!fs.existsSync(path)) throw new Error('unexpected product deletion: ' + path);
+            const bytes = fs.readFileSync(path);
+            const sha = crypto.createHash('sha1').update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
+            console.log('PRODUCT_FILE ' + JSON.stringify({path, sha, size: bytes.length}));
+            for (let offset = 0; offset < bytes.length; offset += 12000) {
+              console.log('PRODUCT_CHUNK ' + JSON.stringify({path, offset, data: bytes.subarray(offset, offset + 12000).toString('base64')}));
+            }
+          }
+          NODE
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.11"
