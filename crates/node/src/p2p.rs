@@ -1376,6 +1376,37 @@ mod dispatch_tests {
     }
 
     #[test]
+    fn getdata_before_inventory_does_not_reveal_local_transactions() -> Result<(), PeerError> {
+        let (gateway, tx) = gateway_holding_witness_tx(false);
+        let txid = bitcoin::Txid::from_byte_array(*tx.txid().as_bytes());
+        let wtxid = bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes());
+        for item in [
+            Inventory::Transaction(txid),
+            Inventory::WitnessTransaction(txid),
+            Inventory::WTx(wtxid),
+        ] {
+            let mut responses = Vec::new();
+            dispatch_inbound_full(
+                &mut ready_peer(),
+                &Message::GetData(vec![item]),
+                None,
+                Some(&RefTxInventory(&gateway)),
+                &|| true,
+                &|| true,
+                &mut |message| {
+                    responses.push(message);
+                    Ok(())
+                },
+                &mut |_| {},
+                &mut |_| {},
+            )?;
+            assert_eq!(responses, vec![Message::NotFound(vec![item])]);
+            assert_eq!(gateway.read().unbroadcast_transactions().count(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn getdata_completes_initial_broadcast_only_after_successful_send() -> Result<(), PeerError> {
         for kind in 0..3 {
             let gateway = MempoolGateway::new(
