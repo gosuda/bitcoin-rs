@@ -74,7 +74,7 @@ NODE
 }
 
 height_test='p2p::block_announce::tests::recent_block_budget_refusal_preserves_slot_and_last_reader'
-chain_test='tests::chain_only_getdata_serves_recent_transactions_without_inventory'
+chain_test='dispatch::tests::chain_only_getdata_serves_recent_transactions_without_inventory'
 git fetch --depth=1 origin "$qa_height_control" "$qa_chain_control" "$qa_product"
 
 git checkout --detach "$qa_height_control"

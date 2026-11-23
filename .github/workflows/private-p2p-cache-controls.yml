@@ -9,7 +9,7 @@ permissions:
 
 concurrency:
   group: private-p2p-cache-controls
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 defaults:
   run:
