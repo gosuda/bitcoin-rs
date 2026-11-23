@@ -188,13 +188,12 @@ impl MiningCoordinator {
             Ok(lock) => lock,
             Err(error) => return map_apply_error(error),
         };
-        if generation.is_some_and(|key| self.service.live_generation_key() != key) {
-            return Err(coordinator::generation_race());
-        }
-        if matches!(
-            self.known_block_result(block_hash),
-            Some(BlockValidationResult::Duplicate)
-        ) {
+        if generation.is_none()
+            && matches!(
+                self.known_block_result(block_hash),
+                Some(BlockValidationResult::Duplicate)
+            )
+        {
             return Ok(BlockValidationResult::Duplicate);
         }
 
@@ -830,6 +829,10 @@ mod tests {
         };
         mining.generate(request())?;
         let committed = state.chainstate().applied_tip_snapshot();
+        let before_gate = state
+            .mempool_gateway()
+            .stable_generation()
+            .ok_or(crate::test_support::TestError::Missing("open admission"))?;
         assert!(matches!(
             mining.submit(&stale, Some(generation)),
             Err(error) if error.is_template_generation_race()
@@ -841,7 +844,10 @@ mod tests {
                 .map(|tip| tip.hash),
             committed.map(|tip| tip.hash)
         );
-        assert!(state.mempool_gateway().stable_generation().is_some());
+        assert_eq!(
+            state.mempool_gateway().stable_generation(),
+            Some(before_gate + 2)
+        );
         assert_eq!(mining.generate(request())?.len(), 1);
         assert_eq!(
             state
