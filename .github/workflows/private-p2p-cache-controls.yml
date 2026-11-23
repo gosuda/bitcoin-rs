@@ -1,0 +1,54 @@
+name: Private P2P cache negative controls
+
+on:
+  push:
+    branches: [stabilize/private-p2p-cache-controls-20261124]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-p2p-cache-controls
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "2"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  cache-controls:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Provision focused test tools
+        run: |
+          set -euo pipefail
+          mkdir -p target/p2p-cache-controls
+          bash scripts/ci-setup.sh apt nextest 2>&1 | tee target/p2p-cache-controls/setup.log
+          cargo nextest --version > target/p2p-cache-controls/nextest-version.txt
+      - name: Verify exact negative and positive outcomes
+        run: |
+          set -euo pipefail
+          bash -n scripts/verify-p2p-cache-controls.sh
+          cp scripts/verify-p2p-cache-controls.sh "$RUNNER_TEMP/p2p-cache-controls.sh"
+          bash "$RUNNER_TEMP/p2p-cache-controls.sh"
+      - name: Preserve logs and JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: p2p-cache-controls
+          path: target/p2p-cache-controls/**
+          if-no-files-found: error
+          retention-days: 7
