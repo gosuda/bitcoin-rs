@@ -366,6 +366,7 @@ wallet interoperability remain unverified.
 - Backend bulk routes hold node-wide expensive-query admission through the HTTP response write.
 - `GET /esplora/block-template` keeps unauthenticated backend access and uses the same admission before template assembly.
 - Template requests retain their slot until the response write completes or fails.
+- Proof: `esplora::tests::backend_templates_share_expensive_admission_through_send` checks admission before template work and slot retention through successful and failed writes. `server::tests::listeners::expensive_query_saturation_preserves_shared_and_split_listener_service` checks refusal before provider calls and admission recovery on shared and split listeners.
 - History reads use bounded pages and cursors preserving public Esplora cursor semantics.
 - Cursors are the exact lowercase `txid` display text.
 - Malformed, noncanonical (including uppercase or prefixed), unknown, and missing cursors restart from the beginning.
@@ -900,6 +901,15 @@ Proof: `mining::tests::templates_reject_missing_inputs_without_mutating_chainsta
 - `gettxoutsetinfo` accepts at most three parameters.
 - The measured call is `["muhash", null, false]`.
 - A fourth positional argument MUST return `InvalidParams`.
+
+### `API-38`: HTTP request-head framing
+
+- Owner: the bounded head reader in `crates/wire/src/server.rs`.
+- A carriage return in a request-head line MUST be followed immediately by LF.
+- A bare carriage return produces HTTP 400 before route selection.
+- The check applies to the request head. It does not modify body bytes.
+- Accepted field text retains UTF-8 and horizontal tab support. Header lines can end with LF.
+- Proof: `server::tests::bare_carriage_returns_in_request_heads_are_rejected` checks malformed request lines and header fields through the reader and HTTP response. `server::tests::request_head_validation_preserves_field_text_and_binary_body` checks accepted field text, LF header lines, partial reads, and unchanged binary body bytes.
 
 ## RPC differential testing and in-process embedding status
 
