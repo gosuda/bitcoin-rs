@@ -3,7 +3,7 @@ use bitcoin_rs_consensus::primitives::Hash256;
 
 use bitcoin_rs_consensus::header_rules::{BlockHeader, ChainWork};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct NodeId(u32);
 
@@ -13,8 +13,11 @@ impl NodeId {
         Self(id)
     }
 
-    pub(crate) fn index(self) -> Option<usize> {
-        usize::try_from(self.0).ok()
+    pub(crate) const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(id) => Some(Self(id)),
+            None => None,
+        }
     }
 }
 

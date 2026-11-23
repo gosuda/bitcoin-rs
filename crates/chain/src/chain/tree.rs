@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_consensus::primitives::Hash256;
@@ -17,7 +20,7 @@ use active_index::ActiveHeightIndex;
 
 #[derive(Default)]
 struct Bip9Cache {
-    entries: RwLock<HashMap<(NodeId, u32), u8>>,
+    entries: RwLock<BTreeMap<(NodeId, u32), u8>>,
 }
 
 impl Bip9Cache {
@@ -30,11 +33,24 @@ impl Bip9Cache {
         self.entries.read().get(&(node_id, deployment_id)).copied()
     }
 
-    fn invalidate_nodes(&self, invalid: &[bool]) {
-        self.entries.write().retain(|(id, _), _| {
-            id.index()
-                .is_none_or(|index| invalid.get(index) != Some(&true))
-        });
+    fn invalidate_nodes(&self, invalid: &[bool], slots: &HashMap<NodeId, usize>) {
+        self.entries
+            .write()
+            .retain(|(id, _), _| slots.get(id).is_none_or(|&index| !invalid[index]));
+    }
+
+    fn remove_node(&self, id: NodeId) {
+        let mut entries = self.entries.write();
+        loop {
+            let key = entries
+                .range((id, u32::MIN)..=(id, u32::MAX))
+                .next()
+                .map(|(&key, _)| key);
+            let Some(key) = key else {
+                break;
+            };
+            entries.remove(&key);
+        }
     }
 }
 
@@ -50,12 +66,23 @@ pub(crate) struct Inserted {
     pub(crate) demoted_tip: Option<Hash256>,
 }
 
+struct ResidentNode {
+    id: NodeId,
+    node: BlockTreeNode,
+    child_count: usize,
+}
+
 pub struct BlockTree {
-    nodes: Slab<BlockTreeNode>,
+    nodes: Slab<ResidentNode>,
+    slots: HashMap<NodeId, usize>,
+    leaves: BTreeSet<NodeId>,
+    next_node_id: Option<NodeId>,
     by_hash: HashTable<NodeId>,
     active_by_height: ActiveHeightIndex,
     tip: Arc<ArcSwapOption<TipSnapshot>>,
     bip9_cache: Bip9Cache,
+    #[cfg(any(test, feature = "test-seam"))]
+    topology_dirty: bool,
 }
 
 impl BlockTree {
@@ -63,10 +90,15 @@ impl BlockTree {
     pub fn new() -> Self {
         Self {
             nodes: Slab::new(),
+            slots: HashMap::new(),
+            leaves: BTreeSet::new(),
+            next_node_id: Some(NodeId::new(0)),
             by_hash: HashTable::new(),
             active_by_height: ActiveHeightIndex::new(),
             tip: Arc::new(ArcSwapOption::empty()),
             bip9_cache: Bip9Cache::default(),
+            #[cfg(any(test, feature = "test-seam"))]
+            topology_dirty: false,
         }
     }
 
@@ -81,10 +113,14 @@ impl BlockTree {
     }
 
     pub fn node(&self, id: NodeId) -> Result<&BlockTreeNode, ChainError> {
-        let Some(index) = id.index() else {
-            return Err(ChainError::UnknownNode { id });
-        };
-        self.nodes.get(index).ok_or(ChainError::UnknownNode { id })
+        Ok(&self.nodes[self.slot(id)?].node)
+    }
+
+    fn slot(&self, id: NodeId) -> Result<usize, ChainError> {
+        self.slots
+            .get(&id)
+            .copied()
+            .ok_or(ChainError::UnknownNode { id })
     }
 
     #[cfg(any(test, feature = "test-seam"))]
@@ -96,6 +132,7 @@ impl BlockTree {
         if is_indexed_active_node {
             self.active_by_height.taint();
         }
+        self.topology_dirty = true;
         self.node_mut_without_index_invalidation(id)
     }
 
@@ -103,12 +140,8 @@ impl BlockTree {
         &mut self,
         id: NodeId,
     ) -> Result<&mut BlockTreeNode, ChainError> {
-        let Some(index) = id.index() else {
-            return Err(ChainError::UnknownNode { id });
-        };
-        self.nodes
-            .get_mut(index)
-            .ok_or(ChainError::UnknownNode { id })
+        let slot = self.slot(id)?;
+        Ok(&mut self.nodes[slot].node)
     }
 
     pub fn record_applied_tx_count(
@@ -211,9 +244,7 @@ impl BlockTree {
     pub fn lookup(&self, hash: Hash256) -> Option<NodeId> {
         self.by_hash
             .find(hash_table_key(hash), |id| {
-                id.index()
-                    .and_then(|index| self.nodes.get(index))
-                    .is_some_and(|node| node.hash == hash)
+                self.nodes[self.slots[id]].node.hash == hash
             })
             .copied()
     }
@@ -230,22 +261,123 @@ impl BlockTree {
 
     #[must_use]
     pub fn leaf_node_ids(&self) -> Vec<NodeId> {
-        let mut parents: hashbrown::HashSet<usize> = hashbrown::HashSet::new();
-        for (_index, node) in &self.nodes {
-            if let Some(parent_index) = node.parent.and_then(NodeId::index) {
-                parents.insert(parent_index);
-            }
+        #[cfg(any(test, feature = "test-seam"))]
+        if self.topology_dirty {
+            let parents: BTreeSet<_> = self
+                .nodes
+                .iter()
+                .filter_map(|(_, resident)| resident.node.parent)
+                .collect();
+            let mut leaves: Vec<_> = self
+                .nodes
+                .iter()
+                .filter_map(|(_, resident)| {
+                    (!parents.contains(&resident.id)).then_some(resident.id)
+                })
+                .collect();
+            leaves.sort_unstable();
+            return leaves;
         }
+        self.leaves.iter().copied().collect()
+    }
 
-        let mut leaves = Vec::new();
-        for (index, _node) in &self.nodes {
-            if !parents.contains(&index)
-                && let Ok(id_u32) = u32::try_from(index)
-            {
-                leaves.push(NodeId::new(id_u32));
+    pub(crate) fn reclaim_leaves(
+        &mut self,
+        required_roots: &[NodeId],
+        max_resident: usize,
+        max_removals: usize,
+    ) -> Result<usize, ChainError> {
+        let mut protected = BTreeSet::new();
+        for id in required_roots.iter().copied().chain(self.tip_id()) {
+            self.node(id)?;
+            protected.insert(id);
+        }
+        if self.len() <= max_resident || max_removals == 0 {
+            return Ok(0);
+        }
+        #[cfg(any(test, feature = "test-seam"))]
+        self.rebuild_topology_if_dirty()?;
+
+        let mut removed = 0;
+        while self.len() > max_resident && removed < max_removals {
+            let Some(id) = self
+                .leaves
+                .iter()
+                .copied()
+                .find(|id| !protected.contains(id))
+            else {
+                break;
+            };
+            let slot = self.slots[&id];
+            let resident = &self.nodes[slot];
+            assert_eq!(resident.child_count, 0);
+            let Ok(entry) = self
+                .by_hash
+                .find_entry(hash_table_key(resident.node.hash), |candidate| {
+                    *candidate == id
+                })
+            else {
+                unreachable!("a resident leaf has a hash index entry");
+            };
+            entry.remove();
+            self.bip9_cache.remove_node(id);
+            let resident = self.nodes.remove(slot);
+            assert_eq!(self.slots.remove(&id), Some(slot));
+            assert!(self.leaves.remove(&id));
+            if let Some(parent) = resident.node.parent {
+                let parent_node = &mut self.nodes[self.slots[&parent]];
+                assert!(parent_node.child_count > 0);
+                parent_node.child_count -= 1;
+                if parent_node.child_count == 0 {
+                    self.leaves.insert(parent);
+                }
+            }
+            removed += 1;
+        }
+        if removed > 0 {
+            if self.nodes.capacity() / 2 > self.nodes.len() {
+                let slots = &mut self.slots;
+                self.nodes.compact(|resident, _from, to| {
+                    let Some(slot) = slots.get_mut(&resident.id) else {
+                        unreachable!("a resident node has a logical ID entry");
+                    };
+                    *slot = to;
+                    true
+                });
+            }
+            if self.slots.capacity() / 2 > self.slots.len() {
+                self.slots.shrink_to_fit();
+            }
+            if self.by_hash.capacity() / 2 > self.by_hash.len() {
+                let nodes = &self.nodes;
+                let slots = &self.slots;
+                self.by_hash
+                    .shrink_to_fit(|id| node_hash_key(nodes, slots, *id));
             }
         }
-        leaves
+        Ok(removed)
+    }
+
+    #[cfg(any(test, feature = "test-seam"))]
+    fn rebuild_topology_if_dirty(&mut self) -> Result<(), ChainError> {
+        if !self.topology_dirty {
+            return Ok(());
+        }
+        let mut counts = vec![0; self.nodes.capacity()];
+        for (_, resident) in &self.nodes {
+            if let Some(parent) = resident.node.parent {
+                counts[self.slot(parent)?] += 1;
+            }
+        }
+        self.leaves.clear();
+        for (slot, resident) in &mut self.nodes {
+            resident.child_count = counts[slot];
+            if resident.child_count == 0 {
+                self.leaves.insert(resident.id);
+            }
+        }
+        self.topology_dirty = false;
+        Ok(())
     }
 
     #[must_use]
@@ -559,21 +691,34 @@ impl BlockTree {
             None => (0, block_work, status),
         };
 
-        let index = self.nodes.insert(BlockTreeNode {
-            parent,
-            height,
-            hash,
-            header,
-            chainwork,
-            chain_tx_count: ChainTxCount::UNKNOWN,
-            status,
+        let node_id = self.next_node_id.ok_or(ChainError::NodeIdOverflow {
+            index: usize::try_from(u64::from(u32::MAX) + 1).unwrap_or(usize::MAX),
+        })?;
+        let slot = self.nodes.insert(ResidentNode {
+            id: node_id,
+            node: BlockTreeNode {
+                parent,
+                height,
+                hash,
+                header,
+                chainwork,
+                chain_tx_count: ChainTxCount::UNKNOWN,
+                status,
+            },
+            child_count: 0,
         });
-        let id_u32 = u32::try_from(index).map_err(|_| ChainError::NodeIdOverflow { index })?;
-        let node_id = NodeId::new(id_u32);
+        self.next_node_id = node_id.checked_next();
+        self.slots.insert(node_id, slot);
+        self.leaves.insert(node_id);
+        if let Some(parent) = parent {
+            self.nodes[self.slots[&parent]].child_count += 1;
+            self.leaves.remove(&parent);
+        }
         let nodes = &self.nodes;
+        let slots = &self.slots;
         self.by_hash
             .insert_unique(hash_table_key(hash), node_id, |id| {
-                node_hash_key(nodes, *id)
+                node_hash_key(nodes, slots, *id)
             });
         let demoted_tip = self.publish_tip_if_best(node_id)?;
         Ok(Inserted {
@@ -590,10 +735,7 @@ impl BlockTree {
             && let Some(best) = best
             && best != old_tip.tip_id
         {
-            let old_index = old_tip
-                .tip_id
-                .index()
-                .ok_or(ChainError::UnknownNode { id: old_tip.tip_id })?;
+            let old_index = self.slot(old_tip.tip_id)?;
             if !invalid[old_index] {
                 if self.find_common_ancestor(old_tip.tip_id, best) != Some(old_tip.tip_id) {
                     demoted_tip = Some(old_tip.hash);
@@ -606,21 +748,22 @@ impl BlockTree {
         self.tip.store(None);
         self.active_by_height.clear_tainted();
 
-        let mut hashes = Vec::with_capacity(invalid.iter().filter(|&&b| b).count());
-        for (index, node) in &mut self.nodes {
+        let mut invalid_nodes = Vec::with_capacity(invalid.iter().filter(|&&b| b).count());
+        for (index, resident) in &mut self.nodes {
             if invalid[index] {
-                node.status = NodeStatus::Invalid;
-                hashes.push(node.hash);
+                resident.node.status = NodeStatus::Invalid;
+                invalid_nodes.push((resident.id, resident.node.hash));
             }
         }
-        self.bip9_cache.invalidate_nodes(&invalid);
+        invalid_nodes.sort_unstable_by_key(|(id, _)| *id);
+        self.bip9_cache.invalidate_nodes(&invalid, &self.slots);
 
         if let Some(best) = best {
             self.publish_tip_if_best(best)?;
         }
 
         Ok(InvalidationOutcome {
-            invalid: hashes,
+            invalid: invalid_nodes.into_iter().map(|(_, hash)| hash).collect(),
             demoted_tip,
         })
     }
@@ -630,20 +773,13 @@ impl BlockTree {
     }
 
     fn invalidation_plan(&self, root: NodeId) -> Result<(Vec<bool>, Option<NodeId>), ChainError> {
-        let root_index = root.index().ok_or(ChainError::UnknownNode { id: root })?;
-        self.node(root)?;
+        let root_index = self.slot(root)?;
 
         let node_count = self.nodes.capacity();
         let mut children: Vec<Vec<NodeId>> = (0..node_count).map(|_| Vec::new()).collect();
-        for (index, node) in &self.nodes {
-            if let Some(parent) = node.parent {
-                let parent_index = parent
-                    .index()
-                    .ok_or(ChainError::UnknownNode { id: parent })?;
-                let child_id = u32::try_from(index)
-                    .map(NodeId::new)
-                    .map_err(|_| ChainError::NodeIdOverflow { index })?;
-                children[parent_index].push(child_id);
+        for (_, resident) in &self.nodes {
+            if let Some(parent) = resident.node.parent {
+                children[self.slot(parent)?].push(resident.id);
             }
         }
 
@@ -651,9 +787,9 @@ impl BlockTree {
         let mut worklist = vec![root];
         invalid[root_index] = true;
         while let Some(id) = worklist.pop() {
-            let idx = id.index().ok_or(ChainError::UnknownNode { id })?;
+            let idx = self.slot(id)?;
             for &child in &children[idx] {
-                let child_index = child.index().ok_or(ChainError::UnknownNode { id: child })?;
+                let child_index = self.slot(child)?;
                 if !invalid[child_index] {
                     invalid[child_index] = true;
                     worklist.push(child);
@@ -665,18 +801,14 @@ impl BlockTree {
             .nodes
             .iter()
             .filter(|(index, _)| !invalid[*index])
-            .filter(|(_, node)| node.status != NodeStatus::Invalid)
-            .max_by(|(left_index, left), (right_index, right)| {
-                left.chainwork
-                    .cmp(&right.chainwork)
-                    .then_with(|| right_index.cmp(left_index))
+            .filter(|(_, resident)| resident.node.status != NodeStatus::Invalid)
+            .max_by(|(_, left), (_, right)| {
+                left.node
+                    .chainwork
+                    .cmp(&right.node.chainwork)
+                    .then_with(|| right.id.cmp(&left.id))
             })
-            .map(|(index, _)| {
-                u32::try_from(index)
-                    .map(NodeId::new)
-                    .map_err(|_| ChainError::NodeIdOverflow { index })
-            })
-            .transpose()?;
+            .map(|(_, resident)| resident.id);
 
         Ok((invalid, best))
     }
@@ -696,31 +828,32 @@ impl BlockTree {
         let mut kept = vec![false; self.nodes.capacity()];
         let mut cursor = Some(tip);
         while let Some(id) = cursor {
-            let index = id.index().ok_or(ChainError::UnknownNode { id })?;
-            *kept.get_mut(index).ok_or(ChainError::UnknownNode { id })? = true;
+            let index = self.slot(id)?;
+            kept[index] = true;
             cursor = self.node(id)?.parent;
         }
+        let mut ordered: Vec<_> = self
+            .nodes
+            .iter()
+            .map(|(slot, resident)| (resident.id, slot))
+            .collect();
+        ordered.sort_unstable_by_key(|(id, _)| *id);
         let mut side = Vec::new();
-        for (index, node) in &self.nodes {
+        for (id, index) in ordered {
+            let node = &self.nodes[index].node;
             let Some(parent) = node.parent else {
                 continue;
             };
-            let parent_index = parent
-                .index()
-                .ok_or(ChainError::UnknownNode { id: parent })?;
+            let parent_index = self.slot(parent)?;
             if kept[index]
                 || node.status == NodeStatus::Invalid
                 || node.chainwork > tip_work
-                || !kept.get(parent_index).copied().unwrap_or(false)
+                || !kept[parent_index]
             {
                 continue;
             }
             kept[index] = true;
-            side.push(
-                u32::try_from(index)
-                    .map(NodeId::new)
-                    .map_err(|_| ChainError::NodeIdOverflow { index })?,
-            );
+            side.push(id);
         }
         Ok(side)
     }
@@ -821,10 +954,8 @@ pub(crate) fn hash_table_key(hash: Hash256) -> u64 {
     u64::from_le_bytes(hash.prefix8())
 }
 
-fn node_hash_key(nodes: &Slab<BlockTreeNode>, id: NodeId) -> u64 {
-    id.index()
-        .and_then(|index| nodes.get(index))
-        .map_or(0, |node| hash_table_key(node.hash))
+fn node_hash_key(nodes: &Slab<ResidentNode>, slots: &HashMap<NodeId, usize>, id: NodeId) -> u64 {
+    hash_table_key(nodes[slots[&id]].node.hash)
 }
 
 #[cfg(test)]
@@ -919,6 +1050,323 @@ mod tests {
             ids.push(tree.insert_header(header, NodeStatus::HeaderValid)?);
         }
         Ok((tree, ids, times))
+    }
+
+    // SYNC-03, SYNC-05
+    #[test]
+    fn reclaimed_ids_never_alias_reused_slots_or_cached_states() -> Result<(), TestError> {
+        let (mut tree, main) = linear_chain(2)?;
+        let evicted = extend(&mut tree, main[0], 100)?;
+        let hash = tree.node(evicted)?.hash;
+        let slot = tree.slot(evicted)?;
+        let retained = extend(&mut tree, main[0], 101)?;
+        for deployment in [u32::MIN, 1, u32::MAX] {
+            tree.cache_bip9_state(evicted, deployment, 3);
+            tree.cache_bip9_state(main[0], deployment, 4);
+            tree.cache_bip9_state(retained, deployment, 5);
+        }
+
+        assert_eq!(tree.reclaim_leaves(&[], main.len() + 1, 1)?, 1);
+        assert_eq!(tree.lookup(hash), None);
+        assert!(matches!(tree.node(evicted), Err(ChainError::UnknownNode { id }) if id == evicted));
+
+        let replacement = extend(&mut tree, main[0], 102)?;
+        assert!(replacement > evicted);
+        assert_eq!(tree.slot(replacement)?, slot);
+        assert_eq!(tree.parent_id(replacement)?, Some(main[0]));
+        assert!(
+            matches!(tree.parent_id(evicted), Err(ChainError::UnknownNode { id }) if id == evicted)
+        );
+        assert_eq!(tree.lookup(hash), None);
+        for deployment in [u32::MIN, 1, u32::MAX] {
+            assert_eq!(tree.cached_bip9_state(evicted, deployment), None);
+            assert_eq!(tree.cached_bip9_state(replacement, deployment), None);
+            assert_eq!(tree.cached_bip9_state(main[0], deployment), Some(4));
+            assert_eq!(tree.cached_bip9_state(retained, deployment), Some(5));
+        }
+        Ok(())
+    }
+
+    // SYNC-03
+    #[test]
+    fn reclamation_bounds_resident_slots_across_repeated_forks() -> Result<(), TestError> {
+        let (mut tree, main) = linear_chain(2)?;
+        let first = extend(&mut tree, main[0], 100)?;
+        let capacity = tree.nodes.capacity();
+        assert_eq!(tree.reclaim_leaves(&[], main.len(), 1)?, 1);
+
+        for nonce in 101..=4_196 {
+            let leaf = extend(&mut tree, main[0], nonce)?;
+            tree.cache_bip9_state(leaf, 1, 2);
+            assert!(leaf > first);
+            assert_eq!(tree.reclaim_leaves(&[], main.len(), 1)?, 1);
+            assert_eq!(tree.len(), main.len());
+            assert!(tree.nodes.capacity() <= capacity);
+            assert_eq!(tree.slots.len(), main.len());
+            assert_eq!(tree.by_hash.len(), main.len());
+            assert_eq!(tree.leaf_node_ids(), [main[2]]);
+            assert_eq!(tree.cached_bip9_state(leaf, 1), None);
+        }
+        assert!(matches!(tree.node(first), Err(ChainError::UnknownNode { id }) if id == first));
+        Ok(())
+    }
+
+    // SYNC-01, SYNC-02, SYNC-03
+    #[test]
+    fn reclamation_preserves_required_roots_and_their_ancestors() -> Result<(), TestError> {
+        let (mut tree, main) = linear_chain(6)?;
+        let applied = extend_branch(&mut tree, main[0], 100..=102)?;
+        let historical = extend_branch(&mut tree, main[0], 200..=203)?;
+        let replay = extend_branch(&mut tree, main[0], 300..=302)?;
+        let operator_header = test_header(BlockHash(tree.node(main[0])?.hash), 400);
+        let operator = tree.insert_node(Some(main[0]), operator_header, NodeStatus::Invalid)?;
+        let invalid_descendants = extend_branch(&mut tree, operator, 401..=402)?;
+        let unused = extend_branch(&mut tree, main[0], 500..=502)?;
+        let roots = [applied[2], historical[3], replay[1], operator];
+
+        assert_eq!(tree.reclaim_leaves(&roots, 0, 1)?, 1);
+        assert!(matches!(
+            tree.node(replay[2]),
+            Err(ChainError::UnknownNode { .. })
+        ));
+        assert_eq!(tree.reclaim_leaves(&roots, 0, 100)?, 5);
+        assert_eq!(tree.reclaim_leaves(&roots, 0, 100)?, 0);
+        assert_eq!(tree.tip_id(), Some(main[6]));
+        assert_eq!(tree.node(operator)?.status, NodeStatus::Invalid);
+
+        let expected: Vec<_> = main
+            .iter()
+            .chain(&applied)
+            .chain(&historical)
+            .chain(&replay[..2])
+            .copied()
+            .chain([operator])
+            .collect();
+        assert_eq!(tree.len(), expected.len());
+        for id in expected {
+            let node = tree.node(id)?;
+            assert_eq!(tree.lookup(node.hash), Some(id));
+            if let Some(parent) = node.parent {
+                assert!(tree.node(parent).is_ok());
+            }
+        }
+        for id in invalid_descendants.into_iter().chain(unused) {
+            assert!(matches!(tree.node(id), Err(ChainError::UnknownNode { .. })));
+        }
+        assert_eq!(
+            tree.leaf_node_ids(),
+            [main[6], applied[2], historical[3], replay[1], operator]
+        );
+        Ok(())
+    }
+
+    // SYNC-03, SYNC-05
+    #[test]
+    fn unknown_required_root_prevents_all_reclamation() -> Result<(), TestError> {
+        let (mut tree, main) = linear_chain(2)?;
+        let leaf = extend(&mut tree, main[0], 100)?;
+        let hash = tree.node(leaf)?.hash;
+        tree.cache_bip9_state(leaf, 1, 3);
+        let count = tree.len();
+        let leaves = tree.leaf_node_ids();
+        let cursor = tree.next_node_id;
+        let unknown = NodeId::new(u32::MAX);
+
+        for removals in [0, 10] {
+            assert_eq!(
+                tree.reclaim_leaves(&[main[0], unknown], 0, removals),
+                Err(ChainError::UnknownNode { id: unknown })
+            );
+            assert_eq!(tree.len(), count);
+            assert_eq!(tree.leaf_node_ids(), leaves);
+            assert_eq!(tree.next_node_id, cursor);
+            assert_eq!(tree.lookup(hash), Some(leaf));
+            assert_eq!(tree.cached_bip9_state(leaf, 1), Some(3));
+            assert_eq!(tree.tip_id(), Some(main[2]));
+        }
+        Ok(())
+    }
+
+    // SYNC-03, SYNC-05
+    #[test]
+    fn reclamation_compacts_sparse_storage_without_rekeying_public_ids() -> Result<(), TestError> {
+        let (mut tree, main) = linear_chain(2)?;
+        let mut branches = Vec::new();
+        for nonce in 100..=199 {
+            let id = extend(&mut tree, main[0], nonce)?;
+            branches.push((id, tree.node(id)?.hash));
+            tree.cache_bip9_state(id, 1, 3);
+        }
+        let (pinned, pinned_hash) = branches[99];
+        let old_slot = tree.slot(pinned)?;
+        let capacity = tree.nodes.capacity();
+
+        assert_eq!(tree.reclaim_leaves(&[pinned], main.len() + 1, 99)?, 99);
+        assert!(tree.nodes.capacity() < capacity);
+        assert!(tree.slot(pinned)? < old_slot);
+        assert_eq!(tree.node(pinned)?.hash, pinned_hash);
+        assert_eq!(tree.lookup(pinned_hash), Some(pinned));
+        assert_eq!(tree.cached_bip9_state(pinned, 1), Some(3));
+        assert_eq!(tree.leaf_node_ids(), [main[2], pinned]);
+        for &(id, hash) in &branches[..99] {
+            assert_eq!(tree.lookup(hash), None);
+            assert!(matches!(tree.node(id), Err(ChainError::UnknownNode { .. })));
+            assert_eq!(tree.cached_bip9_state(id, 1), None);
+        }
+        for (height, &id) in main.iter().enumerate() {
+            let node = tree.node(id)?;
+            assert_eq!(tree.lookup(node.hash), Some(id));
+            assert_eq!(
+                tree.active_node_at_height(u32::try_from(height)?)
+                    .map(|active| active.hash),
+                Some(node.hash)
+            );
+        }
+        let child = extend(&mut tree, pinned, 200)?;
+        assert_eq!(tree.replayable_side_nodes(main[2])?, [pinned, child]);
+        Ok(())
+    }
+
+    // SYNC-02, SYNC-05
+    #[test]
+    fn replay_keeps_parents_before_children_after_slot_reuse() -> Result<(), TestError> {
+        let (mut tree, main) = linear_chain(6)?;
+        let discarded = extend_branch(&mut tree, main[0], 100..=101)?;
+        let parent = extend(&mut tree, main[0], 200)?;
+        assert_eq!(tree.reclaim_leaves(&[parent], main.len() + 1, 2)?, 2);
+        for id in discarded {
+            assert!(matches!(tree.node(id), Err(ChainError::UnknownNode { .. })));
+        }
+        let child = extend(&mut tree, parent, 201)?;
+        let grandchild = extend(&mut tree, child, 202)?;
+        assert!(tree.slot(child)? < tree.slot(parent)?);
+        assert_eq!(
+            tree.replayable_side_nodes(main[6])?,
+            [parent, child, grandchild]
+        );
+        Ok(())
+    }
+
+    // SYNC-04, SYNC-05
+    #[test]
+    fn invalidation_uses_logical_order_and_resident_slots_after_reuse() -> Result<(), TestError> {
+        let (mut tree, main) = linear_chain(2)?;
+        extend_branch(&mut tree, main[0], 100..=101)?;
+        let older = extend_branch(&mut tree, main[0], 200..=201)?;
+        assert_eq!(
+            tree.reclaim_leaves(&[older[1]], main.len() + older.len(), 2)?,
+            2
+        );
+        let newer = extend_branch(&mut tree, main[0], 300..=301)?;
+        assert!(older[1] < newer[1]);
+        assert!(tree.slot(newer[1])? < tree.slot(older[1])?);
+        for &id in older.iter().chain(&newer) {
+            tree.cache_bip9_state(id, 1, 3);
+        }
+
+        assert_eq!(tree.tip_after_invalidation(main[1])?, Some(older[1]));
+        tree.invalidate_subtree(main[1])?;
+        assert_eq!(tree.tip_id(), Some(older[1]));
+        let expected_hashes = newer
+            .iter()
+            .map(|&id| tree.node(id).map(|node| node.hash))
+            .collect::<Result<Vec<_>, _>>()?;
+        let outcome = tree.invalidate_subtree(newer[0])?;
+        assert_eq!(outcome.invalid, expected_hashes);
+        assert_eq!(tree.tip_id(), Some(older[1]));
+        for id in newer {
+            assert_eq!(tree.node(id)?.status, NodeStatus::Invalid);
+            assert_eq!(tree.cached_bip9_state(id, 1), None);
+        }
+        for id in older {
+            assert_ne!(tree.node(id)?.status, NodeStatus::Invalid);
+            assert_eq!(tree.cached_bip9_state(id, 1), Some(3));
+        }
+        Ok(())
+    }
+
+    // SYNC-03, SYNC-05
+    #[test]
+    fn exhausted_logical_ids_refuse_insert_before_mutation_even_with_free_slots()
+    -> Result<(), TestError> {
+        let (mut tree, main) = linear_chain(2)?;
+        tree.next_node_id = Some(NodeId::new(u32::MAX - 1));
+        let first = extend(&mut tree, main[0], 100)?;
+        let last = extend(&mut tree, main[0], 101)?;
+        assert_eq!(first, NodeId::new(u32::MAX - 1));
+        assert_eq!(last, NodeId::new(u32::MAX));
+        assert_eq!(tree.next_node_id, None);
+        assert_eq!(tree.reclaim_leaves(&[last], main.len() + 1, 1)?, 1);
+        let remaining = tree.slots.clone();
+        let leaves = tree.leaf_node_ids();
+        let hashes: Vec<_> = tree
+            .nodes
+            .iter()
+            .map(|(_, resident)| (resident.id, resident.node.hash))
+            .collect();
+        tree.cache_bip9_state(last, 1, 3);
+
+        for nonce in [102, 103] {
+            assert!(matches!(
+                extend(&mut tree, main[0], nonce),
+                Err(ChainError::NodeIdOverflow { .. })
+            ));
+            assert_eq!(tree.slots, remaining);
+            assert_eq!(tree.len(), main.len() + 1);
+            assert_eq!(tree.leaf_node_ids(), leaves);
+            assert_eq!(tree.next_node_id, None);
+            assert_eq!(tree.tip_id(), Some(main[2]));
+            assert_eq!(tree.cached_bip9_state(last, 1), Some(3));
+            for &(id, hash) in &hashes {
+                assert_eq!(tree.node(id)?.hash, hash);
+                assert_eq!(tree.lookup(hash), Some(id));
+            }
+        }
+        assert!(matches!(tree.node(first), Err(ChainError::UnknownNode { id }) if id == first));
+        Ok(())
+    }
+
+    // SYNC-03
+    #[test]
+    fn reclamation_rebuilds_test_mutated_topology_without_losing_ancestors() -> Result<(), TestError>
+    {
+        let (mut tree, main) = linear_chain(4)?;
+        let branch = extend_branch(&mut tree, main[0], 100..=101)?;
+        let moved = extend(&mut tree, main[0], 200)?;
+        tree.node_mut(moved)?.parent = Some(branch[0]);
+        assert_eq!(tree.leaf_node_ids(), [main[4], branch[1], moved]);
+
+        assert_eq!(tree.reclaim_leaves(&[moved], 0, 10)?, 1);
+        assert!(tree.node(branch[0]).is_ok());
+        assert!(tree.node(moved).is_ok());
+        assert!(matches!(
+            tree.node(branch[1]),
+            Err(ChainError::UnknownNode { .. })
+        ));
+        assert_eq!(tree.leaf_node_ids(), [main[4], moved]);
+        Ok(())
+    }
+
+    // SYNC-03, SYNC-05
+    #[test]
+    fn reclamation_refuses_unknown_test_parent_before_removing_any_leaf() -> Result<(), TestError> {
+        let (mut tree, main) = linear_chain(2)?;
+        let side = extend(&mut tree, main[0], 100)?;
+        let unknown = NodeId::new(u32::MAX);
+        tree.node_mut(side)?.parent = Some(unknown);
+        let slots = tree.slots.clone();
+        let leaves = tree.leaf_node_ids();
+
+        assert_eq!(
+            tree.reclaim_leaves(&[], 0, 10),
+            Err(ChainError::UnknownNode { id: unknown })
+        );
+        assert_eq!(tree.slots, slots);
+        assert_eq!(tree.len(), main.len() + 1);
+        assert_eq!(tree.leaf_node_ids(), leaves);
+        assert_eq!(tree.node(side)?.parent, Some(unknown));
+        assert!(tree.topology_dirty);
+        Ok(())
     }
 
     #[test]
@@ -1074,10 +1522,7 @@ mod tests {
         assert_eq!(tree.node_at_height_from(side_ids[3], 1), Some(side_ids[1]));
 
         let active_prefix = main_ids[4];
-        let active_prefix_index = active_prefix.index().ok_or("invalid active prefix")?;
-        tree.nodes
-            .get_mut(active_prefix_index)
-            .ok_or("missing active prefix")?
+        tree.node_mut_without_index_invalidation(active_prefix)?
             .parent = None;
         assert_eq!(
             tree.node_at_height_from(active_prefix, 1),

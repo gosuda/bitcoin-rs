@@ -266,7 +266,7 @@ pub struct AncestryBudgetExceeded;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ChainError {
-    #[error("block-tree node index {index} does not fit in NodeId")]
+    #[error("block-tree logical node ID capacity exhausted (index {index})")]
     NodeIdOverflow { index: usize },
     #[error("unknown block-tree node {id:?}")]
     UnknownNode { id: NodeId },
