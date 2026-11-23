@@ -5,7 +5,6 @@ use super::{
     BlockProvenance, BlockValidationContext, BlockValidationProof, Chainstate, ConnectOutcome,
     PreparedApply, ProvenApply, ResolvedUtxoView, WindowApplyDisposition, WindowApplyError,
 };
-use crate::chain::NodeStatus;
 use crate::error::ApplyError;
 use bitcoin_rs_consensus::primitives::{BlockImage, Hash256, Txid};
 use rayon::prelude::*;
@@ -300,16 +299,14 @@ fn restore_uncommitted_takes(
 
 fn admit_window_headers(handles: &Chainstate, payloads: &[&BlockImage]) {
     let mut tree = handles.block_tree.write();
+    let mut removals = crate::header_admission::RECLAIM_PER_ADMISSION;
     for payload in payloads {
         let header = payload.header();
-        let hash = payload.block_hash().0;
-        if tree.lookup(hash).is_some() {
-            continue;
-        }
-        if tree.insert_header(header, NodeStatus::HeaderValid).is_err() {
-            return;
+        if handles.admit_headers_retained(&mut tree, &[header], None, &mut removals).is_err() {
+            break;
         }
     }
+    handles.reevaluate_assume_valid_with(&tree);
 }
 
 fn proved_window<'a, 'h>(
@@ -329,6 +326,7 @@ pub(super) fn apply_window_admitted(
     handles: &Chainstate,
     payloads: &[&BlockImage],
 ) -> core::result::Result<Vec<ConnectOutcome>, WindowApplyError> {
+    let _pending_headers = handles.header_role.begin_application();
     if payloads.len() > 1
         && handles.applied_tip.load_full().is_none()
         && payloads[0].block_hash().0 == handles.network.genesis_block_hash()
@@ -544,7 +542,7 @@ fn invalidate_permanent_failure(
     handles: &Chainstate,
     hash: Hash256,
 ) -> (Box<[Hash256]>, WindowApplyDisposition) {
-    match crate::reorg::invalidate_and_republish(handles, hash) {
+    match crate::reorg::invalidate_and_republish(handles, hash, crate::reorg::InvalidationOrigin::Consensus) {
         Ok(outcome) => (
             outcome.invalid.into_boxed_slice(),
             WindowApplyDisposition::Permanent,
@@ -1530,6 +1528,7 @@ mod workspace_guard_tests {
 
         let b1 = mined_regtest_child_at(genesis.block_hash(), 1).expect("mine block 1");
         let b1_image = BlockImage::from_local(b1.clone());
+        let _pending_headers = chain.header_role.begin_application();
         let tip = crate::connect::applied_header_tip(
             &chain,
             Hash256::from(b1.block_hash()),

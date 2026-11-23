@@ -223,7 +223,8 @@ pub use deployment::{
     softfork_state,
 };
 pub use header_sync::{
-    AcceptHeaders, HeaderAdmission, HeaderRefusal, HeaderValidationMode, accept_headers,
+    AcceptHeaders, HeaderAdmission, HeaderCandidate, HeaderCandidateError, HeaderCandidatePhase,
+    HeaderContextError, HeaderRefusal, HeaderValidationMode, accept_headers,
     block_work, compact_is_met_by, compact_to_target, current_unix_seconds,
     permitted_difficulty_transition, validate_contextual_header, validate_pow,
 };

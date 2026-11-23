@@ -1,5 +1,8 @@
+mod candidate;
 pub(crate) mod context;
 
+pub use candidate::{HeaderCandidate, HeaderCandidateError, HeaderCandidatePhase};
+pub(crate) use candidate::{HeaderCandidateBudget, VerifiedHeaderTarget};
 pub use context::HeaderContextError;
 
 use bitcoin_rs_consensus::MAX_TIMEWARP;
@@ -15,7 +18,7 @@ use crate::chain::{
 };
 use bitcoin_rs_consensus::header_rules::{BlockHeader, ChainWork};
 
-const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
+pub(crate) const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeaderValidationMode {
@@ -38,6 +41,7 @@ pub enum HeaderAdmission {
 #[error("{cause}")]
 pub struct HeaderRefusal {
     cause: String,
+    candidate_anchor: Option<Hash256>,
 }
 
 impl HeaderRefusal {
@@ -45,7 +49,22 @@ impl HeaderRefusal {
     pub fn from_cause(cause: &dyn core::fmt::Display) -> Self {
         Self {
             cause: cause.to_string(),
+            candidate_anchor: None,
         }
+    }
+
+    #[must_use]
+    pub fn from_resource(cause: &crate::HeaderResourceError) -> Self {
+        let candidate_anchor = match cause {
+            crate::HeaderResourceError::CandidateRequired { anchor } => Some(*anchor),
+            crate::HeaderResourceError::Reclaiming | crate::HeaderResourceError::CapacityOverflow => None,
+        };
+        Self { cause: cause.to_string(), candidate_anchor }
+    }
+
+    #[must_use]
+    pub fn candidate_anchor(&self) -> Option<Hash256> {
+        self.candidate_anchor
     }
 }
 
@@ -76,6 +95,86 @@ pub fn demoted_tip_after_rejection(tree: &BlockTree, pre_tip: Option<Hash256>) -
     Some(pre_hash)
 }
 
+pub(crate) enum PreparedHeader<'a> {
+    Existing(NodeId),
+    New(ValidatedHeader<'a>),
+}
+
+pub(crate) struct ValidatedHeader<'a> {
+    header: &'a BlockHeader,
+    hash: Hash256,
+    parent: Option<NodeId>,
+    chainwork: ChainWork,
+}
+
+impl ValidatedHeader<'_> {
+    pub(crate) fn parent(&self) -> Option<NodeId> {
+        self.parent
+    }
+
+    pub(crate) fn chainwork(&self) -> ChainWork {
+        self.chainwork
+    }
+}
+
+impl PreparedHeader<'_> {
+    pub(crate) fn insert(self, tree: &mut BlockTree) -> Result<Inserted, ChainError> {
+        match self {
+            Self::Existing(id) => Ok(Inserted { id, demoted_tip: None }),
+            Self::New(validated) => tree.insert_header_with_hash(
+                *validated.header,
+                validated.hash,
+                NodeStatus::HeaderValid,
+            ),
+        }
+    }
+}
+
+pub(crate) fn prepare_header<'a>(
+    tree: &BlockTree,
+    header: &'a BlockHeader,
+    network: Network,
+    now_secs: u32,
+    mode: HeaderValidationMode,
+) -> Result<PreparedHeader<'a>, ChainError> {
+    let hash = Hash256::from(header.compute_hash());
+    if let Some(existing_id) = tree.lookup(hash) {
+        if tree.node(existing_id)?.status == NodeStatus::Invalid {
+            return Err(ChainError::KnownInvalidHeader { hash });
+        }
+        return Ok(PreparedHeader::Existing(existing_id));
+    }
+    validate_pow(header, hash, network)?;
+    if tree.is_empty() {
+        if hash != network.genesis_block_hash() {
+            return Err(ChainError::MissingParent {
+                prev_hash: Hash256::from(header.prev_blockhash),
+            });
+        }
+        return Ok(PreparedHeader::New(ValidatedHeader {
+            header,
+            hash,
+            parent: None,
+            chainwork: block_work(header),
+        }));
+    }
+    let prev_hash = Hash256::from(header.prev_blockhash);
+    let parent_id = tree.lookup(prev_hash).ok_or(ChainError::MissingParent { prev_hash })?;
+    let parent = tree.node(parent_id)?;
+    if parent.status == NodeStatus::Invalid {
+        return Err(ChainError::InvalidParent { parent: parent_id });
+    }
+    validate_contextual_header(tree, parent_id, header, network, now_secs, mode)?;
+    let chainwork = parent.chainwork.checked_add(block_work(header))
+        .ok_or(ChainError::ChainworkOverflow { hash })?;
+    Ok(PreparedHeader::New(ValidatedHeader {
+        header,
+        hash,
+        parent: Some(parent_id),
+        chainwork,
+    }))
+}
+
 pub fn accept_headers(
     tree: &mut BlockTree,
     headers: &[BlockHeader],
@@ -88,35 +187,7 @@ pub fn accept_headers(
         demoted_tip: None,
     };
     for header in headers {
-        let hash = Hash256::from(header.compute_hash());
-        if let Some(existing_id) = tree.lookup(hash) {
-            if matches!(tree.node(existing_id)?.status, NodeStatus::Invalid) {
-                return Err(ChainError::KnownInvalidHeader { hash });
-            }
-            accepted.ids.push(existing_id);
-            continue;
-        }
-        validate_pow(header, hash, network)?;
-        if tree.is_empty() {
-            if hash != network.genesis_block_hash() {
-                return Err(ChainError::MissingParent {
-                    prev_hash: Hash256::from(header.prev_blockhash),
-                });
-            }
-            let inserted = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
-            accepted.push_inserted(inserted);
-            continue;
-        }
-        let prev_hash = Hash256::from(header.prev_blockhash);
-        let parent_id = match tree.lookup(prev_hash) {
-            Some(parent_id) => parent_id,
-            None => return Err(ChainError::MissingParent { prev_hash }),
-        };
-        if tree.node(parent_id)?.status == NodeStatus::Invalid {
-            return Err(ChainError::InvalidParent { parent: parent_id });
-        }
-        validate_contextual_header(tree, parent_id, header, network, now_secs, mode)?;
-        let inserted = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
+        let inserted = prepare_header(tree, header, network, now_secs, mode)?.insert(tree)?;
         accepted.push_inserted(inserted);
     }
     Ok(accepted)

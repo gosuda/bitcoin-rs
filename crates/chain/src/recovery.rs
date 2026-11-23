@@ -149,9 +149,16 @@ pub struct RestoredState {
 /// resident UtxoSet is replaced but never seeds the engine.
 pub fn install_restored_state(
     chain: &mut crate::Chainstate,
-    restored: RestoredState,
+    mut restored: RestoredState,
     mode: crate::ValidationMode,
 ) -> Result<(), RecoveryError> {
+    chain.header_retention.restore_operator_verdicts(&mut restored.initial.tree)?;
+    if let Some(applied) = &restored.initial.applied_tip {
+        let node = restored.initial.tree.node(applied.tip_id)?;
+        if node.status == crate::chain::NodeStatus::Invalid {
+            return Err(crate::chain::ChainError::KnownInvalidHeader { hash: applied.hash }.into());
+        }
+    }
     install_engine_checkpoint(chain, restored.engine.as_ref())?;
     chain.validation_mode = mode;
     chain.coin_stats = std::sync::Arc::new(

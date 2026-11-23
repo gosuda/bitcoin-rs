@@ -28,10 +28,18 @@ where
     O: ReorgObserver + ?Sized,
     S: FnMut(&mut O, core::result::Result<(), ReorgError>) -> core::result::Result<(), ReorgError>,
 {
-    if let Err(error) = invalidation_root(handles, hash).map(|_| ()) {
-        return settle_reorg_without_transition(handles, observer, Err(error), &mut settle)
-            .map(|()| InvalidationOutcome::default());
-    }
+    let _header_retention = match (|| {
+        let root = invalidation_root(handles, hash)?;
+        let tree = handles.block_tree.read();
+        handles.header_retention.pin_operation(&tree, &[root])
+            .map_err(|source| ReorgError::Unavailable(Box::new(source)))
+    })() {
+        Ok(retention) => retention,
+        Err(error) => {
+            return settle_reorg_without_transition(handles, observer, Err(error), &mut settle)
+                .map(|()| InvalidationOutcome::default());
+        }
+    };
 
     let transition = match handles.begin_transition() {
         Ok(transition) => transition,
@@ -69,7 +77,7 @@ where
         if progress.disconnected == prepared.disconnect_nodes.len()
             && !outcome.as_ref().is_err_and(ReorgError::requires_recovery)
         {
-            invalidated = invalidate_and_republish(handles, hash)?;
+            invalidated = invalidate_and_republish(handles, hash, InvalidationOrigin::Operator)?;
         }
         if outcome.as_ref().is_err_and(ReorgError::requires_recovery) {
             outcome
@@ -125,9 +133,15 @@ impl From<InvalidationError> for ReorgError {
     }
 }
 
+pub(super) enum InvalidationOrigin {
+    Consensus,
+    Operator,
+}
+
 pub(super) fn invalidate_and_republish(
     handles: &Chainstate,
     hash: Hash256,
+    origin: InvalidationOrigin,
 ) -> core::result::Result<InvalidationOutcome, InvalidationError> {
     let mut tree = handles.block_tree.write();
     let root = tree
@@ -137,6 +151,10 @@ pub(super) fn invalidate_and_republish(
         .invalidate_subtree(root)
         .map_err(InvalidationError::Plan)?;
     let tip = tree.tip().ok_or(InvalidationError::NoValidTip)?;
+    match origin {
+        InvalidationOrigin::Consensus => handles.header_retention.cancel_candidates(),
+        InvalidationOrigin::Operator => handles.header_retention.remember_operator_invalidation(hash),
+    }
     handles.publish_chain_tip(Some(tip), &tree);
     Ok(invalidated)
 }
@@ -335,6 +353,7 @@ struct PreparedBranches {
     connect: Vec<LoadedBranchBody>,
     missing_connect: Option<(Hash256, u32)>,
     retention: Option<bitcoin_rs_storage::RetentionLease>,
+    _header_retention: Option<crate::header_admission::HeaderRetentionLease>,
 }
 
 impl PreparedBranches {
@@ -362,7 +381,14 @@ where
             connect: Vec::new(),
             missing_connect: None,
             retention: None,
+            _header_retention: None,
         });
+    };
+    let header_retention = {
+        let tree = handles.block_tree.read();
+        let roots = plan.disconnect.first().into_iter().chain(plan.connect.last()).copied().collect::<Vec<_>>();
+        handles.header_retention.pin_operation(&tree, &roots)
+            .map_err(|source| ReorgError::Unavailable(Box::new(source)))?
     };
     let disconnect_nodes = branch_nodes(handles, &plan.disconnect)?;
     let connect_nodes = branch_nodes(handles, &plan.connect)?;
@@ -383,6 +409,7 @@ where
         connect,
         missing_connect,
         retention,
+        _header_retention: Some(header_retention),
     })
 }
 
@@ -812,7 +839,7 @@ where
                 invalid: invalidated,
                 demoted_tip,
             } = if disposition == crate::WindowApplyDisposition::Permanent {
-                match invalidate_and_republish(transition.chainstate(), body.hash) {
+                match invalidate_and_republish(transition.chainstate(), body.hash, InvalidationOrigin::Consensus) {
                     Ok(outcome) => outcome,
                     Err(invalidation) => {
                         let handles = transition.chainstate();
