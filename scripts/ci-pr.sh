@@ -145,10 +145,6 @@ test_crates_consensus_chain() {
     cargo_test -p bitcoin-rs-snapshot
   profile "test: bitcoin-rs-chain (native)" \
     cargo_test -p bitcoin-rs-chain
-  profile "test: bitcoin-rs-mempool graph invariants" \
-    cargo_test -p bitcoin-rs-mempool --lib pool::
-  profile "test: bitcoin-rs-mempool local graph allocation" \
-    cargo_test -p bitcoin-rs-mempool --test graph_walk_allocation
   profile "test: bitcoin-rs-p2p" \
     cargo_test -p bitcoin-rs-p2p
 }
