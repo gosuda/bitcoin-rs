@@ -905,6 +905,7 @@ mod tests {
             current_time: 1_700_000_600,
             locktime_cutoff: 1_700_000_000,
             staged_parent_mtp: 1_700_000_000,
+            coinbase_reserve: bitcoin_rs_wire::mining::CoinbaseReserve::EXACT,
             network: Network::Regtest,
             csv_active: true,
             segwit_active: true,

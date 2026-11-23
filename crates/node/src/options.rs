@@ -762,6 +762,11 @@ macro_rules! option_rows {
                     }
                 }
                 group mining: MiningOverrides {
+                    reserved_weight as block_reserved_weight: Option<u64> {
+                        cli[#[arg(long = "block-reserved-weight")]]
+                        env["BITCOIN_RS_BLOCK_RESERVED_WEIGHT", str::parse]
+                        toml native("block_reserved_weight")
+                    }
                     payout_address as mining_payout_address: Option<String> {
                         cli[#[arg(long = "mining-payout-address")]]
                         env["BITCOIN_RS_MINING_PAYOUT_ADDRESS", parse_text]

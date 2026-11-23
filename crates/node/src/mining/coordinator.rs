@@ -21,7 +21,7 @@ use bitcoin_rs_mempool::RemovalReason;
 use bitcoin_rs_mempool::SnapshotEntry;
 use bitcoin_rs_wire::mining::{
     AppliedTipSource, AvailableMiningRule, BlockTemplate, Candidate, CandidateContext,
-    ChainContextSource, CoinbaseBudget, GenerateSelection, GenerateTx, LastCandidateInfo,
+    ChainContextSource, CoinbaseBudget, CoinbaseReserve, GenerateSelection, GenerateTx, LastCandidateInfo,
     MempoolSnapshotSource, MiningCapability, MiningControlError, MiningInfo, MiningRule,
     SignetMiningInfo, TemplateId, TemplateMutation, assemble_ordered_candidate,
     difficulty_for_bits, finish_candidate,
@@ -166,6 +166,7 @@ impl CoordinatorState {
 pub struct MiningService {
     network: Network,
     coinbase_script: Vec<u8>,
+    coinbase_reserve: CoinbaseReserve,
     shutdown: bitcoin_rs_consensus::latch::LatchReader,
     applied_tip: Arc<dyn AppliedTipSource>,
     mempool: Arc<dyn MempoolSnapshotSource>,
@@ -184,6 +185,7 @@ impl MiningService {
         mempool: Arc<dyn MempoolSnapshotSource>,
         chain: Arc<dyn ChainContextSource>,
         coinbase_script: Vec<u8>,
+        coinbase_reserve: CoinbaseReserve,
         shutdown: bitcoin_rs_consensus::latch::LatchReader,
     ) -> Self {
         let seed = mempool.current_revisions().0;
@@ -195,6 +197,7 @@ impl MiningService {
         let shared = Arc::new(PrepShared {
             network,
             coinbase_script: coinbase_script.clone(),
+            coinbase_reserve,
             shutdown: shutdown.clone(),
             mempool: Arc::clone(&mempool),
             chain: Arc::clone(&chain),
@@ -207,6 +210,7 @@ impl MiningService {
             mempool,
             chain,
             coinbase_script,
+            coinbase_reserve,
             shutdown,
             state: Mutex::new(CoordinatorState {
                 seed,
@@ -902,7 +906,7 @@ impl MiningService {
     }
 
     fn candidate_context(&self, tip: &TipSnapshot) -> Result<CandidateContext, MiningControlError> {
-        candidate_context_for(self.network, &self.chain, tip)
+        candidate_context_for(self.network, &self.chain, tip, self.coinbase_reserve)
     }
 
     fn signalling_rules_for(&self, tip: &TipSnapshot, height: u32) -> Vec<AvailableMiningRule> {
@@ -1044,6 +1048,7 @@ struct PrepMailbox {
 struct PrepShared {
     network: Network,
     coinbase_script: Vec<u8>,
+    coinbase_reserve: CoinbaseReserve,
     shutdown: bitcoin_rs_consensus::latch::LatchReader,
     mempool: Arc<dyn MempoolSnapshotSource>,
     chain: Arc<dyn ChainContextSource>,
@@ -1226,7 +1231,12 @@ fn preparation_loop(shared: &PrepShared) {
         let Some(job) = wait_for_staged_job(shared) else {
             return;
         };
-        let Ok(context) = candidate_context_for(shared.network, &shared.chain, &job.tip) else {
+        let Ok(context) = candidate_context_for(
+            shared.network,
+            &shared.chain,
+            &job.tip,
+            shared.coinbase_reserve,
+        ) else {
             mark_prep_failed(shared, job.tip.hash);
             continue;
         };
@@ -1282,6 +1292,7 @@ fn candidate_context_for(
     network: Network,
     chain: &Arc<dyn ChainContextSource>,
     tip: &TipSnapshot,
+    coinbase_reserve: CoinbaseReserve,
 ) -> Result<CandidateContext, MiningControlError> {
     let current_time = current_unix_seconds().max(1);
     let chain = chain
@@ -1296,6 +1307,7 @@ fn candidate_context_for(
         current_time: current_time.max(chain.min_time),
         locktime_cutoff: chain.locktime_cutoff(current_time.max(chain.min_time)),
         staged_parent_mtp: chain.parent_median_time_past,
+        coinbase_reserve,
         network,
         csv_active: chain.csv_active,
         segwit_active: chain.segwit_active,
@@ -1616,6 +1628,60 @@ mod tests {
         fn sorted(mut ids: Vec<Txid>) -> Vec<Txid> {
             ids.sort_unstable_by_key(|id| *id.as_bytes());
             ids
+        }
+
+        // API-11
+        #[test]
+        fn ordinary_service_reserves_coinbase_weight_and_sigops() -> TestResult {
+            let mut pool = Mempool::new(MempoolLimits {
+                min_relay_fee_sat_per_kvb: 0,
+                ..MempoolLimits::default()
+            });
+            for label in 1..=5 {
+                let transaction = tx(label);
+                let vsize = u32::try_from(transaction.vsize())?;
+                pool.insert_entry(MempoolEntry::new(
+                    Arc::new(transaction),
+                    vsize,
+                    10_000,
+                    0,
+                    0,
+                    16_000,
+                ))?;
+            }
+            let (_, service) = service_over(pool)?;
+            let candidate = service.get_block_template(None, None)?.candidate;
+            assert_eq!(candidate.transactions.len(), 4);
+            assert!(block_sigops(&candidate) + 400 <= 80_000);
+
+            let mut pool = Mempool::new(MempoolLimits {
+                min_relay_fee_sat_per_kvb: 0,
+                ..MempoolLimits::default()
+            });
+            let mut reference_weight = 0;
+            for label in 1..=50 {
+                let mut transaction = tx(label);
+                transaction.inputs[0].witness = vec![vec![0x42; 79_650]].into();
+                let reference: bitcoin::Transaction = bitcoin::consensus::deserialize(
+                    &bitcoin_rs_consensus::primitives::consensus_bytes(&transaction),
+                )?;
+                reference_weight = reference.weight().to_wu();
+                let vsize = u32::try_from(transaction.vsize())?;
+                pool.insert_entry(MempoolEntry::new(
+                    Arc::new(transaction),
+                    vsize,
+                    100_000,
+                    0,
+                    0,
+                    0,
+                ))?;
+            }
+            let expected = usize::try_from((4_000_000 - 8_000) / reference_weight)?;
+            assert_eq!(expected, 49);
+            let (_, service) = service_over(pool)?;
+            let candidate = service.get_block_template(None, None)?.candidate;
+            assert_eq!(candidate.transactions.len(), expected);
+            Ok(())
         }
 
         #[test]
@@ -2414,6 +2480,7 @@ mod tests {
                 source.clone(),
                 source.clone(),
                 vec![0x51],
+                CoinbaseReserve::default(),
                 LatchReader::fixture_never(),
             ));
             Ok((source, service))
@@ -3023,6 +3090,7 @@ mod tests {
             pool,
             chain,
             Vec::new(),
+            CoinbaseReserve::default(),
             shutdown,
         )
     }
@@ -3764,6 +3832,7 @@ mod tests {
             pool.clone(),
             Arc::new(ResolvedChain),
             Vec::new(),
+            CoinbaseReserve::default(),
             bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
         ));
         service.stage_tip(
@@ -4031,6 +4100,7 @@ mod tests {
             Arc::new(StaticPool::new(5, 2)),
             chain.clone(),
             Vec::new(),
+            CoinbaseReserve::default(),
             bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
         );
         service.get_block_template(None, None)?;
@@ -4070,6 +4140,7 @@ mod tests {
             pool.clone(),
             Arc::new(ResolvedChain),
             Vec::new(),
+            CoinbaseReserve::default(),
             bitcoin_rs_consensus::latch::LatchReader::fixture_never(),
         );
 

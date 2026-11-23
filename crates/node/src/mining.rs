@@ -31,6 +31,7 @@ use bitcoin_rs_wire::mining::Candidate;
 use bitcoin_rs_wire::mining::CandidateContext;
 use bitcoin_rs_wire::mining::ChainContextSource;
 use bitcoin_rs_wire::mining::CoinbaseBudget;
+use bitcoin_rs_wire::mining::CoinbaseReserve;
 use bitcoin_rs_wire::mining::GenerateRequest;
 use bitcoin_rs_wire::mining::GenerateSelection;
 use bitcoin_rs_wire::mining::GenerateTx;
@@ -69,6 +70,7 @@ impl MiningCoordinator {
         stable: StableRead,
         followers: ChainFollowers,
         coinbase_script: Vec<u8>,
+        coinbase_reserve: CoinbaseReserve,
     ) -> Self {
         let network = chainstate.network();
         let applied_tip = chainstate.applied_tip_reader();
@@ -90,6 +92,7 @@ impl MiningCoordinator {
                 network,
             }),
             coinbase_script,
+            coinbase_reserve,
             shutdown.clone(),
         );
         let block_tree = chainstate.block_tree_reader();
@@ -717,7 +720,6 @@ mod tests {
     use bitcoin_rs_wire::mining::MiningControlError;
     use compact_str::CompactString;
 
-
     // API-11, SYNC-05
     #[test]
     fn templates_reject_missing_inputs_without_mutating_chainstate()
@@ -727,7 +729,7 @@ mod tests {
         };
         use bitcoin_rs_mempool::MempoolEntry;
         use bitcoin_rs_wire::mining::{
-            BlockTemplateMode, BlockTemplateRequest, CoinbaseBudget, MiningControl,
+            BlockTemplateMode, BlockTemplateRequest, CoinbaseBudget, CoinbaseReserve, MiningControl,
         };
         use std::sync::Arc;
 
@@ -743,6 +745,7 @@ mod tests {
             state.stable_read(),
             state.chain_followers(),
             vec![0x51],
+            CoinbaseReserve::default(),
         );
         let request = |coinbase_budget| BlockTemplateRequest {
             mode: BlockTemplateMode::Template,
