@@ -41,8 +41,8 @@ jobs:
           set -euo pipefail
           git config user.name "Stabilization verification"
           git config user.email "stabilization-verification@users.noreply.github.com"
-          git fetch --no-tags origin 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78
-          for integration_source in 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78; do
+          git fetch --no-tags origin 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 043cc2c4be2cc2cec44875816dc2de265880ff64 07f7ad9d2de2a23802845a0404dabb0fc6327e78
+          for integration_source in 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 043cc2c4be2cc2cec44875816dc2de265880ff64 07f7ad9d2de2a23802845a0404dabb0fc6327e78; do
             if ! git merge --no-ff --no-edit "$integration_source"; then
               conflict_paths="$(git diff --name-only --diff-filter=U)"
               test -n "$conflict_paths"
@@ -109,8 +109,8 @@ jobs:
           set -euo pipefail
           git config user.name "Stabilization verification"
           git config user.email "stabilization-verification@users.noreply.github.com"
-          git fetch --no-tags origin 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78
-          for integration_source in 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78; do
+          git fetch --no-tags origin 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 043cc2c4be2cc2cec44875816dc2de265880ff64 07f7ad9d2de2a23802845a0404dabb0fc6327e78
+          for integration_source in 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 043cc2c4be2cc2cec44875816dc2de265880ff64 07f7ad9d2de2a23802845a0404dabb0fc6327e78; do
             if ! git merge --no-ff --no-edit "$integration_source"; then
               conflict_paths="$(git diff --name-only --diff-filter=U)"
               test -n "$conflict_paths"
@@ -189,8 +189,8 @@ jobs:
           set -euo pipefail
           git config user.name "Stabilization verification"
           git config user.email "stabilization-verification@users.noreply.github.com"
-          git fetch --no-tags origin 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78
-          for integration_source in 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 78a48549f3114303cd5ebb4f5d5922e9cb944126 07f7ad9d2de2a23802845a0404dabb0fc6327e78; do
+          git fetch --no-tags origin 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 043cc2c4be2cc2cec44875816dc2de265880ff64 07f7ad9d2de2a23802845a0404dabb0fc6327e78
+          for integration_source in 0d0594a058be188ad8c6aead4d2ba8e493a8d06c d753d439972a6aa5866e73ed51e5a61663568f29 043cc2c4be2cc2cec44875816dc2de265880ff64 07f7ad9d2de2a23802845a0404dabb0fc6327e78; do
             if ! git merge --no-ff --no-edit "$integration_source"; then
               conflict_paths="$(git diff --name-only --diff-filter=U)"
               test -n "$conflict_paths"
