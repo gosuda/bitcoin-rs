@@ -3974,6 +3974,7 @@ mod tests {
                     let mut mining = crate::mining::MiningCoordinator::new(
                         state.mempool_reader(),
                         state.chainstate(),
+                        state.block_memory(),
                         state.stable_read(),
                         state.chain_followers(),
                         vec![0x51],

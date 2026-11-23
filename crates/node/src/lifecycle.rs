@@ -750,6 +750,7 @@ pub(crate) fn start_node(
     let coordinator = Arc::new(crate::MiningCoordinator::new(
         state.mempool_reader(),
         Arc::clone(&chainstate),
+        state.block_memory(),
         state.stable_read(),
         state.chain_followers(),
         final_payout_script(state.config()),
@@ -2465,6 +2466,7 @@ mod tests {
         let coordinator = Arc::new(crate::MiningCoordinator::new(
             state.mempool_reader(),
             state.chainstate(),
+            state.block_memory(),
             state.stable_read(),
             state.chain_followers(),
             super::final_payout_script(state.config()),
