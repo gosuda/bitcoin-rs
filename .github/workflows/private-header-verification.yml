@@ -1,0 +1,94 @@
+name: Header context verification
+
+on:
+  push:
+    branches: [stabilize/private-header-context-20261124]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: header-context-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "2"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  regenerate:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Format and regenerate the proof index
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          cargo run --locked -p contract-index
+          cargo run --locked -p contract-index -- --check
+          git diff --check
+          git add crates/chain/src/chain.rs crates/chain/src/chain/header_sync.rs crates/chain/src/chain/header_sync/context.rs crates/chain/src/chain/node.rs crates/chain/src/chain/tree.rs docs/contracts/evidence-index.md docs/contracts/README.md
+          git rm --cached -- .github/workflows/private-header-verification.yml
+          printf 'PRODUCT_TREE %s\n' "$(git write-tree)"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const paths = [
+            'crates/chain/src/chain.rs',
+            'crates/chain/src/chain/header_sync.rs',
+            'crates/chain/src/chain/header_sync/context.rs',
+            'crates/chain/src/chain/node.rs',
+            'crates/chain/src/chain/tree.rs',
+            'docs/contracts/evidence-index.md',
+            'docs/contracts/README.md',
+          ];
+          for (const path of paths) {
+            const bytes = fs.readFileSync(path);
+            const sha = crypto.createHash('sha1')
+              .update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
+            console.log('PRODUCT_FILE ' + JSON.stringify({path, sha, size: bytes.length}));
+            for (let offset = 0; offset < bytes.length; offset += 12000) {
+              console.log('PRODUCT_CHUNK ' + JSON.stringify({
+                path, offset, data: bytes.subarray(offset, offset + 12000).toString('base64'),
+              }));
+            }
+          }
+          NODE
+
+  header-tests:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Execute header context, retarget, and tree regressions
+        run: |
+          set -euo pipefail
+          mkdir -p target/header-context-proof
+          git rev-parse HEAD > target/header-context-proof/source.txt
+          bash scripts/ci-setup.sh apt nextest 2>&1 | tee target/header-context-proof/setup.log
+          cargo nextest run --locked -p bitcoin-rs-chain --lib --no-tests fail --no-fail-fast \
+            -E 'test(chain::header_sync::context::tests::) | test(chain::header_sync::retarget_rule_tests::) | test(chain::tree::tests::)' \
+            2>&1 | tee target/header-context-proof/tests.log
+          git diff --exit-code
+      - name: Preserve header context evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: header-context-proof-${{ github.run_attempt }}
+          path: target/header-context-proof/**
+          if-no-files-found: warn
+          retention-days: 7
