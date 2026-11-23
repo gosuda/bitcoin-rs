@@ -1,0 +1,66 @@
+name: Recent-block repair merge
+on:
+  push:
+    branches: [stabilize/private-p2p-root-merge-20261124]
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "2"
+jobs:
+  regenerate:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Merge tested repairs and regenerate their evidence
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin 1debbca74ab7466ac4ee38f14602b987df8e9943
+          set +e
+          git -c user.name=Verification -c user.email=verification@invalid merge --no-commit --no-ff 1debbca74ab7466ac4ee38f14602b987df8e9943
+          merge_status=$?
+          set -e
+          if [ "$merge_status" -gt 1 ]; then exit "$merge_status"; fi
+          node <<'NODE'
+          const cp = require('node:child_process');
+          const paths = cp.execFileSync('git', ['diff', '--name-only', '--diff-filter=U', '-z'], { encoding: 'utf8' })
+            .split('\0').filter(Boolean);
+          if (paths.some(path => path !== 'docs/contracts/evidence-index.md')) {
+            throw new Error('Source merge needs review: ' + paths.join(', '));
+          }
+          NODE
+          cargo fmt --all
+          cargo run --locked -p contract-index
+          cargo run --locked -p contract-index -- --check
+          git add -u
+          git diff --cached --check
+          git rm --cached -- .github/workflows/private-p2p-root-merge.yml
+          printf 'PRODUCT_TREE %s\n' "$(git write-tree)"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const cp = require('node:child_process');
+          const paths = cp.execFileSync('git', ['diff', '--cached', '--name-only', '-z', '72feebf7426eccbce37ecee64a49b3e909cb7bfc'], { encoding: 'utf8' })
+            .split('\0').filter(Boolean);
+          for (const path of paths) {
+            if (!fs.existsSync(path)) throw new Error('Unexpected deletion: ' + path);
+            const bytes = fs.readFileSync(path);
+            const sha = crypto.createHash('sha1')
+              .update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
+            console.log('PRODUCT_FILE ' + JSON.stringify({path, sha, size: bytes.length}));
+            for (let offset = 0; offset < bytes.length; offset += 12000) {
+              console.log('PRODUCT_CHUNK ' + JSON.stringify({
+                path, offset, data: bytes.subarray(offset, offset + 12000).toString('base64'),
+              }));
+            }
+          }
+          NODE
