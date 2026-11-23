@@ -52,7 +52,7 @@ pub(crate) fn transaction_json(
     let hash = tx.wtxid().to_string();
     let size = tx.total_size();
     let weight = tx.weight();
-    let vsize = tx.vsize();
+    let vsize = Tx::vsize_from_weight(weight);
     let coinbase = tx.is_coinbase();
     let vin: sonic_rs::Array = if coinbase {
         tx.inputs.iter().map(coinbase_input_json).collect()

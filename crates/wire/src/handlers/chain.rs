@@ -5,8 +5,8 @@ use core::str::FromStr as _;
 use bitcoin_rs_chain::chain::NodeStatus;
 use bitcoin_rs_consensus::primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_consensus::primitives::{
-    Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, TxOut, consensus_bytes,
-    deserialize, u64_to_f64,
+    Block, BlockHash, CompactTarget, ConsensusEncode, Hash256, Header, Network, Tx, TxOut,
+    consensus_bytes, deserialize, u64_to_f64,
 };
 
 #[cfg(test)]
@@ -624,7 +624,7 @@ fn aggregate_block_tx_stats(txs: &[Tx]) -> BlockTxAggregate {
     let mut swtxs = 0_u64;
     let mut swtotal_size = 0_u64;
     let mut swtotal_weight = 0_u64;
-    let mut tx_sizes = Vec::new();
+    let mut tx_sizes = Vec::with_capacity(txs.len().saturating_sub(1));
     for (index, tx) in txs.iter().enumerate() {
         outs = outs.saturating_add(u64::try_from(tx.outputs.len()).unwrap_or(u64::MAX));
         if index == 0 {
@@ -747,7 +747,7 @@ fn percentiles_by_weight(scores: &mut [(u64, u64)], total_weight: u64) -> [u64; 
     if total_weight == 0 || scores.is_empty() {
         return [0; 5];
     }
-    scores.sort_by_key(|score| score.0);
+    scores.sort_unstable_by_key(|score| score.0);
     let thresholds = [
         total_weight * 10 / 100,
         total_weight * 25 / 100,
@@ -828,7 +828,7 @@ fn compute_fee_fields(ctx: &Context, block: &Block) -> Result<FeeFields, TxQuery
 const PER_UTXO_OVERHEAD: u64 = 36 + 4;
 
 fn output_utxo_size(output: &TxOut) -> u64 {
-    u64::try_from(consensus_bytes(output).len())
+    u64::try_from(output.consensus_size())
         .unwrap_or(u64::MAX)
         .saturating_add(PER_UTXO_OVERHEAD)
 }
