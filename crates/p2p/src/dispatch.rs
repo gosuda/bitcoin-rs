@@ -1741,7 +1741,7 @@ mod tests {
         let headroom = || true;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut send = |_message: Message| -> Result<(), PeerError> { panic!("writer died") };
-            serve_getpkgtxns(Some(&inventory), &request, &headroom, &mut send)
+            serve_getpkgtxns(Some(&inventory), Some(0), &request, &headroom, &mut send)
         }));
         assert!(result.is_err(), "the panic must propagate");
         assert_eq!(
