@@ -101,7 +101,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - `base64` is bounded to `>=0.23.1, <0.24` with defaults disabled and `std` (including `alloc`) enabled.
 - `simd-unsafe` remains disabled.
 - `secp256k1` is bounded to `>=0.33.1, <0.34` with `std`, `alloc`, `recovery`, `rand`, and `global-context` enabled. Bitcoin's exact `secp256k1 0.29.100` and `secp256k1-sys 0.10.1` reference line is an approved split, pinned in `deny.toml` `[bans].skip`; it approves no other version.
-- The separate `fuzz/Cargo.lock` retains Bitcoin's `secp256k1 0.29.1`. Its exact exception in `deny.toml` `[bans].skip` preserves the direct `0.33.1` anchor when the same policy checks that workspace.
+- The root and `fuzz/Cargo.lock` files use the same `secp256k1 0.29.100` reference line. BIP324 key exchange uses its `Party` API.
 - The metrics exporter's `base64 0.22.1` is an approved exact-version duplicate, not approval for other versions.
 - `proptest` is bounded at `>=1.12, <1.13` and `proptest-state-machine` is pinned at `=0.9.0` in the root `Cargo.toml` `[workspace.dependencies]`.
 - Version `1.12` moves to the `rand_core 0.10` and `rand_xorshift 0.5` family, so the lock carries `rand_core@0.10.1` beside `rand_core@0.9.5` from the selected `rand 0.9` family.
