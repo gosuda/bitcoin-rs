@@ -105,6 +105,22 @@ impl HeaderCandidateBudget {
         state.replay = None;
     }
 
+    pub(crate) fn cancel_anchor(&self, anchor: Hash256) {
+        let mut state = self.state.lock();
+        let mut cancelled = [None; MAX_HEADER_CANDIDATES];
+        for ((&id, slot), target) in state.slots.iter_mut()
+            .filter(|(_, slot)| slot.anchor == anchor)
+            .zip(&mut cancelled)
+        {
+            slot.cancelled = true;
+            *target = Some(id);
+        }
+        state.waiting.retain(|id| !cancelled.contains(&Some(*id)));
+        if state.replay.is_some_and(|id| cancelled.contains(&Some(id))) {
+            state.replay = None;
+        }
+    }
+
     pub(crate) fn active_replay(&self) -> Option<u64> { self.state.lock().replay }
 
     pub(crate) fn anchors(&self) -> [Option<Hash256>; MAX_HEADER_CANDIDATES] {

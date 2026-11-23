@@ -60,7 +60,12 @@ CPU work.
 `HeaderCandidate` permits a winning fork to exceed the side-cache allowance.
 Its first pass checks every header's proof of work and contextual rules with
 `HeaderValidationContext`. It keeps fixed-size context and chunk commitments.
-This pass inserts no headers. Candidate anchors remain protected within `K`.
+This pass inserts no headers. Candidate anchors share `K` in creation order.
+When required roots change, their shared ancestry is counted again. Missing
+anchors and anchors that no longer fit are cancelled locally, including an
+active replay whose anchor no longer fits. The peer can retry from retained
+ancestry. Cancellation clears replay ownership before another admission and
+keeps the reservation charged until its buffers are released.
 At most four candidates share one lifetime budget, including cancelled
 candidates whose buffers have not been released.
 

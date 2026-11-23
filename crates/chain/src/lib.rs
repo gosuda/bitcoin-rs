@@ -2454,8 +2454,6 @@ mod test_fixtures {
         #[error(transparent)]
         HeaderCheckpoint(#[from] crate::checkpoint::headers::HeaderCheckpointError),
         #[error(transparent)]
-        HeaderAdmission(#[from] crate::HeaderAdmissionError),
-        #[error(transparent)]
         CheckpointSetup(#[from] crate::CheckpointSetupError),
         #[error(transparent)]
         DataDir(#[from] crate::events::DataDirError),
