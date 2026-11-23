@@ -3099,6 +3099,33 @@ mod tests {
         }
     }
 
+    struct ValidationChain<F>(F);
+
+    impl<F> ChainContextSource for ValidationChain<F>
+    where
+        F: Fn(&Candidate) -> Result<(), MiningControlError> + Send + Sync,
+    {
+        fn validate_candidate(&self, candidate: &Candidate) -> Result<(), MiningControlError> {
+            (self.0)(candidate)
+        }
+
+        fn resolve_mining_context(
+            &self,
+            tip: &TipSnapshot,
+            candidate_time: u32,
+        ) -> Result<MiningChainContext, ChainError> {
+            ResolvedChain.resolve_mining_context(tip, candidate_time)
+        }
+
+        fn tip_bits(&self, tip: &TipSnapshot) -> Result<CompactTarget, ChainError> {
+            ResolvedChain.tip_bits(tip)
+        }
+
+        fn signalling_rules(&self, tip: &TipSnapshot, height: u32) -> Vec<AvailableMiningRule> {
+            ResolvedChain.signalling_rules(tip, height)
+        }
+    }
+
     fn service_with(tip: Option<TipSnapshot>, pool: Arc<StaticPool>) -> MiningService {
         service_with_chain(tip, pool, Arc::new(UnresolvedChain))
     }
@@ -3627,6 +3654,125 @@ mod tests {
             vec![(removed, RemovalReason::BlockInclusion)],
             "the receipt keeps stable identities with exact reasons"
         );
+    }
+
+    // API-11, SYNC-05
+    #[test]
+    fn prepared_candidate_validation_refusal_does_not_fill_cache() -> TestResult {
+        let tip_hash = Hash256::from_le_bytes(&[0x75; 32]);
+        let tip = tip_snapshot(tip_hash);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rejected = Arc::new(AtomicBool::new(true));
+        let chain = {
+            let calls = Arc::clone(&calls);
+            let rejected = Arc::clone(&rejected);
+            Arc::new(ValidationChain(move |_candidate: &Candidate| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                if rejected.load(Ordering::Relaxed) {
+                    Err(MiningControlError::Rejected(CompactString::from(
+                        "prepared candidate is invalid",
+                    )))
+                } else {
+                    Ok(())
+                }
+            }))
+        };
+        let service = service_with_chain(
+            Some(tip.clone()),
+            Arc::new(StaticPool::new(5, 2)),
+            chain,
+        );
+        service.stage_tip(
+            &tip,
+            &BlockImage::from_local(Network::Regtest.genesis_block()),
+        );
+        wait_until_ready(&service, tip_hash);
+        let prepared = ready_candidate(&service, tip_hash);
+        service.publish_block_generation(tip_hash, &MutationResult::empty());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        assert!(matches!(
+            service.get_block_template(None, None),
+            Err(MiningControlError::Rejected(reason))
+                if reason.as_str() == "prepared candidate is invalid"
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        {
+            let state = service.state.lock();
+            assert!(state.cache.is_empty());
+            assert!(state.last_candidate.is_none());
+        }
+
+        rejected.store(false, Ordering::Relaxed);
+        let accepted = service.get_block_template(None, None)?.candidate;
+        assert!(Arc::ptr_eq(&prepared, &accepted));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        let cached = service.get_block_template(None, None)?.candidate;
+        assert!(Arc::ptr_eq(&accepted, &cached));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        Ok(())
+    }
+
+    // API-11, SYNC-05
+    #[test]
+    fn validation_generation_change_retries_before_propagating_rejection() -> TestResult {
+        for (prepared, budget) in [
+            (false, None),
+            (true, None),
+            (
+                false,
+                Some(CoinbaseBudget {
+                    additional_size: 100,
+                    additional_sigops: 0,
+                }),
+            ),
+        ] {
+            let tip_hash = Hash256::from_le_bytes(&[0x76; 32]);
+            let tip = tip_snapshot(tip_hash);
+            let pool = Arc::new(StaticPool::new(5, 2));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let chain = {
+                let pool = Arc::clone(&pool);
+                let calls = Arc::clone(&calls);
+                Arc::new(ValidationChain(move |_candidate: &Candidate| {
+                    if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                        pool.set(6, 3);
+                        Err(MiningControlError::Rejected(CompactString::from(
+                            "previous generation is invalid",
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                }))
+            };
+            let service = service_with_chain(Some(tip.clone()), pool, chain);
+            if prepared {
+                service.stage_tip(
+                    &tip,
+                    &BlockImage::from_local(Network::Regtest.genesis_block()),
+                );
+                wait_until_ready(&service, tip_hash);
+                service.publish_block_generation(tip_hash, &MutationResult::empty());
+            }
+
+            let candidate = service.get_block_template(None, budget)?.candidate;
+            let expected = TemplateId::with_fee_revision(&tip_hash, 6, 3).qualified(budget);
+            assert_eq!(candidate.template_id, expected);
+            assert_eq!(calls.load(Ordering::Relaxed), 2);
+            {
+                let state = service.state.lock();
+                assert_eq!(state.cache.len(), 1);
+                assert!(state.cache.keys().all(|key| {
+                    key.generation.mempool_sequence == 6
+                        && key.generation.fee_delta_sequence == 3
+                }));
+            }
+
+            let cached = service.get_block_template(None, budget)?.candidate;
+            assert!(Arc::ptr_eq(&candidate, &cached));
+            assert_eq!(calls.load(Ordering::Relaxed), 2);
+        }
+        Ok(())
     }
 
     #[test]

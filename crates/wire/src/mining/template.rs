@@ -870,7 +870,6 @@ mod tests {
         let met_time = CandidateContext {
             locktime_cutoff: 1_512,
             staged_parent_mtp: 1_000,
-            coinbase_reserve: CoinbaseReserve::EXACT,
             ..base
         };
         let selected = select_template_body_after(&pool, &plan, &met_time, PAYOUT)?;
@@ -881,7 +880,6 @@ mod tests {
         let unmet_time = CandidateContext {
             locktime_cutoff: 1_511,
             staged_parent_mtp: 1_000,
-            coinbase_reserve: CoinbaseReserve::EXACT,
             ..base
         };
         let selected = select_template_body_after(&pool, &plan, &unmet_time, PAYOUT)?;
