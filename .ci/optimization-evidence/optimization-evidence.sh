@@ -9,7 +9,8 @@ current_tree=$(git rev-parse --show-toplevel)
 sources="$current_tree/.ci/optimization-evidence"
 evidence_dir=$(mktemp -d "$RUNNER_TEMP/optimization-evidence.XXXXXX")
 baseline_tree="$evidence_dir/baseline"
-export CARGO_TARGET_DIR="$evidence_dir/target"
+export CARGO_TARGET_DIR="$evidence_dir/target-baseline"
+export CARGO_BUILD_BUILD_DIR="$CARGO_TARGET_DIR"
 
 git merge-base --is-ancestor "$current_revision" HEAD
 git diff --exit-code "$current_revision" HEAD -- \
@@ -126,8 +127,8 @@ run_example() {
             --message-format=json-render-diagnostics \
             -- --check-cfg 'cfg(count_allocations)' "${rustc_arguments[@]}" > "$artifacts"
     )
-    executable=$(jq -er --arg name "$name" -s \
-        '[.[] | select(.reason == "compiler-artifact" and .target.name == $name and .executable != null and .profile.test == false and .profile.opt_level == "3")] | if length == 1 then .[0].executable else error("expected exactly one Cargo executable") end' \
+    executable=$(jq -er --arg name "$name" --arg manifest "$tree/crates/${package#bitcoin-rs-}/Cargo.toml" -s \
+        '[.[] | select(.reason == "compiler-artifact" and .target.name == $name and .manifest_path == $manifest and .executable != null and .profile.test == false and .profile.opt_level == "3")] | if length == 1 then .[0].executable else error("expected exactly one Cargo executable") end' \
         "$artifacts")
     [[ -x "$executable" ]]
     printf 'OPTIMIZATION_EVIDENCE_BENCH_BEGIN phase=%s name=%s mode=%s\n' \
@@ -153,6 +154,8 @@ run_benchmarks() {
 
 run_regressions baseline "$baseline_tree" 100
 run_benchmarks baseline "$baseline_tree"
+export CARGO_TARGET_DIR="$evidence_dir/target-current"
+export CARGO_BUILD_BUILD_DIR="$CARGO_TARGET_DIR"
 run_regressions current "$current_tree" 0
 run_benchmarks current "$current_tree"
 
