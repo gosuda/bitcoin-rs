@@ -8502,6 +8502,10 @@ mod tx_ingress_e2e {
                         &message,
                         None,
                         Some(&inventory),
+                        bitcoin_rs_p2p::listener::TxPolicyObserver::transaction_serving_sequence(
+                            wiring.tx_policy.as_ref(),
+                            lease.source_ip(peer_addr),
+                        ),
                         &|| true,
                         &|| true,
                         &mut send,

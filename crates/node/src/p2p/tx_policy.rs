@@ -1495,13 +1495,25 @@ mod tests {
         fn have_tx(&self, _: Hash256, _: bool) -> bool {
             self.0.load(std::sync::atomic::Ordering::Relaxed)
         }
-        fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+        fn get_tx(
+            &self,
+            _: Txid,
+            _last_inv_sequence: u64,
+        ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
-        fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+        fn get_tx_by_wtxid(
+            &self,
+            _: Wtxid,
+            _last_inv_sequence: u64,
+        ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
-        fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
+        fn resident_ancestor_package(
+            &self,
+            _: Wtxid,
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Wtxid>> {
             None
         }
         fn resident_package(
@@ -1509,6 +1521,14 @@ mod tests {
             _: &[Wtxid],
         ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
             None
+        }
+
+        fn package_for_relay(
+            &self,
+            wtxids: &[Wtxid],
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
+            self.resident_package(wtxids)
         }
     }
     #[test]
@@ -1681,13 +1701,25 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .contains(&key)
         }
-        fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+        fn get_tx(
+            &self,
+            _: Txid,
+            _last_inv_sequence: u64,
+        ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
-        fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+        fn get_tx_by_wtxid(
+            &self,
+            _: Wtxid,
+            _last_inv_sequence: u64,
+        ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
-        fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
+        fn resident_ancestor_package(
+            &self,
+            _: Wtxid,
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Wtxid>> {
             None
         }
         fn resident_package(
@@ -1695,6 +1727,14 @@ mod tests {
             _: &[Wtxid],
         ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
             None
+        }
+
+        fn package_for_relay(
+            &self,
+            wtxids: &[Wtxid],
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
+            self.resident_package(wtxids)
         }
     }
 
@@ -1898,13 +1938,25 @@ mod tests {
                 }
                 false
             }
-            fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+            fn get_tx(
+                &self,
+                _: Txid,
+                _last_inv_sequence: u64,
+            ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
                 None
             }
-            fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+            fn get_tx_by_wtxid(
+                &self,
+                _: Wtxid,
+                _last_inv_sequence: u64,
+            ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
                 None
             }
-            fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
+            fn resident_ancestor_package(
+                &self,
+                _: Wtxid,
+                _last_inv_sequence: u64,
+            ) -> Option<Vec<Wtxid>> {
                 None
             }
             fn resident_package(
@@ -1912,6 +1964,14 @@ mod tests {
                 _: &[Wtxid],
             ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
                 None
+            }
+
+            fn package_for_relay(
+                &self,
+                wtxids: &[Wtxid],
+                _last_inv_sequence: u64,
+            ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
+                self.resident_package(wtxids)
             }
         }
         let now = Instant::now();
@@ -1936,13 +1996,25 @@ mod tests {
                 self.0.store(61, Ordering::Relaxed);
                 false
             }
-            fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+            fn get_tx(
+                &self,
+                _: Txid,
+                _last_inv_sequence: u64,
+            ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
                 None
             }
-            fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+            fn get_tx_by_wtxid(
+                &self,
+                _: Wtxid,
+                _last_inv_sequence: u64,
+            ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
                 None
             }
-            fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
+            fn resident_ancestor_package(
+                &self,
+                _: Wtxid,
+                _last_inv_sequence: u64,
+            ) -> Option<Vec<Wtxid>> {
                 None
             }
             fn resident_package(
@@ -1950,6 +2022,14 @@ mod tests {
                 _: &[Wtxid],
             ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
                 None
+            }
+
+            fn package_for_relay(
+                &self,
+                wtxids: &[Wtxid],
+                _last_inv_sequence: u64,
+            ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
+                self.resident_package(wtxids)
             }
         }
         let started = Instant::now();
@@ -3459,13 +3539,25 @@ mod preferred_tests {
             }
             false
         }
-        fn get_tx(&self, _: Txid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+        fn get_tx(
+            &self,
+            _: Txid,
+            _last_inv_sequence: u64,
+        ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
-        fn get_tx_by_wtxid(&self, _: Wtxid) -> Option<bitcoin_rs_consensus::primitives::Tx> {
+        fn get_tx_by_wtxid(
+            &self,
+            _: Wtxid,
+            _last_inv_sequence: u64,
+        ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             None
         }
-        fn resident_ancestor_package(&self, _: Wtxid) -> Option<Vec<Wtxid>> {
+        fn resident_ancestor_package(
+            &self,
+            _: Wtxid,
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Wtxid>> {
             None
         }
         fn resident_package(
@@ -3473,6 +3565,14 @@ mod preferred_tests {
             _: &[Wtxid],
         ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
             None
+        }
+
+        fn package_for_relay(
+            &self,
+            wtxids: &[Wtxid],
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<std::sync::Arc<bitcoin_rs_consensus::primitives::Tx>>> {
+            self.resident_package(wtxids)
         }
     }
 

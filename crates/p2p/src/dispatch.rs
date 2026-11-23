@@ -130,9 +130,9 @@ pub trait ChainQuery: Send + Sync {
 pub trait TxInventory: Send + Sync {
     fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool;
 
-    fn get_tx(&self, txid: Txid) -> Option<Tx>;
+    fn get_tx(&self, txid: Txid, last_inv_sequence: u64) -> Option<Tx>;
 
-    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx>;
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid, last_inv_sequence: u64) -> Option<Tx>;
 
     fn transaction_sent(&self, _wtxid: Wtxid) {}
 
@@ -140,9 +140,12 @@ pub trait TxInventory: Send + Sync {
 
     fn transaction_send_failed(&self, _wtxid: Wtxid) {}
 
-    fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>>;
+    fn resident_ancestor_package(&self, wtxid: Wtxid, last_inv_sequence: u64)
+    -> Option<Vec<Wtxid>>;
 
     fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>>;
+
+    fn package_for_relay(&self, wtxids: &[Wtxid], last_inv_sequence: u64) -> Option<Vec<Arc<Tx>>>;
 }
 
 pub fn dispatch_inbound<S>(
@@ -153,6 +156,7 @@ pub fn dispatch_inbound<S>(
     dispatch_inbound_full(
         peer,
         message,
+        None,
         None,
         None,
         &|| true,
@@ -172,6 +176,7 @@ pub fn dispatch_inbound_full<S>(
     message: &Message,
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
+    last_inv_sequence: Option<u64>,
     tx_relay_open: &dyn Fn() -> bool,
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
@@ -237,14 +242,30 @@ pub fn dispatch_inbound_full<S>(
             ensure_inventory_request_within_bounds(items)?;
             step(peer, message)?;
             ensure_getdata_package_types_negotiated(peer, items)?;
-            serve_inbound_getdata(peer, chain, tx_inventory, items, headroom, send)?;
+            serve_inbound_getdata(
+                peer,
+                chain,
+                tx_inventory,
+                last_inv_sequence,
+                items,
+                headroom,
+                send,
+            )?;
         }
         Message::AncPkgInfo(_)
         | Message::GetPkgTxns(_)
         | Message::PkgTxns(_)
         | Message::PkgTxnsPayload(_) => {
             step(peer, message)?;
-            receive_package_message(peer, message, tx_inventory, tx_relay_open, headroom, send)?;
+            receive_package_message(
+                peer,
+                message,
+                tx_inventory,
+                last_inv_sequence,
+                tx_relay_open,
+                headroom,
+                send,
+            )?;
         }
         Message::GetBlockTxn(request) => {
             ensure_block_txn_indexes_valid(&request.txs_request)?;
@@ -326,6 +347,7 @@ fn receive_package_message<S>(
     peer: &mut Peer<S>,
     message: &Message,
     tx_inventory: Option<&dyn TxInventory>,
+    last_inv_sequence: Option<u64>,
     tx_relay_open: &dyn Fn() -> bool,
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
@@ -347,7 +369,7 @@ fn receive_package_message<S>(
                 PKG_RELAY_PKGTXNS,
                 "getpkgtxns without negotiated package transaction relay",
             )?;
-            serve_getpkgtxns(tx_inventory, request, headroom, send)?;
+            serve_getpkgtxns(tx_inventory, last_inv_sequence, request, headroom, send)?;
         }
         _ => ensure_package_relay(
             peer,
@@ -466,6 +488,7 @@ impl Drop for BroadcastMarks<'_> {
 
 fn serve_getpkgtxns(
     tx_inventory: Option<&dyn TxInventory>,
+    last_inv_sequence: Option<u64>,
     request: &GetPkgTxns,
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
@@ -473,12 +496,14 @@ fn serve_getpkgtxns(
     if !headroom() {
         return Ok(());
     }
-    let package = tx_inventory.and_then(|inventory| {
-        inventory
-            .resident_package(&request.wtxids)
-            .filter(|bodies| fits_one_frame(bodies))
-            .map(|bodies| (inventory, bodies))
-    });
+    let package = last_inv_sequence
+        .zip(tx_inventory)
+        .and_then(|(sequence, inventory)| {
+            inventory
+                .package_for_relay(&request.wtxids, sequence)
+                .filter(|bodies| fits_one_frame(bodies))
+                .map(|bodies| (inventory, bodies))
+        });
     let Some((inventory, bodies)) = package else {
         return send(Message::NotFound(vec![Inventory::Unknown {
             inv_type: MSG_PKGTXNS,
@@ -507,6 +532,7 @@ fn fits_one_frame(bodies: &[Arc<Tx>]) -> bool {
 
 fn serve_ancpkginfo_item(
     tx_inventory: Option<&dyn TxInventory>,
+    last_inv_sequence: Option<u64>,
     item: &Inventory,
     subject: Wtxid,
     headroom: &dyn Fn() -> bool,
@@ -516,8 +542,9 @@ fn serve_ancpkginfo_item(
     if !headroom() {
         return Ok(false);
     }
-    let package = tx_inventory
-        .and_then(|inventory| inventory.resident_ancestor_package(subject))
+    let package = last_inv_sequence
+        .zip(tx_inventory)
+        .and_then(|(sequence, inventory)| inventory.resident_ancestor_package(subject, sequence))
         .map(|wtxids| AncPkgInfo { wtxids })
         .filter(|info| info.subject() == Some(subject) && info.encode().is_ok());
     match package {
@@ -545,6 +572,7 @@ fn serve_inbound_getdata<S>(
     peer: &mut Peer<S>,
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
+    last_inv_sequence: Option<u64>,
     items: &[Inventory],
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
@@ -559,6 +587,7 @@ fn serve_inbound_getdata<S>(
     let tail = serve_getdata(
         chain,
         tx_inventory,
+        last_inv_sequence,
         compact_version,
         items,
         &mut not_found,
@@ -573,6 +602,7 @@ fn serve_inbound_getdata<S>(
 pub fn serve_getdata(
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
+    last_inv_sequence: Option<u64>,
     compact_version: Option<u64>,
     items: &[Inventory],
     not_found: &mut Vec<Inventory>,
@@ -595,9 +625,19 @@ pub fn serve_getdata(
                 _,
             ) => {
                 let subject = Wtxid::from(Hash256::from_le_bytes(hash));
-                serve_ancpkginfo_item(tx_inventory, item, subject, headroom, send, not_found)?
+                serve_ancpkginfo_item(
+                    tx_inventory,
+                    last_inv_sequence,
+                    item,
+                    subject,
+                    headroom,
+                    send,
+                    not_found,
+                )?
             }
-            (_, Some(inv)) => serve_tx_item(inv, item, headroom, send, not_found)?,
+            (_, Some(inv)) => {
+                serve_tx_item(inv, last_inv_sequence, item, headroom, send, not_found)?
+            }
             (_, None) => serve_block_item(chain, compact_version, item, headroom, send, not_found)?,
         };
         if !served {
@@ -616,6 +656,7 @@ pub fn serve_getdata(
 
 fn serve_tx_item(
     inv: &dyn TxInventory,
+    last_inv_sequence: Option<u64>,
     item: &Inventory,
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
@@ -624,10 +665,14 @@ fn serve_tx_item(
     if !headroom() {
         return Ok(false);
     }
+    let Some(last_inv_sequence) = last_inv_sequence else {
+        not_found.push(*item);
+        return Ok(true);
+    };
     let found = match item {
         Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
             let native = Txid::from(Hash256::from_le_bytes(txid.as_byte_array()));
-            inv.get_tx(native).map(|mut tx| {
+            inv.get_tx(native, last_inv_sequence).map(|mut tx| {
                 let wtxid = tx.wtxid();
                 if matches!(item, Inventory::Transaction(_)) {
                     for input in &mut tx.inputs {
@@ -639,7 +684,8 @@ fn serve_tx_item(
         }
         Inventory::WTx(wtxid) => {
             let native = Wtxid::from(Hash256::from_le_bytes(wtxid.as_byte_array()));
-            inv.get_tx_by_wtxid(native).map(|tx| (native, tx))
+            inv.get_tx_by_wtxid(native, last_inv_sequence)
+                .map(|tx| (native, tx))
         }
         _ => None,
     };
@@ -919,6 +965,7 @@ mod tests {
             message,
             chain,
             None,
+            Some(0),
             &|| true,
             &|| true,
             &mut |response| {
@@ -1230,6 +1277,7 @@ mod tests {
             &message,
             Some(&chain),
             None,
+            Some(0),
             &|| true,
             &|| false,
             &mut |response| {
@@ -1391,6 +1439,7 @@ mod tests {
             &Message::GetData(vec![known]),
             Some(&chain),
             None,
+            Some(0),
             &|| true,
             &|| false,
             &mut |response| {
@@ -1446,6 +1495,7 @@ mod tests {
             &Message::GetData(vec![known; MAX_INV_PER_MSG]),
             Some(&chain),
             None,
+            Some(0),
             &|| true,
             &|| budget.may_reserve_production(),
             &mut |message| {
@@ -1502,6 +1552,7 @@ mod tests {
             &Message::GetData(vec![tx_miss, inv_a, tx_hit, inv_b, unknown_block]),
             Some(&chain),
             Some(&inventory),
+            Some(0),
             &|| true,
             &|| {
                 consulted.set(consulted.get() + 1);
@@ -1527,6 +1578,7 @@ mod tests {
         let rest = serve_getdata(
             Some(&chain),
             Some(&inventory),
+            Some(0),
             None,
             &peer.pending_getdata,
             &mut misses,
@@ -1579,6 +1631,7 @@ mod tests {
         let tail = serve_getdata(
             Some(&chain),
             Some(&inventory),
+            Some(0),
             None,
             &[miss, served],
             &mut not_found,
@@ -1620,6 +1673,7 @@ mod tests {
             )]),
             None,
             None,
+            Some(0),
             &|| true,
             &|| true,
             &mut |response| {
@@ -1666,6 +1720,7 @@ mod tests {
             &Message::GetData(vec![known; 4]),
             Some(&chain),
             None,
+            Some(0),
             &|| true,
             &|| true,
             &mut |message| {
@@ -1717,7 +1772,7 @@ mod tests {
         let headroom = || true;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut send = |_message: Message| -> Result<(), PeerError> { panic!("writer died") };
-            serve_getpkgtxns(Some(&inventory), &request, &headroom, &mut send)
+            serve_getpkgtxns(Some(&inventory), Some(0), &request, &headroom, &mut send)
         }));
         assert!(result.is_err(), "the panic must propagate");
         assert_eq!(
@@ -1789,17 +1844,21 @@ mod tests {
             self.have_hashes.contains(hash.as_byte_array())
         }
 
-        fn get_tx(&self, txid: Txid) -> Option<Tx> {
+        fn get_tx(&self, txid: Txid, _last_inv_sequence: u64) -> Option<Tx> {
             let btid = bitcoin::Txid::from_byte_array(*txid.as_bytes());
             self.txs_by_txid.get(&btid).cloned()
         }
 
-        fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+        fn get_tx_by_wtxid(&self, wtxid: Wtxid, _last_inv_sequence: u64) -> Option<Tx> {
             let bwid = bitcoin::Wtxid::from_byte_array(*wtxid.as_bytes());
             self.txs_by_wtxid.get(&bwid).cloned()
         }
 
-        fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>> {
+        fn resident_ancestor_package(
+            &self,
+            wtxid: Wtxid,
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Wtxid>> {
             self.ancestor_packages.get(&wtxid).cloned()
         }
 
@@ -1813,6 +1872,14 @@ mod tests {
                         .map(Arc::clone)
                 })
                 .collect()
+        }
+
+        fn package_for_relay(
+            &self,
+            wtxids: &[Wtxid],
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Arc<Tx>>> {
+            self.resident_package(wtxids)
         }
     }
 
@@ -2170,6 +2237,7 @@ mod tests {
             message,
             chain,
             tx_inventory,
+            Some(0),
             &|| relay_open,
             &|| true,
             &mut |response| {
@@ -2224,6 +2292,7 @@ mod tests {
                 &request,
                 Some(&chain),
                 None,
+                Some(0),
                 &|| true,
                 &|| true,
                 &mut |_| panic!("index not published"),
@@ -2310,6 +2379,7 @@ mod tests {
             &request,
             Some(&NarrowingChain),
             None,
+            Some(0),
             &|| true,
             &|| true,
             &mut |message| {
@@ -2465,6 +2535,7 @@ mod tests {
             message,
             None,
             Some(inventory),
+            Some(0),
             &|| true,
             &|| true,
             &mut |response| {
@@ -2632,6 +2703,58 @@ mod tests {
         Ok(())
     }
 
+    // P2P-01
+    #[test]
+    fn package_requests_without_inventory_cutoff_reveal_nothing() -> Result<(), PeerError> {
+        let tx = dummy_tx(1);
+        let wtxid = tx.wtxid();
+        let inventory = FakeTxInventory::empty()
+            .with_resident_tx(tx)
+            .with_ancestor_package(wtxid, vec![wtxid]);
+        let loaded = AtomicUsize::new(0);
+        let counting = CountingResident {
+            inner: &inventory,
+            loaded: &loaded,
+        };
+        let ancestor = package_item(MSG_ANCPKGINFO, wtxid);
+        for (message, expected) in [
+            (
+                Message::GetData(vec![ancestor]),
+                Message::NotFound(vec![ancestor]),
+            ),
+            (
+                Message::GetPkgTxns(GetPkgTxns {
+                    wtxids: vec![wtxid],
+                }),
+                Message::NotFound(vec![Inventory::Unknown {
+                    inv_type: MSG_PKGTXNS,
+                    hash: combined_package_hash(&[wtxid]),
+                }]),
+            ),
+        ] {
+            let mut responses = Vec::new();
+            dispatch_inbound_full(
+                &mut package_peer(BOTH_PACKAGE_BITS)?,
+                &message,
+                None,
+                Some(&counting),
+                None,
+                &|| true,
+                &|| true,
+                &mut |response| {
+                    responses.push(response);
+                    Ok(())
+                },
+                &mut |_| {},
+                &mut |_| {},
+            )?;
+            assert_eq!(responses, vec![expected]);
+        }
+        assert_eq!(loaded.load(Ordering::SeqCst), 0);
+        assert!(inventory.marks.lock().is_empty());
+        Ok(())
+    }
+
     #[test]
     fn getpkgtxns_is_all_resident_in_request_order_or_one_notfound() -> Result<(), PeerError> {
         let parent = dummy_tx(1);
@@ -2752,6 +2875,7 @@ mod tests {
             }),
             None,
             Some(&counting),
+            Some(0),
             &|| true,
             &|| false,
             &mut |response| panic!("a closed gate queued {response:?}"),
@@ -2773,21 +2897,34 @@ mod tests {
             self.inner.have_tx(hash, hash_is_wtxid)
         }
 
-        fn get_tx(&self, txid: Txid) -> Option<Tx> {
-            self.inner.get_tx(txid)
+        fn get_tx(&self, txid: Txid, _last_inv_sequence: u64) -> Option<Tx> {
+            self.inner.get_tx(txid, _last_inv_sequence)
         }
 
-        fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
-            self.inner.get_tx_by_wtxid(wtxid)
+        fn get_tx_by_wtxid(&self, wtxid: Wtxid, _last_inv_sequence: u64) -> Option<Tx> {
+            self.inner.get_tx_by_wtxid(wtxid, _last_inv_sequence)
         }
 
-        fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>> {
-            self.inner.resident_ancestor_package(wtxid)
+        fn resident_ancestor_package(
+            &self,
+            wtxid: Wtxid,
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Wtxid>> {
+            self.inner
+                .resident_ancestor_package(wtxid, _last_inv_sequence)
         }
 
         fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
             self.loaded.fetch_add(1, Ordering::SeqCst);
             self.inner.resident_package(wtxids)
+        }
+
+        fn package_for_relay(
+            &self,
+            wtxids: &[Wtxid],
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Arc<Tx>>> {
+            self.resident_package(wtxids)
         }
     }
 
