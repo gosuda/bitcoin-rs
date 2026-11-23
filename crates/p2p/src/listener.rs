@@ -1642,12 +1642,24 @@ enum KeepaliveAction {
     Expired,
 }
 
+#[derive(Clone, Copy)]
+enum PingProbe {
+    Unsent,
+    Awaiting {
+        nonce: std::num::NonZeroU64,
+        sent: Instant,
+    },
+    Settled {
+        sent: Instant,
+    },
+}
+
 struct Keepalive {
     ping_interval: Duration,
     timeout_interval: Duration,
     last_recv: Instant,
     last_send: Instant,
-    last_ping: Option<Instant>,
+    probe: PingProbe,
     stall: Option<Instant>,
     shared_refused: bool,
 }
@@ -1667,7 +1679,7 @@ impl Keepalive {
             timeout_interval,
             last_recv: now,
             last_send: now,
-            last_ping: None,
+            probe: PingProbe::Unsent,
             stall: None,
             shared_refused: false,
         }
@@ -1725,11 +1737,28 @@ impl Keepalive {
         }
     }
 
-    /// One probe's admission: it owes its cadence (`last_ping`) but is not
-    /// send activity — only actual socket writes feed the send-silence
-    /// clock, so a queued-but-unwritten probe cannot mask a stalled writer.
-    fn record_probe(&mut self, now: Instant) {
-        self.last_ping = Some(now);
+    fn record_probe(&mut self, nonce: std::num::NonZeroU64, now: Instant) {
+        assert!(!matches!(self.probe, PingProbe::Awaiting { .. }));
+        self.probe = PingProbe::Awaiting { nonce, sent: now };
+    }
+
+    fn record_pong(&mut self, nonce: u64, now: Instant) -> Option<Duration> {
+        let PingProbe::Awaiting {
+            nonce: expected,
+            sent,
+        } = self.probe
+        else {
+            return None;
+        };
+        if nonce == expected.get() {
+            self.probe = PingProbe::Settled { sent };
+            now.checked_duration_since(sent)
+        } else {
+            if nonce == 0 {
+                self.probe = PingProbe::Settled { sent };
+            }
+            None
+        }
     }
 
     fn next_action(&self, now: Instant) -> KeepaliveAction {
@@ -1751,13 +1780,14 @@ impl Keepalive {
         }
         let idle = now.saturating_duration_since(last_recv) >= self.ping_interval
             || now.saturating_duration_since(last_send) >= self.ping_interval;
-        let probe_owed = self
-            .last_ping
-            .is_none_or(|last| now.saturating_duration_since(last) >= self.ping_interval);
-        // Core initializes a peer's `m_ping_start` to the clock epoch, so the
-        // first `MaybeSendPing` pass after VERACK owes a probe without waiting
-        // for silence (v31.1 net_processing.cpp); later probes stay idle-gated.
-        if probe_owed && (self.last_ping.is_none() || idle) {
+        let probe_owed = match self.probe {
+            PingProbe::Unsent => true,
+            PingProbe::Awaiting { .. } => false,
+            PingProbe::Settled { sent } => {
+                idle && now.saturating_duration_since(sent) >= self.ping_interval
+            }
+        };
+        if probe_owed {
             KeepaliveAction::Ping
         } else {
             KeepaliveAction::Idle
@@ -1768,7 +1798,66 @@ impl Keepalive {
 #[cfg(test)]
 mod keepalive_tests {
     use super::{Keepalive, KeepaliveAction, PING_INTERVAL, TIMEOUT_INTERVAL};
+    use std::num::NonZeroU64;
     use std::time::{Duration, Instant};
+
+    // P2P-08
+    #[test]
+    fn only_the_outstanding_nonce_records_ping_time() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        assert_eq!(keepalive.record_pong(1, t0), None);
+        keepalive.record_probe(NonZeroU64::MIN, t0);
+        assert_eq!(
+            keepalive.record_pong(2, t0 + Duration::from_millis(3)),
+            None
+        );
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL),
+            KeepaliveAction::Idle
+        );
+        assert_eq!(
+            keepalive.record_pong(1, t0 + Duration::from_millis(7)),
+            Some(Duration::from_millis(7))
+        );
+        assert_eq!(
+            keepalive.record_pong(1, t0 + Duration::from_millis(8)),
+            None
+        );
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL),
+            KeepaliveAction::Ping
+        );
+        let next_nonce = NonZeroU64::new(2).unwrap_or_else(|| panic!("nonzero fixture"));
+        keepalive.record_probe(next_nonce, t0 + PING_INTERVAL);
+        assert_eq!(keepalive.record_pong(1, t0 + PING_INTERVAL), None);
+        assert_eq!(
+            keepalive.record_pong(2, t0 + PING_INTERVAL + Duration::from_millis(5)),
+            Some(Duration::from_millis(5))
+        );
+    }
+
+    // P2P-08
+    #[test]
+    fn zero_and_negative_ping_times_follow_core_settlement() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.record_probe(NonZeroU64::MIN, t0);
+        assert_eq!(keepalive.record_pong(1, t0), Some(Duration::ZERO));
+        keepalive.record_probe(NonZeroU64::MIN, t0 + Duration::from_secs(1));
+        assert_eq!(keepalive.record_pong(1, t0), None);
+        assert_eq!(
+            keepalive.next_action(t0 + Duration::from_secs(1) + PING_INTERVAL),
+            KeepaliveAction::Ping
+        );
+        keepalive.record_probe(NonZeroU64::MIN, t0 + PING_INTERVAL);
+        assert_eq!(keepalive.record_pong(0, t0 + PING_INTERVAL), None);
+        assert_eq!(keepalive.record_pong(1, t0 + PING_INTERVAL), None);
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL * 2),
+            KeepaliveAction::Ping
+        );
+    }
 
     #[test]
     fn first_probe_is_owed_immediately() {
@@ -1779,7 +1868,7 @@ mod keepalive_tests {
             KeepaliveAction::Ping,
             "Core's m_ping_start initializes to the clock epoch, so the first pass after the handshake pings without waiting for silence"
         );
-        keepalive.record_probe(t0);
+        keepalive.record_probe(NonZeroU64::MIN, t0);
         assert_eq!(
             keepalive.next_action(t0 + PING_INTERVAL / 2),
             KeepaliveAction::Idle,
@@ -1791,7 +1880,8 @@ mod keepalive_tests {
     fn probes_owe_one_ping_per_idle_interval() {
         let t0 = Instant::now();
         let mut keepalive = Keepalive::starting(t0);
-        keepalive.record_probe(t0);
+        keepalive.record_probe(NonZeroU64::MIN, t0);
+        assert_eq!(keepalive.record_pong(1, t0), Some(Duration::ZERO));
         assert_eq!(
             keepalive.next_action(t0 + PING_INTERVAL / 2),
             KeepaliveAction::Idle,
@@ -1802,7 +1892,11 @@ mod keepalive_tests {
             KeepaliveAction::Ping,
             "one silent direction for an interval owes a probe"
         );
-        keepalive.record_probe(t0 + PING_INTERVAL);
+        keepalive.record_probe(NonZeroU64::MIN, t0 + PING_INTERVAL);
+        assert_eq!(
+            keepalive.record_pong(1, t0 + PING_INTERVAL),
+            Some(Duration::ZERO)
+        );
         assert_eq!(
             keepalive.next_action(t0 + PING_INTERVAL + PING_INTERVAL / 2),
             KeepaliveAction::Idle
@@ -1882,7 +1976,7 @@ mod keepalive_tests {
             keepalive.next_action(t0 + TIMEOUT_INTERVAL),
             KeepaliveAction::Ping
         );
-        keepalive.record_probe(t0 + TIMEOUT_INTERVAL);
+        keepalive.record_probe(NonZeroU64::MIN, t0 + TIMEOUT_INTERVAL);
         assert_eq!(
             keepalive.next_action(t0 + TIMEOUT_INTERVAL + PING_INTERVAL / 2),
             KeepaliveAction::Idle
@@ -1897,7 +1991,7 @@ mod keepalive_tests {
         // The probe is admitted to the queue minutes after the last actual
         // write; inbound traffic keeps the receive clock fresh the whole
         // time. Expiry is still judged from the last actual write.
-        keepalive.record_probe(t0 + PING_INTERVAL);
+        keepalive.record_probe(NonZeroU64::MIN, t0 + PING_INTERVAL);
         keepalive.record_recv(expired);
         assert_eq!(
             keepalive.next_action(expired),
@@ -1917,7 +2011,7 @@ mod keepalive_tests {
             KeepaliveAction::Ping,
             "a refused probe is retryable, not silently lost"
         );
-        keepalive.record_probe(t0 + PING_INTERVAL);
+        keepalive.record_probe(NonZeroU64::MIN, t0 + PING_INTERVAL);
         assert_eq!(
             keepalive.next_action(t0 + PING_INTERVAL + PING_INTERVAL / 2),
             KeepaliveAction::Idle
@@ -2181,16 +2275,22 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
                 // lane or a dead writer is connection-local congestion that
                 // defers the probe — it stays owed — without pausing the
                 // silence clock.
-                let probe = crate::Message::Ping(generate_nonce(peer_addr));
+                let nonce = loop {
+                    if let Some(nonce) = std::num::NonZeroU64::new(generate_nonce(peer_addr)) {
+                        break nonce;
+                    }
+                };
+                let probe = crate::Message::Ping(nonce.get());
                 let Ok(wire_len) = crate::wire::wire_len(&probe) else {
                     lease.cancel();
                     return Err(closed_queue());
                 };
                 match budget.try_charge_control(wire_len) {
                     Ok(credit) => {
+                        let sent = Instant::now();
                         lease
                             .send_with(credit, probe)
-                            .map(|()| keepalive.record_probe(Instant::now()))
+                            .map(|()| keepalive.record_probe(nonce, sent))
                             .map_err(|_| closed_queue())?;
                     }
                     Err(refusal @ crate::connection::Refusal::Shared) => {
@@ -2547,6 +2647,13 @@ pub fn run_message_loop<S: std::io::Read + std::io::Write>(
                         crate::Message::Addr(addr_v1_rows(&book.gossip(crate::addrman::now())))
                     };
                     let _ = sink.send(reply);
+                }
+            }
+            crate::Message::Pong(nonce) => {
+                if let Some(elapsed) = keepalive.record_pong(nonce, Instant::now()) {
+                    shared
+                        .peer_table
+                        .note_ping_time(lease.source(endpoint), elapsed);
                 }
             }
             crate::Message::Headers(headers) => {
@@ -7185,6 +7292,71 @@ mod getdata_pause_tests {
         Ok(received)
     }
 
+    // P2P-08
+    #[test]
+    fn matching_wire_pong_protects_the_live_inbound_connection() -> TestResult {
+        for matches_probe in [false, true] {
+            let shared = shared_with(ScriptedChain { blocks: Vec::new() });
+            let table = Arc::clone(&shared.peer_table);
+            let activity = Arc::clone(&shared.activity);
+            let now = Instant::now();
+            let older: Vec<_> = (1..40_u16)
+                .map(|port| {
+                    let mut lease = PeerLease::new_inbound(crossbeam_channel::unbounded().0);
+                    lease.backdate_for_test(
+                        now.checked_sub(Duration::from_millis(u64::from(40 - port)))
+                            .unwrap_or_else(|| panic!("the clock predates the fixture")),
+                    );
+                    table.register(PeerEndpoint::from(([127, 0, 0, 1], port)), lease.clone());
+                    lease
+                })
+                .collect();
+            let mut served = Served::start(
+                shared,
+                OutboundBudget::with_block_reserve(8, 1 << 20, 1024),
+                &WriterKind::Production {
+                    write_timeout: FAILSAFE,
+                },
+            )?;
+            table.register(served.client.stream.local_addr()?, served.lease.clone());
+            let received = read_messages(&mut served.client, 1)?;
+            let Some(Message::Ping(nonce)) = received.first() else {
+                return Err(TestError::Missing("initial ping"));
+            };
+            let pong = if matches_probe {
+                *nonce
+            } else if *nonce == 1 {
+                2
+            } else {
+                1
+            };
+            served.client.send(&Message::Pong(pong))?;
+            served.client.send(&Message::Ping(17))?;
+            assert_eq!(
+                read_messages(&mut served.client, 1)?,
+                vec![Message::Pong(17)]
+            );
+            assert!(
+                table
+                    .try_register_inbound(
+                        PeerEndpoint::from(([8, 8, 4, 4], 8333)),
+                        PeerLease::new_inbound(crossbeam_channel::unbounded().0),
+                        &[1, 8, 8],
+                        40,
+                        0,
+                        &activity,
+                    )
+                    .is_some()
+            );
+            assert_eq!(served.lease.is_cancelled(), !matches_probe);
+            assert_eq!(
+                older.iter().filter(|lease| lease.is_cancelled()).count(),
+                usize::from(matches_probe)
+            );
+        }
+        Ok(())
+    }
+
     // P2P-01
     #[test]
     fn block_and_control_messages_do_not_read_transaction_serving_cutoff() -> TestResult {
@@ -7278,10 +7450,17 @@ mod getdata_pause_tests {
 
     // P2P-01
     #[test]
-    fn parked_transaction_tail_checks_current_inventory_cutoff() -> TestResult {
-        for announced_while_parked in [false, true] {
+    fn parked_inventory_tail_reads_only_transaction_cutoffs() -> TestResult {
+        for (is_transaction, announced_while_parked) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
             let tx = tiny_tx(1);
-            let item = tx_inventory_of(&tx);
+            let held_block = block(6);
+            let item = if is_transaction {
+                tx_inventory_of(&tx)
+            } else {
+                inventory_of(&held_block)
+            };
             let (outbound_tx, outbound_rx) = crate::test_support::message_channel();
             let lease = PeerLease::new_with_budget(
                 outbound_tx,
@@ -7291,10 +7470,14 @@ mod getdata_pause_tests {
             lease
                 .send(Message::Ping(1))
                 .map_err(|_| "fixture queue admits one frame")?;
-            let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
+            let mut shared = shared_with(ScriptedChain {
+                blocks: vec![scripted(&held_block)],
+            });
             shared.tx_inventory = Some(Arc::new(ScriptedTxs {
                 txs: vec![tx.clone()],
             }));
+            let mut policy = Arc::new(super::transaction_poll_tests::MockTxPolicy::default());
+            shared.tx_policy = Some(policy.clone());
             let mut peer = parked_peer(vec![item]);
             let mut keepalive = Keepalive::starting(Instant::now());
             let mut parked_since = None;
@@ -7307,10 +7490,17 @@ mod getdata_pause_tests {
                 &mut parked_since,
             )?;
             assert_eq!(peer.pending_getdata, vec![item]);
+            assert_eq!(
+                policy
+                    .serving_reads
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                usize::from(is_transaction)
+            );
             assert_eq!(outbound_rx.try_recv(), Ok(Message::Ping(1)));
             if announced_while_parked {
-                let policy = super::transaction_poll_tests::MockTxPolicy::with_serving_sequence(0);
-                shared.tx_policy = Some(Arc::new(policy));
+                policy =
+                    Arc::new(super::transaction_poll_tests::MockTxPolicy::with_serving_sequence(0));
+                shared.tx_policy = Some(policy.clone());
             }
             step_parked_getdata(
                 &mut peer,
@@ -7321,7 +7511,19 @@ mod getdata_pause_tests {
                 &mut parked_since,
             )?;
             assert!(peer.pending_getdata.is_empty());
-            if announced_while_parked {
+            assert_eq!(
+                policy
+                    .serving_reads
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                usize::from(is_transaction) * if announced_while_parked { 1 } else { 2 }
+            );
+            if !is_transaction {
+                assert_eq!(
+                    outbound_rx.try_recv(),
+                    Ok(Message::BlockBytes(scripted(&held_block).1))
+                );
+                assert!(peer.pending_notfound.is_empty());
+            } else if announced_while_parked {
                 assert_eq!(outbound_rx.try_recv(), Ok(Message::Tx(tx)));
                 assert!(peer.pending_notfound.is_empty());
             } else {
@@ -7333,6 +7535,7 @@ mod getdata_pause_tests {
         Ok(())
     }
 
+    // P2P-01
     #[test]
     fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
         let (block_a, block_b) = (block(1), block(2));
@@ -7348,7 +7551,11 @@ mod getdata_pause_tests {
         let chain = ScriptedChain {
             blocks: vec![entry_a, entry_b],
         };
-        let mut served = Served::start(shared_with(chain), budget, &WriterKind::Gated)?;
+        let policy =
+            Arc::new(super::transaction_poll_tests::MockTxPolicy::with_serving_sequence(0));
+        let mut shared = shared_with(chain);
+        shared.tx_policy = Some(policy.clone());
+        let mut served = Served::start(shared, budget, &WriterKind::Gated)?;
 
         served.client.send(&Message::GetData(vec![
             unknown_tx,
@@ -7370,6 +7577,12 @@ mod getdata_pause_tests {
         assert!(
             !served.lease.is_cancelled(),
             "saturation parks the peer instead of disconnecting it"
+        );
+        assert_eq!(
+            policy
+                .serving_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
         );
 
         served.open_gate();
@@ -7394,6 +7607,12 @@ mod getdata_pause_tests {
                 Message::Pong(7),
             ],
             "request order, the miss before the tail, and the waiting ping last"
+        );
+        assert_eq!(
+            policy
+                .serving_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
         );
         assert!(!served.lease.is_cancelled());
 
