@@ -718,6 +718,7 @@ mod tests {
         )
     }
 
+    // MPS-03
     #[test]
     fn snapshot_reconciles_empty_pool_and_index_without_fabricating_block_events()
     -> Result<(), TestError> {
@@ -1387,6 +1388,7 @@ mod tests {
         Ok(())
     }
 
+    // MPS-03
     #[test]
     fn snapshot_clears_the_cached_epoch_with_the_block_log() -> Result<(), TestError> {
         let genesis = Network::Regtest.genesis_block();

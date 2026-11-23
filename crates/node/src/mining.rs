@@ -940,6 +940,109 @@ mod tests {
         Ok(())
     }
 
+    // API-11, API-30, MPS-03, SYNC-05
+    #[test]
+    fn fresh_submission_commits_after_fee_changes_past_generation_check()
+    -> Result<(), crate::test_support::TestError> {
+        use bitcoin_rs_consensus::primitives::{BlockImage, Network};
+        use bitcoin_rs_wire::mining::{CoinbaseReserve, GenerateRequest, solve_block};
+        use std::{
+            sync::{Arc, mpsc},
+            time::Duration,
+        };
+
+        let directory = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
+        config.data_dir = directory.path().join("node");
+        config.p2p.listen.clear();
+        let state = crate::state::NodeState::open(config, None)?;
+        state.apply_block(&BlockImage::from_local(Network::Regtest.genesis_block()))?;
+        let chain = state.chainstate();
+        let gateway = state.mempool_gateway();
+        let durable = state.durable_head();
+        let mining = super::MiningCoordinator::new(
+            state.mempool_reader(),
+            Arc::clone(&chain),
+            state.stable_read(),
+            state.chain_followers(),
+            vec![0x51],
+            CoinbaseReserve::default(),
+        );
+        let generation = mining.service.live_generation_key();
+        let mut candidate = mining
+            .service
+            .assemble_fresh_for_generation(generation, &[0x51])?
+            .into_unsolved_block()?;
+        solve_block(&mut candidate, GenerateRequest::DEFAULT_MAX_TRIES)?;
+        let payload = BlockImage::from_local(candidate);
+        let expected_hash = Hash256::from(payload.block_hash());
+        let before_head = durable
+            .load()?
+            .ok_or(crate::test_support::TestError::Missing("committed genesis"))?;
+        let before_hash = before_head.tip;
+        let before_pool = gateway.read().settled_generation();
+        let before_gate = gateway
+            .stable_generation()
+            .ok_or(crate::test_support::TestError::Missing("open admission"))?;
+        let prioritised = Txid::from(Hash256::from_le_bytes(&[93; 32]));
+        let hook_gateway = Arc::clone(&gateway);
+        let hook_durable = Arc::clone(&durable);
+        let applied = chain.applied_tip_reader();
+        let (edited_tx, edited_rx) = mpsc::channel();
+        chain
+            .set_pow_valid_block(Arc::new(move |_block, hash, height| {
+                assert_eq!((hash, height), (expected_hash, 1));
+                assert_eq!(hook_gateway.stable_generation(), None);
+                assert_eq!(applied.load_full().map(|tip| tip.hash), Some(before_hash));
+                let head = hook_durable.load();
+                let edit = hook_gateway.prioritise(prioritised, 900);
+                let changed_pool = hook_gateway.read().settled_generation();
+                assert!(edited_tx.send((head, edit, changed_pool)).is_ok());
+            }))
+            .map_err(|_| {
+                crate::test_support::TestError::ExpectationFailed("pow-valid hook installs once")
+            })?;
+
+        assert_eq!(
+            mining.submit(&payload, Some(generation))?,
+            BlockValidationResult::Accepted
+        );
+        let (hook_head, edit, changed_pool) =
+            edited_rx.recv_timeout(Duration::from_secs(10))?;
+        edit?;
+        assert_eq!(
+            hook_head?.map(|head| (head.tip, head.commit_id)),
+            Some((before_head.tip, before_head.commit_id))
+        );
+        assert_eq!(
+            changed_pool,
+            (before_pool.0, before_pool.1, before_pool.2 + 1)
+        );
+        let committed = durable
+            .load()?
+            .ok_or(crate::test_support::TestError::Missing("committed generated block"))?;
+        assert_eq!(
+            (committed.tip, committed.height, committed.commit_id),
+            (expected_hash, 1, before_head.commit_id + 1)
+        );
+        assert_eq!(
+            chain
+                .applied_tip_snapshot()
+                .map(|tip| (tip.hash, tip.height)),
+            Some((expected_hash, 1))
+        );
+        let settled = gateway.read().settled_generation();
+        assert_eq!(settled.0, committed.commit_id);
+        assert_eq!(settled.2, changed_pool.2);
+        assert!(matches!(
+            gateway.prioritised_transactions().as_slice(),
+            [entry] if entry.txid == prioritised && entry.fee_delta == 900
+        ));
+        assert_eq!(gateway.stable_generation(), Some(before_gate + 2));
+        assert!(!chain.is_closed_for_recovery());
+        Ok(())
+    }
+
     // API-11, API-30, SYNC-05
     #[test]
     fn templates_reject_missing_inputs_without_mutating_chainstate()

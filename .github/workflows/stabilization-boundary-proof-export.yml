@@ -1,0 +1,96 @@
+name: Stabilization boundary proof export
+
+on:
+  push:
+    branches: [stabilize/private-boundary-proof-20261124]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stabilization-boundary-proof-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "2"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  regenerate:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Format and regenerate the proof index
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          cargo run --locked -p contract-index
+          cargo run --locked -p contract-index -- --check
+          git diff --check
+          git add crates/node/src/chain_effects.rs crates/node/src/mining.rs docs/contracts/mempool-mutations.md docs/contracts/external-api.md docs/contracts/evidence-index.md docs/contracts/README.md
+          git rm --cached -- .github/workflows/stabilization-boundary-proof-export.yml
+          printf 'PRODUCT_TREE %s\n' "$(git write-tree)"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const paths = [
+            'crates/node/src/chain_effects.rs',
+            'crates/node/src/mining.rs',
+            'docs/contracts/mempool-mutations.md',
+            'docs/contracts/external-api.md',
+            'docs/contracts/evidence-index.md',
+            'docs/contracts/README.md',
+          ];
+          for (const path of paths) {
+            const bytes = fs.readFileSync(path);
+            const sha = crypto.createHash('sha1')
+              .update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
+            console.log('PRODUCT_FILE ' + JSON.stringify({path, sha, size: bytes.length}));
+            for (let offset = 0; offset < bytes.length; offset += 12000) {
+              console.log('PRODUCT_CHUNK ' + JSON.stringify({
+                path, offset, data: bytes.subarray(offset, offset + 12000).toString('base64'),
+              }));
+            }
+          }
+          NODE
+
+  boundary-tests:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Execute the owning boundary regressions
+        run: |
+          set -euo pipefail
+          mkdir -p target/boundary-proof
+          git rev-parse HEAD > target/boundary-proof/source.txt
+          bash scripts/ci-setup.sh apt nextest 2>&1 | tee target/boundary-proof/setup.log
+          cargo nextest run --locked -p bitcoin-rs-mempool --lib --no-tests fail --no-fail-fast \
+            -E 'test(=admission::tests::snapshot_settlement_requires_its_live_guard_and_empty_membership)' \
+            2>&1 | tee target/boundary-proof/snapshot-guard.log
+          cargo nextest run --locked -p bitcoin-rs-node --lib --no-default-features --no-tests fail --no-fail-fast \
+            -E 'test(=mining::tests::fresh_submission_commits_after_fee_changes_past_generation_check) | test(=mining::tests::fresh_submission_observes_fee_changes_while_waiting_for_admission) | test(=mining::tests::fresh_submission_rechecks_generation_under_transition_and_reopens_admission)' \
+            2>&1 | tee target/boundary-proof/submission-boundary.log
+          git diff --exit-code
+      - name: Preserve boundary evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: boundary-proof-${{ github.run_attempt }}
+          path: target/boundary-proof/**
+          if-no-files-found: warn
+          retention-days: 7
