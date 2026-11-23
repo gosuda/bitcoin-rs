@@ -1438,7 +1438,7 @@ mod tests {
         assert!(resumed.mempool_gateway().stable_generation().is_some());
         let coins = reconstruct_utxo_set(&resumed)?;
         assert_eq!(
-            coins.with_stable_view(|view| view.hash_serialized_3_at_height(pinned.height))??,
+            coins.with_stable_view(|view| view.hash_serialized_3_at_height(pinned.height))?,
             pinned.hash_serialized
         );
         Ok(())
