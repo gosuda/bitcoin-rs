@@ -1,0 +1,87 @@
+name: Mining pressure review verification
+on:
+  push:
+    branches: [stabilize/private-mining-pressure-review-20261124]
+permissions:
+  contents: read
+concurrency:
+  group: mining-pressure-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "2"
+  RUST_BACKTRACE: "1"
+jobs:
+  regenerate:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Format and export the generated product
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin fb43a9b3980d7d4cdffeb1df3020c569e4176767
+          cargo fmt --all
+          cargo run --locked -p contract-index
+          cargo run --locked -p contract-index -- --check
+          git diff --check
+          git add -u
+          git rm --cached -- .github/workflows/private-mining-pressure-verification.yml scripts/verify-mining-pressure-regressions.sh
+          printf 'PRODUCT_TREE %s\n' "$(git write-tree)"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const cp = require('node:child_process');
+          const paths = cp.execFileSync('git', ['diff', '--cached', '--name-only', '-z', 'fb43a9b3980d7d4cdffeb1df3020c569e4176767'], { encoding: 'utf8' })
+            .split('\0').filter(Boolean);
+          for (const path of paths) {
+            if (!fs.existsSync(path)) throw new Error('Unexpected deletion: ' + path);
+            const bytes = fs.readFileSync(path);
+            const sha = crypto.createHash('sha1')
+              .update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
+            console.log('PRODUCT_FILE ' + JSON.stringify({path, sha, size: bytes.length}));
+            for (let offset = 0; offset < bytes.length; offset += 12000) {
+              console.log('PRODUCT_CHUNK ' + JSON.stringify({
+                path, offset, data: bytes.subarray(offset, offset + 12000).toString('base64'),
+              }));
+            }
+          }
+          NODE
+  native-controls:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify mining pressure and negative controls
+        run: |
+          set -euo pipefail
+          mkdir -p target/mining-pressure-proof
+          bash scripts/ci-setup.sh apt nextest 2>&1 | tee target/mining-pressure-proof/setup.log
+          bash scripts/verify-mining-pressure-regressions.sh
+      - name: Run mining owner suite
+        run: |
+          set -euo pipefail
+          cargo nextest run --locked -p bitcoin-rs-node --lib --no-default-features --no-fail-fast --no-tests fail -E 'test(/^mining::/)' 2>&1 | tee target/mining-pressure-proof/mining-owner.log
+      - name: Check local node callers
+        run: |
+          set -euo pipefail
+          cargo clippy --locked -p bitcoin-rs-node --all-targets --no-default-features -- -D warnings 2>&1 | tee target/mining-pressure-proof/clippy.log
+      - name: Preserve raw ownership evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: mining-pressure-proof-${{ github.run_attempt }}
+          path: target/mining-pressure-proof/**
+          if-no-files-found: warn
+          retention-days: 7
