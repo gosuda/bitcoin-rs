@@ -1,0 +1,42 @@
+name: Header duplicate classification reproduction
+on:
+  push:
+    branches: [stabilize/private-header-duplicate-review-20261124]
+permissions:
+  contents: read
+concurrency:
+  group: header-duplicate-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "2"
+  RUST_BACKTRACE: "1"
+jobs:
+  reproduce:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prove the current header-eviction failure
+        run: |
+          set -euo pipefail
+          mkdir -p target/header-duplicate-before
+          bash scripts/ci-setup.sh apt nextest 2>&1 | tee target/header-duplicate-before/setup.log
+          bash scripts/verify-header-duplicates.sh
+      - name: Preserve exact failing behavior
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: header-duplicate-before-${{ github.run_attempt }}
+          path: target/header-duplicate-before/**
+          if-no-files-found: warn
+          retention-days: 7
