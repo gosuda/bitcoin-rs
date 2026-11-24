@@ -509,6 +509,7 @@ Proof: `mining::template::tests::ordinary_templates_reserve_external_coinbase_we
 - Owner: `update_uncommitted_block_structures` in `crates/wire/src/mining/coinbase.rs`, called from `MiningCoordinator::submit_block` in `crates/node/src/mining.rs`.
 - The miner applies read-only fill-need signals on the borrowed payload and submits directly when no fill applies (no re-encode/clone).
 - Only a possible fill trial-clones and submits `from_local` of the filled clone.
+- After successful materialization and witness repair, the miner releases its original image and receipts before it reserves the replacement serialization. Other readers keep their own raw receipt. Proof: `mining::tests::witness_repair_releases_the_original_before_reserving_its_replacement` in `crates/node/src/mining.rs` leaves capacity for either standalone image, checks both standalone admissions, and commits the repaired submission under the same limit.
 - The previous header must be known, and SegWit must be active for the height.
 - If the coinbase has a BIP141 commitment output and its witness is empty, `submitblock` inserts the 32-byte reserved nonce (Core `UpdateUncommittedBlockStructures`).
 - An existing coinbase witness is left unchanged.

@@ -585,9 +585,8 @@ impl MiningControl for MiningCoordinator {
             if image_needs_witness_reserved_value(&payload.image, segwit_active == Some(true)) {
                 let mut trial = payload.image.materialize();
                 if self.fill_uncommitted_witness(&mut trial) {
-                    let filled = AccountedBlock::from_local(trial, &self.block_memory)?;
                     drop(payload);
-                    return Ok(filled);
+                    return AccountedBlock::from_local(trial, &self.block_memory);
                 }
             }
             Ok(payload)
@@ -1384,6 +1383,63 @@ mod tests {
                 .assemble_fresh_for_generation(generation, &[0x51])
                 .is_ok()
         );
+        assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), baseline);
+        Ok(())
+    }
+
+    // API-15, API-17, BUD-01, BUD-02, BUD-06, SYNC-05
+    #[test]
+    fn witness_repair_releases_the_original_before_reserving_its_replacement()
+    -> Result<(), crate::test_support::TestError> {
+        use bitcoin_rs_consensus::primitives::{
+            BlockImage, consensus_bytes, layout::decode_reservation,
+        };
+        use bitcoin_rs_storage::budget::BudgetOwner;
+        use bitcoin_rs_wire::mining::{GenerateRequest, MiningControl, solve_block};
+
+        let (_directory, state, mining) = mining_state_at_genesis()?;
+        let generation = mining.service.live_generation_key();
+        let mut block = mining
+            .service
+            .assemble_fresh_for_generation(generation, &[0x51])?
+            .into_unsolved_block()?;
+        solve_block(&mut block, GenerateRequest::DEFAULT_MAX_TRIES)?;
+        let expected_hash = Hash256::from(block.block_hash());
+        let repaired_bound = decode_reservation(block.total_size());
+        let repaired = block.clone();
+        assert!(!block.txs[0].inputs[0].witness.is_empty());
+        block.txs[0].inputs[0].witness = Default::default();
+        let submitted = consensus_bytes(&block);
+        let payload = BlockImage::from_raw(submitted.clone().into())?;
+        let original_bytes = submitted.len() + payload.retained_heap_bytes();
+        assert!(original_bytes <= repaired_bound);
+        let budget = state.budget();
+        let baseline = budget.charged_bytes(BudgetOwner::StagedImages);
+        let memory = state.block_memory();
+        let pressure_bytes =
+            memory.ledger().capacity() - usize::try_from(baseline)? - repaired_bound;
+        let pressure = memory.try_reserve(pressure_bytes)?;
+        drop(mining.account_image(payload.clone())?);
+        drop(super::AccountedBlock::from_local(
+            repaired,
+            &mining.block_memory,
+        )?);
+        assert_eq!(
+            mining.submit_block(payload)?,
+            BlockValidationResult::Accepted
+        );
+        assert_eq!(
+            state
+                .chainstate()
+                .applied_tip_snapshot()
+                .map(|tip| tip.hash),
+            Some(expected_hash)
+        );
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::StagedImages),
+            baseline + u64::try_from(pressure_bytes)?
+        );
+        drop(pressure);
         assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), baseline);
         Ok(())
     }
