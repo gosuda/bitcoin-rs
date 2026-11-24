@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Own external overlay backend processes and run the real process-harness tests."""
+from __future__ import annotations
+
 import argparse
 from contextlib import ExitStack
 import hashlib
@@ -15,7 +17,7 @@ import time
 IVNP_REVISION = "d5274b4752bd5a37bb35e6bb47796916c21e514c"
 
 
-def reserve_port(kind=socket.SOCK_STREAM):
+def reserve_port(kind: int = socket.SOCK_STREAM) -> socket.socket:
     listener = socket.socket(type=kind)
     try:
         listener.bind(("127.0.0.1", 0))
@@ -25,7 +27,7 @@ def reserve_port(kind=socket.SOCK_STREAM):
         raise
 
 
-def wait_port(address, process):
+def wait_port(address: tuple[str, int], process: subprocess.Popen[bytes]) -> None:
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -38,7 +40,7 @@ def wait_port(address, process):
     raise TimeoutError("overlay backend did not open its local control endpoint")
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ivnp-revision", action="store_true")
     parser.add_argument("--ivnpd", type=Path)
