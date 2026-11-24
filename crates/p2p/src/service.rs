@@ -1823,7 +1823,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                 &mut next_dns,
             ) {
                 for seed in &maintenance.seeds {
-                    match crate::peer::DnsResolver::resolve(&resolver, seed) {
+                    match resolver.resolve(seed) {
                         Ok(addresses) => maintenance.address_book.learn_dns(seed, &addresses, now),
                         Err(error) => tracing::warn!(seed, %error, "DNS bootstrap unavailable"),
                     }

@@ -36,7 +36,7 @@ class Process:
     start_ticks: str
 
 
-def process(pid: int) -> Process | None:
+def snapshot_process(pid: int) -> Process | None:
     try:
         fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
     except FileNotFoundError:
@@ -93,7 +93,7 @@ def read_progress(log: Path, cursor: Cursor | None) -> tuple[Cursor | None, bool
 def wait_for_stall(identity: Process, log: Path, timeout: float) -> bool:
     cursor, _ = read_progress(log, None)
     last = time.monotonic()
-    while process(identity.pid) == identity:
+    while snapshot_process(identity.pid) == identity:
         cursor, progressed = read_progress(log, cursor)
         now = time.monotonic()
         if progressed:
@@ -125,7 +125,7 @@ def preflight_attach(identity: Process, debugger: str) -> None:
     momentarily pauses the target once more before the diagnostic run. The
     target identity is checked around the probe so a recycled PID is never
     attached."""
-    if process(identity.pid) != identity:
+    if snapshot_process(identity.pid) != identity:
         raise ProcessLookupError(
             f"target exited or PID was reused before attach preflight (PID {identity.pid})")
     handle, name = tempfile.mkstemp(prefix=f"stall-preflight-{identity.pid}-", suffix=".gdb")
@@ -139,7 +139,7 @@ def preflight_attach(identity: Process, debugger: str) -> None:
              "-iex", "set auto-load off", "-iex", "set debuginfod enabled off",
              "-x", str(commands)],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=GDB_TIMEOUT)
-        if process(identity.pid) != identity:
+        if snapshot_process(identity.pid) != identity:
             raise ProcessLookupError(
                 f"target exited or PID was reused during attach preflight (PID {identity.pid})")
         output = probe.stdout + probe.stderr
@@ -157,7 +157,7 @@ def preflight_attach(identity: Process, debugger: str) -> None:
 
 
 def capture(identity: Process, log: Path, output: Path, debugger: str) -> Path:
-    if process(identity.pid) != identity:
+    if snapshot_process(identity.pid) != identity:
         raise ProcessLookupError("target exited or PID was reused before capture")
     directory = Path(tempfile.mkdtemp(prefix=f"stall-{identity.pid}-", dir=output))
     # A private 0700 directory contains possibly sensitive thread/debugger data.
@@ -196,7 +196,7 @@ def capture(identity: Process, log: Path, output: Path, debugger: str) -> Path:
                 except OSError as error:
                     value = f"unavailable: {error}"
                 stream.write(f"\n{task.name}/{name}: {value}\n")
-    if process(identity.pid) != identity:
+    if snapshot_process(identity.pid) != identity:
         # The partial directory already holds evidence; an unaudited raise
         # would strand it without a result.json explaining the early exit.
         write_result(directory, identity, log, None, None, False,
@@ -240,7 +240,7 @@ def capture(identity: Process, log: Path, output: Path, debugger: str) -> Path:
     # Re-read identity only after the child exits: PID recycling between
     # attach and dump must not pass as a complete capture of the original
     # start_ticks, so a changed identity forces an incomplete result.
-    identity_changed = process(identity.pid) != identity
+    identity_changed = snapshot_process(identity.pid) != identity
     # Preserve failure output. A refused attach or timeout is not a capture.
     # Count over the whole file: the child is capped at 16 MiB by
     # RLIMIT_FSIZE, while a 1 MiB tail would scroll early thread blocks out
@@ -288,7 +288,7 @@ def main() -> int:
                        check=True, timeout=5)
         if not args.output.is_dir():
             raise NotADirectoryError(args.output)
-        identity = process(args.pid)
+        identity = snapshot_process(args.pid)
         if identity is None:
             raise ProcessLookupError(args.pid)
         # WHY: the dry attach trades one momentary pause for failing on a
