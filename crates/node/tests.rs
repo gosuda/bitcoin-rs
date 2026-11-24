@@ -9436,14 +9436,20 @@ mod winning_header_driver {
             "the old applied branch header must be evicted before body rediscovery"
         );
         {
-            let bodies = reopened.chainstate().block_body_store_handle()
+            let bodies = reopened
+                .chainstate()
+                .block_body_store_handle()
                 .ok_or("missing retained body store")?;
             for (index, block) in main.iter().enumerate() {
                 let height = u32::try_from(index + 1)?;
-                let stored = bodies.load_block_body_for_verification(height, block.block_hash().0)
+                let stored = bodies
+                    .load_block_body_for_verification(height, block.block_hash().0)
                     .map_err(|error| TestError::message(error.to_string()))?
                     .ok_or("old main body was not retained")?;
-                assert_eq!(&stored[..], &BlockImage::from_local(block.clone()).bytes()[..]);
+                assert_eq!(
+                    &stored[..],
+                    &BlockImage::from_local(block.clone()).bytes()[..]
+                );
             }
         }
         let mut parent = main[31].block_hash();
@@ -9472,10 +9478,19 @@ mod winning_header_driver {
                 break;
             }
         }
-        assert!(rediscovery_peer.peers.is_current(rediscovery_peer.source),
-            "retained-body rediscovery must keep the source connected");
-        assert_eq!(reopened.chainstate().header_tip().ok_or("missing rediscovered header tip")?.hash,
-            main[35].block_hash().0, "rediscovered headers must win before stored body application");
+        assert!(
+            rediscovery_peer.peers.is_current(rediscovery_peer.source),
+            "retained-body rediscovery must keep the source connected"
+        );
+        assert_eq!(
+            reopened
+                .chainstate()
+                .header_tip()
+                .ok_or("missing rediscovered header tip")?
+                .hash,
+            main[35].block_hash().0,
+            "rediscovered headers must win before stored body application"
+        );
         let reused = reopened
             .chainstate()
             .applied_tip_snapshot()

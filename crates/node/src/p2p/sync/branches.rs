@@ -175,7 +175,7 @@ impl BlockSync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::p2p::sync::test_support::{ScriptedBranchSwitch, TestChain, syncing_ibd_latch};
+    use crate::p2p::sync::test_support::{ScriptedBranchSwitch, TestChain};
     use crate::test_support::TestError;
     use arc_swap::ArcSwapOption;
     use bitcoin_rs_chain::chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
@@ -224,7 +224,7 @@ mod tests {
             Arc::new(PeerTable::new()),
             headers_rx,
             blocks_rx,
-            syncing_ibd_latch(),
+            crate::p2p::sync::syncing_ibd_latch(),
         );
         let set_outcome = |error| {
             *chain.scripted_branch_switch.lock() = Some(ScriptedBranchSwitch {

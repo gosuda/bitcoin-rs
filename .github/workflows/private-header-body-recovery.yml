@@ -85,9 +85,9 @@ jobs:
       - name: Verify stored-body recovery, refusal retries, sync tests and Clippy
         run: |
           set -euo pipefail
-          qa_source="19e24e5f9f4e21c101f20613c637a9701b974ea5"
-          qa_baseline="706709daef6a96c0d83d6dd818027bd8ae0ac80c"
-          qa_refusal="1dc417b223301c0b54a5129d2c2f4d8edeb2d8a1"
+          qa_source="29338b6669b2f26288fabcc69bcd908cc739838b"
+          qa_baseline="df483503deaf537f5f66862d8fd25f0640aaf9a5"
+          qa_refusal="cc97a132711db783649aa22f3d80fc4e42350451"
           qa_evidence="$PWD/target/stored-branch-recovery-proof"
           qa_config="$RUNNER_TEMP/stored-branch-nextest.toml"
           qa_unit="p2p::sync::branches::tests::stored_branch_work_retries_refusal_and_waits_for_frontier_or_body_progress"
