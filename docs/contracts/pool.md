@@ -62,7 +62,11 @@ Source owners in the table use repository-relative paths.
 - The capacity reservation provides 8 slots shared by reservations and recovery records, with 4,000,000 bytes per slot.
 - Failed writes MUST keep the compact projection, not full blocks.
 - Per-connection limits stay in force.
+- An unavailable SV2 submission MUST retain its solved block under the existing found-block reservation. It MUST NOT take a second slot for a retry. The full body stays with the connection's deferred owner; a failed ledger write keeps only its compact projection in the recovery queue.
+- The owner MUST wait at least 100 ms between deferred submission attempts. An `Unavailable` result MUST NOT consume the allowance for inconclusive submission results.
 - No single bound claims a total-process memory bound.
+
+Proof: `crates/node/src/pool/sv2.rs::unavailable_sv2_submission_retains_its_bounded_block_until_admission_recovers` checks the shared eight-slot bound, retry timing, retained work during continued refusal, and slot release after success.
 ### `POOL-04`: Authority-key handling
 - The SV2 authority MUST be a matching BIP340 x-only public and secret pair.
 - The authority authenticates transport and MUST NOT be treated as payout custody.
@@ -96,6 +100,7 @@ Source owners in the table use repository-relative paths.
 - SV2 `SubmitShares.Success` MUST wait for host confirmation of the durable outcome.
 - An idempotent record MAY satisfy this confirmation.
 - Queued or failed work MUST NOT present as committed.
+- A typed `MiningControlError::Unavailable` MUST leave a solved SV2 block pending without closing the miner connection or sending success. The deferred owner MUST retry the same block after availability returns. A later applied receipt and the durable found-block record are required before acknowledgement.
 - SV1 success MUST wait for a completion token covering the share write, plus block-record write for found blocks.
 - Failed inline writes MAY sit in the bounded outbox, but queueing MUST NOT complete the response.
 - Each SV1 session MUST keep at most one pending accounting response.
@@ -104,6 +109,8 @@ Source owners in the table use repository-relative paths.
 - Found records MUST start pending and deduplicate by block and share identity.
 - Retries MUST NOT double-allocate.
 - Parents, clean-job flags, and receipts MUST NOT serve as reorg/maturity evidence.
+
+Proof: `crates/node/src/pool/sv2.rs::unavailable_sv2_submission_retains_its_bounded_block_until_admission_recovers` checks withheld acknowledgement, successful retry, replay rejection and exactly one share credit. `terminal_sv2_submission_errors_do_not_enter_the_admission_retry_queue` checks that typed request, rejection and fatal errors retain their terminal handling.
 ### `POOL-06`: PPLNS reward and maturity
 - Rounds MUST snapshot the work-weighted accepted-share window at the solving share, not connection, account, or share counts.
 - Fixing MUST require authoritative canonical observation of the exact block and coinbase with agreeing txid and value.
