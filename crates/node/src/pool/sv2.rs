@@ -55,11 +55,12 @@ fn settle_one_deferred(
     control: &dyn MiningControl,
     connection: &mut Connection,
     core: &PoolCore,
-    now: Instant,
+    mut clock: impl FnMut() -> Instant,
 ) -> Option<DeferredBlock> {
     if !matches!(ledger.found_block_recorded(entry.hash), Ok(true)) {
         return Some(entry);
     }
+    let now = clock();
     let unresolved = match &entry.submission {
         DeferredSubmission::AwaitingAdmission => true,
         DeferredSubmission::Submitted(submission) => {
@@ -70,8 +71,9 @@ fn settle_one_deferred(
         && entry.attempts < DEFERRED_RESUBMIT_ATTEMPTS
         && now >= entry.next_attempt
     {
-        entry.next_attempt = now + SOCKET_POLL_INTERVAL;
-        match entry.pending.submit(control) {
+        let submission = entry.pending.submit(control);
+        entry.next_attempt = clock() + SOCKET_POLL_INTERVAL;
+        match submission {
             Ok(fresh) if fresh.receipt().status() == BlockStatus::Applied => {
                 core.invalidate_active();
                 entry.submission = DeferredSubmission::Submitted(fresh);
@@ -348,10 +350,9 @@ fn process_deferred_blocks(
     core: &PoolCore,
 ) -> bool {
     let deferred_before = deferred.len();
-    let now = Instant::now();
     let mut still_deferred = Vec::with_capacity(deferred.len());
     for entry in std::mem::take(deferred) {
-        if let Some(waiter) = settle_one_deferred(entry, ledger, control, connection, core, now) {
+        if let Some(waiter) = settle_one_deferred(entry, ledger, control, connection, core, Instant::now) {
             still_deferred.push(waiter);
         }
     }
@@ -1395,7 +1396,7 @@ mod tests {
             host.control.as_ref(),
             &mut host.connection,
             &host.core,
-            Instant::now(),
+            std::time::Instant::now,
         );
         assert!(
             waiter.is_none(),
@@ -1453,7 +1454,7 @@ mod tests {
                 host.control.as_ref(),
                 &mut host.connection,
                 &host.core,
-                now - Duration::from_nanos(1),
+                || now - Duration::from_nanos(1),
             )
             .ok_or(FixtureError::Missing("waiter before retry deadline"))?;
             assert_eq!(host.node_submissions(), 1 + attempt);
@@ -1463,7 +1464,7 @@ mod tests {
                 host.control.as_ref(),
                 &mut host.connection,
                 &host.core,
-                now,
+                || now,
             )
             .ok_or(FixtureError::Missing("waiter under continued refusal"))?;
             host.deferred.push(entry);
@@ -1487,7 +1488,7 @@ mod tests {
                 host.control.as_ref(),
                 &mut host.connection,
                 &host.core,
-                now,
+                || now,
             )
             .is_none()
         );
@@ -1506,6 +1507,74 @@ mod tests {
         assert!(host.ledger.try_reserve_block_slot().is_none());
         drop(released);
         drop(remaining);
+        Ok(())
+    }
+
+    // POOL-03
+    #[test]
+    fn unavailable_retry_deadline_starts_after_submission_completes() -> TestResult {
+        let mut host = Host::new()?;
+        let channel = host.open_channel()?;
+        let job = Arc::clone(&host.job);
+        let winner = block_nonces(&job, &channel.prefix, 1)?
+            .pop()
+            .ok_or(FixtureError::NonceSpace(1))?;
+        *host.control.fail.lock() = Some(bitcoin_rs_wire::mining::MiningControlError::Unavailable(
+            "image budget is full".into(),
+        ));
+        let frames = host.submit(&channel, 1, &job, winner)?;
+        assert!(!has(&frames, MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS));
+        let entry = host
+            .deferred
+            .pop()
+            .ok_or(FixtureError::Missing("admission waiter"))?;
+        let started_at = entry.next_attempt;
+        let completed_at = started_at + Duration::from_secs(2);
+        let mut started = false;
+        let clock = || {
+            if started {
+                completed_at
+            } else {
+                started = true;
+                started_at
+            }
+        };
+        let entry = super::settle_one_deferred(
+            entry,
+            &host.ledger,
+            host.control.as_ref(),
+            &mut host.connection,
+            &host.core,
+            clock,
+        )
+        .ok_or(FixtureError::Missing("waiter after slow submission"))?;
+        assert_eq!(host.node_submissions(), 2);
+        let entry = super::settle_one_deferred(
+            entry,
+            &host.ledger,
+            host.control.as_ref(),
+            &mut host.connection,
+            &host.core,
+            || completed_at + Duration::from_millis(99),
+        )
+        .ok_or(FixtureError::Missing("waiter before completion deadline"))?;
+        assert_eq!(host.node_submissions(), 2);
+        *host.control.fail.lock() = None;
+        assert!(
+            super::settle_one_deferred(
+                entry,
+                &host.ledger,
+                host.control.as_ref(),
+                &mut host.connection,
+                &host.core,
+                || completed_at + Duration::from_millis(100),
+            )
+            .is_none()
+        );
+        assert_eq!(host.node_submissions(), 3);
+        let frames = host.miner.open(&host.connection.take_transmit())?;
+        assert!(has(&frames, MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS));
+        assert_eq!(host.credited_shares()?, 1);
         Ok(())
     }
 
