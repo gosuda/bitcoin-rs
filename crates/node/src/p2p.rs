@@ -460,8 +460,9 @@ mod block_forward_tests {
             assert_eq!(fixture.headers_rx.try_recv()?.headers, vec![block.header]);
             let raw_charge = budget.charged_bytes(BudgetOwner::PeerReceive) - prior_receive;
             assert_eq!(raw_charge, 0);
-            let expected_receipt = encoded_bytes + decoded_bytes;
-            let expected_charge = u64::try_from(expected_receipt)?;
+            let backing_slack = if compact { 9 - 1 } else { 0 };
+            let backing_charge = u64::try_from(encoded_bytes + backing_slack)?;
+            let expected_charge = backing_charge + u64::try_from(decoded_bytes)?;
             assert_eq!(
                 budget.charged_bytes(BudgetOwner::StagedImages),
                 prior_image + expected_charge
@@ -471,6 +472,7 @@ mod block_forward_tests {
                 prior_total + raw_charge + expected_charge
             );
             let credit = inbound.memory_credit.take().ok_or("wire image receipt")?;
+            let compact_reader = compact.then(|| inbound.payload().bytes().slice(..1));
             let payload = inbound.into_payload();
             let mut stager = crate::p2p::block_stager::BlockStager::new(
                 crate::p2p::download_window::policy::default_sync_budget(
@@ -509,11 +511,18 @@ mod block_forward_tests {
             assert_eq!(stager.received_len(), 0);
             assert_eq!(stager.received_bytes(), 0);
             assert_eq!(stager.decoded_bytes(), 0);
-            assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), prior_image);
+            let remaining_charge = if compact { backing_charge } else { 0 };
+            assert_eq!(
+                budget.charged_bytes(BudgetOwner::StagedImages),
+                prior_image + remaining_charge
+            );
             assert_eq!(
                 budget.charged_bytes(BudgetOwner::PeerReceive),
                 prior_receive
             );
+            assert_eq!(budget.total_committed(), prior_total + remaining_charge);
+            drop(compact_reader);
+            assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), prior_image);
             assert_eq!(budget.total_committed(), prior_total);
             drop(held);
             assert_eq!(budget.total_committed(), 0);

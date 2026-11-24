@@ -19,6 +19,7 @@ import platform
 import re
 import sys
 from pathlib import Path
+from typing import Any, Dict
 
 try:
     import tomllib
@@ -115,7 +116,7 @@ def _toml_lite(text):
     return root
 
 
-def load_manifest(path):
+def load_manifest(path: Path) -> Dict[str, Any]:
     if tomllib is not None:
         with path.open("rb") as stream:
             return tomllib.load(stream)
