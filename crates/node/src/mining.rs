@@ -60,6 +60,26 @@ struct AccountedBlock {
     _layout_credit: BlockMemoryCredit,
 }
 
+impl AccountedBlock {
+    fn from_local(block: Block, memory: &Arc<BlockMemory>) -> Result<Self, MiningControlError> {
+        let mut credit = memory
+            .try_reserve(
+                bitcoin_rs_consensus::primitives::layout::decode_reservation(block.total_size()),
+            )
+            .map_err(mining_memory_refusal)?;
+        let image = BlockImage::from_local(block)
+            .with_owned_backing(|bytes| credit.split_off(bytes))
+            .map_err(mining_memory_refusal)?;
+        credit
+            .retain(image.retained_heap_bytes())
+            .map_err(mining_memory_refusal)?;
+        Ok(Self {
+            image,
+            _layout_credit: credit,
+        })
+    }
+}
+
 pub struct MiningCoordinator {
     chainstate: Arc<Chainstate>,
     block_memory: Arc<BlockMemory>,
@@ -99,6 +119,7 @@ impl MiningCoordinator {
                 block_tree,
                 network,
                 chainstate: Arc::clone(&chainstate),
+                block_memory: Arc::clone(&block_memory),
             }),
             coinbase_script,
             coinbase_reserve,
@@ -199,25 +220,6 @@ impl MiningCoordinator {
         Ok(AccountedBlock {
             image,
             _layout_credit: layout_credit,
-        })
-    }
-
-    fn encode_local(&self, block: Block) -> Result<AccountedBlock, MiningControlError> {
-        let mut credit = self
-            .block_memory
-            .try_reserve(
-                bitcoin_rs_consensus::primitives::layout::decode_reservation(block.total_size()),
-            )
-            .map_err(mining_memory_refusal)?;
-        let image = BlockImage::from_local(block)
-            .with_owned_backing(|bytes| credit.split_off(bytes))
-            .map_err(mining_memory_refusal)?;
-        credit
-            .retain(image.retained_heap_bytes())
-            .map_err(mining_memory_refusal)?;
-        Ok(AccountedBlock {
-            image,
-            _layout_credit: credit,
         })
     }
 
@@ -438,6 +440,7 @@ struct ChainContextAdapter {
     block_tree: BlockTreeReader,
     network: Network,
     chainstate: Arc<Chainstate>,
+    block_memory: Arc<BlockMemory>,
 }
 
 impl ChainContextSource for ChainContextAdapter {
@@ -445,8 +448,9 @@ impl ChainContextSource for ChainContextAdapter {
         let block = candidate
             .into_unsolved_block()
             .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+        let payload = AccountedBlock::from_local(block, &self.block_memory)?;
         self.chainstate
-            .validate_block(&BlockImage::from_local(block))
+            .validate_block(&payload.image)
             .map_err(|error| test_block_validity_error(&error))
     }
 
@@ -550,40 +554,56 @@ impl MiningControl for MiningCoordinator {
         &self,
         payload: BlockImage,
     ) -> Result<BlockValidationResult, MiningControlError> {
+        let block_hash = payload.block_hash().into();
         {
             let _transition = match self.chainstate.lock_transition() {
                 Ok(lock) => lock,
                 Err(error) => return map_apply_error(error),
             };
             if matches!(
-                self.known_block_result(payload.block_hash().into()),
+                self.known_block_result(block_hash),
                 Some(BlockValidationResult::Duplicate)
             ) {
                 return Ok(BlockValidationResult::Duplicate);
             }
         }
-        let payload = self.account_image(payload)?;
-        let segwit_active = {
-            let tree = self.block_tree.read();
-            tree.lookup(payload.image.header().prev_blockhash.into())
-                .map(|prev_id| {
-                    tree.node(prev_id)
-                        .expect("node exists for looked-up id under block_tree read guard")
-                })
-                .map(|prev| {
-                    self.chainstate
-                        .network()
-                        .is_segwit_active(prev.height.saturating_add(1))
-                })
-        };
-        if image_needs_witness_reserved_value(&payload.image, segwit_active == Some(true)) {
-            let mut trial = payload.image.materialize();
-            if self.fill_uncommitted_witness(&mut trial) {
-                let filled = self.encode_local(trial)?;
-                drop(payload);
-                return self.submit(&filled, None);
+        let payload = match (|| {
+            let payload = self.account_image(payload)?;
+            let segwit_active = {
+                let tree = self.block_tree.read();
+                tree.lookup(payload.image.header().prev_blockhash.into())
+                    .map(|prev_id| {
+                        tree.node(prev_id)
+                            .expect("node exists for looked-up id under block_tree read guard")
+                    })
+                    .map(|prev| {
+                        self.chainstate
+                            .network()
+                            .is_segwit_active(prev.height.saturating_add(1))
+                    })
+            };
+            if image_needs_witness_reserved_value(&payload.image, segwit_active == Some(true)) {
+                let mut trial = payload.image.materialize();
+                if self.fill_uncommitted_witness(&mut trial) {
+                    drop(payload);
+                    return AccountedBlock::from_local(trial, &self.block_memory);
+                }
             }
-        }
+            Ok(payload)
+        })() {
+            Ok(payload) => payload,
+            Err(error) => {
+                if let Ok(_transition) = self.chainstate.lock_transition()
+                    && matches!(
+                        self.known_block_result(block_hash),
+                        Some(BlockValidationResult::Duplicate)
+                    )
+                {
+                    return Ok(BlockValidationResult::Duplicate);
+                }
+                return Err(error);
+            }
+        };
         self.submit(&payload, None)
     }
 
@@ -670,7 +690,7 @@ impl MiningControl for MiningCoordinator {
                     MiningControlError::Failed(CompactString::from(error.to_string()))
                 })?;
                 if matches!(request.selection, GenerateSelection::Ordered(_)) {
-                    let payload = self.encode_local(block)?;
+                    let payload = AccountedBlock::from_local(block, &self.block_memory)?;
                     self.chainstate
                         .validate_block(&payload.image)
                         .map_err(|error| test_block_validity_error(&error))?;
@@ -695,7 +715,7 @@ impl MiningControl for MiningCoordinator {
                     MiningControlError::Failed(CompactString::from(error.to_string()))
                 })?;
                 let hash = block.block_hash();
-                let payload = self.encode_local(block)?;
+                let payload = AccountedBlock::from_local(block, &self.block_memory)?;
                 let hex = bitcoin_rs_consensus::primitives::hex::hex_encode(payload.image.bytes());
                 if generation.is_some_and(|key| self.service.live_generation_key() != key) {
                     continue;
@@ -1175,6 +1195,261 @@ mod tests {
         Ok(())
     }
 
+    // API-18, BUD-03, SYNC-03, SYNC-05
+    #[test]
+    fn local_submission_rechecks_a_competing_commit_after_accounting_refusal()
+    -> Result<(), crate::test_support::TestError> {
+        use bitcoin_rs_consensus::primitives::BlockImage;
+        use bitcoin_rs_p2p::inbound::block_memory::{BlockMemory, IngressLedger};
+        use bitcoin_rs_storage::budget::BudgetOwner;
+        use bitcoin_rs_wire::mining::{
+            CoinbaseReserve, GenerateRequest, MiningControl, solve_block,
+        };
+        use std::{
+            sync::{Arc, mpsc},
+            time::Duration,
+        };
+
+        struct GatedLedger {
+            inner: Arc<dyn IngressLedger>,
+            gate: parking_lot::Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+            attempt: core::sync::atomic::AtomicUsize,
+            gated_attempt: usize,
+        }
+
+        impl IngressLedger for GatedLedger {
+            fn capacity(&self) -> usize {
+                self.inner.capacity()
+            }
+
+            fn try_take(&self, bytes: usize) -> bool {
+                if self
+                    .attempt
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                    == self.gated_attempt
+                    && let Some((entered, resume)) = self.gate.lock().take()
+                {
+                    assert!(entered.send(()).is_ok());
+                    assert!(resume.recv_timeout(Duration::from_secs(10)).is_ok());
+                }
+                self.inner.try_take(bytes)
+            }
+
+            fn give_back(&self, bytes: usize) {
+                self.inner.give_back(bytes);
+            }
+
+            fn wait_released(&self, timeout: Duration) {
+                self.inner.wait_released(timeout);
+            }
+
+            fn transfer_receive_to_image(&self, bytes: usize) -> bool {
+                self.inner.transfer_receive_to_image(bytes)
+            }
+
+            fn receive_capacity(&self) -> usize {
+                self.inner.receive_capacity()
+            }
+
+            fn try_take_receive(&self, bytes: usize) -> bool {
+                self.inner.try_take_receive(bytes)
+            }
+
+            fn give_back_receive(&self, bytes: usize) {
+                self.inner.give_back_receive(bytes);
+            }
+        }
+
+        for gated_attempt in 0..3 {
+            let (_directory, state, original) = mining_state_at_genesis()?;
+            let generation = original.service.live_generation_key();
+            let mut block = original
+                .service
+                .assemble_fresh_for_generation(generation, &[0x51])?
+                .into_unsolved_block()?;
+            solve_block(&mut block, GenerateRequest::DEFAULT_MAX_TRIES)?;
+            let committed_payload = BlockImage::from_local(block.clone());
+            if gated_attempt == 2 {
+                assert!(!block.txs[0].inputs[0].witness.is_empty());
+                block.txs[0].inputs[0].witness = Default::default();
+            }
+            let payload = BlockImage::from_local(block);
+            let hash = Hash256::from(payload.block_hash());
+            assert!(original.known_block_result(hash).is_none());
+            let budget = state.budget();
+            let baseline = budget.charged_bytes(BudgetOwner::StagedImages);
+            let memory = state.block_memory();
+            let available = match gated_attempt {
+                0 => 0,
+                1 => payload.retained_heap_bytes(),
+                _ => payload.retained_heap_bytes() + payload.bytes().len(),
+            };
+            let pressure = memory
+                .try_reserve(memory.ledger().capacity() - usize::try_from(baseline)? - available)?;
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let gated = Arc::new(BlockMemory::new(Arc::new(GatedLedger {
+                inner: Arc::clone(memory.ledger()),
+                gate: parking_lot::Mutex::new(Some((entered_tx, resume_rx))),
+                attempt: core::sync::atomic::AtomicUsize::new(0),
+                gated_attempt,
+            })));
+            let mining = super::MiningCoordinator::new(
+                state.mempool_reader(),
+                state.chainstate(),
+                gated,
+                state.stable_read(),
+                state.chain_followers(),
+                vec![0x51],
+                CoinbaseReserve::default(),
+            );
+            let durable = state.durable_head();
+            let gateway = state.mempool_gateway();
+            let ((committed, settled, generation), result) = std::thread::scope(|scope| {
+                let submitted = scope.spawn(|| mining.submit_block(payload.clone()));
+                entered_rx.recv_timeout(Duration::from_secs(10))?;
+                let commit = state.apply_block(&committed_payload);
+                let committed = durable
+                    .load()?
+                    .map(|head| (head.tip, head.height, head.commit_id));
+                let settled = gateway.read().settled_generation();
+                let generation = gateway.stable_generation();
+                resume_tx.send(()).map_err(|_| {
+                    crate::test_support::TestError::ChannelSend("resume image admission")
+                })?;
+                let result = submitted.join().map_err(|_| {
+                    crate::test_support::TestError::ExpectationFailed("submission thread panicked")
+                })?;
+                assert_eq!(commit?.hash, hash);
+                Ok::<_, crate::test_support::TestError>(((committed, settled, generation), result))
+            })?;
+            assert_eq!(result?, BlockValidationResult::Duplicate);
+            assert_eq!(
+                durable
+                    .load()?
+                    .map(|head| (head.tip, head.height, head.commit_id)),
+                committed
+            );
+            assert_eq!(gateway.read().settled_generation(), settled);
+            assert_eq!(gateway.stable_generation(), generation);
+            assert_eq!(
+                state
+                    .chainstate()
+                    .applied_tip_snapshot()
+                    .map(|tip| tip.hash),
+                Some(hash)
+            );
+            drop(pressure);
+            assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), baseline);
+        }
+        Ok(())
+    }
+
+    // API-30, BUD-01, BUD-02, BUD-03, SYNC-03, SYNC-05
+    #[test]
+    fn candidate_preflight_refuses_exhausted_shared_image_memory_and_recovers()
+    -> Result<(), crate::test_support::TestError> {
+        use bitcoin_rs_storage::budget::BudgetOwner;
+
+        let (_directory, state, mining) = mining_state_at_genesis()?;
+        let generation = mining.service.live_generation_key();
+        let chain = state.chainstate();
+        let durable = state.durable_head();
+        let gateway = state.mempool_gateway();
+        let before_head = durable
+            .load()?
+            .map(|head| (head.tip, head.height, head.commit_id));
+        let before_pool = gateway.read().settled_generation();
+        let before_gate = gateway.stable_generation();
+        let budget = state.budget();
+        let baseline = budget.charged_bytes(BudgetOwner::StagedImages);
+        let memory = state.block_memory();
+        let pressure =
+            memory.try_reserve(memory.ledger().capacity() - usize::try_from(baseline)?)?;
+        assert!(matches!(
+            mining
+                .service
+                .assemble_fresh_for_generation(generation, &[0x51]),
+            Err(MiningControlError::Unavailable(_))
+        ));
+        assert_eq!(
+            durable
+                .load()?
+                .map(|head| (head.tip, head.height, head.commit_id)),
+            before_head
+        );
+        assert_eq!(gateway.read().settled_generation(), before_pool);
+        assert_eq!(gateway.stable_generation(), before_gate);
+        assert!(!chain.is_closed_for_recovery());
+        drop(pressure);
+        assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), baseline);
+        assert!(
+            mining
+                .service
+                .assemble_fresh_for_generation(generation, &[0x51])
+                .is_ok()
+        );
+        assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), baseline);
+        Ok(())
+    }
+
+    // API-15, API-17, BUD-01, BUD-02, BUD-06, SYNC-05
+    #[test]
+    fn witness_repair_releases_the_original_before_reserving_its_replacement()
+    -> Result<(), crate::test_support::TestError> {
+        use bitcoin_rs_consensus::primitives::{
+            BlockImage, consensus_bytes, layout::decode_reservation,
+        };
+        use bitcoin_rs_storage::budget::BudgetOwner;
+        use bitcoin_rs_wire::mining::{GenerateRequest, MiningControl, solve_block};
+
+        let (_directory, state, mining) = mining_state_at_genesis()?;
+        let generation = mining.service.live_generation_key();
+        let mut block = mining
+            .service
+            .assemble_fresh_for_generation(generation, &[0x51])?
+            .into_unsolved_block()?;
+        solve_block(&mut block, GenerateRequest::DEFAULT_MAX_TRIES)?;
+        let expected_hash = Hash256::from(block.block_hash());
+        let repaired_bound = decode_reservation(block.total_size());
+        let repaired = block.clone();
+        assert!(!block.txs[0].inputs[0].witness.is_empty());
+        block.txs[0].inputs[0].witness = Default::default();
+        let submitted = consensus_bytes(&block);
+        let payload = BlockImage::from_raw(submitted.clone().into())?;
+        let original_bytes = submitted.len() + payload.retained_heap_bytes();
+        assert!(original_bytes <= repaired_bound);
+        let budget = state.budget();
+        let baseline = budget.charged_bytes(BudgetOwner::StagedImages);
+        let memory = state.block_memory();
+        let pressure_bytes =
+            memory.ledger().capacity() - usize::try_from(baseline)? - repaired_bound;
+        let pressure = memory.try_reserve(pressure_bytes)?;
+        drop(mining.account_image(payload.clone())?);
+        drop(super::AccountedBlock::from_local(
+            repaired,
+            &mining.block_memory,
+        )?);
+        assert_eq!(
+            mining.submit_block(payload)?,
+            BlockValidationResult::Accepted
+        );
+        assert_eq!(
+            state
+                .chainstate()
+                .applied_tip_snapshot()
+                .map(|tip| tip.hash),
+            Some(expected_hash)
+        );
+        assert_eq!(
+            budget.charged_bytes(BudgetOwner::StagedImages),
+            baseline + u64::try_from(pressure_bytes)?
+        );
+        drop(pressure);
+        assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), baseline);
+        Ok(())
+    }
+
     // API-30, MPS-03, SYNC-05
     #[test]
     fn fresh_submission_rechecks_generation_under_transition_and_reopens_admission()
@@ -1205,7 +1480,7 @@ mod tests {
             .assemble_fresh_for_generation(generation, &[0x51])?
             .into_unsolved_block()?;
         solve_block(&mut stale, GenerateRequest::DEFAULT_MAX_TRIES)?;
-        let stale = mining.encode_local(stale)?;
+        let stale = super::AccountedBlock::from_local(stale, &mining.block_memory)?;
         let request = || GenerateRequest {
             payout: vec![0x52],
             count: 1,
@@ -1274,7 +1549,7 @@ mod tests {
             .assemble_fresh_for_generation(generation, &[0x51])?
             .into_unsolved_block()?;
         solve_block(&mut candidate, GenerateRequest::DEFAULT_MAX_TRIES)?;
-        let payload = mining.encode_local(candidate)?;
+        let payload = super::AccountedBlock::from_local(candidate, &mining.block_memory)?;
         let gateway = state.mempool_gateway();
         let before_gate = gateway
             .stable_generation()
@@ -1362,7 +1637,7 @@ mod tests {
             .assemble_fresh_for_generation(generation, &[0x51])?
             .into_unsolved_block()?;
         solve_block(&mut candidate, GenerateRequest::DEFAULT_MAX_TRIES)?;
-        let payload = mining.encode_local(candidate)?;
+        let payload = super::AccountedBlock::from_local(candidate, &mining.block_memory)?;
         let expected_hash = Hash256::from(payload.image.block_hash());
         let before_head = durable
             .load()?
