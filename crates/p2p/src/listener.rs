@@ -3061,53 +3061,55 @@ pub fn process_compact_wire_message(
     if compact_reconstruction.pending_len() == 0 {
         compact_reconstruction.memory_credit = None;
     }
+    let announced_header = if let crate::Message::CmpctBlock(cmpct) = message {
+        crate::compact_blocks::native_header(&cmpct.compact_block.header)
+    } else {
+        None
+    };
+    handle_compact_outcome(
+        outcome,
+        announced_header,
+        materialization,
+        sink,
+        peer_addr,
+        shared,
+    );
+}
+
+fn handle_compact_outcome(
+    outcome: crate::compact_blocks::Outcome,
+    announced_header: Option<bitcoin_rs_consensus::primitives::Header>,
+    materialization: crate::inbound::block_memory::BlockMemoryCredit,
+    sink: &ProductionSink<'_>,
+    peer_addr: impl Into<crate::PeerRemote>,
+    shared: &ConnectionShared,
+) {
+    let peer_addr = peer_addr.into();
+    let lease = sink.lease;
     let (outcome, produced_credit) = match outcome {
         crate::compact_blocks::Outcome::Complete(image) => {
+            let hash = image.block_hash();
             match retain_compact_image(materialization, image) {
                 Ok((image, credit)) => (
                     crate::compact_blocks::Outcome::Complete(image),
                     Some(credit),
                 ),
                 Err(error) => {
-                    tracing::error!(peer_addr = %peer_addr, %error, "compact reconstruction image reservation refused");
-                    return;
+                    log::error!(
+                        "compact reconstruction image reservation refused for {peer_addr}: {error}"
+                    );
+                    (crate::compact_blocks::Outcome::Fallback(hash), None)
                 }
             }
         }
         outcome => (outcome, None),
     };
-    let announced_header = if let crate::Message::CmpctBlock(cmpct) = message
-        && !matches!(outcome, crate::compact_blocks::Outcome::Complete(_))
-    {
-        crate::compact_blocks::native_header(&cmpct.compact_block.header)
-    } else {
-        None
-    };
-    let source = lease.source(peer_addr.endpoint());
-    if let Some((hash, follow_up)) =
-        handle_compact_outcome(outcome, sink, peer_addr, shared, produced_credit)
-        && let Some(sync) = shared.block_sync.as_ref()
-    {
-        sync.enqueue_owned_body_fetch(source, hash, &mut || sink.send(follow_up.clone()).is_ok());
-    }
-    if let Some(header) = announced_header {
-        shared.send_embedded_headers(lease, source, vec![header]);
-    }
-}
-
-fn handle_compact_outcome(
-    outcome: crate::compact_blocks::Outcome,
-    sink: &ProductionSink<'_>,
-    peer_addr: impl Into<crate::PeerRemote>,
-    shared: &ConnectionShared,
-    memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
-) -> Option<(bitcoin_rs_consensus::primitives::Hash256, crate::Message)> {
-    let peer_addr = peer_addr.into();
-    let lease = sink.lease;
-    match outcome {
+    let announced_header = announced_header
+        .filter(|_| !matches!(outcome, crate::compact_blocks::Outcome::Complete(_)));
+    let follow_up = match outcome {
         crate::compact_blocks::Outcome::Complete(image) => {
             tracing::info!(peer_addr = %peer_addr, hash = %image.block_hash(), "p2p compact block reconstructed");
-            shared.send_block(lease, peer_addr, image, memory_credit);
+            shared.send_block(lease, peer_addr, image, produced_credit);
             None
         }
         crate::compact_blocks::Outcome::RequestMissing(request) => {
@@ -3129,6 +3131,15 @@ fn handle_compact_outcome(
             ))
         }
         crate::compact_blocks::Outcome::Idle => None,
+    };
+    let source = lease.source(peer_addr.endpoint());
+    if let Some((hash, follow_up)) = follow_up
+        && let Some(sync) = shared.block_sync.as_ref()
+    {
+        sync.enqueue_owned_body_fetch(source, hash, &mut || sink.send(follow_up.clone()).is_ok());
+    }
+    if let Some(header) = announced_header {
+        shared.send_embedded_headers(lease, source, vec![header]);
     }
 }
 
@@ -9082,7 +9093,14 @@ mod aggregate_budget_tests {
         let sink = ProductionSink::new(&lease, Some(credit));
         let shared = shared_with(ScriptedChain { blocks: Vec::new() });
         let addr = bitcoin_rs_consensus::primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
-        assert!(super::handle_compact_outcome(outcome, &sink, addr, &shared, None).is_none());
+        super::handle_compact_outcome(
+            outcome,
+            None,
+            shared.block_memory.try_reserve(0)?,
+            &sink,
+            addr,
+            &shared,
+        );
         assert!(receiver.is_empty());
         assert!(!lease.is_cancelled());
         drop(sink);
@@ -9503,6 +9521,67 @@ mod aggregate_budget_tests {
                 ledger.try_take(ledger.capacity()),
                 "{refusal}: refusal releases every part of the original reservation"
             );
+            ledger.give_back(ledger.capacity());
+            if let Some(alias) = alias {
+                assert_eq!(alias.as_ref(), encoded.as_slice());
+            }
+        }
+        Ok(())
+    }
+
+    // BUD-06, P2P-06, SYNC-03
+    #[test]
+    fn compact_receipt_refusal_preserves_discovery_and_requests_full_body() -> CompactTestResult {
+        for refusal in ["shared", "raw", "metadata"] {
+            let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+            let encoded = bitcoin::consensus::serialize(&block);
+            assert_eq!(encoded.len(), 285);
+            let mut backing = Vec::with_capacity(293);
+            backing.extend_from_slice(&encoded);
+            let raw = bytes::Bytes::from(backing);
+            let Message::Block(image) = crate::wire::decode_payload("block", &raw)? else {
+                return Err(CompactIngressTestError::UnexpectedCommand);
+            };
+            let alias = (refusal == "shared").then(|| raw.clone());
+            drop(raw);
+            let reserved = match refusal {
+                "shared" => 293 + image.retained_heap_bytes(),
+                "raw" => 292,
+                "metadata" => 292 + image.retained_heap_bytes(),
+                _ => unreachable!(),
+            };
+            let expected = crate::compact_blocks::native_header(&block.header)
+                .ok_or(CompactIngressTestError::Missing("native header"))?;
+            let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
+            shared.block_sync = Some(Arc::new(CompactAdmissionObserver { forwarding: None }));
+            let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
+            shared.headers_tx = headers_tx;
+            let (queue, receiver) = crate::test_support::message_channel();
+            let lease = PeerLease::new(queue);
+            let endpoint =
+                bitcoin_rs_consensus::primitives::PeerEndpoint::from(([127, 0, 0, 1], 8333));
+            let ledger = shared.block_memory.ledger();
+            let credit = shared.block_memory.try_reserve(reserved)?;
+            super::handle_compact_outcome(
+                crate::compact_blocks::Outcome::Complete(image),
+                Some(expected),
+                credit,
+                &ProductionSink::new(&lease, None),
+                endpoint,
+                &shared,
+            );
+            let delivered = headers_rx.try_recv()?;
+            assert_eq!(delivered.headers, vec![expected]);
+            assert_eq!(delivered.source, Some(lease.source(Some(endpoint))));
+            assert!(!delivered.wire_response);
+            assert!(headers_rx.is_empty());
+            assert_eq!(
+                receiver.try_recv()?,
+                Message::GetData(vec![Inventory::WitnessBlock(block.block_hash())])
+            );
+            assert!(receiver.is_empty());
+            assert!(!lease.is_cancelled());
+            assert!(ledger.try_take(ledger.capacity()));
             ledger.give_back(ledger.capacity());
             if let Some(alias) = alias {
                 assert_eq!(alias.as_ref(), encoded.as_slice());

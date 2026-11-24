@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_consensus::primitives::BlockHash;
-use bitcoin_rs_wire::mining::MiningControl;
+use bitcoin_rs_wire::mining::{MiningControl, MiningControlError};
 use bitcoin_rs_wire::mining::pool::ledger::MinerId;
 use bitcoin_rs_wire::mining::pool::stratum::sv1::{ConnectionLimiter, ConnectionPermit};
 use bitcoin_rs_wire::mining::pool::stratum::sv2::{
@@ -30,10 +30,16 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 struct DeferredBlock {
     hash: BlockHash,
     pending: PendingBlock,
-    submission: BlockSubmission,
+    submission: DeferredSubmission,
     attempts: u32,
+    next_attempt: Instant,
     #[expect(dead_code, reason = "held for RAII drop cleanup")]
     charge: DeferredCharge,
+}
+
+enum DeferredSubmission {
+    AwaitingAdmission,
+    Submitted(BlockSubmission),
 }
 
 const DEFERRED_RESUBMIT_ATTEMPTS: u32 = 5;
@@ -49,18 +55,26 @@ fn settle_one_deferred(
     control: &dyn MiningControl,
     connection: &mut Connection,
     core: &PoolCore,
+    now: Instant,
 ) -> Option<DeferredBlock> {
     if !matches!(ledger.found_block_recorded(entry.hash), Ok(true)) {
         return Some(entry);
     }
-    if entry.submission.receipt().status() == BlockStatus::Undetermined
+    let unresolved = match &entry.submission {
+        DeferredSubmission::AwaitingAdmission => true,
+        DeferredSubmission::Submitted(submission) => {
+            submission.receipt().status() == BlockStatus::Undetermined
+        }
+    };
+    if unresolved
         && entry.attempts < DEFERRED_RESUBMIT_ATTEMPTS
+        && now >= entry.next_attempt
     {
-        entry.attempts = entry.attempts.saturating_add(1);
+        entry.next_attempt = now + SOCKET_POLL_INTERVAL;
         match entry.pending.submit(control) {
             Ok(fresh) if fresh.receipt().status() == BlockStatus::Applied => {
                 core.invalidate_active();
-                entry.submission = fresh;
+                entry.submission = DeferredSubmission::Submitted(fresh);
             }
             Ok(fresh) if fresh.receipt().status() == BlockStatus::Rejected => {
                 if fresh.receipt().is_stale_parent() {
@@ -69,14 +83,22 @@ fn settle_one_deferred(
                 return None;
             }
             Ok(fresh) => {
-                entry.submission = fresh;
+                entry.attempts += 1;
+                entry.submission = DeferredSubmission::Submitted(fresh);
                 return Some(entry);
             }
-            Err(_) => return Some(entry),
+            Err(MiningControlError::Unavailable(_)) => return Some(entry),
+            Err(error) => {
+                entry.attempts += 1;
+                log::warn!("deferred SV2 block {} submission failed: {error}", entry.hash);
+                return Some(entry);
+            }
         }
     }
-    if entry.submission.receipt().status() == BlockStatus::Applied {
-        if connection.confirm_block(&entry.submission).is_err() {
+    if let DeferredSubmission::Submitted(submission) = &entry.submission
+        && submission.receipt().status() == BlockStatus::Applied
+    {
+        if connection.confirm_block(submission).is_err() {
             return Some(entry);
         }
         return None;
@@ -326,9 +348,10 @@ fn process_deferred_blocks(
     core: &PoolCore,
 ) -> bool {
     let deferred_before = deferred.len();
+    let now = Instant::now();
     let mut still_deferred = Vec::with_capacity(deferred.len());
     for entry in std::mem::take(deferred) {
-        if let Some(waiter) = settle_one_deferred(entry, ledger, control, connection, core) {
+        if let Some(waiter) = settle_one_deferred(entry, ledger, control, connection, core, now) {
             still_deferred.push(waiter);
         }
     }
@@ -536,60 +559,49 @@ fn handle_block_found(
         .as_ref()
         .map(|submitted| submitted.receipt().clone())
         .map_err(Clone::clone);
-    match permit.record_or_enqueue(account, found, &receipt) {
-        (BlockRecordOutcome::Durable, charge) => {
-            if matches!(
-                &submission,
-                Ok(submitted) if submitted.receipt().status() == BlockStatus::Undetermined
-            ) {
-                let Ok(submitted) = submission else {
-                    return Err(RunError::PoolSv2BlockSubmissionLost);
-                };
-                let hash = found.share.hash;
-                let Some(charge) = charge else {
-                    return Err(RunError::PoolSv2DurableReservationMissing);
-                };
-                deferred.push(DeferredBlock {
-                    hash,
-                    pending,
-                    submission: submitted,
-                    attempts: 0,
-                    charge,
-                });
-                return Ok(());
-            }
-            debug_assert!(charge.is_none());
-        }
-        (BlockRecordOutcome::Queued, charge) => {
-            if matches!(
-                &submission,
-                Ok(submitted)
-                    if matches!(
-                        submitted.receipt().status(),
-                        BlockStatus::Applied | BlockStatus::Undetermined
-                    )
-            ) {
-                let Ok(submitted) = submission else {
-                    return Err(RunError::PoolSv2BlockSubmissionLost);
-                };
-                let hash = found.share.hash;
-                let Some(charge) = charge else {
-                    return Err(RunError::PoolSv2QueuedReservationMissing);
-                };
-                deferred.push(DeferredBlock {
-                    hash,
-                    pending,
-                    submission: submitted,
-                    attempts: 0,
-                    charge,
-                });
-                return Ok(());
-            }
-        }
-        (BlockRecordOutcome::Unrecordable, _) => {
-            return Err(RunError::PoolSv2BlockUnrecordable);
-        }
+    let (recorded, charge) = permit.record_or_enqueue(account, found, &receipt);
+    if matches!(recorded, BlockRecordOutcome::Unrecordable) {
+        return Err(RunError::PoolSv2BlockUnrecordable);
     }
+    let should_defer = match &submission {
+        Err(MiningControlError::Unavailable(_)) => true,
+        Ok(submitted) => match submitted.receipt().status() {
+            BlockStatus::Undetermined => true,
+            BlockStatus::Applied => matches!(recorded, BlockRecordOutcome::Queued),
+            BlockStatus::Rejected => false,
+        },
+        Err(_) => false,
+    };
+    if should_defer {
+        let submission = match submission {
+            Ok(submitted) => DeferredSubmission::Submitted(submitted),
+            Err(MiningControlError::Unavailable(reason)) => {
+                log::debug!("SV2 block {} awaits node admission: {reason}", found.share.hash);
+                DeferredSubmission::AwaitingAdmission
+            }
+            Err(source) => return Err(RunError::PoolSv2BlockSubmissionFailed { source }),
+        };
+        let charge = charge.ok_or(match recorded {
+            BlockRecordOutcome::Durable => RunError::PoolSv2DurableReservationMissing,
+            BlockRecordOutcome::Queued => RunError::PoolSv2QueuedReservationMissing,
+            BlockRecordOutcome::Unrecordable => RunError::PoolSv2BlockUnrecordable,
+        })?;
+        let next_attempt = if matches!(submission, DeferredSubmission::AwaitingAdmission) {
+            Instant::now() + SOCKET_POLL_INTERVAL
+        } else {
+            Instant::now()
+        };
+        deferred.push(DeferredBlock {
+            hash: found.share.hash,
+            pending,
+            submission,
+            attempts: 0,
+            next_attempt,
+            charge,
+        });
+        return Ok(());
+    }
+    debug_assert!(charge.is_none());
     let submission =
         submission.map_err(|source| RunError::PoolSv2BlockSubmissionFailed { source })?;
     match submission.receipt().status() {
@@ -1383,6 +1395,7 @@ mod tests {
             host.control.as_ref(),
             &mut host.connection,
             &host.core,
+            Instant::now(),
         );
         assert!(
             waiter.is_none(),
@@ -1395,6 +1408,142 @@ mod tests {
         );
         let confirmed = host.miner.open(&host.connection.take_transmit())?;
         assert!(has(&confirmed, MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS));
+        Ok(())
+    }
+
+    // POOL-03, POOL-05
+    #[test]
+    fn unavailable_sv2_submission_retains_its_bounded_block_until_admission_recovers() -> TestResult {
+        let mut host = Host::new()?;
+        let channel = host.open_channel()?;
+        let job = Arc::clone(&host.job);
+        let winner = block_nonces(&job, &channel.prefix, 1)?
+            .pop()
+            .ok_or(FixtureError::NonceSpace(1))?;
+        *host.control.fail.lock() = Some(bitcoin_rs_wire::mining::MiningControlError::Unavailable(
+            "image budget is full".into(),
+        ));
+        let frames = host.submit(&channel, 1, &job, winner)?;
+        assert!(!has(&frames, MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS));
+        assert!(!has(&frames, MESSAGE_TYPE_SUBMIT_SHARES_ERROR));
+        assert!(!host.connection.is_closing());
+        assert_eq!(host.node_submissions(), 1);
+        assert_eq!(host.deferred.len(), 1);
+        let hash = header_hash(&job, &channel.prefix, winner)?;
+        assert!(host.ledger.found_block_recorded(hash)?);
+        assert_eq!(host.credited_shares()?, 1);
+        let remaining = (0..7)
+            .map(|_| {
+                host.ledger
+                    .try_reserve_block_slot()
+                    .ok_or(FixtureError::Missing("remaining bounded slot"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(host.ledger.try_reserve_block_slot().is_none());
+
+        for attempt in 0..7 {
+            let entry = host
+                .deferred
+                .pop()
+                .ok_or(FixtureError::Missing("admission waiter"))?;
+            let now = entry.next_attempt;
+            let entry = super::settle_one_deferred(
+                entry,
+                &host.ledger,
+                host.control.as_ref(),
+                &mut host.connection,
+                &host.core,
+                now - Duration::from_nanos(1),
+            )
+            .ok_or(FixtureError::Missing("waiter before retry deadline"))?;
+            assert_eq!(host.node_submissions(), 1 + attempt);
+            let entry = super::settle_one_deferred(
+                entry,
+                &host.ledger,
+                host.control.as_ref(),
+                &mut host.connection,
+                &host.core,
+                now,
+            )
+            .ok_or(FixtureError::Missing("waiter under continued refusal"))?;
+            host.deferred.push(entry);
+            assert_eq!(host.node_submissions(), 2 + attempt);
+            assert!(host.ledger.try_reserve_block_slot().is_none());
+            assert!(host.connection.take_transmit().is_empty());
+            assert!(!host.connection.is_closing());
+            assert_eq!(host.credited_shares()?, 1);
+        }
+
+        *host.control.fail.lock() = None;
+        let entry = host
+            .deferred
+            .pop()
+            .ok_or(FixtureError::Missing("recoverable admission waiter"))?;
+        let now = entry.next_attempt;
+        assert!(
+            super::settle_one_deferred(
+                entry,
+                &host.ledger,
+                host.control.as_ref(),
+                &mut host.connection,
+                &host.core,
+                now,
+            )
+            .is_none()
+        );
+        assert_eq!(host.node_submissions(), 9);
+        let confirmed = host.miner.open(&host.connection.take_transmit())?;
+        assert!(has(&confirmed, MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS));
+        assert_eq!(host.credited_shares()?, 1);
+        let mut duplicate = host.submit(&channel, 2, &job, winner)?;
+        assert_eq!(share_error(&mut duplicate)?, (2, "duplicate-share".to_owned()));
+        assert_eq!(host.node_submissions(), 9);
+        assert_eq!(host.credited_shares()?, 1);
+        let released = host
+            .ledger
+            .try_reserve_block_slot()
+            .ok_or(FixtureError::Missing("released deferred slot"))?;
+        assert!(host.ledger.try_reserve_block_slot().is_none());
+        drop(released);
+        drop(remaining);
+        Ok(())
+    }
+
+    // POOL-05
+    #[test]
+    fn terminal_sv2_submission_errors_do_not_enter_the_admission_retry_queue() -> TestResult {
+        use bitcoin_rs_wire::mining::MiningControlError;
+
+        for error in [
+            MiningControlError::InvalidRequest("invalid submission".into()),
+            MiningControlError::Rejected("invalid block".into()),
+            MiningControlError::Failed("fatal submission failure".into()),
+        ] {
+            let mut host = Host::new()?;
+            let channel = host.open_channel()?;
+            let job = Arc::clone(&host.job);
+            let winner = block_nonces(&job, &channel.prefix, 1)?
+                .pop()
+                .ok_or(FixtureError::NonceSpace(1))?;
+            *host.control.fail.lock() = Some(error.clone());
+            let result = host.submit(&channel, 1, &job, winner);
+            assert!(matches!(
+                result,
+                Err(FixtureError::Run(crate::run::RunError::PoolSv2BlockSubmissionFailed {
+                    source
+                })) if source == error
+            ));
+            assert!(host.deferred.is_empty());
+            let slots = (0..8)
+                .map(|_| {
+                    host.ledger
+                        .try_reserve_block_slot()
+                        .ok_or(FixtureError::Missing("released terminal slot"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            assert!(host.ledger.try_reserve_block_slot().is_none());
+            drop(slots);
+        }
         Ok(())
     }
 

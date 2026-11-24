@@ -388,9 +388,13 @@ impl BlockRecordPermit {
         let host = Arc::clone(&self.host);
         self.armed = false;
         let bytes = self.bytes;
-        let undetermined =
-            matches!(submission, Ok(receipt) if receipt.status() == BlockStatus::Undetermined);
-        let queued_defers = matches!(
+        let admission_refused = matches!(
+            submission,
+            Err(bitcoin_rs_wire::mining::MiningControlError::Unavailable(_))
+        );
+        let needs_retention = admission_refused
+            || matches!(submission, Ok(receipt) if receipt.status() == BlockStatus::Undetermined);
+        let queued_defers = admission_refused || matches!(
             submission,
             Ok(receipt) if matches!(
                 receipt.status(),
@@ -401,7 +405,7 @@ impl BlockRecordPermit {
             .record_submitted_block(account, block, submission)
             .is_ok();
         if recorded_directly || matches!(host.found_block_recorded(block.share.hash), Ok(true)) {
-            if undetermined {
+            if needs_retention {
                 let permit = Self {
                     host,
                     bytes,
