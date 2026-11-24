@@ -1,0 +1,174 @@
+name: Stored branch recovery verification
+
+on:
+  push:
+    branches: [stabilize/private-header-body-recovery-20261124]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stored-branch-recovery-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "2"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  regenerate:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Format and export exact generated product files
+        run: |
+          set -euo pipefail
+          mkdir -p target/stored-branch-regeneration
+          git fetch --no-tags --depth=1 origin c9510d7dd9cb13ee78f48145f833944accfb53e6
+          cargo fmt --all
+          cargo run --locked -p contract-index
+          cargo run --locked -p contract-index -- --check
+          git diff --check
+          git add -u
+          git rm --cached -- .github/workflows/private-header-body-recovery.yml
+          printf 'PRODUCT_TREE %s\n' "$(git write-tree)"
+          node <<'NODE' | tee target/stored-branch-regeneration/export.log
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const cp = require('node:child_process');
+          const paths = cp.execFileSync('git', [
+            'diff', '--cached', '--name-only', '-z',
+            'c9510d7dd9cb13ee78f48145f833944accfb53e6',
+          ], {encoding: 'utf8'}).split('\0').filter(Boolean);
+          for (const path of paths) {
+            if (!fs.existsSync(path)) {
+              console.log('PRODUCT_DELETE ' + JSON.stringify({path}));
+              continue;
+            }
+            const bytes = fs.readFileSync(path);
+            const sha = crypto.createHash('sha1')
+              .update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
+            console.log('PRODUCT_FILE ' + JSON.stringify({path, sha, size: bytes.length}));
+            for (let offset = 0; offset < bytes.length; offset += 12000) {
+              console.log('PRODUCT_CHUNK ' + JSON.stringify({
+                path, offset, data: bytes.subarray(offset, offset + 12000).toString('base64'),
+              }));
+            }
+          }
+          NODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: stored-branch-regeneration-${{ github.run_attempt }}
+          path: target/stored-branch-regeneration
+          retention-days: 7
+
+  recovery-and-controls:
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify stored-body recovery, refusal retries, sync tests and Clippy
+        run: |
+          set -euo pipefail
+          qa_source="19e24e5f9f4e21c101f20613c637a9701b974ea5"
+          qa_baseline="706709daef6a96c0d83d6dd818027bd8ae0ac80c"
+          qa_refusal="1dc417b223301c0b54a5129d2c2f4d8edeb2d8a1"
+          qa_evidence="$PWD/target/stored-branch-recovery-proof"
+          qa_config="$RUNNER_TEMP/stored-branch-nextest.toml"
+          qa_unit="p2p::sync::branches::tests::stored_branch_work_retries_refusal_and_waits_for_frontier_or_body_progress"
+          qa_suite="winning_header_driver::winning_header_driver_applies_deep_fork_and_recovers_durable_tip"
+          mkdir -p "$qa_evidence"
+          printf '%s\n' "$qa_source" > "$qa_evidence/source.txt"
+          bash scripts/ci-setup.sh apt nextest 2>&1 | tee "$qa_evidence/setup.log"
+          cat > "$qa_config" <<'TOML'
+          [profile.header_body_control]
+          retries = 0
+          fail-fast = false
+          test-threads = 1
+          [profile.header_body_control.junit]
+          path = "junit.xml"
+          report-skipped = "none"
+          TOML
+          run_control() {
+            local label="$1" expected_status="$2" expected_failures="$3" target="$4" test_name="$5" marker="$6"
+            local cargo_target=(--lib)
+            if [[ "$target" == suite ]]; then cargo_target=(--test suite); fi
+            local report="$PWD/target/nextest/header_body_control/junit.xml"
+            rm -f "$report"
+            git rev-parse HEAD > "$qa_evidence/$label-source.txt"
+            git diff "$qa_source" HEAD -- > "$qa_evidence/$label-diff.patch"
+            set +e
+            cargo nextest run --locked -p bitcoin-rs-node "${cargo_target[@]}" --no-default-features --features test-seam \
+              --config-file "$qa_config" --profile header_body_control --color never --no-tests fail --no-fail-fast \
+              -E "test(=$test_name)" \
+              2>&1 | tee "$qa_evidence/$label.log"
+            local statuses=("${PIPESTATUS[@]}")
+            set -e
+            if [[ -f "$report" ]]; then cp "$report" "$qa_evidence/$label.xml"; fi
+            if (( statuses[0] != expected_status || statuses[1] != 0 )); then
+              printf 'unexpected nextest exit %s (expected %s), tee %s\n' "${statuses[0]}" "$expected_status" "${statuses[1]}" >&2
+              return 1
+            fi
+            node - "$report" "$expected_failures" "$qa_evidence/$label.log" "$expected_status" "$test_name" "$marker" <<'NODE' | tee "$qa_evidence/$label-result.json"
+          const fs = require('node:fs');
+          const [path, failures, logPath, status, expected, marker] = process.argv.slice(2);
+          const xml = fs.readFileSync(path, 'utf8');
+          const root = /<testsuites\b([^>]*)>/.exec(xml);
+          if (!root) throw new Error('missing testsuites');
+          const counts = Object.fromEntries([...root[1].matchAll(/\b(tests|failures|errors)="(\d+)"/g)].map(([, key, n]) => [key, Number(n)]));
+          const names = [...xml.matchAll(/<testcase\b[^>]*\bname="([^"]+)"/g)].map(([, name]) => name);
+          if (counts.tests !== 1 || counts.failures !== Number(failures) || counts.errors !== 0 || names.length !== 1 || names[0] !== expected || /<skipped\b/.test(xml)) throw new Error('unexpected test set/counts ' + JSON.stringify({counts, names}));
+          if (Number(failures) && !fs.readFileSync(logPath, 'utf8').includes(marker)) throw new Error('missing expected behavioral assertion');
+          console.log(JSON.stringify({name: expected, ...counts, nextestExit: Number(status)}));
+          NODE
+          }
+          git fetch --no-tags --depth=1 origin "$qa_source" "$qa_baseline" "$qa_refusal"
+          git checkout --detach "$qa_baseline"
+          run_control baseline-scheduler 100 1 lib "$qa_unit" "startup must drive a branch whose bodies can already be stored"
+          run_control baseline-recovery 100 1 suite "$qa_suite" "revalidated evicted headers must reuse their retained body bytes"
+          git checkout --detach "$qa_source"
+          run_control fixed-scheduler 0 0 lib "$qa_unit" ""
+          run_control fixed-recovery 0 0 suite "$qa_suite" ""
+          git checkout --detach "$qa_refusal"
+          run_control refusal-control 100 1 lib "$qa_unit" "a refused operation must remain owed on the same frontier"
+          git checkout --detach "$qa_source"
+          run_control restored-scheduler 0 0 lib "$qa_unit" ""
+          cargo nextest run --locked -p bitcoin-rs-node --lib --no-default-features --features test-seam \
+            --config-file "$qa_config" --profile header_body_control --color never --no-tests fail --no-fail-fast \
+            -E 'test(p2p::sync::)' 2>&1 | tee "$qa_evidence/all-sync.log"
+          cp target/nextest/header_body_control/junit.xml "$qa_evidence/all-sync.xml"
+          node - "$qa_evidence/all-sync.xml" <<'NODE' | tee "$qa_evidence/all-sync-result.json"
+          const fs = require('node:fs');
+          const xml = fs.readFileSync(process.argv[2], 'utf8');
+          const root = /<testsuites\b([^>]*)>/.exec(xml);
+          if (!root) throw new Error('missing testsuites');
+          const counts = Object.fromEntries([...root[1].matchAll(/\b(tests|failures|errors)="(\d+)"/g)].map(([, key, n]) => [key, Number(n)]));
+          const names = [...xml.matchAll(/<testcase\b[^>]*\bname="([^"]+)"/g)].map(([, name]) => name);
+          if (counts.tests !== 302 || counts.failures !== 0 || counts.errors !== 0 || names.length !== 302 || names.some(name => !name.startsWith('p2p::sync::')) || /<skipped\b/.test(xml)) throw new Error('unexpected sync test set/counts ' + JSON.stringify(counts));
+          console.log(JSON.stringify({...counts, nextestExit: 0}));
+          NODE
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features test-seam --all-targets -- -D warnings \
+            2>&1 | tee "$qa_evidence/clippy.log"
+          git diff --exit-code
+          printf 'COMPLETE_SOURCE %s\n' "$qa_source"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: stored-branch-recovery-proof-${{ github.run_attempt }}
+          path: target/stored-branch-recovery-proof
+          retention-days: 7
