@@ -1219,7 +1219,9 @@ mod tests {
             }
 
             fn try_take(&self, bytes: usize) -> bool {
-                if self.attempt.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                if self
+                    .attempt
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                     == self.gated_attempt
                     && let Some((entered, resume)) = self.gate.lock().take()
                 {
