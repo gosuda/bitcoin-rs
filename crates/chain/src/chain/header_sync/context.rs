@@ -198,7 +198,12 @@ impl HeaderValidationContext {
         encoded[..80].copy_from_slice(&self.parent.to_bytes());
         encoded[80..84].copy_from_slice(&self.height.to_le_bytes());
         encoded[84..116].copy_from_slice(&self.chainwork.to_le_bytes::<32>());
-        for (slot, time) in encoded[116..160].as_chunks_mut::<4>().0.iter_mut().zip(self.times) {
+        for (slot, time) in encoded[116..160]
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(self.times)
+        {
             slot.copy_from_slice(&time.to_le_bytes());
         }
         encoded[160] = u8::try_from(self.time_count).expect("timestamp count is at most eleven");
