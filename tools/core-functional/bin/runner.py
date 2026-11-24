@@ -21,6 +21,8 @@ group: a timed-out framework process leaves its node processes running
 RPC/p2p ports for the rest of the parallel run.
 """
 
+from __future__ import annotations
+
 import argparse
 import concurrent.futures
 import datetime
@@ -36,7 +38,7 @@ import time
 LOG_TAIL_LINES = 30
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="run.sh", add_help=False)
     parser.add_argument("--tests", nargs="+", required=True)
     parser.add_argument("--dest", required=True, help="extraction dir (core-v31.1)")
@@ -48,12 +50,12 @@ def parse_args():
     return parser.parse_args()
 
 
-def render_config(template, dest, output_path):
+def render_config(template: pathlib.Path | str, dest: pathlib.Path | str, output_path: pathlib.Path | str) -> None:
     text = pathlib.Path(template).read_text(encoding="utf-8")
     pathlib.Path(output_path).write_text(text.replace("@CORE_TESTS_DIR@", str(dest)), encoding="utf-8")
 
 
-def classify(exit_code, timed_out):
+def classify(exit_code: int | None, timed_out: bool) -> str:
     if timed_out:
         return "FAIL"
     if exit_code == 0:
@@ -63,7 +65,7 @@ def classify(exit_code, timed_out):
     return "FAIL"
 
 
-def log_tail(path):
+def log_tail(path: pathlib.Path | str) -> str | None:
     try:
         lines = pathlib.Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
@@ -71,13 +73,13 @@ def log_tail(path):
     return "\n".join(lines[-LOG_TAIL_LINES:]) if lines else None
 
 
-def tail_text(text):
+def tail_text(text: str | None) -> str | None:
     if not text:
         return None
     return "\n".join(text.splitlines()[-LOG_TAIL_LINES:])
 
 
-def run_one(test, args, env):
+def run_one(test: str, args: argparse.Namespace, env: dict[str, str]) -> dict[str, object]:
     """Run a single test file; return its result record."""
     test_dir = pathlib.Path(args.dest).resolve() / "test" / "functional"
     script = test_dir / f"{test}.py"
@@ -118,7 +120,7 @@ def run_one(test, args, env):
     }
 
 
-def prime_cache(args, env):
+def prime_cache(args: argparse.Namespace, env: dict[str, str]) -> int:
     """Build the shared chain cache once, serially, before the pool starts.
 
     Core's test_runner.py runs create_cache.py the same way before its
@@ -157,7 +159,7 @@ def prime_cache(args, env):
     return 0
 
 
-def main():
+def main() -> int:
     args = parse_args()
     results_dir = pathlib.Path(args.results_dir).resolve()
     results_dir.mkdir(parents=True, exist_ok=True)

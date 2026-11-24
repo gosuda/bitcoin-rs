@@ -188,7 +188,7 @@ cargo +nightly fuzz run block_validate --target x86_64-unknown-linux-gnu -- -run
 target on pull requests that touch `fuzz/**` or any `Cargo.toml`; the scheduled campaign is defined in
 [`.github/workflows/daily-fuzz.yml`](.github/workflows/daily-fuzz.yml). See
 [`fuzz/README.md`](fuzz/README.md) for local fuzzing, the
-[shared corpus and local campaigns](fuzz/README.md#shared-corpus-and-local-campaigns),
+[campaign automation](fuzz/README.md#campaign-automation),
 and the companion [corpus repository](https://github.com/gosuda/bitcoin-rs-fuzz-corpus).
 
 ### Dependency-range check

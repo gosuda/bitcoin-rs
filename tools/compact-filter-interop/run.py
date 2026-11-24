@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Opt-in, loopback-only Core/Kyoto evidence. No node internals are imported."""
+from __future__ import annotations
+
 import argparse
 import base64
+from collections.abc import Callable
 import hashlib
 import json
 import pathlib
@@ -11,11 +14,12 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Any
 import urllib.error
 import urllib.request
 
 
-def wait_for(predicate, timeout=40):
+def wait_for(predicate: Callable[[], object], timeout: float = 40) -> Any:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = predicate()
@@ -26,13 +30,13 @@ def wait_for(predicate, timeout=40):
 
 
 class RpcError(Exception):
-    def __init__(self, error):
+    def __init__(self, error: dict[str, Any]) -> None:
         self.code = error["code"]
         super().__init__(str(error))
 
 
 class Node:
-    def __init__(self, binary, directory, core=False, filters=False, prune=False):
+    def __init__(self, binary: pathlib.Path | str, directory: pathlib.Path | str, core: bool = False, filters: bool = False, prune: bool = False) -> None:
         self.directory = pathlib.Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.reservations = [socket.socket(), socket.socket()]
@@ -53,7 +57,7 @@ class Node:
             if prune:
                 self.args += ["--prune-target-mb=550"]
 
-    def start(self):
+    def start(self) -> Node:
         # Reserve distinct ports until the process is ready to bind them.
         for sock in self.reservations:
             sock.close()
@@ -69,13 +73,13 @@ class Node:
         wait_for(ready)
         return self
 
-    def rpc(self, method, *params):
+    def rpc(self, method: str, *params: Any) -> Any:
         data = self.post({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
         if data.get("error"):
             raise RpcError(data["error"])
         return data["result"]
 
-    def batch(self, method, params):
+    def batch(self, method: str, params: list[list[Any]]) -> list[Any]:
         results = []
         for start in range(0, len(params), 256):
             calls = [{"jsonrpc": "2.0", "id": index, "method": method, "params": row} for index, row in enumerate(params[start:start + 256])]
@@ -87,7 +91,7 @@ class Node:
                 results.append(reply["result"])
         return results
 
-    def post(self, body):
+    def post(self, body: object) -> Any:
         request = urllib.request.Request(
             f"http://127.0.0.1:{self.rpcport}",
             data=json.dumps(body).encode(),
@@ -110,7 +114,7 @@ class Node:
                 return False
         wait_for(ready)
 
-    def stop(self, crash=False):
+    def stop(self, crash: bool = False) -> None:
         for sock in self.reservations:
             sock.close()
         self.reservations.clear()
@@ -129,13 +133,13 @@ class Node:
                 self.process.wait(timeout=5)
 
 
-def sha256d(data):
+def sha256d(data: bytes) -> bytes:
     return hashlib.sha256(hashlib.sha256(data).digest()).digest()
 
 
 class Peer:
     """Bounded BIP157 wire probe; Kyoto itself still supplies consumer evidence."""
-    def __init__(self, node):
+    def __init__(self, node: Node) -> None:
         self.socket = socket.create_connection(("127.0.0.1", node.p2p), timeout=5)
         self.socket.settimeout(5)
         address = struct.pack("<Q", 0) + b"\x00" * 10 + b"\xff\xff\x7f\x00\x00\x01" + struct.pack(">H", node.p2p)
@@ -155,11 +159,11 @@ class Peer:
         else:
             raise AssertionError("handshake did not finish")
 
-    def send(self, command, payload=b""):
+    def send(self, command: str, payload: bytes = b"") -> None:
         header = b"\xfa\xbf\xb5\xda" + command.encode().ljust(12, b"\x00")
         self.socket.sendall(header + struct.pack("<I", len(payload)) + sha256d(payload)[:4] + payload)
 
-    def read(self, size):
+    def read(self, size: int) -> bytes:
         result = bytearray()
         while len(result) < size:
             part = self.socket.recv(size - len(result))
@@ -168,7 +172,7 @@ class Peer:
             result.extend(part)
         return bytes(result)
 
-    def receive(self):
+    def receive(self) -> tuple[str, bytes]:
         header = self.read(24)
         assert header[:4] == b"\xfa\xbf\xb5\xda"
         size = struct.unpack_from("<I", header, 16)[0]
@@ -177,7 +181,7 @@ class Peer:
         assert sha256d(payload)[:4] == header[20:]
         return header[4:16].rstrip(b"\x00").decode(), payload
 
-    def query(self, command, payload):
+    def query(self, command: str, payload: bytes) -> list[tuple[str, bytes]]:
         self.send(command, payload)
         self.send("ping", struct.pack("<Q", 0x1502))
         result = []
@@ -199,7 +203,7 @@ class Peer:
         self.socket.close()
 
 
-def wire_query(node, command, payload):
+def wire_query(node: Node, command: str, payload: bytes) -> tuple[list[tuple[str, bytes]], bool]:
     peer = Peer(node)
     try:
         responses = peer.query(command, payload)
@@ -208,7 +212,7 @@ def wire_query(node, command, payload):
         peer.close()
 
 
-def wire_checks(core, node, tip, evidence):
+def wire_checks(core: Node, node: Node, tip: int, evidence: pathlib.Path) -> int:
     cases = []
     def request(command, start, stop, valid=True, kind=0):
         hash_ = bytes.fromhex(core.rpc("getblockhash", stop))[::-1] if stop is not None else bytes(32)
@@ -242,7 +246,7 @@ def wire_checks(core, node, tip, evidence):
     return len(cases)
 
 
-def transaction(prev_txid, vout, outputs):
+def transaction(prev_txid: str, vout: int, outputs: list[tuple[int, bytes]]) -> bytes:
     # Fixture spends raw(OP_TRUE) outputs; no signature/wallet is necessary.
     raw = struct.pack("<I", 2) + b"\x01" + bytes.fromhex(prev_txid)[::-1] + struct.pack("<I", vout)
     raw += b"\x00\xff\xff\xff\xff" + bytes([len(outputs)])
@@ -252,7 +256,7 @@ def transaction(prev_txid, vout, outputs):
     return raw
 
 
-def consumer(client, node, target, evidence, label):
+def consumer(client: pathlib.Path | str, node: Node, target: int, evidence: pathlib.Path, label: str) -> int:
     result = subprocess.run([str(client), str(node.p2p), str(target)], capture_output=True, text=True, timeout=100)
     (evidence / (label + ".jsonl")).write_text(result.stdout)
     (evidence / (label + ".log")).write_text(result.stderr)
@@ -268,7 +272,7 @@ def consumer(client, node, target, evidence, label):
     return len(filters)
 
 
-def compare(core, node, heights):
+def compare(core: Node, node: Node, heights: range) -> None:
     hashes = core.batch("getblockhash", [[height] for height in heights])
     assert node.batch("getblockhash", [[height] for height in heights]) == hashes
     assert node.batch("getblockfilter", [[hash_] for hash_ in hashes]) == core.batch("getblockfilter", [[hash_] for hash_ in hashes])
@@ -406,7 +410,7 @@ def main():
     print(json.dumps(report, indent=2))
 
 
-def perform_reorg(core, node, last, evidence, report, blocks, client):
+def perform_reorg(core: Node, node: Node, last: str, evidence: pathlib.Path, report: dict[str, Any], blocks: list[str], client: pathlib.Path | str) -> None:
     # Public invalidateblock disconnects the block with both kinds of spend,
     # then a replacement branch reconnects through the same owner.
     core.rpc("invalidateblock", last)

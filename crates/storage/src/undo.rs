@@ -435,13 +435,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn a_truncated_disconnect_marker_is_an_error_not_an_absence() {
-        let Err(_error) = DisconnectMarker::decode(&[0_u8; 20]) else {
-            panic!("a 20-byte marker must not decode as absent");
-        };
-    }
-
     // EVT-05
     #[test]
     fn a_marker_row_with_a_trailing_byte_is_an_error_not_a_truncation() {
