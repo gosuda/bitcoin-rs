@@ -1574,6 +1574,7 @@ mod mining {
             MiningCoordinator::new(
                 state.mempool_reader(),
                 state.chainstate(),
+                state.block_memory(),
                 state.stable_read(),
                 state.chain_followers(),
                 state.config().mining.payout_script.clone(),
@@ -2719,6 +2720,7 @@ mod mining {
             let mining = Arc::new(MiningCoordinator::new(
                 state.mempool_reader(),
                 state.chainstate(),
+                state.block_memory(),
                 state.stable_read(),
                 state.chain_followers(),
                 state.config().mining.payout_script.clone(),
@@ -2892,6 +2894,7 @@ mod mining {
             let mining = Arc::new(MiningCoordinator::new(
                 state.mempool_reader(),
                 state.chainstate(),
+                state.block_memory(),
                 state.stable_read(),
                 state.chain_followers(),
                 state.config().mining.payout_script.clone(),
@@ -3625,6 +3628,7 @@ mod mining {
             let mining = MiningCoordinator::new(
                 state.mempool_reader(),
                 state.chainstate(),
+                state.block_memory(),
                 state.stable_read(),
                 state.chain_followers(),
                 payout,
