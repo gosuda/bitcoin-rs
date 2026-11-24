@@ -63,10 +63,10 @@ Source owners in the table use repository-relative paths.
 - Failed writes MUST keep the compact projection, not full blocks.
 - Per-connection limits stay in force.
 - An unavailable SV2 submission MUST retain its solved block under the existing found-block reservation. It MUST NOT take a second slot for a retry. The full body stays with the connection's deferred owner; a failed ledger write keeps only its compact projection in the recovery queue.
-- The owner MUST wait at least 100 ms between deferred submission attempts. An `Unavailable` result MUST NOT consume the allowance for inconclusive submission results.
+- The owner MUST wait at least 100 ms after a deferred submission returns before it retries. Each attempt samples its own completion time. An `Unavailable` result MUST NOT consume the allowance for inconclusive submission results.
 - No single bound claims a total-process memory bound.
 
-Proof: `crates/node/src/pool/sv2.rs::unavailable_sv2_submission_retains_its_bounded_block_until_admission_recovers` checks the shared eight-slot bound, retry timing, retained work during continued refusal, and slot release after success.
+Proof: `crates/node/src/pool/sv2.rs::unavailable_sv2_submission_retains_its_bounded_block_until_admission_recovers` checks the shared eight-slot bound, retry timing, retained work during continued refusal, and slot release after success. `unavailable_retry_deadline_starts_after_submission_completes` advances the clock during submission and checks the full delay after completion.
 ### `POOL-04`: Authority-key handling
 - The SV2 authority MUST be a matching BIP340 x-only public and secret pair.
 - The authority authenticates transport and MUST NOT be treated as payout custody.

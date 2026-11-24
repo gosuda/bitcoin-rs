@@ -42,14 +42,18 @@ elif [[ "$mode" == pool ]]; then
   package=bitcoin-rs-node
   features=(--features pool-sv2)
   test_name=pool::sv2::tests::unavailable_sv2_submission_retains_its_bounded_block_until_admission_recovers
-  names='["pool::sv2::tests::unavailable_sv2_submission_retains_its_bounded_block_until_admission_recovers","pool::sv2::tests::terminal_sv2_submission_errors_do_not_enter_the_admission_retry_queue","pool::sv2::tests::undetermined_sv2_block_withholds_success_and_retries_authoritative_state","pool::sv2::tests::applied_sv2_block_retires_the_common_job_before_a_sibling_reaches_the_node"]'
-  filter="test(=$test_name) | test(=pool::sv2::tests::terminal_sv2_submission_errors_do_not_enter_the_admission_retry_queue) | test(=pool::sv2::tests::undetermined_sv2_block_withholds_success_and_retries_authoritative_state) | test(=pool::sv2::tests::applied_sv2_block_retires_the_common_job_before_a_sibling_reaches_the_node)"
+  names='["pool::sv2::tests::unavailable_sv2_submission_retains_its_bounded_block_until_admission_recovers","pool::sv2::tests::unavailable_retry_deadline_starts_after_submission_completes","pool::sv2::tests::terminal_sv2_submission_errors_do_not_enter_the_admission_retry_queue","pool::sv2::tests::undetermined_sv2_block_withholds_success_and_retries_authoritative_state","pool::sv2::tests::applied_sv2_block_retires_the_common_job_before_a_sibling_reaches_the_node"]'
+  filter="test(=$test_name) | test(=pool::sv2::tests::unavailable_retry_deadline_starts_after_submission_completes) | test(=pool::sv2::tests::terminal_sv2_submission_errors_do_not_enter_the_admission_retry_queue) | test(=pool::sv2::tests::undetermined_sv2_block_withholds_success_and_retries_authoritative_state) | test(=pool::sv2::tests::applied_sv2_block_retires_the_common_job_before_a_sibling_reaches_the_node)"
   run_case positive pass "$names" "$filter"
   for mutation in drop-unavailable consume-refusal-attempt omit-retry-delay; do
     restore_source
     node scripts/verify-pressure-review.cjs mutate "$mutation"
     run_case "$mutation" fail "[\"$test_name\"]" "test(=$test_name)"
   done
+  restore_source
+  node scripts/verify-pressure-review.cjs mutate stale-retry-clock
+  clock_test=pool::sv2::tests::unavailable_retry_deadline_starts_after_submission_completes
+  run_case stale-retry-clock fail "[\"$clock_test\"]" "test(=$clock_test)"
   restore_source
   run_case restored pass "$names" "$filter"
 else

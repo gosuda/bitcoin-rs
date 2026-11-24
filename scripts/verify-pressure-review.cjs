@@ -25,6 +25,9 @@ if (mode === "mutate") {
   } else if (mutation === "consume-refusal-attempt") {
     replaceOne(sv2, "Err(MiningControlError::Unavailable(_)) => return Some(entry),",
       "Err(MiningControlError::Unavailable(_)) => { entry.attempts += 1; return Some(entry); },");
+  } else if (mutation === "stale-retry-clock") {
+    replaceOne(sv2, "entry.next_attempt = clock() + SOCKET_POLL_INTERVAL;",
+      "entry.next_attempt = now + SOCKET_POLL_INTERVAL;");
   } else if (mutation === "omit-retry-delay") {
     replaceOne(sv2, "        && now >= entry.next_attempt\n", "");
   } else {
