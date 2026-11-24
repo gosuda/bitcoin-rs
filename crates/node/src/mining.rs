@@ -903,6 +903,145 @@ mod tests {
         Ok((directory, state, mining))
     }
 
+
+    fn evicted_connected_block() -> Result<
+        (
+            tempfile::TempDir,
+            crate::state::NodeState,
+            super::MiningCoordinator,
+            bitcoin_rs_consensus::primitives::BlockImage,
+            Hash256,
+        ),
+        crate::test_support::TestError,
+    > {
+        use bitcoin_rs_chain::chain::regtest_fixture;
+        use bitcoin_rs_consensus::primitives::{BlockImage, Network};
+
+        let (directory, state, mining) = mining_state_at_genesis()?;
+        let chain = state.chainstate();
+        let genesis = Network::Regtest.genesis_block();
+        let mut previous = genesis.block_hash();
+        let mut old = Vec::new();
+        for height in 1..=3 {
+            let block = regtest_fixture::mined_regtest_child_at(previous, height)?;
+            previous = block.block_hash();
+            let image = BlockImage::from_local(block);
+            state.apply_block(&image)?;
+            old.push(image);
+        }
+        let old_root = old[0].block_hash().into();
+        let old_tip = old[2].clone();
+        let old_hash = old_tip.block_hash().into();
+
+        let mut replacement = Vec::new();
+        previous = genesis.block_hash();
+        for height in 1..=4 {
+            let block = regtest_fixture::mined_regtest_child_at_time(
+                previous,
+                genesis.header.time + 10 + height,
+                height,
+            )?;
+            previous = block.block_hash();
+            replacement.push(BlockImage::from_local(block));
+        }
+        let headers: Vec<_> = replacement.iter().map(BlockImage::header).collect();
+        chain.admit_headers(&headers)?;
+        let target = chain
+            .block_tree_reader()
+            .read()
+            .lookup(previous.into())
+            .ok_or(crate::test_support::TestError::Missing("replacement header"))?;
+        crate::reorg::switch_to_branch(
+            &chain,
+            &state.chain_followers(),
+            target,
+            |hash| {
+                replacement
+                    .iter()
+                    .find(|image| Hash256::from(image.block_hash()) == hash)
+                    .cloned()
+            },
+            |_| {},
+        )?;
+        assert_eq!(
+            chain.applied_tip_snapshot().map(|tip| tip.hash),
+            Some(previous.into())
+        );
+        assert_eq!(mining.propose(&old_tip)?, BlockValidationResult::Duplicate);
+
+        chain.set_header_side_cache_limit(1);
+        assert!(chain.maintain_header_retention()? > 0);
+        assert!(chain.block_tree_reader().read().lookup(old_hash).is_none());
+        assert!(chain.block_tree_reader().read().lookup(old_root).is_some());
+        Ok((directory, state, mining, old_tip, old_root))
+    }
+
+    // API-18, BUD-02, CMT-03, P2P-10, SYNC-03
+    #[test]
+    fn connected_submission_survives_header_eviction_and_memory_pressure()
+    -> Result<(), crate::test_support::TestError> {
+        use bitcoin_rs_storage::budget::BudgetOwner;
+        use bitcoin_rs_wire::mining::MiningControl;
+
+        let (_directory, state, mining, old, _) = evicted_connected_block()?;
+        let durable = state.durable_head();
+        let committed = durable.load()?;
+        let gateway = state.mempool_gateway();
+        let settled = gateway.read().settled_generation();
+        let gate = gateway.stable_generation();
+        let budget = state.budget();
+        let before = budget.charged_bytes(BudgetOwner::StagedImages);
+        assert_eq!(
+            mining.submit_block(old.clone())?,
+            BlockValidationResult::Duplicate,
+            "a committed body must remain duplicate after its header is evicted"
+        );
+        let memory = state.block_memory();
+        let pressure = memory.try_reserve(memory.ledger().capacity() - usize::try_from(before)?)?;
+        assert_eq!(
+            mining.submit_block(old)?,
+            BlockValidationResult::Duplicate,
+            "duplicate classification must precede image-memory admission"
+        );
+        assert_eq!(durable.load()?, committed);
+        assert_eq!(gateway.read().settled_generation(), settled);
+        assert_eq!(gateway.stable_generation(), gate);
+        drop(pressure);
+        assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), before);
+        Ok(())
+    }
+
+    // API-18, P2P-10, SYNC-03
+    #[test]
+    fn connected_proposal_survives_header_eviction_and_operator_invalidation()
+    -> Result<(), crate::test_support::TestError> {
+        let (_directory, state, mining, old, old_root) = evicted_connected_block()?;
+        assert_eq!(
+            mining.propose(&old)?,
+            BlockValidationResult::Duplicate,
+            "a committed proposal must remain duplicate after its header is evicted"
+        );
+        crate::reorg::invalidate_block(
+            &state.chainstate(),
+            &state.chain_followers(),
+            old_root,
+        )?;
+        assert!(
+            state
+                .chainstate()
+                .block_tree_reader()
+                .read()
+                .lookup(old.block_hash().into())
+                .is_none()
+        );
+        assert_eq!(
+            mining.propose(&old)?,
+            BlockValidationResult::DuplicateInvalid,
+            "an invalid ancestor must take precedence over a connection receipt"
+        );
+        Ok(())
+    }
+
     // API-30, BUD-01, BUD-02, BUD-06
     #[test]
     fn local_generated_backing_stays_charged_until_last_reader()
