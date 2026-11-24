@@ -151,6 +151,11 @@ Distinguish, and never conflate:
 - This clause, not `SYNC-02`, rules out the execution gap where the next block is unowned but the request never reaches a peer.
 - Only the named execution evidence below discharges it.
 - Download/frontier work: the event-loop sync tick drives `BlockSync::tick` only (`crates/node/src/event_loop.rs::on_sync_tick` → `sync.tick()`).
+- For an outweighed applied branch, the first sync tick and a changed `(applied hash, header hash)` pair drive a branch attempt without a new body arrival.
+- Chainstate keeps sole ownership of branch planning, retained-body reads, validation, and commit. The scheduler pair is only a work hint.
+- Success or an explicit `MissingBody` result settles that pair. An unchanged settled pair does not cause another stored-body scan. An operation refusal leaves the attempt due for retry. Body arrival keeps the existing retry path.
+- `crates/node/src/p2p/sync/branches.rs::stored_branch_work_retries_refusal_and_waits_for_frontier_or_body_progress` checks startup, refusal retry, idle suppression, header change, and body arrival.
+- `crates/node/tests.rs::winning_header_driver_applies_deep_fork_and_recovers_durable_tip` checks header rediscovery with retained bodies. It verifies the old bytes, withholds their network delivery, applies the winning branch, and checks applied identity and UTXO consistency after restart.
 - The sync tick does not drive the index worker.
 - Index worker work: the worker has its own wake/timeout reconciliation loop (`crates/index/src/runtime/reconciliation.rs`, with revision-coalesced quiet wait, 1 s `recv_timeout` tick, and `IDX-08`).
 - Committed chain effects send its wakes (`crates/node/src/chain_effects.rs::wake_index`).

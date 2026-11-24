@@ -157,6 +157,7 @@ struct SchedulerState {
     headers_sync: hashbrown::HashMap<PeerSource, PeerHeadersSync>,
     stale_tip: StaleTipState,
     expected_apply_cache: Option<ExpectedApplyCache>,
+    settled_branch_frontier: Option<branches::BranchFrontier>,
 }
 
 impl SchedulerState {
@@ -335,6 +336,7 @@ impl BlockSync {
                 headers_sync: hashbrown::HashMap::new(),
                 stale_tip: StaleTipState::default(),
                 expected_apply_cache: None,
+                settled_branch_frontier: None,
             }),
             refused_rerequest_at: Mutex::new(None),
             block_announcements: Mutex::new(hashbrown::HashMap::new()),
@@ -354,6 +356,7 @@ impl BlockSync {
             headers_sync: hashbrown::HashMap::new(),
             stale_tip: StaleTipState::default(),
             expected_apply_cache: None,
+            settled_branch_frontier: None,
         };
     }
 
@@ -466,6 +469,9 @@ impl BlockSync {
         self.advance_historical();
         self.drain_inbound_blocks();
         self.advance_historical();
+        if let Some(demoted_tip) = self.resume_stored_branch() {
+            self.record_demoted_tip(demoted_tip);
+        }
 
         let now = Instant::now();
         let chain = self.observe_chain_frontier();
@@ -7116,7 +7122,10 @@ mod tests {
             } = SyncHarness::new(tree);
             applied_tip.store(Some(Arc::new(applied)));
 
-            assert_eq!(sync.outweighed_branch_target(), Some(high_work_id));
+            assert_eq!(
+                sync.outweighed_branch_target().map(|(target, _)| target),
+                Some(high_work_id)
+            );
             Ok(())
         }
 

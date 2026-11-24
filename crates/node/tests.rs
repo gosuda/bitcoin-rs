@@ -9277,7 +9277,7 @@ mod winning_header_driver {
         }
     }
 
-    // P2P-10, SYNC-01, SYNC-02, SYNC-05
+    // P2P-10, SYNC-01, SYNC-02, SYNC-05, SYNC-06
     #[test]
     fn winning_header_driver_applies_deep_fork_and_recovers_durable_tip() -> Result<(), TestError> {
         let directory = tempfile::tempdir()?;

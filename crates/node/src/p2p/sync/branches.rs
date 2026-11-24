@@ -5,14 +5,40 @@ use bitcoin_rs_chain::chain::NodeId;
 use bitcoin_rs_consensus::primitives::Hash256;
 use std::time::Instant;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct BranchFrontier {
+    applied: Hash256,
+    header: Hash256,
+}
+
 impl BlockSync {
+    pub(super) fn resume_stored_branch(&self) -> Option<Hash256> {
+        if self.chain.closed_for_recovery() {
+            return None;
+        }
+        let Some((target, frontier)) = self.outweighed_branch_target() else {
+            self.scheduler.lock().settled_branch_frontier = None;
+            return None;
+        };
+        if self.scheduler.lock().settled_branch_frontier == Some(frontier) {
+            return None;
+        }
+        self.switch_branch(target, frontier)
+    }
+
     pub(super) fn switch_branch_if_outweighed(&self) -> Option<Hash256> {
-        let target = self.outweighed_branch_target()?;
+        let (target, frontier) = self.outweighed_branch_target()?;
+        self.switch_branch(target, frontier)
+    }
+
+    fn switch_branch(&self, target: NodeId, frontier: BranchFrontier) -> Option<Hash256> {
         let outcome = self.chain.switch_to_branch(
             target,
             &mut |hash| self.scheduler.lock().stager.staged_body(hash),
             &mut |hash| self.retire_applied_reorg_body(hash),
         );
+        self.scheduler.lock().settled_branch_frontier =
+            matches!(&outcome, Ok(()) | Err(ReorgError::MissingBody { .. })).then_some(frontier);
         let mut displaced = None;
         match outcome {
             Ok(()) => {
@@ -123,7 +149,7 @@ impl BlockSync {
         }
     }
 
-    pub(super) fn outweighed_branch_target(&self) -> Option<NodeId> {
+    pub(super) fn outweighed_branch_target(&self) -> Option<(NodeId, BranchFrontier)> {
         let chain_tip = self.chain.chain_tip()?;
         let applied = self.chain.applied_tip()?;
         if chain_tip.hash == applied.hash {
@@ -136,7 +162,13 @@ impl BlockSync {
             return None;
         }
         let ancestor = tree.find_common_ancestor(applied_id, chain_tip.tip_id)?;
-        (ancestor != applied_id).then_some(chain_tip.tip_id)
+        (ancestor != applied_id).then_some((
+            chain_tip.tip_id,
+            BranchFrontier {
+                applied: applied.hash,
+                header: chain_tip.hash,
+            },
+        ))
     }
 }
 
