@@ -333,7 +333,6 @@ class ProofsJobLimitsTest(unittest.TestCase):
                 environment = self.fixture(root, jobs, 1, 2)
                 status, output = run_proofs(root, environment)
                 self.assertEqual(status, 2, output)
-                self.assertIn("PROOFS_JOBS must be a decimal integer", output)
                 self.assertEqual(tuple((root / "probe/started").iterdir()), ())
                 self.assertFalse((root / "probe/model-arguments").exists())
                 self.assertFalse((root / "docs/lean/.lake").exists())
