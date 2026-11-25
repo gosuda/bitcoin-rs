@@ -1989,7 +1989,7 @@ mod tests {
 
     #[test]
     fn version_user_agent_capped_at_256_bytes() -> Result<(), PeerError> {
-        fn payload_with_agent(agent_len: usize) -> Vec<u8> {
+        fn payload_with_agent(agent_len: usize) -> Result<Vec<u8>, PeerError> {
             let mut payload = Vec::new();
             payload.extend_from_slice(&70_017u32.to_le_bytes());
             payload.extend_from_slice(&0u64.to_le_bytes());
@@ -2001,14 +2001,14 @@ mod tests {
                 u64::try_from(agent_len).map_err(|_| PeerError::PayloadTooLarge(agent_len))?,
             )));
             payload.extend_from_slice(&vec![b'x'; agent_len]);
-            payload
+            Ok(payload)
         }
 
-        let version = read_version_payload(&payload_with_agent(256))?;
+        let version = read_version_payload(&payload_with_agent(256)?)?;
         assert_eq!(version.user_agent.len(), 256);
 
         assert!(matches!(
-            read_version_payload(&payload_with_agent(257)),
+            read_version_payload(&payload_with_agent(257)?),
             Err(PeerError::Misbehavior(_))
         ));
         Ok(())
