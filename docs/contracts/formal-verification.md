@@ -24,7 +24,7 @@ The moving `ghcr.io/apalache-mc/apalache:main` image is not accepted evidence. A
 
 ## Run rules
 
-`PROOFS_JOBS` sets the worker limit for each of the Kani and model schedulers. An explicit value MUST contain decimal digits and have a numeric value from 1 through 9223372036854775807. Leading zeroes are normalized as decimal. Empty, zero, malformed, and overflow values fail before proof workers start. When unset, the existing CPU and crate-count default applies. This limit applies to each scheduler separately; it does not bound the combined Kani, model, and Lean process count.
+`PROOFS_JOBS` sets the worker limit for each of the Kani and model schedulers. An explicit value MUST contain decimal digits and have a numeric value from 1 through 9223372036854775807. Leading zeroes are normalized as decimal. Empty, zero, malformed, and overflow values fail before proof workers start. When unset, the existing CPU and crate-count default applies. This limit applies to each scheduler separately; it does not bound the combined Kani, model, and Lean process count. Proof: `scripts/tests/proofs_crate_paths.py::test_decimal_limit_reaches_both_schedulers` checks normalization and forwarding to both schedulers; `test_invalid_limit_refuses_before_launching_proof_jobs` checks fail-fast refusal before workers start.
 
 `python3 scripts/check_models.py` checks safety and temporal evidence for every module in the inventory.
 The checker engine is configured per module in the `checker` column below (`tlc` or `apalache`), and can be selected via `--checker {configured,apalache,tlc}` (default `configured`).
