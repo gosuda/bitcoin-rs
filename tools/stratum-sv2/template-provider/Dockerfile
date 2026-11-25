@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Build with repository root as context: the adapter embeds path dependencies.
-FROM rust:1.100.0-bookworm AS build
+FROM rust:1.100.0-bookworm@sha256:75d26c23c24cc6ea1cdabf0714a6bff8fd7bf3248716043fd7ae86dac7f41b94 AS build
 WORKDIR /build
 COPY . .
 # The target cache is scoped to the builder above; rotate the id with the FROM pin.
