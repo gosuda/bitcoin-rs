@@ -597,7 +597,7 @@ impl BlockSync {
             let tree = self.chain.block_tree();
             let active_tip = chain.chain_tip.as_ref().map(|tip| tip.tip_id);
             for session in sessions {
-                let demonstrated_tips = session.demonstrated_tips;
+                let demonstrated_tips = session.all_demonstrated_tips();
                 let info = match session.info {
                     Some(info) => info,
                     None => continue,
@@ -14085,6 +14085,92 @@ mod tests {
                 retained[0],
                 Hash256::from(branch_tips[7].compute_hash()),
                 "the deepest unresolved tip is retained first"
+            );
+            Ok(())
+        }
+
+        // P2P-03
+        #[test]
+        fn ancestor_announcement_at_capacity_preserves_deeper_tip() -> TestResult {
+            let (tree, blocks) = mined_chain(10, 0)?;
+            let SyncHarness {
+                sync,
+                peers,
+                inbound_headers_tx,
+                ..
+            } = SyncHarness::new(tree);
+
+            let peer = test_addr(9709, 0)?;
+            let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
+            let source = current_source(&peers, peer);
+
+            let fork_base = regtest_fixture::mined_regtest_header(blocks[0].block_hash(), 2)
+                .or_fail("regtest fixture header");
+            let fork_tip = regtest_fixture::mined_regtest_header(fork_base.compute_hash(), 3)
+                .or_fail("regtest fixture header");
+            inbound_headers_tx.send(InboundHeaders {
+                headers: vec![fork_base, fork_tip],
+                source: Some(source),
+                wire_response: true,
+            })?;
+            for (index, parent) in blocks.iter().enumerate().skip(1).take(7) {
+                let height = u32::try_from(index + 2)?;
+                let tip = regtest_fixture::mined_regtest_header(parent.block_hash(), height)
+                    .or_fail("regtest fixture header");
+                inbound_headers_tx.send(InboundHeaders {
+                    headers: vec![tip],
+                    source: Some(source),
+                    wire_response: true,
+                })?;
+            }
+            sync.drain_inbound_headers();
+            let full = peers
+                .sessions()
+                .into_iter()
+                .find(|session| session.endpoint == peer.endpoint())
+                .ok_or("peer session missing")?;
+            assert_eq!(
+                full.demonstrated_tips.len(),
+                8,
+                "seven branches plus the fork tip fill the per-session cap"
+            );
+            assert!(
+                full.demonstrated_tips
+                    .contains(&Hash256::from(fork_tip.compute_hash())),
+                "the fork tip is retained before its ancestor is re-announced"
+            );
+
+            inbound_headers_tx.send(InboundHeaders {
+                headers: vec![fork_base],
+                source: Some(source),
+                wire_response: true,
+            })?;
+            sync.drain_inbound_headers();
+            let merged = peers
+                .sessions()
+                .into_iter()
+                .find(|session| session.endpoint == peer.endpoint())
+                .ok_or("peer session missing")?;
+            assert_eq!(
+                merged.demonstrated_tips.len(),
+                8,
+                "the merge keeps the cap without admitting the ancestor"
+            );
+            assert!(
+                merged
+                    .demonstrated_tips
+                    .contains(&Hash256::from(fork_tip.compute_hash())),
+                "a known ancestor waits out of the way instead of evicting the deeper tip"
+            );
+            assert!(
+                !merged
+                    .demonstrated_tips
+                    .contains(&Hash256::from(fork_base.compute_hash())),
+                "the ancestor never displaces retained evidence"
+            );
+            assert!(
+                merged.pending_tips.is_empty(),
+                "the merge compacts the ancestor against the retained descendant"
             );
             Ok(())
         }
