@@ -421,7 +421,7 @@ impl BlockAnnouncer {
         let known_position = peer_state
             .last_announced_block
             .into_iter()
-            .chain(session.demonstrated_tips.iter().copied())
+            .chain(session.all_demonstrated_tips())
             .filter_map(|hash| {
                 self.chain_query
                     .active_height(BlockHash::from(hash))
@@ -742,14 +742,15 @@ impl BlockAnnouncer {
             let Some(prefers_blocks) = announcement_state.stale_tip_prefers_blocks else {
                 continue;
             };
-            if session.demonstrated_tips.is_empty() {
+            let demonstrated_tips = session.all_demonstrated_tips();
+            if demonstrated_tips.is_empty() {
                 continue;
             }
 
             let pending = stale_tips.pending_for(source, |tip_hash| {
                 match self
                     .chain_query
-                    .stale_tip_announcement(tip_hash, &session.demonstrated_tips)
+                    .stale_tip_announcement(tip_hash, &demonstrated_tips)
                 {
                     Some(bitcoin_rs_p2p::dispatch::StaleTipHeaders::Headers(a)) => {
                         !prefers_blocks || a.have_block
@@ -764,7 +765,7 @@ impl BlockAnnouncer {
                 }
                 let Some(bitcoin_rs_p2p::dispatch::StaleTipHeaders::Headers(announcement)) = self
                     .chain_query
-                    .stale_tip_announcement(tip_hash, &session.demonstrated_tips)
+                    .stale_tip_announcement(tip_hash, &demonstrated_tips)
                 else {
                     continue;
                 };

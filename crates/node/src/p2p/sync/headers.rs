@@ -581,9 +581,14 @@ impl BlockSync {
             sessions
                 .into_iter()
                 .filter_map(|session| {
+                    let pending = self
+                        .peer_table
+                        .take_pending_tips(session.lease.source(session.endpoint));
+                    let mut candidates = session.demonstrated_tips;
+                    candidates.extend(pending);
                     let mut argmax: Option<(u32, Hash256)> = None;
                     let mut unresolved: Vec<(NodeId, u32, Hash256)> = Vec::new();
-                    for hash in &session.demonstrated_tips {
+                    for hash in &candidates {
                         let Some(node_id) = tree.lookup(*hash) else {
                             continue;
                         };
@@ -620,7 +625,7 @@ impl BlockSync {
                     if let Some((_, hash)) = argmax {
                         keep.push(hash);
                     }
-                    let needs_prune = keep.len() < session.demonstrated_tips.len();
+                    let needs_prune = keep.len() < candidates.len();
                     let credit = i32::try_from(best_shared).ok().filter(|height| {
                         session
                             .info

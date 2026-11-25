@@ -18,6 +18,7 @@ use crate::peer_info::PeerInfo;
 use crate::peer_info::PeerRole;
 
 const MAX_DEMONSTRATED_TIPS: usize = 8;
+const MAX_PENDING_DEMONSTRATED_TIPS: usize = 64;
 
 #[derive(Clone, Debug)]
 pub struct PeerSession {
@@ -26,9 +27,23 @@ pub struct PeerSession {
     pub lease: PeerLease,
     pub info: Option<PeerInfo>,
     pub demonstrated_tips: Vec<Hash256>,
+    pub pending_tips: Vec<Hash256>,
     pub headers_horizon: Option<u32>,
     pub bip152_hb_to: bool,
     pub bip152_hb_from: bool,
+}
+
+impl PeerSession {
+    #[must_use]
+    pub fn all_demonstrated_tips(&self) -> Vec<Hash256> {
+        let mut all = self.demonstrated_tips.clone();
+        for tip in &self.pending_tips {
+            if !all.contains(tip) {
+                all.push(*tip);
+            }
+        }
+        all
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,6 +63,7 @@ struct Entry {
     lease: PeerLease,
     info: Option<PeerInfo>,
     demonstrated_tips: Vec<Hash256>,
+    pending_tips: Vec<Hash256>,
     headers_horizon: Option<u32>,
     announcement: PeerAnnouncementState,
     keyed_netgroup: u64,
@@ -63,6 +79,7 @@ impl Entry {
             lease,
             info: None,
             demonstrated_tips: Vec::new(),
+            pending_tips: Vec::new(),
             headers_horizon: None,
             announcement: PeerAnnouncementState::default(),
             keyed_netgroup: 0,
@@ -80,6 +97,7 @@ impl Entry {
             lease: self.lease.clone(),
             info: self.info.clone(),
             demonstrated_tips: self.demonstrated_tips.clone(),
+            pending_tips: self.pending_tips.clone(),
             headers_horizon: self.headers_horizon,
             bip152_hb_to: self.announcement.selected_high_bandwidth,
             bip152_hb_from: self.announcement.compact_high_bandwidth == Some(true),
@@ -437,11 +455,15 @@ impl PeerTable {
         let Some(info) = entry.info.as_mut() else {
             return false;
         };
-        if !entry.demonstrated_tips.contains(&tip_hash) {
-            if entry.demonstrated_tips.len() >= MAX_DEMONSTRATED_TIPS {
-                entry.demonstrated_tips.remove(0);
+        if !entry.demonstrated_tips.contains(&tip_hash) && !entry.pending_tips.contains(&tip_hash) {
+            if entry.demonstrated_tips.len() < MAX_DEMONSTRATED_TIPS {
+                entry.demonstrated_tips.push(tip_hash);
+            } else {
+                if entry.pending_tips.len() >= MAX_PENDING_DEMONSTRATED_TIPS {
+                    entry.pending_tips.remove(0);
+                }
+                entry.pending_tips.push(tip_hash);
             }
-            entry.demonstrated_tips.push(tip_hash);
         }
         if let Some(height) = height
             && height > info.best_known_height
@@ -460,6 +482,17 @@ impl PeerTable {
         {
             entry.demonstrated_tips = tips;
         }
+    }
+
+    pub fn take_pending_tips(&self, source: PeerSource) -> Vec<Hash256> {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&PeerRemote::from(source))
+            .filter(|entry| entry.lease.is_current(source))
+        else {
+            return Vec::new();
+        };
+        std::mem::take(&mut entry.pending_tips)
     }
 
     pub fn note_announced_height(&self, source: PeerSource, height: i32) -> bool {
@@ -2178,7 +2211,7 @@ mod tests {
     }
 
     #[test]
-    fn demonstrated_tips_capped_at_8_with_oldest_eviction() {
+    fn demonstrated_overflow_waits_in_pending_without_evicting_retained() {
         let table = PeerTable::new();
         let current = lease();
         table.register(addr(1), current.clone());
@@ -2191,10 +2224,36 @@ mod tests {
         for tip in &tips[..9] {
             assert!(table.note_announced_tip(source, *tip, None));
         }
-        assert_eq!(table.sessions()[0].demonstrated_tips, tips[1..9].to_vec());
+        assert_eq!(table.sessions()[0].demonstrated_tips, tips[..8].to_vec());
+        assert_eq!(table.sessions()[0].pending_tips, tips[8..9].to_vec());
 
         assert!(table.note_announced_tip(source, tips[5], None));
-        assert_eq!(table.sessions()[0].demonstrated_tips, tips[1..9].to_vec());
+        assert!(table.note_announced_tip(source, tips[8], None));
+        assert_eq!(table.sessions()[0].demonstrated_tips, tips[..8].to_vec());
+        assert_eq!(table.sessions()[0].pending_tips, tips[8..9].to_vec());
+    }
+
+    #[test]
+    fn pending_overflow_evicts_oldest_pending_first() {
+        let table = PeerTable::new();
+        let current = lease();
+        table.register(addr(1), current.clone());
+        let source = current.source(Some(addr(1)));
+        assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
+
+        let retained: Vec<Hash256> = (0u8..8).map(|i| Hash256::from_le_bytes(&[i; 32])).collect();
+        for tip in &retained {
+            assert!(table.note_announced_tip(source, *tip, None));
+        }
+        let overflow: Vec<Hash256> = (8u8..73)
+            .map(|i| Hash256::from_le_bytes(&[i; 32]))
+            .collect();
+        for tip in &overflow {
+            assert!(table.note_announced_tip(source, *tip, None));
+        }
+        assert_eq!(table.sessions()[0].demonstrated_tips, retained);
+        assert_eq!(table.sessions()[0].pending_tips.len(), 64);
+        assert_eq!(table.sessions()[0].pending_tips, overflow[1..].to_vec());
     }
 
     #[test]
