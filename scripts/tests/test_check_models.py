@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -944,5 +946,148 @@ class ModelEvidenceTests(unittest.TestCase):
             states_gen=60,
         )
         self.assertEqual(check_models.map_tlc_return_codes(0, report_fail, state_budget=26), (14, 14))
+
+
+class FormalRuntimeIdentityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="formal-java-identity-")
+        self.addCleanup(temporary.cleanup)
+        self.root: Path = Path(temporary.name)
+        self.contract: Path = self.root / "docs/contracts/formal-verification.md"
+        self.sentinel: Path = self.root / "download"
+        self.java_home: Path = self.root / "jdk"
+        self.shims: Path = self.root / "bin"
+        repository = Path(__file__).resolve().parents[2]
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        for name in ("resolve_reference_identity.py", "provision-ci-reference-fixtures.sh"):
+            shutil.copy2(repository / "scripts" / name, scripts / name)
+        self.contract.parent.mkdir(parents=True)
+        self.write_java_rows("| Java | release and build `25.0.5+8` |")
+        manifest = self.root / "crates/wire/core-compat.toml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            '[reference.formal_tool]\nname = "apalache-mc"\nversion = "0.62.4"\n'
+            f'archive_sha256 = "{"0" * 64}"\njar_sha256 = "{"1" * 64}"\n',
+            encoding="utf-8",
+        )
+        (self.java_home / "bin").mkdir(parents=True)
+        self.shims.mkdir()
+        curl = self.shims / "curl"
+        curl.write_text(
+            '#!/bin/sh\n: > "$DOWNLOAD_SENTINEL"\nexit 97\n',
+            encoding="utf-8",
+        )
+        curl.chmod(0o755)
+
+    def write_java_rows(self, rows: str) -> None:
+        self.contract.write_text(
+            f"| Archive | `apalache-0.62.4.zip` |\n{rows}\n",
+            encoding="utf-8",
+        )
+
+    def resolve(self, mode: str = "java") -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(self.root / "scripts/resolve_reference_identity.py"),
+                mode,
+                str(self.root),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+    def provision(
+        self, runtime_version: str | None, probe_status: int = 0
+    ) -> subprocess.CompletedProcess[str]:
+        java = self.java_home / "bin/java"
+        body = '#!/bin/sh\nprintf \'%s\\n\' \'openjdk version "25.0.5"\' >&2\n'
+        if runtime_version is not None:
+            body += f"printf '%s\\n' '    java.runtime.version = {runtime_version}' >&2\n"
+        body += f"exit {probe_status}\n"
+        java.write_text(body, encoding="utf-8")
+        java.chmod(0o755)
+        self.sentinel.unlink(missing_ok=True)
+        environment: dict[str, str] = {
+            "PATH": f"{self.shims}{os.pathsep}{os.environ['PATH']}",
+            "JAVA_HOME": str(self.java_home),
+            "JAVA_HOME_25_X64": str(self.java_home),
+            "DOWNLOAD_SENTINEL": str(self.sentinel),
+        }
+        return subprocess.run(
+            ["bash", str(self.root / "scripts/provision-ci-reference-fixtures.sh"), "formal"],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+    def test_java_selector_returns_complete_runtime_version(self) -> None:
+        result = self.resolve()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "25.0.5+8\n")
+
+    def test_java_selector_refuses_missing_malformed_or_duplicate_rows(self) -> None:
+        valid = "| Java | release and build `25.0.5+8` |"
+        rows = (
+            "",
+            "| Java | malformed |",
+            "| Java | release and build `25.0.5` |",
+            f"{valid}\n{valid}",
+            f"{valid}\n| Java | malformed |",
+            f"{valid}\n|Java| malformed |",
+            f"{valid}\n  | Java | malformed |",
+            f"{valid}\n| Java | release and build `25.0.5+9` |",
+        )
+        for case in rows:
+            with self.subTest(rows=case):
+                self.write_java_rows(case)
+                result = self.resolve()
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_formal_selector_preserves_five_value_identity(self) -> None:
+        result = self.resolve("formal")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["0.62.4", "apalache-0.62.4.zip", "0" * 64, "1" * 64, "0.62.4"],
+        )
+
+    def test_matching_runtime_reaches_download(self) -> None:
+        for runtime in ("25.0.5+8", "25.0.5+8-LTS"):
+            with self.subTest(runtime=runtime):
+                result = self.provision(runtime)
+                self.assertEqual(result.returncode, 97, result.stderr)
+                self.assertTrue(self.sentinel.exists())
+
+    def test_same_release_wrong_build_refuses_before_download(self) -> None:
+        for runtime in ("25.0.5+9", "25.0.5+9-LTS"):
+            with self.subTest(runtime=runtime):
+                result = self.provision(runtime)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertFalse(self.sentinel.exists())
+
+    def test_invalid_or_failed_runtime_probe_refuses_before_download(self) -> None:
+        cases: tuple[tuple[str | None, int], ...] = (
+            (None, 0),
+            ("25.0.5+8", 42),
+            ("25.0.5", 0),
+            ("25.0.5+8 extra", 0),
+            ("25.0.5+8-other", 0),
+            ("25.0.5+8\n    java.runtime.version = 25.0.5+8", 0),
+            ("25.0.5+8\n    java.runtime.version = malformed value", 0),
+            ("25.0.5+8\n    java.runtime.version = ", 0),
+        )
+        for runtime, status in cases:
+            with self.subTest(runtime=runtime, status=status):
+                result = self.provision(runtime, status)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertFalse(self.sentinel.exists())
+
 if __name__ == "__main__":
     unittest.main()
