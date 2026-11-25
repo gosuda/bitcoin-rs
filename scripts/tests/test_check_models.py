@@ -1001,7 +1001,7 @@ class FormalRuntimeIdentityTests(unittest.TestCase):
         )
 
     def provision(
-        self, runtime_version: str | None, probe_status: int = 0
+        self, runtime_version: str | None, probe_status: int = 0, isolated: bool = False
     ) -> subprocess.CompletedProcess[str]:
         java = self.java_home / "bin/java"
         body = '#!/bin/sh\nprintf \'%s\\n\' \'openjdk version "25.0.5"\' >&2\n'
@@ -1012,13 +1012,28 @@ class FormalRuntimeIdentityTests(unittest.TestCase):
         java.chmod(0o755)
         self.sentinel.unlink(missing_ok=True)
         environment: dict[str, str] = {
-            "PATH": f"{self.shims}{os.pathsep}{os.environ['PATH']}",
+            "PATH": str(self.shims)
+            if isolated
+            else f"{self.shims}{os.pathsep}{os.environ['PATH']}",
             "JAVA_HOME": str(self.java_home),
             "JAVA_HOME_25_X64": str(self.java_home),
             "DOWNLOAD_SENTINEL": str(self.sentinel),
+            "PYTHON": sys.executable,
         }
+        if isolated:
+            for tool in ("dirname", "mkdir", "sed"):
+                resolved = shutil.which(tool)
+                if resolved is not None:
+                    link = self.shims / tool
+                    if not link.exists():
+                        link.symlink_to(resolved)
+
         return subprocess.run(
-            ["bash", str(self.root / "scripts/provision-ci-reference-fixtures.sh"), "formal"],
+            [
+                shutil.which("bash") or "bash",
+                str(self.root / "scripts/provision-ci-reference-fixtures.sh"),
+                "formal",
+            ],
             env=environment,
             capture_output=True,
             text=True,
@@ -1062,6 +1077,13 @@ class FormalRuntimeIdentityTests(unittest.TestCase):
         for runtime in ("25.0.5+8", "25.0.5+8-LTS"):
             with self.subTest(runtime=runtime):
                 result = self.provision(runtime)
+                self.assertEqual(result.returncode, 97, result.stderr)
+                self.assertTrue(self.sentinel.exists())
+
+    def test_provision_uses_calling_interpreter_without_path_python(self) -> None:
+        for runtime in ("25.0.5+8", "25.0.5+8-LTS"):
+            with self.subTest(runtime=runtime):
+                result = self.provision(runtime, isolated=True)
                 self.assertEqual(result.returncode, 97, result.stderr)
                 self.assertTrue(self.sentinel.exists())
 
