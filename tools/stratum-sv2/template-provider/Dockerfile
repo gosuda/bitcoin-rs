@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Build with repository root as context: the adapter embeds path dependencies.
-FROM rust:1.100.0 AS build
+FROM rust:1.100.0-bookworm AS build
 WORKDIR /build
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
