@@ -17,6 +17,8 @@ use crate::peer_info::PeerInfo;
 #[cfg(test)]
 use crate::peer_info::PeerRole;
 
+const MAX_DEMONSTRATED_TIPS: usize = 8;
+
 #[derive(Clone, Debug)]
 pub struct PeerSession {
     pub endpoint: Option<PeerEndpoint>,
@@ -436,6 +438,9 @@ impl PeerTable {
             return false;
         };
         if !entry.demonstrated_tips.contains(&tip_hash) {
+            if entry.demonstrated_tips.len() >= MAX_DEMONSTRATED_TIPS {
+                entry.demonstrated_tips.remove(0);
+            }
             entry.demonstrated_tips.push(tip_hash);
         }
         if let Some(height) = height
@@ -2170,6 +2175,26 @@ mod tests {
         };
         let unpublished_source = unpublished.source(Some(addr(3)));
         assert!(!table.note_announced_height(unpublished_source, 50));
+    }
+
+    #[test]
+    fn demonstrated_tips_capped_at_8_with_oldest_eviction() {
+        let table = PeerTable::new();
+        let current = lease();
+        table.register(addr(1), current.clone());
+        let source = current.source(Some(addr(1)));
+        assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
+
+        let tips: Vec<Hash256> = (0u8..10)
+            .map(|i| Hash256::from_le_bytes(&[i; 32]))
+            .collect();
+        for tip in &tips[..9] {
+            assert!(table.note_announced_tip(source, *tip, None));
+        }
+        assert_eq!(table.sessions()[0].demonstrated_tips, tips[1..9].to_vec());
+
+        assert!(table.note_announced_tip(source, tips[5], None));
+        assert_eq!(table.sessions()[0].demonstrated_tips, tips[1..9].to_vec());
     }
 
     #[test]
