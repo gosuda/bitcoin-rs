@@ -95,7 +95,7 @@ class RuntimeStallTests(unittest.TestCase):
 
     def test_missing_cadence_expires_without_rpc_or_node_locks(self) -> None:
         identity = watchdog.Process(99, "100")
-        with patch.object(watchdog, "process", return_value=identity), \
+        with patch.object(watchdog, "snapshot_process", return_value=identity), \
              patch.object(watchdog.time, "monotonic", side_effect=[0.0, 0.0, 179.0, 180.0]), \
              patch.object(watchdog.time, "sleep"):
             self.assertTrue(watchdog.wait_for_stall(identity, self.log, 180))
@@ -103,7 +103,7 @@ class RuntimeStallTests(unittest.TestCase):
     def test_exit_and_pid_reuse_do_not_attach_to_a_replacement(self) -> None:
         identity = watchdog.Process(99, "100")
         for current in (None, watchdog.Process(99, "101")):
-            with self.subTest(current=current), patch.object(watchdog, "process", return_value=current):
+            with self.subTest(current=current), patch.object(watchdog, "snapshot_process", return_value=current):
                 self.assertFalse(watchdog.wait_for_stall(identity, self.log, 180))
                 with self.assertRaises(ProcessLookupError):
                     watchdog.capture(identity, self.log, self.root, "/not-a-debugger")
@@ -112,14 +112,14 @@ class RuntimeStallTests(unittest.TestCase):
     def test_new_progress_restarts_the_deadline(self) -> None:
         identity = watchdog.Process(99, "100")
         cursor, _ = watchdog.read_progress(self.log, None)
-        with patch.object(watchdog, "process", side_effect=[identity, identity, None]), \
+        with patch.object(watchdog, "snapshot_process", side_effect=[identity, identity, None]), \
              patch.object(watchdog, "read_progress", side_effect=[(cursor, False), (cursor, False), (cursor, True)]), \
              patch.object(watchdog.time, "monotonic", side_effect=[0.0, 179.0, 180.0]), \
              patch.object(watchdog.time, "sleep"):
             self.assertFalse(watchdog.wait_for_stall(identity, self.log, 180))
 
     def test_capture_preserves_failure_and_only_accepts_complete_debugger_output(self) -> None:
-        identity = watchdog.process(os.getpid())
+        identity = watchdog.snapshot_process(os.getpid())
         assert identity is not None
         executable = self.root / "fake-gdb"
         for rc, text, complete in (
@@ -150,9 +150,9 @@ class RuntimeStallTests(unittest.TestCase):
         self.assertEqual(sum(result["complete"] for result in results), 1)
 
     def test_pre_attach_exit_writes_an_incomplete_result(self) -> None:
-        identity = watchdog.process(os.getpid())
+        identity = watchdog.snapshot_process(os.getpid())
         assert identity is not None
-        with patch.object(watchdog, "process", side_effect=[identity, None]):
+        with patch.object(watchdog, "snapshot_process", side_effect=[identity, None]):
             with self.assertRaises(ProcessLookupError):
                 watchdog.capture(identity, self.log, self.root, "/not-a-debugger")
         result = json.loads(next(self.root.glob("stall-*/result.json")).read_text())
@@ -162,9 +162,9 @@ class RuntimeStallTests(unittest.TestCase):
         self.assertIn("exited", result["reason"])
 
     def test_exit_before_kernel_snapshot_writes_an_incomplete_result(self) -> None:
-        identity = watchdog.process(os.getpid())
+        identity = watchdog.snapshot_process(os.getpid())
         assert identity is not None
-        with patch.object(watchdog, "process", return_value=identity), \
+        with patch.object(watchdog, "snapshot_process", return_value=identity), \
              patch.object(Path, "iterdir", side_effect=FileNotFoundError):
             with self.assertRaises(ProcessLookupError) as raised:
                 watchdog.capture(identity, self.log, self.root, "/not-a-debugger")
@@ -177,7 +177,7 @@ class RuntimeStallTests(unittest.TestCase):
         self.assertIn("kernel snapshot", result["reason"])
 
     def test_kernel_snapshot_pulls_exactly_257_entries_and_truncates_the_snapshot(self) -> None:
-        identity = watchdog.process(os.getpid())
+        identity = watchdog.snapshot_process(os.getpid())
         assert identity is not None
         executable = self.root / "fake-gdb"
         text = "Thread 1 (LWP 1):\n#0  main () at src/main.rs:12\n"
@@ -199,7 +199,7 @@ class RuntimeStallTests(unittest.TestCase):
                     yield task
             return pulled()
 
-        with patch.object(watchdog, "process", return_value=identity), \
+        with patch.object(watchdog, "snapshot_process", return_value=identity), \
              patch.object(Path, "iterdir", fake_iterdir), \
              self.assertRaises(RuntimeError):
             watchdog.capture(identity, self.log, self.root, str(executable))
@@ -211,14 +211,14 @@ class RuntimeStallTests(unittest.TestCase):
         self.assertEqual(waits.count("/comm: unavailable"), 256)
 
     def test_identity_change_after_attach_forces_an_incomplete_result(self) -> None:
-        identity = watchdog.process(os.getpid())
+        identity = watchdog.snapshot_process(os.getpid())
         assert identity is not None
         executable = self.root / "fake-gdb"
         text = "Thread 1 (LWP 1):\n#0  main () at src/main.rs:12\nSTALL_CAPTURE_COMPLETE"
         executable.write_text(f"#!{sys.executable}\nprint({text!r})\nraise SystemExit(0)\n")
         executable.chmod(0o755)
         replacement = watchdog.Process(identity.pid, "1")
-        with patch.object(watchdog, "process", side_effect=[identity, identity, replacement]):
+        with patch.object(watchdog, "snapshot_process", side_effect=[identity, identity, replacement]):
             with self.assertRaises(RuntimeError):
                 watchdog.capture(identity, self.log, self.root, str(executable))
         result = json.loads(next(self.root.glob("stall-*/result.json")).read_text())
@@ -242,18 +242,18 @@ class RuntimeStallTests(unittest.TestCase):
         executable.write_text(
             f"#!{sys.executable}\nprint('ptrace: Operation not permitted.')\nraise SystemExit(0)\n")
         executable.chmod(0o755)
-        with patch.object(watchdog, "process", return_value=identity), \
+        with patch.object(watchdog, "snapshot_process", return_value=identity), \
              self.assertRaises(RuntimeError):
             watchdog.preflight_attach(identity, str(executable))
         executable.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
         executable.chmod(0o755)
-        with patch.object(watchdog, "process", return_value=identity):
+        with patch.object(watchdog, "snapshot_process", return_value=identity):
             watchdog.preflight_attach(identity, str(executable))
 
     def test_preflight_rejects_identity_change_before_the_dry_attach(self) -> None:
         identity = watchdog.Process(99, "100")
         replacement = watchdog.Process(99, "101")
-        with patch.object(watchdog, "process", return_value=replacement), \
+        with patch.object(watchdog, "snapshot_process", return_value=replacement), \
              patch.object(watchdog.subprocess, "run") as run:
             with self.assertRaises(ProcessLookupError) as raised:
                 watchdog.preflight_attach(identity, "/not-a-debugger")
@@ -264,7 +264,7 @@ class RuntimeStallTests(unittest.TestCase):
         identity = watchdog.Process(99, "100")
         replacement = watchdog.Process(99, "101")
         probe = watchdog.subprocess.CompletedProcess([], 0, "", "")
-        with patch.object(watchdog, "process",
+        with patch.object(watchdog, "snapshot_process",
                           side_effect=[identity, replacement]), \
              patch.object(watchdog.subprocess, "run", return_value=probe) as run:
             with self.assertRaises(ProcessLookupError) as raised:
@@ -280,7 +280,7 @@ class RuntimeStallTests(unittest.TestCase):
             executable.write_text(
                 f"#!{sys.executable}\nprint({output!r})\nraise SystemExit(1)\n")
             executable.chmod(0o755)
-            with patch.object(watchdog, "process", return_value=identity), \
+            with patch.object(watchdog, "snapshot_process", return_value=identity), \
                  self.assertRaises(RuntimeError) as raised:
                 watchdog.preflight_attach(identity, str(executable))
             return str(raised.exception)
@@ -293,13 +293,13 @@ class RuntimeStallTests(unittest.TestCase):
         executable.write_text(
             f"#!{sys.executable}\nprint('ptrace: Operation not permitted.')\nraise SystemExit(1)\n")
         executable.chmod(0o755)
-        with patch.object(watchdog, "process", return_value=identity), \
+        with patch.object(watchdog, "snapshot_process", return_value=identity), \
              self.assertRaises(RuntimeError) as raised:
             watchdog.preflight_attach(identity, str(executable))
         self.assertIn("ptrace", str(raised.exception))
 
     def test_sweep_header_count_requires_thread_apply_block_shape(self) -> None:
-        identity = watchdog.process(os.getpid())
+        identity = watchdog.snapshot_process(os.getpid())
         assert identity is not None
         executable = self.root / "fake-gdb"
         notification = 'Thread 1 "node" received signal SIGSTOP'
@@ -323,7 +323,7 @@ class RuntimeStallTests(unittest.TestCase):
                         watchdog.capture(identity, self.log, self.root, str(executable))
 
     def test_unresolved_frame_at_any_depth_blocks_completion(self) -> None:
-        identity = watchdog.process(os.getpid())
+        identity = watchdog.snapshot_process(os.getpid())
         assert identity is not None
         executable = self.root / "fake-gdb"
         text = ("Thread 1 (LWP 1):\n#0  main () at src/main.rs:12\n"
@@ -336,12 +336,12 @@ class RuntimeStallTests(unittest.TestCase):
         self.assertFalse(result["complete"])
 
     def test_keyboard_interrupt_during_gdb_wait_persists_incomplete_result(self) -> None:
-        identity = watchdog.process(os.getpid())
+        identity = watchdog.snapshot_process(os.getpid())
         assert identity is not None
         executable = self.root / "fake-gdb"
         executable.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
         executable.chmod(0o755)
-        real_process = watchdog.process
+        real_process = watchdog.snapshot_process
         real_wait = watchdog.subprocess.Popen.wait
 
         def fake_process(pid: int) -> watchdog.Process | None:
@@ -358,7 +358,7 @@ class RuntimeStallTests(unittest.TestCase):
 
         raise_interrupt_once.raised = False
 
-        with patch.object(watchdog, "process", fake_process), \
+        with patch.object(watchdog, "snapshot_process", fake_process), \
              patch.object(watchdog.subprocess.Popen, "wait", raise_interrupt_once):
             with self.assertRaises(KeyboardInterrupt):
                 watchdog.capture(identity, self.log, self.root, str(executable))

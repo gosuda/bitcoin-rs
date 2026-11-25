@@ -477,10 +477,6 @@ impl<S: Read> Peer<S> {
     }
 }
 
-pub(crate) trait DnsResolver: Send + Sync {
-    fn resolve(&self, seed: &str) -> Result<Vec<PeerEndpoint>, PeerError>;
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SystemDnsResolver {
     port: u16,
@@ -491,10 +487,8 @@ impl SystemDnsResolver {
     pub(crate) const fn new(port: u16) -> Self {
         Self { port }
     }
-}
 
-impl DnsResolver for SystemDnsResolver {
-    fn resolve(&self, seed: &str) -> Result<Vec<PeerEndpoint>, PeerError> {
+    pub(crate) fn resolve(&self, seed: &str) -> Result<Vec<PeerEndpoint>, PeerError> {
         let seed = seed.trim_end_matches('.');
         (seed, self.port)
             .to_socket_addrs()

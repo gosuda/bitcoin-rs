@@ -3,6 +3,7 @@ use std::hash::{BuildHasher, RandomState};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_consensus::primitives::Hash256;
@@ -15,6 +16,8 @@ use crate::peer::CompactBlockNegotiation;
 use crate::peer_info::PeerInfo;
 #[cfg(test)]
 use crate::peer_info::PeerRole;
+
+const MAX_DEMONSTRATED_TIPS: usize = 8;
 
 #[derive(Clone, Debug)]
 pub struct PeerSession {
@@ -49,6 +52,7 @@ struct Entry {
     announcement: PeerAnnouncementState,
     keyed_netgroup: u64,
     useful_tx_sequence: u64,
+    minimum_ping: Option<Duration>,
     #[cfg(test)]
     onion_epoch: Option<u64>,
 }
@@ -63,6 +67,7 @@ impl Entry {
             announcement: PeerAnnouncementState::default(),
             keyed_netgroup: 0,
             useful_tx_sequence: 0,
+            minimum_ping: None,
             #[cfg(test)]
             onion_epoch: None,
         }
@@ -368,6 +373,7 @@ impl PeerTable {
         Some(crate::eviction::EvictionCandidate {
             addr,
             connected: lease.connected_at(),
+            minimum_ping: entry.minimum_ping,
             last_block: entry.announcement.useful_block_sequence,
             last_tx: entry.useful_tx_sequence,
             relevant_services: info.is_some_and(|info| {
@@ -432,6 +438,9 @@ impl PeerTable {
             return false;
         };
         if !entry.demonstrated_tips.contains(&tip_hash) {
+            if entry.demonstrated_tips.len() >= MAX_DEMONSTRATED_TIPS {
+                entry.demonstrated_tips.remove(0);
+            }
             entry.demonstrated_tips.push(tip_hash);
         }
         if let Some(height) = height
@@ -628,6 +637,22 @@ impl PeerTable {
             .next_useful_block_sequence
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
+        true
+    }
+
+    pub(crate) fn note_ping_time(&self, source: PeerSource, elapsed: Duration) -> bool {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&PeerRemote::from(source))
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        else {
+            return false;
+        };
+        entry.minimum_ping = Some(
+            entry
+                .minimum_ping
+                .map_or(elapsed, |minimum| minimum.min(elapsed)),
+        );
         true
     }
 
@@ -1687,18 +1712,18 @@ mod tests {
     #[test]
     fn one_host_filling_every_inbound_slot_gives_way_to_another_netgroup() {
         let table = PeerTable::new();
-        let flooded = flood(&table, 20, false);
+        let flooded = flood(&table, 32, false);
         let honest = inbound_lease();
         assert!(
-            offer(&table, newcomer(), honest.clone(), 20).is_some(),
+            offer(&table, newcomer(), honest.clone(), 32).is_some(),
             "a full table must evict rather than refuse a newcomer"
         );
-        assert_eq!(table.live_inbound_count(), 20);
+        assert_eq!(table.live_inbound_count(), 32);
         assert_eq!(cancelled(&flooded).len(), 1);
-        assert!(offer(&table, flooder(999), inbound_lease(), 20).is_some());
+        assert!(offer(&table, flooder(999), inbound_lease(), 32).is_some());
         assert!(!honest.is_cancelled());
         assert_eq!(cancelled(&flooded).len(), 2);
-        assert_eq!(table.live_inbound_count(), 20);
+        assert_eq!(table.live_inbound_count(), 32);
     }
 
     #[test]
@@ -1727,12 +1752,46 @@ mod tests {
     #[test]
     fn useful_transactions_and_blocks_protect_inbound_connections() {
         let table = PeerTable::new();
-        let flooded = flood(&table, 13, false);
-        assert!(!table.note_useful_transaction(inbound_lease().source(Some(flooder(12)))));
-        assert!(table.note_useful_transaction(flooded[11].source(Some(flooder(12)))));
-        assert!(table.note_useful_block(flooded[12].source(Some(flooder(13)))));
-        assert!(offer(&table, newcomer(), inbound_lease(), 13).is_some());
-        assert_eq!(cancelled(&flooded), [10]);
+        let flooded = flood(&table, 21, false);
+        assert!(!table.note_useful_transaction(inbound_lease().source(Some(flooder(20)))));
+        assert!(table.note_useful_transaction(flooded[19].source(Some(flooder(20)))));
+        assert!(table.note_useful_block(flooded[20].source(Some(flooder(21)))));
+        assert!(offer(&table, newcomer(), inbound_lease(), 21).is_some());
+        assert_eq!(cancelled(&flooded), [18]);
+    }
+
+    // P2P-08
+    #[test]
+    fn ping_samples_keep_the_connection_minimum_for_eviction() {
+        let table = PeerTable::new();
+        let flooded = flood(&table, 40, false);
+        for port in 32..=40_u16 {
+            assert!(table.note_ping_time(
+                flooded[usize::from(port - 1)].source(Some(flooder(port))),
+                Duration::from_micros(u64::from(40 - port)),
+            ));
+        }
+        assert!(table.note_ping_time(
+            flooded[39].source(Some(flooder(40))),
+            Duration::from_secs(1),
+        ));
+        assert!(offer(&table, newcomer(), inbound_lease(), 40).is_some());
+        assert_eq!(cancelled(&flooded), [31]);
+    }
+
+    // P2P-08
+    #[test]
+    fn replacement_connections_never_inherit_ping_protection() {
+        let table = PeerTable::new();
+        let flooded = flood(&table, 40, false);
+        let source = flooded[39].source(Some(flooder(40)));
+        assert!(table.note_ping_time(source, Duration::ZERO));
+        let replacement = inbound_lease();
+        assert!(offer(&table, flooder(40), replacement.clone(), 40).is_some());
+        assert!(!table.note_ping_time(source, Duration::ZERO));
+        assert!(offer(&table, newcomer(), inbound_lease(), 40).is_some());
+        assert!(replacement.is_cancelled());
+        assert!(!table.note_ping_time(replacement.source(Some(flooder(40))), Duration::ZERO));
     }
 
     #[test]
@@ -2116,6 +2175,26 @@ mod tests {
         };
         let unpublished_source = unpublished.source(Some(addr(3)));
         assert!(!table.note_announced_height(unpublished_source, 50));
+    }
+
+    #[test]
+    fn demonstrated_tips_capped_at_8_with_oldest_eviction() {
+        let table = PeerTable::new();
+        let current = lease();
+        table.register(addr(1), current.clone());
+        let source = current.source(Some(addr(1)));
+        assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
+
+        let tips: Vec<Hash256> = (0u8..10)
+            .map(|i| Hash256::from_le_bytes(&[i; 32]))
+            .collect();
+        for tip in &tips[..9] {
+            assert!(table.note_announced_tip(source, *tip, None));
+        }
+        assert_eq!(table.sessions()[0].demonstrated_tips, tips[1..9].to_vec());
+
+        assert!(table.note_announced_tip(source, tips[5], None));
+        assert_eq!(table.sessions()[0].demonstrated_tips, tips[1..9].to_vec());
     }
 
     #[test]

@@ -321,6 +321,38 @@ impl MempoolGateway {
         Some(bodies)
     }
 
+    #[must_use]
+    pub fn ancestor_package_for_relay(
+        &self,
+        tip: Wtxid,
+        last_inv_sequence: u64,
+    ) -> Option<Vec<Wtxid>> {
+        let pool = self.read();
+        let wtxids = pool.ancestor_package_wtxids(&tip)?;
+        for wtxid in &wtxids {
+            let entry = pool.entry_by_wtxid(wtxid)?;
+            pool.entry_by_txid_for_relay(&entry.txid, last_inv_sequence)?;
+        }
+        Some(wtxids)
+    }
+
+    #[must_use]
+    pub fn package_for_relay(
+        &self,
+        wtxids: &[Wtxid],
+        last_inv_sequence: u64,
+    ) -> Option<Vec<Arc<Tx>>> {
+        let pool = self.read();
+        wtxids
+            .iter()
+            .map(|wtxid| {
+                let entry = pool.entry_by_wtxid(wtxid)?;
+                pool.entry_by_txid_for_relay(&entry.txid, last_inv_sequence)
+                    .map(|entry| Arc::clone(&entry.tx))
+            })
+            .collect()
+    }
+
     fn submit_package_atomic(
         &self,
         txs: &[Arc<Tx>],
@@ -750,6 +782,51 @@ mod tests {
             });
         }
         txs
+    }
+
+    // P2P-01
+    #[test]
+    fn package_serving_requires_every_members_admission_within_cutoff() -> TestResult {
+        let gateway = gateway(1_000, None);
+        let chain = chain_of(2);
+        let parent = Arc::new(chain[0].clone());
+        let child = Arc::new(chain[1].clone());
+        gateway.insert_entry(
+            AdmissionOrigin::Rpc,
+            crate::MempoolEntry::new(Arc::clone(&parent), 100, 1_000, 1, 0, 0),
+        )?;
+        let cutoff = gateway.read().sequence_number();
+        gateway.insert_entry(
+            AdmissionOrigin::Rpc,
+            crate::MempoolEntry::new(Arc::clone(&child), 100, 1_000, 1, 0, 0),
+        )?;
+        let sequence = gateway.read().sequence_number();
+        let requested = [child.wtxid(), parent.wtxid(), child.wtxid()];
+
+        assert!(gateway.resident_package(&requested).is_some());
+        assert!(gateway.package_for_relay(&requested, cutoff).is_none());
+        assert_eq!(
+            gateway.ancestor_package_for_relay(child.wtxid(), cutoff),
+            None
+        );
+        assert_eq!(
+            gateway.ancestor_package_for_relay(parent.wtxid(), cutoff),
+            Some(vec![parent.wtxid()])
+        );
+        let bodies = gateway
+            .package_for_relay(&requested, sequence)
+            .ok_or("announced package")?;
+        assert_eq!(
+            bodies.iter().map(|tx| tx.wtxid()).collect::<Vec<_>>(),
+            requested
+        );
+        assert_eq!(
+            gateway.ancestor_package_for_relay(child.wtxid(), sequence),
+            Some(vec![parent.wtxid(), child.wtxid()])
+        );
+        assert_eq!(gateway.read().sequence_number(), sequence);
+        assert_eq!(gateway.read().unbroadcast_transactions().count(), 2);
+        Ok(())
     }
 
     #[test]

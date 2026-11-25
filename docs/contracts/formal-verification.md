@@ -10,7 +10,7 @@ This file owns the formal toolchain pins, the run rules, and the per-module chec
 | Archive | `apalache-0.62.4.zip`, SHA256 `3b6b7ebf24e778535bf47e0cb3f0799c9ab9048df41119c7d3091c6ca1760bc1` (matches the release `sha256sum.txt` and the GitHub asset digest) |
 | Jar | `lib/apalache.jar`, SHA256 `e5223915507b65cc5f1638bd037ede60f8a4fc1644aff46355779f9b05df9262` |
 | Apalache home | `${APALACHE_HOME}`, default `target/tools/apalache-0.62.4` (untracked) |
-| Java | `java -version` observed line: Java 25.0.5 |
+| Java | release and build `25.0.5+8` |
 | Solver | `SMT_SOLVER=z3`, `JVM_ARGS` default `-Xmx4096m` |
 | SMT encoding | `funArrays` (`--smt-encoding=funArrays`) |
 | Lean | `leanprover/lean4:v4.35.0` (`docs/lean/lean-toolchain`) |
@@ -18,9 +18,13 @@ This file owns the formal toolchain pins, the run rules, and the per-module chec
 | Charon | 0.1.301 at commit `373d84044d80f6eb44285c2c349bae1453f5b6ca` (the Aeneas revision's `charon-pin`) |
 | Aeneas Lean library | `backends/lean/lean-toolchain` of the Aeneas revision: `leanprover/lean4:v4.35.0` |
 
+The Java row owns the runtime release and build number. The manual workflow reads this row through `scripts/resolve_reference_identity.py java .`. Formal provisioning reads the selected runtime's `java.runtime.version` property and removes only an exact trailing `-LTS` label. The remaining value MUST match the Java row exactly. Other suffixes and different build numbers fail validation.
+
 The moving `ghcr.io/apalache-mc/apalache:main` image is not accepted evidence. A run begins only after the pinned archive and JAR digests match.
 
 ## Run rules
+
+`PROOFS_JOBS` sets the worker limit for each of the Kani and model schedulers. An explicit value MUST contain decimal digits and have a numeric value from 1 through 9223372036854775807. Leading zeroes are normalized as decimal. Empty, zero, malformed, and overflow values fail before proof workers start. When unset, the existing CPU and crate-count default applies. This limit applies to each scheduler separately; it does not bound the combined Kani, model, and Lean process count. Proof: `scripts/tests/proofs_crate_paths.py::test_decimal_limit_reaches_both_schedulers` checks normalization and forwarding to both schedulers; `test_invalid_limit_refuses_before_launching_proof_jobs` checks fail-fast refusal before workers start.
 
 `python3 scripts/check_models.py` checks safety and temporal evidence for every module in the inventory.
 The checker engine is configured per module in the `checker` column below (`tlc` or `apalache`), and can be selected via `--checker {configured,apalache,tlc}` (default `configured`).

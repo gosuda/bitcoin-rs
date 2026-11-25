@@ -9,7 +9,7 @@ use bitcoin::bip152::{
 use bitcoin::consensus::encode::{self, Decodable};
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::address::{AddrV2Message, Address};
-use bitcoin::p2p::message::{CommandString, NetworkMessage};
+use bitcoin::p2p::message::CommandString;
 use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
 use bitcoin::p2p::message_bloom::{FilterAdd, FilterLoad};
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn, SendCmpct};
@@ -18,7 +18,7 @@ use bitcoin::p2p::message_filter::{
 };
 use bitcoin::p2p::message_network::{Reject, VersionMessage};
 use bitcoin_rs_consensus::primitives::{
-    BlockImage, ConsensusDecode, ConsensusEncode, Header, Tx, deserialize,
+    BlockImage, ConsensusDecode, ConsensusEncode, Header, MAX_SUBVERSION_LENGTH, Tx, deserialize,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -177,17 +177,20 @@ impl Message {
 }
 
 impl Message {
-    fn envelope(&self) -> NetworkMessage {
+    fn encode_bitcoin_payload<W: bitcoin::io::Write + ?Sized>(
+        &self,
+        writer: &mut W,
+    ) -> Result<usize, bitcoin::io::Error> {
+        use bitcoin::consensus::Encodable;
+
         match self {
-            Self::Version(message) => NetworkMessage::Version(message.clone()),
-            Self::Verack => NetworkMessage::Verack,
-            Self::Addr(addresses) => NetworkMessage::Addr(addresses.clone()),
-            Self::Inv(inventory) => NetworkMessage::Inv(inventory.clone()),
-            Self::GetData(inventory) => NetworkMessage::GetData(inventory.clone()),
-            Self::NotFound(inventory) => NetworkMessage::NotFound(inventory.clone()),
-            Self::GetBlocks(message) => NetworkMessage::GetBlocks(message.clone()),
-            Self::GetHeaders(message) => NetworkMessage::GetHeaders(message.clone()),
-            Self::MemPool => NetworkMessage::MemPool,
+            Self::Version(message) => message.consensus_encode(writer),
+            Self::Addr(addresses) => addresses.consensus_encode(writer),
+            Self::Inv(inventory) | Self::GetData(inventory) | Self::NotFound(inventory) => {
+                inventory.consensus_encode(writer)
+            }
+            Self::GetBlocks(message) => message.consensus_encode(writer),
+            Self::GetHeaders(message) => message.consensus_encode(writer),
             Self::Tx(_)
             | Self::Block(_)
             | Self::BlockBytes(_)
@@ -201,34 +204,32 @@ impl Message {
             | Self::StaleTip(_) => {
                 unreachable!("native payloads are encoded directly")
             }
-            Self::SendHeaders => NetworkMessage::SendHeaders,
-            Self::GetAddr => NetworkMessage::GetAddr,
-            Self::Ping(nonce) => NetworkMessage::Ping(*nonce),
-            Self::Pong(nonce) => NetworkMessage::Pong(*nonce),
-            Self::MerkleBlock(block) => NetworkMessage::MerkleBlock(block.clone()),
-            Self::FilterLoad(filter) => NetworkMessage::FilterLoad(filter.clone()),
-            Self::FilterAdd(filter) => NetworkMessage::FilterAdd(filter.clone()),
-            Self::FilterClear => NetworkMessage::FilterClear,
-            Self::GetCFilters(message) => NetworkMessage::GetCFilters(message.clone()),
-            Self::CFilter(message) => NetworkMessage::CFilter(message.clone()),
-            Self::GetCFHeaders(message) => NetworkMessage::GetCFHeaders(message.clone()),
-            Self::CFHeaders(message) => NetworkMessage::CFHeaders(message.clone()),
-            Self::GetCFCheckpt(message) => NetworkMessage::GetCFCheckpt(message.clone()),
-            Self::CFCheckpt(message) => NetworkMessage::CFCheckpt(message.clone()),
-            Self::SendCmpct(message) => NetworkMessage::SendCmpct(*message),
-            Self::CmpctBlock(message) => NetworkMessage::CmpctBlock(message.clone()),
-            Self::GetBlockTxn(message) => NetworkMessage::GetBlockTxn(message.clone()),
-            Self::BlockTxn(message) => NetworkMessage::BlockTxn(message.clone()),
-            Self::Alert(payload) => NetworkMessage::Alert(payload.clone()),
-            Self::Reject(message) => NetworkMessage::Reject(message.clone()),
-            Self::FeeFilter(rate) => NetworkMessage::FeeFilter(*rate),
-            Self::WtxidRelay => NetworkMessage::WtxidRelay,
-            Self::AddrV2(addresses) => NetworkMessage::AddrV2(addresses.clone()),
-            Self::SendAddrV2 => NetworkMessage::SendAddrV2,
-            Self::Unknown { command, payload } => NetworkMessage::Unknown {
-                command: command.clone(),
-                payload: payload.clone(),
-            },
+            Self::Ping(nonce) | Self::Pong(nonce) => nonce.consensus_encode(writer),
+            Self::MerkleBlock(block) => block.consensus_encode(writer),
+            Self::FilterLoad(filter) => filter.consensus_encode(writer),
+            Self::FilterAdd(filter) => filter.consensus_encode(writer),
+            Self::GetCFilters(message) => message.consensus_encode(writer),
+            Self::CFilter(message) => message.consensus_encode(writer),
+            Self::GetCFHeaders(message) => message.consensus_encode(writer),
+            Self::CFHeaders(message) => message.consensus_encode(writer),
+            Self::GetCFCheckpt(message) => message.consensus_encode(writer),
+            Self::CFCheckpt(message) => message.consensus_encode(writer),
+            Self::SendCmpct(message) => message.consensus_encode(writer),
+            Self::CmpctBlock(message) => message.consensus_encode(writer),
+            Self::GetBlockTxn(message) => message.consensus_encode(writer),
+            Self::BlockTxn(message) => message.consensus_encode(writer),
+            Self::Alert(payload) => payload.consensus_encode(writer),
+            Self::Reject(message) => message.consensus_encode(writer),
+            Self::FeeFilter(rate) => rate.consensus_encode(writer),
+            Self::AddrV2(addresses) => addresses.consensus_encode(writer),
+            Self::Verack
+            | Self::MemPool
+            | Self::SendHeaders
+            | Self::GetAddr
+            | Self::FilterClear
+            | Self::WtxidRelay
+            | Self::SendAddrV2 => Ok(0),
+            Self::Unknown { payload, .. } => writer.write(payload),
         }
     }
 }
@@ -663,11 +664,9 @@ pub fn wire_len(message: &Message) -> Result<usize, PeerError> {
                 .and_then(|l| l.checked_add(data_len))
                 .ok_or(PeerError::PayloadTooLarge(usize::MAX))?
         }
-        other => {
-            let envelope = other.envelope();
-            bitcoin::consensus::Encodable::consensus_encode(&envelope, &mut bitcoin::io::sink())
-                .map_err(encode::Error::from)?
-        }
+        other => other
+            .encode_bitcoin_payload(&mut bitcoin::io::sink())
+            .map_err(encode::Error::from)?,
     };
     HEADER_LEN
         .checked_add(payload_len)
@@ -702,7 +701,15 @@ pub fn encode_payload(message: &Message) -> Result<Vec<u8>, PeerError> {
         Message::StaleTip(announcement) => {
             payload.extend_from_slice(&crate::staletip::encode(announcement)?);
         }
-        other => payload.extend_from_slice(&encode::serialize(&other.envelope())),
+        other => {
+            let payload_len = other
+                .encode_bitcoin_payload(&mut bitcoin::io::sink())
+                .map_err(encode::Error::from)?;
+            payload.reserve_exact(payload_len);
+            other
+                .encode_bitcoin_payload(&mut payload)
+                .map_err(encode::Error::from)?;
+        }
     }
     Ok(payload)
 }
@@ -988,6 +995,11 @@ fn decode_version(payload: &[u8]) -> Result<VersionMessage, PeerError> {
     } else {
         let len = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
         let len = usize::try_from(len).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+        if len > MAX_SUBVERSION_LENGTH {
+            return Err(PeerError::Misbehavior(
+                "version user_agent exceeds 256 bytes",
+            ));
+        }
         if len > reader.len() {
             return Err(bitcoin::consensus::encode::Error::ParseFailed(
                 "version subversion exceeds the payload",
@@ -1972,6 +1984,33 @@ mod tests {
         assert!(version.user_agent.is_empty());
         assert_eq!(version.start_height, -1);
         assert!(version.relay);
+        Ok(())
+    }
+
+    #[test]
+    fn version_user_agent_capped_at_256_bytes() -> Result<(), PeerError> {
+        fn payload_with_agent(agent_len: usize) -> Result<Vec<u8>, PeerError> {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&70_017u32.to_le_bytes());
+            payload.extend_from_slice(&0u64.to_le_bytes());
+            payload.extend_from_slice(&0i64.to_le_bytes());
+            payload.extend_from_slice(&[0u8; 26]);
+            payload.extend_from_slice(&[0u8; 26]);
+            payload.extend_from_slice(&1u64.to_le_bytes());
+            payload.extend_from_slice(&serialize(&bitcoin::consensus::encode::VarInt(
+                u64::try_from(agent_len).map_err(|_| PeerError::PayloadTooLarge(agent_len))?,
+            )));
+            payload.extend_from_slice(&vec![b'x'; agent_len]);
+            Ok(payload)
+        }
+
+        let version = read_version_payload(&payload_with_agent(256)?)?;
+        assert_eq!(version.user_agent.len(), 256);
+
+        assert!(matches!(
+            read_version_payload(&payload_with_agent(257)?),
+            Err(PeerError::Misbehavior(_))
+        ));
         Ok(())
     }
 

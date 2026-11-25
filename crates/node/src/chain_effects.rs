@@ -200,6 +200,7 @@ impl ChainFollowers {
                     bitcoin_rs_mempool::ChainChangeError::AlreadyActive
                     | bitcoin_rs_mempool::ChainChangeError::GenerationMoved
                     | bitcoin_rs_mempool::ChainChangeError::ForeignGuard
+                    | bitcoin_rs_mempool::ChainChangeError::SnapshotMempoolNotEmpty
                     | bitcoin_rs_mempool::ChainChangeError::DeliveryQueueFull => {
                         bitcoin_rs_chain::ApplyError::ConcurrentChainChange
                     }
@@ -325,14 +326,20 @@ impl ChainFollowers {
         }
     }
 
-    pub(crate) fn on_snapshot(&self) {
-        if let Some(gateway) = &self.mempool {
-            gateway.snapshot_changed();
+    pub(crate) fn on_snapshot(
+        &self,
+        change: Option<&ChainChangeGuard>,
+    ) -> Result<(), bitcoin_rs_mempool::ChainChangeError> {
+        match (&self.mempool, change) {
+            (Some(gateway), Some(change)) => gateway.snapshot_changed(change)?,
+            (None, None) => {}
+            _ => return Err(bitcoin_rs_mempool::ChainChangeError::ForeignGuard),
         }
         self.blocks.write().clear();
         self.epoch.reset();
         self.wake_index();
         self.mining.publish_generation();
+        Ok(())
     }
 
     fn wake_index(&self) {
@@ -711,6 +718,7 @@ mod tests {
         )
     }
 
+    // MPS-03
     #[test]
     fn snapshot_reconciles_empty_pool_and_index_without_fabricating_block_events()
     -> Result<(), TestError> {
@@ -725,11 +733,21 @@ mod tests {
         let followers = followers_with_gateway(&gateway)
             .with_zmq_publisher(publisher.clone())
             .with_tx_index(Some(DerivedIndexRuntime::new(wake_tx)));
+        let prior_commit = 19;
+        gateway.settle_block_facts(
+            AdmissionOrigin::Block,
+            &bitcoin_rs_mempool::TransitionFacts::empty(),
+            prior_commit,
+            0,
+            0,
+        )?;
+        assert_eq!(gateway.settled_at_commit(), prior_commit);
         let fence = followers
             .begin_mempool_change()?
             .ok_or(TestError::Missing("fence"))?;
-        followers.on_snapshot();
+        followers.on_snapshot(Some(&fence))?;
         assert!(gateway.read().is_empty());
+        assert_eq!(gateway.settled_at_commit(), 0);
         assert!(gateway.stable_generation().is_none());
         assert!(wake_rx.try_recv().is_ok());
         assert_eq!(publisher.events(), Vec::<String>::new());
@@ -795,8 +813,8 @@ mod tests {
                 script_pubkey: p2sh_true_output(),
             },
         )];
-        followers.on_snapshot();
-        followers.on_snapshot();
+        followers.on_snapshot(Some(&fence))?;
+        followers.on_snapshot(Some(&fence))?;
         gateway.maintain_orphans(now, [replacement, missing_source]);
         assert_eq!(gateway.retry_orphans(&chain, now), []);
         assert!(gateway.read().is_empty());
@@ -1013,9 +1031,11 @@ mod tests {
         let mining = crate::MiningCoordinator::new(
             state.mempool_reader(),
             state.chainstate(),
+            state.block_memory(),
             state.stable_read(),
             followers,
             Vec::new(),
+            state.config().mining.coinbase_reserve,
         );
 
         assert_eq!(
@@ -1369,6 +1389,7 @@ mod tests {
         Ok(())
     }
 
+    // MPS-03
     #[test]
     fn snapshot_clears_the_cached_epoch_with_the_block_log() -> Result<(), TestError> {
         let genesis = Network::Regtest.genesis_block();
@@ -1378,7 +1399,7 @@ mod tests {
         followers.on_connect(&image, &connect_outcome(&tip, &image))?;
         assert!(followers.epoch().current().is_some());
         assert_eq!(followers.block_log().read().len(), 1);
-        followers.on_snapshot();
+        followers.on_snapshot(None)?;
         assert!(followers.block_log().read().is_empty());
         assert!(
             followers.epoch().current().is_none(),

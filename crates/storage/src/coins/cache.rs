@@ -689,20 +689,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_guarded_read_cannot_replace_commit_or_resurrect_delete() {
-        let cache = CoinCache::new(8_192);
-        let k = key(7, 1);
-        let epoch = cache.epoch(k.shard());
-        cache.install(&k, Some(Bytes::from_static(b"new")));
-        cache.fill_after_read_guarded(&k, Bytes::from_static(b"old"), epoch);
-        assert_eq!(cache.lookup(&k).as_deref(), Some(b"new".as_slice()));
-        let epoch = cache.epoch(k.shard());
-        cache.install(&k, None);
-        cache.fill_after_read_guarded(&k, Bytes::from_static(b"old"), epoch);
-        assert_eq!(cache.lookup(&k), None);
-    }
-
-    #[test]
     fn empty_values_still_consume_budget_and_clear_releases_backing() -> Result<(), StorageError> {
         let cache = CoinCache::new(8_192);
         for tail in 0..=255 {

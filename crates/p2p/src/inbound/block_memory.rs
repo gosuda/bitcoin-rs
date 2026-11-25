@@ -176,20 +176,16 @@ impl BlockMemory {
         })
     }
 
-    pub(crate) fn try_reserve(
-        self: &Arc<Self>,
-        bytes: usize,
-    ) -> Result<BlockMemoryCredit, PeerError> {
+    pub fn try_reserve(self: &Arc<Self>, bytes: usize) -> Result<BlockMemoryCredit, PeerError> {
         if bytes > self.ledger.capacity() {
-            return Err(std::io::Error::other(
-                "compact reconstruction reservation exceeds ingress budget",
-            )
-            .into());
+            return Err(
+                std::io::Error::other("retained block reservation exceeds ingress budget").into(),
+            );
         }
         if !self.ledger.try_take(bytes) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
-                "compact reconstruction ingress budget unavailable",
+                "retained block ingress budget unavailable",
             )
             .into());
         }
@@ -262,6 +258,24 @@ impl BlockMemoryCredit {
             Allocation::Image => self.owner.ledger.give_back(bytes),
             Allocation::Receive => self.owner.ledger.give_back_receive(bytes),
         }
+    }
+
+    /// Split the existing charge without acquiring or releasing ledger capacity.
+    ///
+    /// Both credits retain the original allocation lane. A refused split leaves
+    /// the original credit and ledger unchanged.
+    pub fn split_off(&mut self, bytes: usize) -> Result<Self, PeerError> {
+        if bytes > self.bytes {
+            return Err(
+                std::io::Error::other("block allocation split exceeded its reservation").into(),
+            );
+        }
+        self.bytes -= bytes;
+        Ok(Self {
+            owner: Arc::clone(&self.owner),
+            bytes,
+            allocation: self.allocation,
+        })
     }
 
     pub fn retain(&mut self, bytes: usize) -> Result<(), PeerError> {
@@ -354,6 +368,95 @@ mod tests {
             Ok(())
         })?;
         assert_eq!(*memory.used.lock(), BLOCK_INGRESS_BYTES);
+        Ok(())
+    }
+
+    // BUD-01, BUD-06
+    #[test]
+    fn split_credit_conserves_usage_and_releases_each_piece_once() -> TestResult {
+        let memory = Arc::new(BlockMemory::default());
+        let mut credit = memory.try_reserve(64)?;
+        let mut split = credit.split_off(17)?;
+        assert_eq!(credit.bytes, 47);
+        assert_eq!(split.bytes, 17);
+        assert!(Arc::ptr_eq(&credit.owner, &split.owner));
+        assert!(matches!(split.allocation, Allocation::Image));
+        assert_eq!(*memory.used.lock(), 64);
+        split.retain(10)?;
+        assert_eq!(*memory.used.lock(), 57);
+        drop(credit);
+        assert_eq!(*memory.used.lock(), 10);
+        drop(split);
+        assert_eq!(*memory.used.lock(), 0);
+        Ok(())
+    }
+
+    // BUD-01, BUD-06
+    #[test]
+    fn split_credit_refuses_before_mutation_and_allows_empty_and_complete_splits() -> TestResult {
+        let memory = Arc::new(BlockMemory::default());
+        let mut credit = memory.try_reserve(64)?;
+        let error = credit
+            .split_off(65)
+            .err()
+            .ok_or(TestError::Missing("oversized split must be refused"))?;
+        assert!(matches!(PeerError::inbound(error), PeerError::Io(_)));
+        assert_eq!(credit.bytes, 64);
+        assert_eq!(*memory.used.lock(), 64);
+        let empty = credit.split_off(0)?;
+        assert_eq!(empty.bytes, 0);
+        assert_eq!(credit.bytes, 64);
+        drop(empty);
+        assert_eq!(*memory.used.lock(), 64);
+        let complete = credit.split_off(64)?;
+        assert_eq!(credit.bytes, 0);
+        assert_eq!(complete.bytes, 64);
+        drop(credit);
+        assert_eq!(*memory.used.lock(), 64);
+        drop(complete);
+        assert_eq!(*memory.used.lock(), 0);
+        Ok(())
+    }
+
+    // BUD-01, BUD-06
+    #[test]
+    fn split_receive_credit_keeps_its_lane_through_refused_and_successful_transfers() -> TestResult
+    {
+        let used = Arc::new(Mutex::new(0));
+        let ledger = Arc::new(FixedIngressLedger {
+            capacity: 32,
+            used: Arc::clone(&used),
+            released: Condvar::new(),
+            receive_used: Mutex::new(0),
+        });
+        let memory = Arc::new(BlockMemory::new(ledger.clone()));
+        let mut receive = memory.reserve_receive(40)?;
+        let mut split = receive.split_off(24)?;
+        assert!(matches!(receive.allocation, Allocation::Receive));
+        assert!(matches!(split.allocation, Allocation::Receive));
+        assert_eq!(*used.lock(), 40);
+        assert_eq!(*ledger.receive_used.lock(), 40);
+
+        let image = memory.try_reserve(32)?;
+        assert!(!split.transfer_to_image());
+        assert!(matches!(split.allocation, Allocation::Receive));
+        assert_eq!(split.bytes, 24);
+        assert_eq!(*used.lock(), 72);
+        assert_eq!(*ledger.receive_used.lock(), 40);
+        drop(image);
+        assert!(split.transfer_to_image());
+        assert!(matches!(split.allocation, Allocation::Image));
+        assert_eq!(*used.lock(), 40);
+        assert_eq!(*ledger.receive_used.lock(), 16);
+        split.retain(20)?;
+        assert_eq!(*used.lock(), 36);
+        assert_eq!(*ledger.receive_used.lock(), 16);
+        drop(receive);
+        assert_eq!(*used.lock(), 20);
+        assert_eq!(*ledger.receive_used.lock(), 0);
+        drop(split);
+        assert_eq!(*used.lock(), 0);
+        assert_eq!(*ledger.receive_used.lock(), 0);
         Ok(())
     }
 

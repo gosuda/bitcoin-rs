@@ -1,6 +1,6 @@
 use bitcoin::p2p::Magic;
 use bitcoin::secp256k1::SecretKey;
-use bitcoin::secp256k1::ellswift::{ElligatorSwift, ElligatorSwiftParty};
+use bitcoin::secp256k1::ellswift::{ElligatorSwift, Party};
 use hkdf::Hkdf;
 use sha2::Sha256;
 
@@ -22,10 +22,10 @@ pub(crate) fn shared_secret(
 ) -> [u8; 32] {
     let secret = match role {
         Role::Initiator => {
-            ElligatorSwift::shared_secret(ours, theirs, secret_key, ElligatorSwiftParty::A, None)
+            ElligatorSwift::shared_secret(ours, theirs, secret_key, Party::Initiator, None)
         }
         Role::Responder => {
-            ElligatorSwift::shared_secret(theirs, ours, secret_key, ElligatorSwiftParty::B, None)
+            ElligatorSwift::shared_secret(theirs, ours, secret_key, Party::Responder, None)
         }
     };
     secret.to_secret_bytes()

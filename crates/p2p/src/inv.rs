@@ -1,5 +1,11 @@
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin_rs_consensus::primitives::{BlockHash, Hash256};
+use bitcoin_rs_consensus::primitives::{BlockHash, Hash256, Txid, Wtxid};
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum TransactionId {
+    Txid(Txid),
+    Wtxid(Wtxid),
+}
 
 pub fn native_block_hash(hash: bitcoin::BlockHash) -> BlockHash {
     use bitcoin::hashes::Hash as _;

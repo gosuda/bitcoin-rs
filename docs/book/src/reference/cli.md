@@ -103,6 +103,7 @@ Boolean flags come in two forms. Some require an explicit true or false value. O
 | Flag | Value | Default | Purpose |
 | --- | --- | --- | --- |
 | `--mining-payout-address` | address | unset | Sets the pool payout script; required with `--pool`. Generated blocks take their address from the call. |
+| `--block-reserved-weight` | weight units | `8000` | Reserves template weight for the header, transaction count, and external coinbase. Clamped to 2,000 through 4,000,000 WU. |
 
 ## Native pool
 

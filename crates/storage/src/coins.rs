@@ -314,27 +314,20 @@ impl CoinStore {
 
     pub fn multi_get(&self, keys: &[CoinKey]) -> Result<Vec<Option<Bytes>>, StorageError> {
         let mut results: Vec<Option<Bytes>> = vec![None; keys.len()];
-        let mut missed_keys: Vec<CoinKey> = Vec::new();
-        let mut missed_positions: Vec<usize> = Vec::new();
-        let mut missed_epochs: Vec<u64> = Vec::new();
+        let mut missed_keys: Vec<&[u8]> = Vec::new();
+        let mut missed: Vec<(usize, u64)> = Vec::new();
         for (position, key) in keys.iter().enumerate() {
             match self.cache.lookup(key) {
                 Some(value) => results[position] = Some(value),
                 None => {
-                    missed_keys.push(*key);
-                    missed_positions.push(position);
-                    missed_epochs.push(self.cache.epoch(key.shard()));
+                    missed_keys.push(key.as_bytes());
+                    missed.push((position, self.cache.epoch(key.shard())));
                 }
             }
         }
         if !missed_keys.is_empty() {
-            let key_refs: Vec<&[u8]> = missed_keys.iter().map(|key| &key.0[..]).collect();
-            let resolved = self.store.multi_get(ColumnFamily::Coins, &key_refs)?;
-            for ((position, value), expected_epoch) in missed_positions
-                .into_iter()
-                .zip(resolved)
-                .zip(missed_epochs)
-            {
+            let resolved = self.store.multi_get(ColumnFamily::Coins, &missed_keys)?;
+            for ((position, expected_epoch), value) in missed.into_iter().zip(resolved) {
                 if let Some(value) = value {
                     self.cache.fill_after_read_guarded(
                         &keys[position],

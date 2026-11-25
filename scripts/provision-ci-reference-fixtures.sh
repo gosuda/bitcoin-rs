@@ -23,14 +23,17 @@ else
   probe='import sys; sys.exit(sys.version_info < (3, 6))'
   hint='a Python >=3.6 interpreter is required'
 fi
-PYTHON=""
-for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6 python3; do
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "$probe" 2>/dev/null; then
-    PYTHON="$candidate"
-    break
-  fi
-done
+PYTHON="${PYTHON:-}"
+if [[ -z "$PYTHON" ]]; then
+  for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6 python3; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "$probe" 2>/dev/null; then
+      PYTHON="$candidate"
+      break
+    fi
+  done
+fi
 [[ -n "$PYTHON" ]] || { echo "$hint" >&2; exit 1; }
+"$PYTHON" -c "$probe" 2>/dev/null || { echo "$hint" >&2; exit 1; }
 
 # Exact-match digest gate; stock macOS ships shasum, not sha256sum.
 sha256_check() {
@@ -70,19 +73,21 @@ else
   binary="$install/bin/apalache-mc"
   export JAVA_HOME="${JAVA_HOME_25_X64:-${JAVA_HOME:?set JAVA_HOME for the formal lane}}"
   [[ -x "$JAVA_HOME/bin/java" ]] || { echo "Java executable missing" >&2; exit 1; }
-  # The formal contract records what java -version actually printed
-  # "Java | ... Java <version>"); a JDK that no longer matches that
-  # observation invalidates the formal lane's tool identity, before PATH
-  # export so nothing downstream runs against the wrong JVM.
-  observed="$("$JAVA_HOME/bin/java" -version 2>&1)" || {
+  register_version="$("$PYTHON" scripts/resolve_reference_identity.py java .)" || exit 1
+  observed="$("$JAVA_HOME/bin/java" -XshowSettings:properties -version 2>&1)" || {
     printf '%s\n' "$observed" >&2
     printf '%s\n' "Java version probe failed" >&2
     exit 1
   }
-  # The banner's label varies by vendor (openjdk, java, Temurin's java);
-  # only the quoted version token is identity.
-  observed_version="$(printf '%s\n' "$observed" | sed -n '1s/^[[:space:]]*[a-z][a-z]*[[:space:]]\+version[[:space:]]\+"\([^"]*\)".*/\1/p')"
-  register_version="$(sed -n 's/^| Java |.*[[:space:]]Java \([0-9.][0-9.]*\)[[:space:]]*|[[:space:]]*$/\1/p' docs/contracts/formal-verification.md)"
+  observed_versions=()
+  while IFS= read -r value; do observed_versions+=("$value"); done < <(
+    printf '%s\n' "$observed" | sed -n 's/^[[:space:]]*java\.runtime\.version[[:space:]]*=[[:space:]]*//p'
+  )
+  [[ "${#observed_versions[@]}" -eq 1 ]] || {
+    printf '%s\n' "Java runtime version property missing or ambiguous" >&2
+    exit 1
+  }
+  observed_version="${observed_versions[0]%-LTS}"
   [[ -n "$observed_version" && -n "$register_version" ]] || {
     printf '%s\n' "Java identity missing: observed '${observed_version:-none}' vs register '${register_version:-none}'" >&2
     exit 1

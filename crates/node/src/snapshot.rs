@@ -557,8 +557,11 @@ impl SnapshotControl {
             return Err(SnapshotImportError::MempoolNotEmpty);
         }
         let result = activation(self.manager.as_ref());
-        if result.is_ok() {
-            self.followers.on_snapshot();
+        if result.is_ok()
+            && let Err(settlement) = self.followers.on_snapshot(change.as_ref())
+        {
+            self.chainstate.fail_closed_for_recovery();
+            return Err(SnapshotImportError::Settlement(settlement));
         }
         if !self.chainstate.is_closed_for_recovery()
             && let Some(change) = change
@@ -1233,6 +1236,7 @@ mod tests {
         Ok(())
     }
 
+    // MPL-04, MPS-03, SNP-07
     #[test]
     fn successful_snapshot_import_preserves_nonresident_fee_prioritisation() -> Result<(), TestError>
     {
@@ -1253,6 +1257,8 @@ mod tests {
         assert_eq!(gateway.prioritised_transactions(), expected);
         assert!(gateway.read().is_empty());
         let sequence = gateway.read().sequence_number();
+        let fee_sequence = gateway.read().fee_delta_sequence_number();
+        assert_ne!(gateway.read().settled_at_commit(), 0);
         state.snapshots.import(&core_path)?;
         assert_eq!(
             gateway.prioritised_transactions(),
@@ -1261,6 +1267,8 @@ mod tests {
         );
         assert!(gateway.read().is_empty());
         assert_eq!(gateway.read().sequence_number(), sequence);
+        assert_eq!(gateway.read().fee_delta_sequence_number(), fee_sequence);
+        assert_eq!(gateway.read().settled_at_commit(), 0);
         assert!(gateway.stable_generation().is_some());
         assert_eq!(
             state
@@ -1270,6 +1278,180 @@ mod tests {
             Some(200)
         );
         assert!(state.chainstate().role().is_assumed_active());
+        Ok(())
+    }
+
+    // API-11, API-30, MPS-03, SNP-07, SYNC-05
+    #[test]
+    fn mining_resumes_after_snapshot_replaces_a_settled_tip() -> Result<(), TestError> {
+        use bitcoin_rs_wire::mining::{
+            BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, GenerateRequest,
+            GenerateSelection, MiningControl,
+        };
+
+        let dir = tempfile::tempdir()?;
+        let (state, core_path) = snapshot_inputs(dir.path())?;
+        let mining = crate::mining::MiningCoordinator::new(
+            state.mempool_reader(),
+            state.chainstate(),
+            state.block_memory(),
+            state.stable_read(),
+            state.chain_followers(),
+            vec![0x51],
+            state.config().mining.coinbase_reserve,
+        );
+        assert_ne!(state.mempool_gateway().read().settled_at_commit(), 0);
+        state.snapshots.import(&core_path)?;
+        let template = mining.get_block_template(BlockTemplateRequest {
+            mode: BlockTemplateMode::Template,
+            capabilities: Vec::new(),
+            rules: Vec::new(),
+            long_poll_id: None,
+            coinbase_budget: None,
+        })?;
+        let BlockTemplateResult::Template(template) = template else {
+            return Err(TestError::ExpectationFailed("snapshot mining template"));
+        };
+        assert_eq!(template.candidate.height, 201);
+        for submit in [false, true] {
+            let generated = mining.generate(GenerateRequest {
+                payout: vec![0x51],
+                count: 1,
+                max_tries: GenerateRequest::DEFAULT_MAX_TRIES,
+                selection: GenerateSelection::Mempool,
+                submit,
+            })?;
+            assert_eq!(generated.len(), 1);
+            assert_eq!(
+                state
+                    .chainstate()
+                    .applied_tip_snapshot()
+                    .map(|tip| tip.height),
+                Some(if submit { 201 } else { 200 })
+            );
+            assert!(state.mempool_gateway().stable_generation().is_some());
+        }
+        assert_ne!(state.mempool_gateway().read().settled_at_commit(), 0);
+        Ok(())
+    }
+
+    // MPS-03, SYNC-04
+    #[test]
+    fn snapshot_settlement_refusal_after_durable_activation_keeps_admission_closed()
+    -> Result<(), TestError> {
+        use bitcoin_rs_consensus::primitives::{
+            Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+        };
+        use bitcoin_rs_mempool::{AdmissionOrigin, ChainChangeError, MempoolEntry, SubmitError};
+        use bitcoin_rs_wire::context::ChainAdmissionView;
+
+        let dir = tempfile::tempdir()?;
+        let (state, core_path) = snapshot_inputs(dir.path())?;
+        let pinned = regtest_pin()?;
+        let gateway = state.mempool_gateway();
+        let transaction = Arc::new(Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Network::Regtest.genesis_block().txs[0].txid(), 0),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: Script::from_bytes(vec![0x6a, 0x04, 0xaa, 0xbb, 0xcc, 0xdd]),
+            }],
+            lock_time: LockTime::ZERO,
+        });
+        let before_commit = gateway.read().settled_at_commit();
+        let before_sequence = gateway.read().sequence_number();
+        assert_ne!(before_commit, 0);
+        assert!(gateway.read().is_empty());
+        assert!(gateway.stable_generation().is_some());
+        assert_eq!(tip_identity(&state).map(|tip| tip.0), Some(0));
+        let mut input = BufReader::new(std::fs::File::open(&core_path)?);
+        let mut inserted = None;
+        let result = state.snapshots.activate(|manager| {
+            let activated = manager.activate_core_snapshot(&mut input, None, |_, _| {}, || true)?;
+            assert_eq!(
+                tip_identity(&state),
+                Some((pinned.height, pinned.block_hash))
+            );
+            assert!(gateway.stable_generation().is_none());
+            inserted = Some(gateway.insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::clone(&transaction), 100, 1_000, 0, 0, 0),
+            ));
+            Ok(activated)
+        });
+        inserted.ok_or(TestError::Missing("post-activation mempool mutation"))??;
+        assert!(matches!(
+            result,
+            Err(SnapshotImportError::Settlement(
+                ChainChangeError::SnapshotMempoolNotEmpty
+            ))
+        ));
+        assert!(state.chainstate().is_closed_for_recovery());
+        assert_eq!(gateway.stable_generation(), None);
+        assert!(matches!(
+            gateway.begin_chain_change(),
+            Err(ChainChangeError::AlreadyActive)
+        ));
+        assert!(gateway.read().contains_txid(&transaction.txid()));
+        assert_eq!(gateway.read().sequence_number(), before_sequence + 1);
+        assert_eq!(gateway.read().settled_at_commit(), before_commit);
+        let chainstate = state.chainstate();
+        let admission = ChainAdmissionView::new(
+            chainstate.utxo_reader(),
+            chainstate.applied_tip_reader(),
+            chainstate.block_tree_reader(),
+            chainstate.network(),
+        );
+        assert_eq!(
+            gateway.submit_transaction(
+                Arc::clone(&transaction),
+                AdmissionOrigin::Rpc,
+                None,
+                0,
+                &admission,
+            ),
+            Err(SubmitError::RetryExhausted)
+        );
+        let identity = validating_identity(&state.snapshots.manager.status()?)?;
+        assert_eq!(identity.1, pinned.block_hash);
+        assert_eq!(
+            tip_identity(&state),
+            Some((pinned.height, pinned.block_hash))
+        );
+        assert!(state.chainstate().role().is_assumed_active());
+        assert!(matches!(
+            state.snapshots.import(&core_path),
+            Err(SnapshotImportError::Activation(
+                AssumeUtxoError::AlreadyActive
+            ))
+        ));
+        assert_eq!(gateway.stable_generation(), None);
+        drop(admission);
+        drop(chainstate);
+        drop(gateway);
+        drop(state);
+
+        let resumed = crate::state::NodeState::open(node_config(dir.path()), None)?;
+        assert_eq!(
+            tip_identity(&resumed),
+            Some((pinned.height, pinned.block_hash))
+        );
+        assert_eq!(
+            validating_identity(&resumed.snapshots.manager.status()?)?,
+            identity
+        );
+        assert!(!resumed.chainstate().is_closed_for_recovery());
+        assert!(resumed.mempool_gateway().stable_generation().is_some());
+        let coins = reconstruct_utxo_set(&resumed)?;
+        assert_eq!(
+            coins.with_stable_view(|view| view.hash_serialized_3_at_height(pinned.height))?,
+            pinned.hash_serialized
+        );
         Ok(())
     }
 

@@ -460,8 +460,9 @@ mod block_forward_tests {
             assert_eq!(fixture.headers_rx.try_recv()?.headers, vec![block.header]);
             let raw_charge = budget.charged_bytes(BudgetOwner::PeerReceive) - prior_receive;
             assert_eq!(raw_charge, 0);
-            let expected_receipt = encoded_bytes + decoded_bytes;
-            let expected_charge = u64::try_from(expected_receipt)?;
+            let backing_slack = if compact { 9 - 1 } else { 0 };
+            let backing_charge = u64::try_from(encoded_bytes + backing_slack)?;
+            let expected_charge = backing_charge + u64::try_from(decoded_bytes)?;
             assert_eq!(
                 budget.charged_bytes(BudgetOwner::StagedImages),
                 prior_image + expected_charge
@@ -471,6 +472,7 @@ mod block_forward_tests {
                 prior_total + raw_charge + expected_charge
             );
             let credit = inbound.memory_credit.take().ok_or("wire image receipt")?;
+            let compact_reader = compact.then(|| inbound.payload().bytes().slice(..1));
             let payload = inbound.into_payload();
             let mut stager = crate::p2p::block_stager::BlockStager::new(
                 crate::p2p::download_window::policy::default_sync_budget(
@@ -509,11 +511,18 @@ mod block_forward_tests {
             assert_eq!(stager.received_len(), 0);
             assert_eq!(stager.received_bytes(), 0);
             assert_eq!(stager.decoded_bytes(), 0);
-            assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), prior_image);
+            let remaining_charge = if compact { backing_charge } else { 0 };
+            assert_eq!(
+                budget.charged_bytes(BudgetOwner::StagedImages),
+                prior_image + remaining_charge
+            );
             assert_eq!(
                 budget.charged_bytes(BudgetOwner::PeerReceive),
                 prior_receive
             );
+            assert_eq!(budget.total_committed(), prior_total + remaining_charge);
+            drop(compact_reader);
+            assert_eq!(budget.charged_bytes(BudgetOwner::StagedImages), prior_image);
             assert_eq!(budget.total_committed(), prior_total);
             drop(held);
             assert_eq!(budget.total_committed(), 0);
@@ -1293,6 +1302,7 @@ mod dispatch_tests {
         message: &Message,
         chain: Option<&dyn ChainQuery>,
         tx_inventory: Option<&dyn TxInventory>,
+        last_inv_sequence: Option<u64>,
     ) -> Result<Vec<Message>, PeerError> {
         let collected = RefCell::new(Vec::new());
         dispatch_inbound_full(
@@ -1300,6 +1310,7 @@ mod dispatch_tests {
             message,
             chain,
             tx_inventory,
+            last_inv_sequence,
             &|| true,
             &|| true,
             &mut |response| {
@@ -1375,6 +1386,100 @@ mod dispatch_tests {
         (gateway, tx)
     }
 
+    // P2P-01
+    #[test]
+    fn getdata_before_inventory_does_not_reveal_local_transactions() -> Result<(), PeerError> {
+        let (gateway, tx) = gateway_holding_witness_tx(false);
+        let txid = bitcoin::Txid::from_byte_array(*tx.txid().as_bytes());
+        let wtxid = bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes());
+        for item in [
+            Inventory::Transaction(txid),
+            Inventory::WitnessTransaction(txid),
+            Inventory::WTx(wtxid),
+        ] {
+            let mut responses = Vec::new();
+            dispatch_inbound_full(
+                &mut ready_peer(),
+                &Message::GetData(vec![item]),
+                None,
+                Some(&RefTxInventory(&gateway)),
+                None,
+                &|| true,
+                &|| true,
+                &mut |message| {
+                    responses.push(message);
+                    Ok(())
+                },
+                &mut |_| {},
+                &mut |_| {},
+            )?;
+            assert_eq!(responses, vec![Message::NotFound(vec![item])]);
+            assert_eq!(gateway.read().unbroadcast_transactions().count(), 1);
+        }
+        Ok(())
+    }
+
+    // P2P-01
+    #[test]
+    fn getdata_cutoff_rejects_new_and_readmitted_epochs() -> Result<(), PeerError> {
+        for readmitted in [false, true] {
+            let (gateway, first) = gateway_holding_witness_tx(false);
+            let cutoff = gateway.read().sequence_number();
+            let requested = if readmitted {
+                gateway
+                    .clear(AdmissionOrigin::Block)
+                    .expect("clear fixture");
+                Arc::clone(&first)
+            } else {
+                let mut later = dummy_tx(0x52);
+                later.inputs[0].witness = Witness::from_stack(vec![vec![0x51]]);
+                Arc::new(later)
+            };
+            gateway
+                .insert_entry(
+                    AdmissionOrigin::Rpc,
+                    MempoolEntry::new(Arc::clone(&requested), 100, 10_000, 1, 0, 0),
+                )
+                .expect("insert later admission");
+            let sequence = gateway.read().sequence_number();
+            let unbroadcast = gateway.read().unbroadcast_transactions().count();
+            let txid = bitcoin::Txid::from_byte_array(*requested.txid().as_bytes());
+            let wtxid = bitcoin::Wtxid::from_byte_array(*requested.wtxid().as_bytes());
+            for item in [
+                Inventory::Transaction(txid),
+                Inventory::WitnessTransaction(txid),
+                Inventory::WTx(wtxid),
+            ] {
+                assert_eq!(
+                    dispatch_collect_full(
+                        &mut ready_peer(),
+                        &Message::GetData(vec![item]),
+                        None,
+                        Some(&RefTxInventory(&gateway)),
+                        Some(cutoff),
+                    )?,
+                    vec![Message::NotFound(vec![item])]
+                );
+                assert_eq!(
+                    gateway.read().unbroadcast_transactions().count(),
+                    unbroadcast
+                );
+                assert_eq!(gateway.read().sequence_number(), sequence);
+            }
+            assert_eq!(
+                dispatch_collect_full(
+                    &mut ready_peer(),
+                    &Message::GetData(vec![Inventory::WTx(wtxid)]),
+                    None,
+                    Some(&RefTxInventory(&gateway)),
+                    Some(sequence),
+                )?,
+                vec![Message::Tx((*requested).clone())]
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn getdata_completes_initial_broadcast_only_after_successful_send() -> Result<(), PeerError> {
         for kind in 0..3 {
@@ -1409,6 +1514,7 @@ mod dispatch_tests {
                 serve_getdata(
                     None,
                     Some(&RefTxInventory(&gateway)),
+                    Some(sequence),
                     None,
                     &[item],
                     &mut not_found,
@@ -1422,6 +1528,7 @@ mod dispatch_tests {
             serve_getdata(
                 None,
                 Some(&RefTxInventory(&gateway)),
+                Some(sequence),
                 None,
                 &[item],
                 &mut not_found,
@@ -1461,6 +1568,7 @@ mod dispatch_tests {
                     &Message::Inv(vec![item]),
                     None,
                     Some(&RefTxInventory(&gateway)),
+                    None,
                 )?;
                 if held_suppresses {
                     assert!(
@@ -1483,6 +1591,7 @@ mod dispatch_tests {
                         &Message::Inv(vec![item, unknown]),
                         None,
                         Some(&RefTxInventory(&gateway)),
+                        None,
                     )?,
                     vec![Message::GetData(expected)]
                 );
@@ -1497,16 +1606,141 @@ mod dispatch_tests {
         for orphan in [false, true] {
             let (gateway, tx) = gateway_holding_witness_tx(orphan);
             let item = Inventory::WTx(bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes()));
+            let sequence = gateway.read().sequence_number();
             let responses = dispatch_collect_full(
                 &mut ready_peer(),
                 &Message::GetData(vec![item]),
                 None,
                 Some(&RefTxInventory(&gateway)),
+                Some(sequence),
             )?;
             if orphan {
                 assert_eq!(responses, vec![Message::NotFound(vec![item])]);
             } else {
                 assert_eq!(responses, vec![Message::Tx((*tx).clone())]);
+            }
+        }
+        Ok(())
+    }
+
+    // P2P-01
+    #[test]
+    fn recent_block_getdata_preserves_privacy_and_broadcast_state() -> Result<(), PeerError> {
+        use bitcoin_rs_chain::chain::{BlockTree, BlockTreeReader, TipReader};
+        use bitcoin_rs_consensus::primitives::{Block, BlockImage, Network};
+
+        for orphan in [false, true] {
+            for in_recent_block in [false, true] {
+                for cutoff in [None, Some(0)] {
+                    for kind in 0..3 {
+                        let (gateway, tx) = gateway_holding_witness_tx(orphan);
+                        let sequence = gateway.read().sequence_number();
+                        let txid = bitcoin::Txid::from_byte_array(*tx.txid().as_bytes());
+                        let wtxid = bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes());
+                        let item = match kind {
+                            0 => Inventory::Transaction(txid),
+                            1 => Inventory::WitnessTransaction(txid),
+                            _ => Inventory::WTx(wtxid),
+                        };
+                        let genesis = Network::Regtest.genesis_block();
+                        let image = Arc::new(BlockImage::from_local(Block {
+                            header: genesis.header,
+                            txs: vec![
+                                genesis.txs[0].clone(),
+                                if in_recent_block {
+                                    (*tx).clone()
+                                } else {
+                                    dummy_tx(0xa5)
+                                },
+                            ],
+                        }));
+                        let slot = super::RecentBlockSlot::new(Arc::new(
+                            bitcoin_rs_p2p::inbound::block_memory::BlockMemory::default(),
+                        ));
+                        drop(slot.store(slot.prepare(&image)?));
+                        let query = super::ActiveChainQuery::new(
+                            BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(
+                                BlockTree::new(),
+                            ))),
+                            TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty())),
+                            Network::Regtest,
+                        )
+                        .with_recent_block(slot);
+                        let inventory = RefTxInventory(&gateway);
+                        let mut not_found = Vec::new();
+                        assert_eq!(
+                            serve_getdata(
+                                Some(&query),
+                                Some(&inventory),
+                                cutoff,
+                                None,
+                                &[item],
+                                &mut not_found,
+                                &|| false,
+                                &mut |_| panic!("a saturated reply must stay parked"),
+                            )?,
+                            vec![item]
+                        );
+                        assert!(not_found.is_empty());
+                        let expected = if in_recent_block {
+                            let mut body = (*tx).clone();
+                            if kind == 0 {
+                                for input in &mut body.inputs {
+                                    input.witness.clear();
+                                }
+                            }
+                            Message::Tx(body)
+                        } else {
+                            Message::NotFound(vec![item])
+                        };
+                        let mut attempted = Vec::new();
+                        assert!(
+                            serve_getdata(
+                                Some(&query),
+                                Some(&inventory),
+                                cutoff,
+                                None,
+                                &[item],
+                                &mut not_found,
+                                &|| true,
+                                &mut |message| {
+                                    attempted.push(message);
+                                    Err(PeerError::Io(std::io::ErrorKind::BrokenPipe.into()))
+                                },
+                            )
+                            .is_err()
+                        );
+                        assert_eq!(attempted, vec![expected.clone()]);
+                        assert_eq!(
+                            gateway.read().unbroadcast_transactions().count(),
+                            usize::from(!orphan)
+                        );
+                        let mut delivered = Vec::new();
+                        assert!(
+                            serve_getdata(
+                                Some(&query),
+                                Some(&inventory),
+                                cutoff,
+                                None,
+                                &[item],
+                                &mut not_found,
+                                &|| true,
+                                &mut |message| {
+                                    delivered.push(message);
+                                    Ok(())
+                                },
+                            )?
+                            .is_empty()
+                        );
+                        assert_eq!(delivered, vec![expected]);
+                        assert_eq!(
+                            gateway.read().unbroadcast_transactions().count(),
+                            usize::from(!orphan && !in_recent_block)
+                        );
+                        assert_eq!(gateway.read().sequence_number(), sequence);
+                        assert_eq!(gateway.orphan_count(), usize::from(orphan));
+                    }
+                }
             }
         }
         Ok(())
@@ -1549,6 +1783,7 @@ mod dispatch_tests {
                 &Message::Inv(vec![item]),
                 None,
                 Some(&RefTxInventory(&gateway)),
+                None,
             )?;
             assert_eq!(responses, []);
         }
@@ -1560,11 +1795,13 @@ mod dispatch_tests {
         let missing = Inventory::WTx(bitcoin::Wtxid::from_byte_array([0xFF; 32]));
         let mut peer = ready_peer();
         peer.wtxid_relay.mark_peer_supported();
+        let sequence = gateway.read().sequence_number();
         let responses = dispatch_collect_full(
             &mut peer,
             &Message::GetData(vec![txid_item, witness_txid_item, wtxid_item, missing]),
             None,
             Some(&RefTxInventory(&gateway)),
+            Some(sequence),
         )?;
         assert_eq!(
             responses,
@@ -2158,6 +2395,12 @@ mod loopback_serving_tests {
         ChainQuery, Message, Peer, PeerCounters, PeerError, PeerLease, PeerSession, PeerTable,
     };
 
+    fn recent_slot() -> RecentBlockSlot {
+        RecentBlockSlot::new(Arc::new(
+            bitcoin_rs_p2p::inbound::block_memory::BlockMemory::default(),
+        ))
+    }
+
     const MAGIC: bitcoin::p2p::Magic = bitcoin::p2p::Magic::BITCOIN;
     const FAILSAFE: Duration = Duration::from_secs(20);
 
@@ -2543,11 +2786,8 @@ mod loopback_serving_tests {
             vec![coinbase(2, 1), payment(2)],
         )?);
         let held_hash = held.block_hash();
-        let slot = RecentBlockSlot::default();
-        slot.store(
-            Hash256::from(held_hash),
-            Arc::new(BlockImage::from_local((*held).clone())),
-        );
+        let slot = recent_slot();
+        drop(slot.store(slot.prepare(&BlockImage::from_local((*held).clone()))?));
         let chain = chain_over(&[genesis, tip], slot)?;
         assert_eq!(
             chain.active_height(held_hash),
@@ -2683,7 +2923,7 @@ mod loopback_serving_tests {
         });
         let hog_item = Inventory::WitnessBlock(wire_block_hash(hog_block.block_hash()));
         let blocks = [genesis, hog_block, victim_block];
-        let node = Node::start(chain_over(&blocks, RecentBlockSlot::default())?)?;
+        let node = Node::start(chain_over(&blocks, recent_slot())?)?;
         let mut victim = Client::connect(&node)?;
         let victim_session = session_of(&node, &victim)?;
         victim.send(&request)?;
@@ -2755,7 +2995,7 @@ mod loopback_serving_tests {
         ))))?;
         let victim_payload = consensus_bytes(&victim_block);
         let blocks = [genesis, hog_block, victim_block];
-        let chain = chain_over(&blocks, RecentBlockSlot::default())?;
+        let chain = chain_over(&blocks, recent_slot())?;
 
         let node = Node::start(chain)?;
         let mut victim = Client::connect(&node)?;
@@ -2868,7 +3108,7 @@ mod loopback_serving_tests {
     #[test]
     fn a_node_ledger_without_peer_outbound_room_refuses_the_server_reply() -> TestResult {
         let genesis = child_block(BlockHash::default(), 0, vec![coinbase(0, 1)])?;
-        let node = Node::start(chain_over(&[genesis], RecentBlockSlot::default())?)?;
+        let node = Node::start(chain_over(&[genesis], recent_slot())?)?;
         let mut client = Client::connect(&node)?;
 
         let (budget, ledger) = node_outbound_ledger(0);
@@ -2893,7 +3133,7 @@ mod loopback_serving_tests {
     #[test]
     fn a_node_ledger_with_peer_outbound_room_delivers_the_server_reply() -> TestResult {
         let genesis = child_block(BlockHash::default(), 0, vec![coinbase(0, 1)])?;
-        let node = Node::start(chain_over(&[genesis], RecentBlockSlot::default())?)?;
+        let node = Node::start(chain_over(&[genesis], recent_slot())?)?;
         let mut client = Client::connect(&node)?;
 
         let (budget, ledger) = node_outbound_ledger(64 * 1024 * 1024);
@@ -2956,6 +3196,7 @@ mod writer_shutdown_tests {
         fn get_tx(
             &self,
             txid: bitcoin_rs_consensus::primitives::Txid,
+            _last_inv_sequence: u64,
         ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             self.gateway.get_tx(txid)
         }
@@ -2963,6 +3204,7 @@ mod writer_shutdown_tests {
         fn get_tx_by_wtxid(
             &self,
             wtxid: bitcoin_rs_consensus::primitives::Wtxid,
+            _last_inv_sequence: u64,
         ) -> Option<bitcoin_rs_consensus::primitives::Tx> {
             self.gateway.get_tx_by_wtxid(wtxid)
         }
@@ -2970,6 +3212,7 @@ mod writer_shutdown_tests {
         fn resident_ancestor_package(
             &self,
             wtxid: bitcoin_rs_consensus::primitives::Wtxid,
+            _last_inv_sequence: u64,
         ) -> Option<Vec<bitcoin_rs_consensus::primitives::Wtxid>> {
             self.gateway.ancestor_package_wtxids(wtxid)
         }
@@ -2979,6 +3222,14 @@ mod writer_shutdown_tests {
             wtxids: &[bitcoin_rs_consensus::primitives::Wtxid],
         ) -> Option<Vec<Arc<bitcoin_rs_consensus::primitives::Tx>>> {
             self.gateway.resident_package(wtxids)
+        }
+
+        fn package_for_relay(
+            &self,
+            wtxids: &[bitcoin_rs_consensus::primitives::Wtxid],
+            _last_inv_sequence: u64,
+        ) -> Option<Vec<Arc<bitcoin_rs_consensus::primitives::Tx>>> {
+            self.resident_package(wtxids)
         }
     }
 
@@ -3178,8 +3429,16 @@ impl TxInventory for NodeTxInventory {
     fn transaction_send_failed(&self, wtxid: Wtxid) {
         self.0.restore_unbroadcast(wtxid);
     }
-    fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>> {
-        bitcoin_rs_mempool::MempoolGateway::ancestor_package_wtxids(&self.0, wtxid)
+    fn resident_ancestor_package(
+        &self,
+        wtxid: Wtxid,
+        last_inv_sequence: u64,
+    ) -> Option<Vec<Wtxid>> {
+        bitcoin_rs_mempool::MempoolGateway::ancestor_package_for_relay(
+            &self.0,
+            wtxid,
+            last_inv_sequence,
+        )
     }
     fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
         bitcoin_rs_mempool::MempoolGateway::resident_package(&self.0, wtxids)
@@ -3187,11 +3446,19 @@ impl TxInventory for NodeTxInventory {
     fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool {
         bitcoin_rs_mempool::MempoolGateway::have_tx(&self.0, hash, hash_is_wtxid)
     }
-    fn get_tx(&self, txid: Txid) -> Option<Tx> {
-        bitcoin_rs_mempool::MempoolGateway::get_tx(&self.0, txid)
+    fn get_tx(&self, txid: Txid, last_inv_sequence: u64) -> Option<Tx> {
+        bitcoin_rs_mempool::MempoolGateway::get_tx_for_relay(&self.0, txid, last_inv_sequence)
     }
-    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
-        bitcoin_rs_mempool::MempoolGateway::get_tx_by_wtxid(&self.0, wtxid)
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid, last_inv_sequence: u64) -> Option<Tx> {
+        bitcoin_rs_mempool::MempoolGateway::get_tx_by_wtxid_for_relay(
+            &self.0,
+            wtxid,
+            last_inv_sequence,
+        )
+    }
+
+    fn package_for_relay(&self, wtxids: &[Wtxid], last_inv_sequence: u64) -> Option<Vec<Arc<Tx>>> {
+        bitcoin_rs_mempool::MempoolGateway::package_for_relay(&self.0, wtxids, last_inv_sequence)
     }
 }
 
@@ -3207,8 +3474,16 @@ impl TxInventory for RefTxInventory<'_> {
     fn transaction_send_failed(&self, wtxid: Wtxid) {
         self.0.restore_unbroadcast(wtxid);
     }
-    fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>> {
-        bitcoin_rs_mempool::MempoolGateway::ancestor_package_wtxids(self.0, wtxid)
+    fn resident_ancestor_package(
+        &self,
+        wtxid: Wtxid,
+        last_inv_sequence: u64,
+    ) -> Option<Vec<Wtxid>> {
+        bitcoin_rs_mempool::MempoolGateway::ancestor_package_for_relay(
+            self.0,
+            wtxid,
+            last_inv_sequence,
+        )
     }
     fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
         bitcoin_rs_mempool::MempoolGateway::resident_package(self.0, wtxids)
@@ -3216,11 +3491,19 @@ impl TxInventory for RefTxInventory<'_> {
     fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool {
         bitcoin_rs_mempool::MempoolGateway::have_tx(self.0, hash, hash_is_wtxid)
     }
-    fn get_tx(&self, txid: Txid) -> Option<Tx> {
-        bitcoin_rs_mempool::MempoolGateway::get_tx(self.0, txid)
+    fn get_tx(&self, txid: Txid, last_inv_sequence: u64) -> Option<Tx> {
+        bitcoin_rs_mempool::MempoolGateway::get_tx_for_relay(self.0, txid, last_inv_sequence)
     }
-    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
-        bitcoin_rs_mempool::MempoolGateway::get_tx_by_wtxid(self.0, wtxid)
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid, last_inv_sequence: u64) -> Option<Tx> {
+        bitcoin_rs_mempool::MempoolGateway::get_tx_by_wtxid_for_relay(
+            self.0,
+            wtxid,
+            last_inv_sequence,
+        )
+    }
+
+    fn package_for_relay(&self, wtxids: &[Wtxid], last_inv_sequence: u64) -> Option<Vec<Arc<Tx>>> {
+        bitcoin_rs_mempool::MempoolGateway::package_for_relay(self.0, wtxids, last_inv_sequence)
     }
 }
 
@@ -3336,6 +3619,10 @@ impl TxIngressObserver for NodeTxIngress {
 }
 
 impl TxPolicyObserver for NodeTxPolicy {
+    fn transaction_serving_sequence(&self, source: PeerSource) -> Option<u64> {
+        self.transaction_serving_sequence(source)
+    }
+
     fn announce_transactions(&self, source: PeerSource, items: &[Inventory]) {
         self.announce_transactions(source, items);
     }

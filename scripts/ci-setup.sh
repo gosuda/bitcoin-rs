@@ -20,7 +20,7 @@ tool() {
 
 for t in "$@"; do
   case "$t" in
-    apt) dpkg -s cmake libboost-dev libclang-dev mold >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq cmake libboost-dev libclang-dev mold; } ;;
+    apt) dpkg -s cmake libboost-dev libclang-dev mold ripgrep >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq cmake libboost-dev libclang-dev mold ripgrep; } ;;
     nextest) tool cargo-nextest "$gh/nextest-rs/nextest/releases/download/cargo-nextest-0.9.151/cargo-nextest-0.9.151-x86_64-unknown-linux-gnu.tar.gz" 1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4 ;;
     deny) tool cargo-deny "$gh/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz" 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f ;;
     mdbook) tool mdbook "$gh/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz" 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7 ;;

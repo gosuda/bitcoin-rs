@@ -267,6 +267,7 @@ mod core_compat {
             message,
             chain,
             None,
+            None,
             &|| true,
             &|| true,
             &mut |response| {
