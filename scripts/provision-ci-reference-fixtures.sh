@@ -23,14 +23,17 @@ else
   probe='import sys; sys.exit(sys.version_info < (3, 6))'
   hint='a Python >=3.6 interpreter is required'
 fi
-PYTHON=""
-for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6 python3; do
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "$probe" 2>/dev/null; then
-    PYTHON="$candidate"
-    break
-  fi
-done
+PYTHON="${PYTHON:-}"
+if [[ -z "$PYTHON" ]]; then
+  for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6 python3; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "$probe" 2>/dev/null; then
+      PYTHON="$candidate"
+      break
+    fi
+  done
+fi
 [[ -n "$PYTHON" ]] || { echo "$hint" >&2; exit 1; }
+"$PYTHON" -c "$probe" 2>/dev/null || { echo "$hint" >&2; exit 1; }
 
 # Exact-match digest gate; stock macOS ships shasum, not sha256sum.
 sha256_check() {
