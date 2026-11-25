@@ -67,6 +67,10 @@ Boolean flags come in two forms. Some require an explicit true or false value. O
 | --- | --- | --- | --- |
 | `--rpc-bind` | socket address | `127.0.0.1:<rpc port>` | Binds the management JSON-RPC listener. |
 | `--public-bind` | socket address | unset | Splits REST and Esplora onto a second listener. |
+| `--esplora-enabled` | `[bool]` | `true` | Serves Esplora `/api` and `/esplora` routes. `false` answers 404. |
+| `--esplora-broadcast-enabled` | `[bool]` | `true` | Serves Esplora broadcast `POST /api/tx`. `false` answers 404. |
+| `--public-allowed-hosts` | list | empty | Allows only these `Host` values on the public listener. Empty allows all. |
+| `--public-allowed-origins` | list | empty | Echoes only these `Origin` values in CORS. Empty emits `*`. |
 | `--rpc-max-connections` | count | `128` | Caps management listener connections. |
 | `--public-max-connections` | count | `128` | Caps public listener connections. |
 | `--esplora-max-queries` | count | `2` | Caps concurrent expensive Esplora reads. |

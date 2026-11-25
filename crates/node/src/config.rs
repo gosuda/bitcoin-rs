@@ -131,6 +131,10 @@ pub enum ConfigError {
     EsploraMaxQueries,
     #[error("public-bind and rpc-bind must not overlap")]
     RpcBindOverlap,
+    #[error("public allowed host must not be empty")]
+    PublicAllowedHostEmpty,
+    #[error("public allowed origin must not be empty")]
+    PublicAllowedOriginEmpty,
     #[error("unsupported storage backend {backend}")]
     StorageBackendUnsupported { backend: StorageBackend },
     #[error(
@@ -502,6 +506,10 @@ pub struct RpcConfig {
     pub public_bind: Option<SocketAddr>,
     pub max_connections: usize,
     pub public_max_connections: usize,
+    pub esplora_enabled: bool,
+    pub esplora_broadcast_enabled: bool,
+    pub public_allowed_hosts: Vec<String>,
+    pub public_allowed_origins: Vec<String>,
     pub esplora_max_queries: usize,
     pub rest: bool,
     pub silent_payments: bool,
@@ -675,6 +683,22 @@ impl NodeConfig {
         }
         if self.rpc.esplora_max_queries == 0 {
             return Err(ConfigError::EsploraMaxQueries);
+        }
+        if self
+            .rpc
+            .public_allowed_hosts
+            .iter()
+            .any(|host| host.trim().is_empty())
+        {
+            return Err(ConfigError::PublicAllowedHostEmpty);
+        }
+        if self
+            .rpc
+            .public_allowed_origins
+            .iter()
+            .any(|origin| origin.trim().is_empty())
+        {
+            return Err(ConfigError::PublicAllowedOriginEmpty);
         }
         if !self.rpc.public_bind.is_none_or(|address| {
             let management = self.rpc.bind;
@@ -880,6 +904,10 @@ fn materialize_rpc(
         public_bind: settings.public_bind,
         max_connections: settings.max_connections.unwrap_or(128),
         public_max_connections: settings.public_max_connections.unwrap_or(128),
+        esplora_enabled: settings.esplora_enabled.unwrap_or(true),
+        esplora_broadcast_enabled: settings.esplora_broadcast_enabled.unwrap_or(true),
+        public_allowed_hosts: settings.public_allowed_hosts.clone().unwrap_or_default(),
+        public_allowed_origins: settings.public_allowed_origins.clone().unwrap_or_default(),
         esplora_max_queries: settings
             .esplora_max_queries
             .unwrap_or(bitcoin_rs_wire::esplora::DEFAULT_MAX_QUERIES.get()),
@@ -2139,6 +2167,93 @@ mod tests {
             resolved(&[&explicit_cookie]).rpc.auth,
             Auth::Cookie { .. }
         ));
+    }
+
+    // API-08
+    #[test]
+    fn public_exposure_defaults_stay_open() {
+        let config = resolved(&[]);
+        assert!(config.rpc.esplora_enabled);
+        assert!(config.rpc.esplora_broadcast_enabled);
+        assert!(config.rpc.public_allowed_hosts.is_empty());
+        assert!(config.rpc.public_allowed_origins.is_empty());
+    }
+
+    // API-08
+    #[test]
+    fn esplora_toggles_disable_read_and_broadcast() {
+        let disabled = UserConfig {
+            rpc: RpcOverrides {
+                esplora_enabled: Some(false),
+                ..RpcOverrides::default()
+            },
+            ..UserConfig::default()
+        };
+        assert!(!resolved(&[&disabled]).rpc.esplora_enabled);
+        let quiet = UserConfig {
+            rpc: RpcOverrides {
+                esplora_broadcast_enabled: Some(false),
+                ..RpcOverrides::default()
+            },
+            ..UserConfig::default()
+        };
+        let config = resolved(&[&quiet]);
+        assert!(config.rpc.esplora_enabled);
+        assert!(!config.rpc.esplora_broadcast_enabled);
+    }
+
+    // API-08
+    #[test]
+    fn public_allowlist_entries_must_not_be_blank() {
+        let hosts = UserConfig {
+            rpc: RpcOverrides {
+                public_allowed_hosts: Some(vec![" ".to_owned()]),
+                ..RpcOverrides::default()
+            },
+            ..UserConfig::default()
+        };
+        assert!(matches!(
+            super::resolve(&[&hosts]),
+            Err(ConfigError::PublicAllowedHostEmpty)
+        ));
+        let origins = UserConfig {
+            rpc: RpcOverrides {
+                public_allowed_origins: Some(vec![" ".to_owned()]),
+                ..RpcOverrides::default()
+            },
+            ..UserConfig::default()
+        };
+        assert!(matches!(
+            super::resolve(&[&origins]),
+            Err(ConfigError::PublicAllowedOriginEmpty)
+        ));
+    }
+
+    // API-08
+    #[test]
+    fn public_allowlist_env_parses_comma_lists() {
+        let mut upper = UserConfig::default();
+        upper
+            .apply_env(
+                "BITCOIN_RS_PUBLIC_ALLOWED_HOSTS",
+                std::ffi::OsStr::new("example.com, api.example.com"),
+            )
+            .unwrap_or_else(|error| panic!("hosts env must parse: {error}"));
+        upper
+            .apply_env(
+                "BITCOIN_RS_PUBLIC_ALLOWED_ORIGINS",
+                std::ffi::OsStr::new("https://app.example"),
+            )
+            .unwrap_or_else(|error| panic!("origins env must parse: {error}"));
+        let config = resolved(&[&upper]);
+        assert_eq!(
+            config.rpc.public_allowed_hosts,
+            vec!["example.com".to_owned(), "api.example.com".to_owned()]
+        );
+        assert_eq!(
+            config.rpc.public_allowed_origins,
+            vec!["https://app.example".to_owned()]
+        );
     }
 
     fn resolved(layers: &[&UserConfig]) -> NodeConfig {

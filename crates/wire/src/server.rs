@@ -67,6 +67,73 @@ impl RpcSurface {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct PublicPolicy {
+    pub esplora_enabled: bool,
+    pub broadcast_enabled: bool,
+    pub allowed_hosts: Vec<String>,
+    pub allowed_origins: Vec<String>,
+}
+
+impl Default for PublicPolicy {
+    fn default() -> Self {
+        Self {
+            esplora_enabled: true,
+            broadcast_enabled: true,
+            allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
+        }
+    }
+}
+
+impl PublicPolicy {
+    fn normalized_host(value: &str) -> String {
+        let value = value.trim();
+        let value = match value.strip_prefix('[') {
+            Some(rest) => match rest.split_once(']') {
+                Some((inside, _)) => inside,
+                None => value,
+            },
+            None => match value.rsplit_once(':') {
+                Some((host, port))
+                    if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) =>
+                {
+                    host
+                }
+                _ => value,
+            },
+        };
+        value.to_ascii_lowercase()
+    }
+
+    fn is_host_allowed(&self, host: Option<&str>) -> bool {
+        if self.allowed_hosts.is_empty() {
+            return true;
+        }
+        let Some(host) = host else {
+            return false;
+        };
+        let normalized = Self::normalized_host(host);
+        self.allowed_hosts
+            .iter()
+            .any(|allowed| Self::normalized_host(allowed) == normalized)
+    }
+
+    fn cors_allow_origin(&self, origin: Option<&str>) -> Option<String> {
+        if self.allowed_origins.is_empty() {
+            return Some("*".to_owned());
+        }
+        let origin = origin?.trim();
+        if origin.is_empty() {
+            return None;
+        }
+        self.allowed_origins
+            .iter()
+            .any(|allowed| allowed.trim() == origin)
+            .then(|| origin.to_owned())
+    }
+}
+
 pub struct RpcServer {
     pub listener: TcpListener,
     pub auth: Arc<Auth>,
@@ -74,6 +141,7 @@ pub struct RpcServer {
     pub max_connections: usize,
     pub idle_timeout: Duration,
     pub rest_enabled: bool,
+    pub public_policy: PublicPolicy,
 }
 
 impl RpcServer {
@@ -98,6 +166,7 @@ impl RpcServer {
             max_connections,
             idle_timeout,
             rest_enabled,
+            public_policy: PublicPolicy::default(),
         })
     }
 
@@ -258,6 +327,7 @@ impl RpcServer {
         let handler = Arc::clone(&self.handler);
         let rest_enabled = self.rest_enabled;
         let idle_timeout = self.idle_timeout;
+        let policy = self.public_policy.clone();
         let id = context.connections.next_id();
         context.connections.admit(id, stream.try_clone()?);
         if context.shutdown.is_triggered() {
@@ -271,13 +341,14 @@ impl RpcServer {
             .spawn(move || {
                 let _slot = ConnectionSlot { tracker, id };
                 let _permit = permit;
-                if let Err(error) = serve_connection(
+                if let Err(error) = serve_connection_with_policy(
                     stream,
                     &auth,
                     &handler,
                     rest_enabled,
                     idle_timeout,
                     surface,
+                    policy,
                     connection_shutdown,
                 ) {
                     debug!(%error, "rpc connection closed with error");
@@ -615,6 +686,7 @@ impl Read for RequestDeadlineStream {
     }
 }
 
+#[cfg(test)]
 fn serve_connection(
     stream: TcpStream,
     auth: &Auth,
@@ -622,6 +694,28 @@ fn serve_connection(
     rest_enabled: bool,
     idle_timeout: Duration,
     surface: RpcSurface,
+    shutdown: bitcoin_rs_consensus::latch::LatchReader,
+) -> io::Result<()> {
+    serve_connection_with_policy(
+        stream,
+        auth,
+        handler,
+        rest_enabled,
+        idle_timeout,
+        surface,
+        PublicPolicy::default(),
+        shutdown,
+    )
+}
+
+fn serve_connection_with_policy(
+    stream: TcpStream,
+    auth: &Auth,
+    handler: &Handler,
+    rest_enabled: bool,
+    idle_timeout: Duration,
+    surface: RpcSurface,
+    policy: PublicPolicy,
     shutdown: bitcoin_rs_consensus::latch::LatchReader,
 ) -> io::Result<()> {
     stream.set_write_timeout(Some(idle_timeout))?;
@@ -655,6 +749,18 @@ fn serve_connection(
             write_not_found(reader.get_mut().socket_mut(), false)?;
             return Ok(());
         }
+        if surface == RpcSurface::Public && !policy.is_host_allowed(head.host.as_deref()) {
+            write_forbidden(reader.get_mut().socket_mut(), false)?;
+            return Ok(());
+        }
+        if is_esplora_route(&route) && !policy.esplora_enabled {
+            write_not_found(reader.get_mut().socket_mut(), false)?;
+            return Ok(());
+        }
+        if is_broadcast_route(&route) && !policy.broadcast_enabled {
+            write_not_found(reader.get_mut().socket_mut(), false)?;
+            return Ok(());
+        }
         if authenticate_json_rpc_head(auth, &mut reader, &head)? {
             return Ok(());
         }
@@ -680,6 +786,8 @@ fn serve_connection(
             &request,
             handler,
             rest_enabled,
+            surface,
+            &policy,
         )? {
             return Ok(());
         }
@@ -771,6 +879,8 @@ fn dispatch_http_request(
     request: &HttpRequest,
     handler: &Handler,
     rest_enabled: bool,
+    rpc_surface: RpcSurface,
+    policy: &PublicPolicy,
 ) -> io::Result<bool> {
     let keep_alive = request.keep_alive;
     match classify(&request.method, &request.path) {
@@ -788,21 +898,45 @@ fn dispatch_http_request(
             path,
             query,
         } => {
+            let allow_origin = if rpc_surface == RpcSurface::Public {
+                policy.cors_allow_origin(request.origin.as_deref())
+            } else {
+                Some("*".to_owned())
+            };
             crate::esplora::respond(
                 handler,
                 esplora_surface(surface),
                 path,
                 crate::esplora::Request::Get(query),
-                |response| write_response(stream, &response, keep_alive, surface.cors_policy()),
+                |response| {
+                    write_response(
+                        stream,
+                        &response,
+                        keep_alive,
+                        surface.cors_policy(allow_origin),
+                    )
+                },
             )?;
         }
         HttpRoute::EsploraPost { surface, path } => {
+            let allow_origin = if rpc_surface == RpcSurface::Public {
+                policy.cors_allow_origin(request.origin.as_deref())
+            } else {
+                Some("*".to_owned())
+            };
             crate::esplora::respond(
                 handler,
                 esplora_surface(surface),
                 path,
                 crate::esplora::Request::Post(&request.body),
-                |response| write_response(stream, &response, keep_alive, surface.cors_policy()),
+                |response| {
+                    write_response(
+                        stream,
+                        &response,
+                        keep_alive,
+                        surface.cors_policy(allow_origin),
+                    )
+                },
             )?;
         }
         HttpRoute::Preflight { surface } => {
@@ -812,7 +946,17 @@ fn dispatch_http_request(
                 content_type: "text/plain",
                 body: Vec::new(),
             };
-            write_response(stream, &response, keep_alive, surface.cors_policy())?;
+            let allow_origin = if rpc_surface == RpcSurface::Public {
+                policy.cors_allow_origin(request.origin.as_deref())
+            } else {
+                Some("*".to_owned())
+            };
+            write_response(
+                stream,
+                &response,
+                keep_alive,
+                surface.cors_policy(allow_origin),
+            )?;
         }
         HttpRoute::NotFound => {
             write_not_found(stream, keep_alive)?;
@@ -839,6 +983,8 @@ pub struct HttpRequest {
     pub path: String,
     pub keep_alive: bool,
     pub body: Vec<u8>,
+    pub host: Option<String>,
+    pub origin: Option<String>,
 }
 
 const fn is_token_char(byte: u8) -> bool {
@@ -895,10 +1041,19 @@ fn trim_header_value(value: &str) -> &str {
 fn read_headers(
     reader: &mut impl BufRead,
     mut header_bytes: usize,
-) -> io::Result<(usize, Option<usize>, Option<String>, bool)> {
+) -> io::Result<(
+    usize,
+    Option<usize>,
+    Option<String>,
+    bool,
+    Option<String>,
+    Option<String>,
+)> {
     let mut content_length = None;
     let mut content_length_text = None;
     let mut authorization = None;
+    let mut host = None;
+    let mut origin = None;
     let mut keep_alive = false;
     let mut header_count = 0;
     loop {
@@ -911,7 +1066,14 @@ fn read_headers(
         }
         header_bytes += read;
         if line == "\r\n" {
-            return Ok((header_bytes, content_length, authorization, keep_alive));
+            return Ok((
+                header_bytes,
+                content_length,
+                authorization,
+                keep_alive,
+                host,
+                origin,
+            ));
         }
         header_count += 1;
         if header_count > MAX_HEADER_COUNT {
@@ -952,6 +1114,14 @@ fn read_headers(
             ));
         } else if name.eq_ignore_ascii_case("authorization") {
             authorization = Some(value.to_owned());
+        } else if name.eq_ignore_ascii_case("host") {
+            if host.is_none() {
+                host = Some(value.to_owned());
+            }
+        } else if name.eq_ignore_ascii_case("origin") {
+            if origin.is_none() {
+                origin = Some(value.to_owned());
+            }
         } else if name.eq_ignore_ascii_case("connection") {
             keep_alive = value.eq_ignore_ascii_case("keep-alive");
         }
@@ -972,6 +1142,8 @@ pub(crate) struct RequestHead {
     pub(crate) authorization: Option<String>,
     pub(crate) keep_alive: bool,
     pub(crate) content_length: usize,
+    pub(crate) host: Option<String>,
+    pub(crate) origin: Option<String>,
 }
 
 pub(crate) fn read_request_head(
@@ -1011,7 +1183,8 @@ pub(crate) fn read_request_head(
     if method.is_empty() || !method.bytes().all(is_token_char) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request method").into());
     }
-    let (_, content_length, authorization, keep_alive) = read_headers(reader, request_line.len())?;
+    let (_, content_length, authorization, keep_alive, host, origin) =
+        read_headers(reader, request_line.len())?;
 
     let content_length = match (method, content_length) {
         ("POST", None) => {
@@ -1034,6 +1207,8 @@ pub(crate) fn read_request_head(
         authorization,
         keep_alive,
         content_length,
+        host,
+        origin,
     }))
 }
 
@@ -1048,6 +1223,8 @@ pub(crate) fn read_request_body(
         path: head.path,
         keep_alive: head.keep_alive,
         body,
+        host: head.host,
+        origin: head.origin,
     })
 }
 
@@ -1561,16 +1738,18 @@ enum CorsPolicy {
         methods: &'static [&'static str],
         headers: &'static [&'static str],
         expose: &'static [&'static str],
+        allow_origin: Option<String>,
     },
 }
 
 impl HttpSurface {
-    const fn cors_policy(self) -> CorsPolicy {
+    fn cors_policy(self, allow_origin: Option<String>) -> CorsPolicy {
         match self {
             Self::EsploraPublic => CorsPolicy::Public {
                 methods: PUBLIC_ESPLORA_METHODS,
                 headers: PUBLIC_ESPLORA_HEADERS,
                 expose: PUBLIC_ESPLORA_EXPOSE_HEADERS,
+                allow_origin,
             },
             Self::EsploraBackend => CorsPolicy::Disabled,
         }
@@ -1632,6 +1811,37 @@ fn write_not_found(stream: &mut TcpStream, keep_alive: bool) -> io::Result<()> {
     )
 }
 
+fn write_forbidden(stream: &mut TcpStream, keep_alive: bool) -> io::Result<()> {
+    write_response(
+        stream,
+        &crate::rest::Response {
+            status: 403,
+            reason: "Forbidden",
+            content_type: "text/plain",
+            body: b"forbidden".to_vec(),
+        },
+        keep_alive,
+        CorsPolicy::Disabled,
+    )
+}
+
+fn is_esplora_route(route: &HttpRoute<'_>) -> bool {
+    matches!(
+        route,
+        HttpRoute::EsploraGet { .. } | HttpRoute::EsploraPost { .. } | HttpRoute::Preflight { .. }
+    )
+}
+
+fn is_broadcast_route(route: &HttpRoute<'_>) -> bool {
+    matches!(
+        route,
+        HttpRoute::EsploraPost {
+            surface: HttpSurface::EsploraPublic,
+            ..
+        }
+    )
+}
+
 fn write_response(
     stream: &mut TcpStream,
     response: &crate::rest::Response,
@@ -1688,18 +1898,23 @@ fn render_response_head(head: &ResponseHead<'_>) -> String {
         methods,
         headers,
         expose,
-    } = head.cors_policy
+        allow_origin,
+    } = &head.cors_policy
     {
-        header.push_str("Access-Control-Allow-Origin: *\r\n");
-        for (name, values) in [
-            ("Access-Control-Allow-Methods", methods),
-            ("Access-Control-Allow-Headers", headers),
-            ("Access-Control-Expose-Headers", expose),
-        ] {
-            header.push_str(name);
-            header.push_str(": ");
-            header.push_str(&values.join(", "));
+        if let Some(allow_origin) = allow_origin {
+            header.push_str("Access-Control-Allow-Origin: ");
+            header.push_str(allow_origin);
             header.push_str("\r\n");
+            for (name, values) in [
+                ("Access-Control-Allow-Methods", *methods),
+                ("Access-Control-Allow-Headers", *headers),
+                ("Access-Control-Expose-Headers", *expose),
+            ] {
+                header.push_str(name);
+                header.push_str(": ");
+                header.push_str(&values.join(", "));
+                header.push_str("\r\n");
+            }
         }
     }
     if head.status != 204 {
@@ -1791,7 +2006,16 @@ mod tests {
                 surface: RpcSurface,
                 limit: usize,
             ) -> io::Result<Self> {
-                let server = RpcServer::bind(
+                Self::start_with_policy(context, surface, limit, PublicPolicy::default())
+            }
+
+            fn start_with_policy(
+                context: &Arc<Context>,
+                surface: RpcSurface,
+                limit: usize,
+                policy: PublicPolicy,
+            ) -> io::Result<Self> {
+                let mut server = RpcServer::bind(
                     "127.0.0.1:0",
                     Arc::new(Auth::basic("alice", "secret")),
                     Arc::new(Handler::new(Arc::clone(context))),
@@ -1799,6 +2023,7 @@ mod tests {
                     Duration::from_secs(5),
                     true,
                 )?;
+                server.public_policy = policy;
                 let address = server.local_addr()?;
                 let handler = Arc::clone(&server.handler);
                 let shutdown = bitcoin_rs_consensus::latch::LatchWriter::new();
@@ -2123,6 +2348,125 @@ mod tests {
                 )?;
                 assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
             }
+            Ok(())
+        }
+        // API-08
+        #[test]
+        fn public_policy_defaults_stay_open() {
+            let policy = PublicPolicy::default();
+            assert!(policy.esplora_enabled);
+            assert!(policy.broadcast_enabled);
+            assert!(policy.allowed_hosts.is_empty());
+            assert!(policy.allowed_origins.is_empty());
+            assert!(policy.is_host_allowed(None));
+            assert!(policy.is_host_allowed(Some("example.com")));
+            assert_eq!(policy.cors_allow_origin(None).as_deref(), Some("*"));
+            assert_eq!(
+                policy
+                    .cors_allow_origin(Some("https://app.example"))
+                    .as_deref(),
+                Some("*")
+            );
+        }
+
+        // API-08
+        #[test]
+        fn disabled_esplora_answers_public_reads_with_not_found() -> io::Result<()> {
+            let context = Arc::new(Context::new());
+            let policy = PublicPolicy {
+                esplora_enabled: false,
+                ..PublicPolicy::default()
+            };
+            let public = RunningServer::start_with_policy(&context, RpcSurface::Public, 8, policy)?;
+            let preflight = public.request(
+                b"OPTIONS /api/tx HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )?;
+            assert!(
+                preflight.starts_with("HTTP/1.1 404 Not Found"),
+                "{preflight}"
+            );
+            let read = public.request(
+                b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )?;
+            assert!(read.starts_with("HTTP/1.1 404 Not Found"), "{read}");
+            Ok(())
+        }
+
+        // API-08
+        #[test]
+        fn disabled_broadcast_answers_public_post_with_not_found() -> io::Result<()> {
+            let context = Arc::new(Context::new());
+            let policy = PublicPolicy {
+                broadcast_enabled: false,
+                ..PublicPolicy::default()
+            };
+            let public = RunningServer::start_with_policy(&context, RpcSurface::Public, 8, policy)?;
+            let broadcast = public.request(
+                b"POST /api/tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n00",
+            )?;
+            assert!(
+                broadcast.starts_with("HTTP/1.1 404 Not Found"),
+                "{broadcast}"
+            );
+            let read = public.request(
+                b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )?;
+            assert!(!read.starts_with("HTTP/1.1 404 Not Found"), "{read}");
+            Ok(())
+        }
+
+        // API-08
+        #[test]
+        fn public_host_allowlist_refuses_unknown_hosts() -> io::Result<()> {
+            let context = Arc::new(Context::new());
+            let policy = PublicPolicy {
+                allowed_hosts: vec!["example.com".to_owned()],
+                ..PublicPolicy::default()
+            };
+            let public = RunningServer::start_with_policy(&context, RpcSurface::Public, 8, policy)?;
+            let allowed = public.request(
+                b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
+            )?;
+            assert!(!allowed.starts_with("HTTP/1.1 403 Forbidden"), "{allowed}");
+            let denied = public.request(
+                b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+            )?;
+            assert!(denied.starts_with("HTTP/1.1 403 Forbidden"), "{denied}");
+            Ok(())
+        }
+
+        // API-08
+        #[test]
+        fn public_origin_allowlist_echoes_only_matches() -> io::Result<()> {
+            let context = Arc::new(Context::new());
+            let open = RunningServer::start(&context, RpcSurface::Public, 8)?;
+            let response = open.request(
+                b"OPTIONS /api/tx HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example\r\nConnection: close\r\n\r\n",
+            )?;
+            assert!(
+                response.contains("Access-Control-Allow-Origin: *"),
+                "{response}"
+            );
+            let policy = PublicPolicy {
+                allowed_origins: vec!["https://app.example".to_owned()],
+                ..PublicPolicy::default()
+            };
+            let guarded =
+                RunningServer::start_with_policy(&context, RpcSurface::Public, 8, policy)?;
+            let echoed = guarded.request(
+                b"OPTIONS /api/tx HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example\r\nConnection: close\r\n\r\n",
+            )?;
+            assert!(
+                echoed.contains("Access-Control-Allow-Origin: https://app.example"),
+                "{echoed}"
+            );
+            let withheld = guarded.request(
+                b"OPTIONS /api/tx HTTP/1.1\r\nHost: localhost\r\nOrigin: https://evil.example\r\nConnection: close\r\n\r\n",
+            )?;
+            assert!(
+                !withheld.contains("Access-Control-Allow-Origin:"),
+                "{withheld}"
+            );
             Ok(())
         }
     }

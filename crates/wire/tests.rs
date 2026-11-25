@@ -10,7 +10,7 @@ mod auth {
     use crate::support::TestError;
     use bitcoin_rs_wire::auth::constant_time_eq;
     use bitcoin_rs_wire::context::Context;
-    use bitcoin_rs_wire::{Auth, Handler, RpcServer, RpcSurface};
+    use bitcoin_rs_wire::{Auth, Handler, PublicPolicy, RpcServer, RpcSurface};
     use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
     type TestResult<T = ()> = Result<T, TestError>;
@@ -469,6 +469,7 @@ mod auth {
             max_connections: 8,
             idle_timeout: Duration::from_secs(2),
             rest_enabled: false,
+            public_policy: PublicPolicy::default(),
         };
         let shutdown = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
         thread::spawn(move || {
@@ -493,6 +494,7 @@ mod auth {
             max_connections: 8,
             idle_timeout: Duration::from_secs(2),
             rest_enabled,
+            public_policy: PublicPolicy::default(),
         };
         let shutdown = bitcoin_rs_consensus::latch::LatchReader::fixture_never();
         thread::spawn(move || {
