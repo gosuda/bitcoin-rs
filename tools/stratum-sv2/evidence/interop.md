@@ -5,7 +5,6 @@ performance comparison. The exact provider binary and image, device image,
 source base and changed production-file digests are in [identity.txt](identity.txt).
 The builder resolved Rust 1.99.1, release profile and the standalone lockfile.
 External pool/device pins are unchanged in Compose and `device/Dockerfile`.
-This record covers the 2026-10-16 run on Rust 1.99.1. The current build uses Rust 1.100.0-bookworm.
 
 ## Observed behavior
 
