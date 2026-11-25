@@ -1,4 +1,4 @@
-use crate::feature::{FEATURE_VERSION, FeatureAnnouncement};
+use crate::feature::{FEATURE_VERSION, FeatureAnnouncement, MAX_REMOTE_FEATURES};
 use crate::packages::SendPackages;
 use crate::peer::{Peer, PeerState};
 use crate::wire::{MIN_PEER_PROTO_VERSION, Message, PeerError};
@@ -134,6 +134,11 @@ fn receive_feature<S>(
         ));
     }
     if announcement.is_supported() {
+        if !peer.remote_features.contains_key(&announcement.id)
+            && peer.remote_features.len() >= MAX_REMOTE_FEATURES
+        {
+            return Err(PeerError::Misbehavior("too many remote features"));
+        }
         peer.remote_features
             .entry(announcement.id.clone())
             .or_insert_with(|| announcement.data.clone());
@@ -397,9 +402,38 @@ mod tests {
         step(&mut peer, &feature_message(b"BIP332", &[1]))?;
         step(&mut peer, &feature_message(b"BIP332", &[0]))?;
         step(&mut peer, &feature_message(b"BIP332", &[]))?;
-
         assert_eq!(peer.remote_feature(b"BIP332"), Some([1].as_slice()));
         assert_eq!(peer.remote_features.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn remote_features_capped_at_32_distinct_entries() -> Result<(), PeerError> {
+        fn fill(peer: &mut Peer<Cursor<Vec<u8>>>, count: u8) {
+            for index in 0..count {
+                peer.remote_features.insert(
+                    FeatureId::from_raw_unchecked(
+                        format!("retained-feature-{index:02}").into_bytes(),
+                    ),
+                    vec![index],
+                );
+            }
+        }
+
+        let mut peer = peer_awaiting_verack(FEATURE_VERSION)?;
+        fill(&mut peer, 31);
+        step(&mut peer, &feature_message(b"BIP332", &[1]))?;
+        assert_eq!(peer.remote_features.len(), 32);
+        step(&mut peer, &feature_message(b"BIP332", &[0]))?;
+        assert_eq!(peer.remote_features.len(), 32);
+
+        let mut peer = peer_awaiting_verack(FEATURE_VERSION)?;
+        fill(&mut peer, 32);
+        assert!(matches!(
+            step(&mut peer, &feature_message(b"BIP332", &[1])),
+            Err(PeerError::Misbehavior(_))
+        ));
+        assert_eq!(peer.remote_features.len(), 32);
         Ok(())
     }
 

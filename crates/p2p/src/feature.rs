@@ -12,6 +12,8 @@ pub const MAX_ID_LEN: usize = 80;
 
 pub const MAX_DATA_LEN: usize = 512;
 
+pub(crate) const MAX_REMOTE_FEATURES: usize = 32;
+
 pub(crate) const BIP332_ID: &[u8] = b"BIP332";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
