@@ -28,7 +28,7 @@ pub use manifest::MANIFEST_TOML;
 
 pub use error::RpcError;
 pub use handlers::Handler;
-pub use server::{RpcServer, RpcSurface};
+pub use server::{PublicPolicy, RpcServer, RpcSurface};
 
 #[cfg(feature = "test-seam")]
 pub use server::{handle_json, read_http_request};

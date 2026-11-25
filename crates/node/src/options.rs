@@ -179,6 +179,17 @@ fn parse_connect_list(value: &str) -> Result<Vec<String>, OptionParseError> {
         .map(|part| parse_connect_endpoint(part.trim()))
         .collect()
 }
+fn parse_string_list(value: &str) -> Result<Vec<String>, Infallible> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(value
+        .split(',')
+        .map(|part| part.trim().to_owned())
+        .filter(|part| !part.is_empty())
+        .collect())
+}
 
 pub fn parse_network_label(
     value: &str,
@@ -666,6 +677,26 @@ macro_rules! option_rows {
                         cli[#[arg(long = "public-max-connections")]]
                         env["BITCOIN_RS_PUBLIC_MAX_CONNECTIONS", str::parse]
                         toml native("public_max_connections")
+                    }
+                    esplora_enabled as esplora_enabled: Option<bool> {
+                        cli[#[arg(long = "esplora-enabled", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_ESPLORA_ENABLED", parse_bool]
+                        toml native("esplora_enabled")
+                    }
+                    esplora_broadcast_enabled as esplora_broadcast_enabled: Option<bool> {
+                        cli[#[arg(long = "esplora-broadcast-enabled", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_ESPLORA_BROADCAST_ENABLED", parse_bool]
+                        toml native("esplora_broadcast_enabled")
+                    }
+                    public_allowed_hosts as public_allowed_hosts: Option<Vec<String>> {
+                        cli[#[arg(long = "public-allowed-hosts", value_delimiter = ',')]]
+                        env["BITCOIN_RS_PUBLIC_ALLOWED_HOSTS", parse_string_list]
+                        toml native("public_allowed_hosts")
+                    }
+                    public_allowed_origins as public_allowed_origins: Option<Vec<String>> {
+                        cli[#[arg(long = "public-allowed-origins", value_delimiter = ',')]]
+                        env["BITCOIN_RS_PUBLIC_ALLOWED_ORIGINS", parse_string_list]
+                        toml native("public_allowed_origins")
                     }
                     esplora_max_queries as esplora_max_queries: Option<usize> {
                         cli[#[arg(long = "esplora-max-queries")]]

@@ -15,7 +15,7 @@ BITCOIN_RS_REST=true bitcoin-rs ...
 
 In TOML set `rest = true`; in `bitcoin.conf` set `rest=1`.
 
-Without `--public-bind`, one listener serves JSON-RPC, REST, and Esplora. With `--public-bind`, that second listener serves REST and Esplora, and the `--rpc-bind` listener serves management JSON-RPC only. A JSON-RPC request sent to the public listener gets 404.
+Without `--public-bind`, one listener serves JSON-RPC, REST, and Esplora. With `--public-bind`, that second listener serves REST and Esplora, and the `--rpc-bind` listener serves management JSON-RPC only. A JSON-RPC request sent to the public listener gets 404. `--esplora-enabled=false` turns off both Esplora namespaces on every listener with 404. `--esplora-broadcast-enabled=false` turns off broadcast `POST /api/tx` with 404 while reads keep working. `--public-allowed-hosts` refuses other `Host` values on the public listener with 403. `--public-allowed-origins` echoes only a matching `Origin` in CORS; an empty list emits `*`.
 
 REST disabled means `/rest/*` returns 404. It does not fall through to JSON-RPC:
 
@@ -130,9 +130,9 @@ The backend dialect adds `/esplora/internal/mempool/txs`, `/esplora/internal/blo
 
 ## Listener behavior and limits
 
-The listener routes by HTTP method and path. It does not inspect the `Host` header, so a reverse proxy must enforce host rules. Other methods on REST paths return 404; `HEAD /rest/chaininfo.json` is 404.
+The public listener checks `Host` against `--public-allowed-hosts` and refuses others with 403. Other methods on REST paths return 404; `HEAD /rest/chaininfo.json` is 404.
 
-Only the public Esplora surface sends CORS headers. REST and the backend Esplora surface send none. `--esplora-max-queries` limits concurrent expensive reads and defaults to 2. Shared materialization permits for full blocks and spent outputs can refuse a read with 503 under load.
+Only the public Esplora surface sends CORS headers. REST and the backend Esplora surface send none. `--public-allowed-origins` controls the echoed origin; an empty list sends `*`. `--esplora-max-queries` limits concurrent expensive reads and defaults to 2. Shared materialization permits for full blocks and spent outputs can refuse a read with 503 under load.
 
 The owner of every rule is [docs/rest-interface.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/rest-interface.md). Clause [API-03](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/external-api.md#api-03-rest-dialect) governs REST status codes, and [API-09](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/external-api.md#api-09-esplora-dialects) governs the two Esplora dialects. The wallet-facing projection is described in [docs/contracts/wallet-facing.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/wallet-facing.md).
 

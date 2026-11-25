@@ -235,6 +235,15 @@ fn rpc_context_handles(
     }
 }
 
+fn public_policy_from_config(config: &NodeConfig) -> bitcoin_rs_wire::PublicPolicy {
+    bitcoin_rs_wire::PublicPolicy {
+        esplora_enabled: config.rpc.esplora_enabled,
+        broadcast_enabled: config.rpc.esplora_broadcast_enabled,
+        allowed_hosts: config.rpc.public_allowed_hosts.clone(),
+        allowed_origins: config.rpc.public_allowed_origins.clone(),
+    }
+}
+
 fn bind_rpc_with_pool(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
@@ -252,7 +261,7 @@ fn bind_rpc_with_pool(
         );
     let context = Arc::new(context);
     let handler = Arc::new(bitcoin_rs_wire::Handler::new(Arc::clone(&context)));
-    let server = RpcServer::bind(
+    let mut server = RpcServer::bind(
         state.config().rpc.bind,
         Arc::clone(&rpc_auth),
         Arc::clone(&handler),
@@ -264,9 +273,10 @@ fn bind_rpc_with_pool(
         address: config.rpc.bind,
         source,
     })?;
+    server.public_policy = public_policy_from_config(config);
     let mut servers = Vec::with_capacity(2);
     if let Some(address) = config.rpc.public_bind {
-        let public = RpcServer::bind(
+        let mut public = RpcServer::bind(
             address,
             rpc_auth,
             handler,
@@ -275,6 +285,7 @@ fn bind_rpc_with_pool(
             config.rpc.rest,
         )
         .map_err(|source| RunError::PublicRpcBind { address, source })?;
+        public.public_policy = public_policy_from_config(config);
         servers.push((server, RpcSurface::Management));
         servers.push((public, RpcSurface::Public));
     } else {

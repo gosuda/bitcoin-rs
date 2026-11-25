@@ -74,6 +74,10 @@ Environment booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `of
 | `compressed_transactions` | `BITCOIN_RS_COMPRESSED_TRANSACTIONS` | no | `false` |
 | `rpc_bind` | `BITCOIN_RS_RPC_BIND` | no | `127.0.0.1:<rpc port>` |
 | `public_bind` | `BITCOIN_RS_PUBLIC_BIND` | no | unset |
+| `esplora_enabled` | `BITCOIN_RS_ESPLORA_ENABLED` | no | `true` |
+| `esplora_broadcast_enabled` | `BITCOIN_RS_ESPLORA_BROADCAST_ENABLED` | no | `true` |
+| `public_allowed_hosts` | `BITCOIN_RS_PUBLIC_ALLOWED_HOSTS` | no | empty (all) |
+| `public_allowed_origins` | `BITCOIN_RS_PUBLIC_ALLOWED_ORIGINS` | no | empty (`*`) |
 | `rpc_max_connections` | `BITCOIN_RS_RPC_MAX_CONNECTIONS` | no | `128` |
 | `public_max_connections` | `BITCOIN_RS_PUBLIC_MAX_CONNECTIONS` | no | `128` |
 | `esplora_max_queries` | `BITCOIN_RS_ESPLORA_MAX_QUERIES` | no | `2` |
