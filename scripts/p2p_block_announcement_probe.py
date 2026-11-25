@@ -13,6 +13,7 @@ import struct
 import time
 import urllib.error
 import urllib.request
+from typing import Any
 
 
 MAGIC = b"\xfa\xbf\xb5\xda"
@@ -63,7 +64,7 @@ def frame(command: str, payload: bytes) -> bytes:
     return header + payload
 
 
-def rpc(port: int, authentication: str, method: str, params: list[object] | None = None):
+def rpc(port: int, authentication: str, method: str, params: list[object] | None = None) -> Any:
     body = json.dumps(
         {"jsonrpc": "1.0", "id": "announcement-probe", "method": method, "params": params or []}
     ).encode()

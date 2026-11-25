@@ -206,20 +206,8 @@ mod tail_gate_tests {
         let prepared = writer.prepare_block_from_facts(caps, block.clone())?;
         assert_eq!(FILTER_BUILDS.with(std::cell::Cell::get), 1);
         assert_eq!(SCRIPT_HASH_BUILDS.with(std::cell::Cell::get), 0);
-        assert!(
-            prepared
-                .tail
-                .inputs
-                .iter()
-                .all(|tx| tx.iter().all(|hash| hash.is_none()))
-        );
-        assert!(
-            prepared
-                .tail
-                .outputs
-                .iter()
-                .all(|tx| tx.iter().all(|hash| hash.is_none()))
-        );
+        assert_eq!(prepared.tail.inputs.capacity(), 0);
+        assert_eq!(prepared.tail.outputs.capacity(), 0);
         Ok(())
     }
 
@@ -233,13 +221,8 @@ mod tail_gate_tests {
             writer.prepare_block_from_facts(IndexCapabilities::COMPACT_FILTERS, block.clone())?;
         assert_eq!(FILTER_BUILDS.with(std::cell::Cell::get), 1);
         assert_eq!(SCRIPT_HASH_BUILDS.with(std::cell::Cell::get), 0);
-        assert!(
-            prepared
-                .tail
-                .inputs
-                .iter()
-                .all(|tx| tx.iter().all(|hash| hash.is_none()))
-        );
+        assert_eq!(prepared.tail.inputs.capacity(), 0);
+        assert_eq!(prepared.tail.outputs.capacity(), 0);
         Ok(())
     }
 

@@ -161,7 +161,6 @@ skip = [
     { crate = "parking_lot_core@0.9.12", reason = "dashmap 6.2 and parking_lot 0.12" },
     { crate = "redox_syscall@0.5.18", reason = "parking_lot_core 0.9" },
     # bitcoin 0.32 pins hex-conservative 0.2; miniscript uses 1.x.
-    # surrealkv 1.x pins lz4_flex 0.12 while workspace pins 0.13.
     { crate = "lz4_flex@0.12.3", reason = "surrealkv 1.x pins lz4_flex 0.12" },
     { crate = "hex-conservative@0.2.3", reason = "bitcoin 0.32 pin" },
     # metrics-util 0.20 (via metrics-exporter-prometheus 0.18) pins quanta 0.12
@@ -170,7 +169,6 @@ skip = [
     { crate = "quanta@0.12.6", reason = "metrics-util 0.20 via metrics-exporter-prometheus 0.18" },
     # tokio's backtrace and the usdt probe chain's ar_archive_writer pin disjoint object lines in the minimal all-features graph.
     { crate = "object@0.39.1", reason = "ar_archive_writer 0.5.5 via psm in the usdt probe chain" },
-    { crate = "object@0.40.0", reason = "backtrace 0.3.77 via the tokio 1.36.0 minimal floor" },
     # cap-std 4 stack: fs-set-times 0.20 pins io-lifetimes 2, cap-std uses 3.
     { crate = "io-lifetimes@2.0.4", reason = "fs-set-times 0.20" },
     # system-deps 6 (zmq/rocksdb build chain) pins the toml 0.8 stack.

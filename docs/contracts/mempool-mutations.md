@@ -125,6 +125,8 @@ The gateway owns its private orphan/reject state (`crates/mempool/src/orphan.rs`
 - The gateway refuses a populated pool.
 - It settles the fence without removing transactions or operator fee deltas.
 - Successful activation retains the existing pool, prioritisation overlays (including absent txids), fee history, and orphans.
+- Successful activation clears the old settlement commit ID to match the new snapshot epoch. Membership and fee-priority revisions remain unchanged. Proof: `snapshot::tests::successful_snapshot_import_preserves_nonresident_fee_prioritisation` in `crates/node/src/snapshot.rs` checks the cleared settlement commit ID and the retained membership and fee-priority revisions.
+- `snapshot_changed` requires this gateway's active `ChainChangeGuard`. A foreign guard returns `ForeignGuard`, a stale generation returns `GenerationMoved`, and populated membership returns `SnapshotMempoolNotEmpty`. Refusal preserves the settlement commit, membership and fee-priority revisions. Proof: `admission::tests::snapshot_settlement_requires_its_live_guard_and_empty_membership` in `crates/mempool/src/admission.rs` checks these refusals and successful settlement while admission remains closed.
 - The gateway's `snapshot_changed` event invalidates chain-bound reject entries.
 - It marks each resident witness identity ready once.
 - Existing orphan residency limits bound that pass.

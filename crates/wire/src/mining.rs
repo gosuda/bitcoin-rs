@@ -71,9 +71,10 @@ pub use control::{
 pub use generation_signal::MiningGenerationSignal;
 pub use network_hashps::{estimate_network_hashps, network_hash_ps};
 pub use template::{
-    Candidate, CandidateContext, CandidateTransaction, CoinbaseBudget, SelectedBody, SelectedTx,
-    TemplateId, assemble_candidate, assemble_ordered_candidate, finish_candidate,
-    select_template_body, select_template_body_after, solve_block,
+    Candidate, CandidateContext, CandidateTransaction, CoinbaseBudget, CoinbaseReserve,
+    SelectedBody, SelectedTx, TemplateId, assemble_candidate, assemble_ordered_candidate,
+    finish_candidate, select_template_body, select_template_body_after, solve_block,
+    solve_block_with_budget,
 };
 
 #[cfg(feature = "pool")]

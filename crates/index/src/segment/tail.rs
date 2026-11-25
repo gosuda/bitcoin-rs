@@ -317,32 +317,37 @@ impl PreparedTail {
         } else {
             Default::default()
         };
-        let inputs = block
-            .txs
-            .iter()
-            .map(|tx| {
-                tx.inputs
-                    .iter()
-                    .map(|input| {
-                        (needs_hashes && !is_coinbase_marker(&input.txid, input.vout))
-                            .then(|| script_hash(&input.script))
-                    })
-                    .collect()
-            })
-            .collect();
-        let outputs = block
-            .txs
-            .iter()
-            .map(|tx| {
-                tx.outputs
-                    .iter()
-                    .map(|output| {
-                        (needs_hashes && output.script.first() != Some(&0x6a))
-                            .then(|| script_hash(&output.script))
-                    })
-                    .collect()
-            })
-            .collect();
+        let (inputs, outputs) = if needs_hashes {
+            let inputs = block
+                .txs
+                .iter()
+                .map(|tx| {
+                    tx.inputs
+                        .iter()
+                        .map(|input| {
+                            (!is_coinbase_marker(&input.txid, input.vout))
+                                .then(|| script_hash(&input.script))
+                        })
+                        .collect()
+                })
+                .collect();
+            let outputs = block
+                .txs
+                .iter()
+                .map(|tx| {
+                    tx.outputs
+                        .iter()
+                        .map(|output| {
+                            (output.script.first() != Some(&0x6a))
+                                .then(|| script_hash(&output.script))
+                        })
+                        .collect()
+                })
+                .collect();
+            (inputs, outputs)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         Self {
             capabilities,
             filter_bytes,
@@ -417,11 +422,7 @@ pub(crate) fn append_prepared_tail_block(
     let mut block_next_ordinal =
         existing_log.map_or(state.next_ordinal, |value| read_u32_le(value, 0));
     let needs_directory = needs_transaction_directory(prepared);
-    for (tx, (input_hashes, output_hashes)) in block
-        .txs
-        .iter()
-        .zip(prepared.inputs.iter().zip(&prepared.outputs))
-    {
+    for (tx_index, tx) in block.txs.iter().enumerate() {
         let ordinal =
             if let Some(ordinal) = existing_log.and_then(|_| state.txid_to_ordinal.get(&tx.txid)) {
                 *ordinal
@@ -455,13 +456,13 @@ pub(crate) fn append_prepared_tail_block(
                 ordinal,
                 height: block.height,
                 prevouts: &tx.inputs,
-                hashes: input_hashes,
+                hashes: &prepared.inputs[tx_index],
             };
             append_inputs(&mut rec, spends, state);
             let funding = FundingOutputs {
                 ordinal,
                 outputs: &tx.outputs,
-                hashes: output_hashes,
+                hashes: &prepared.outputs[tx_index],
             };
             append_outputs(&mut rec, funding, state);
         }

@@ -1,6 +1,6 @@
 # External API contract
 
-`API-01`–`API-37` govern RPC, REST, Esplora and ZMQ under the
+`API-01`–`API-38` govern RPC, REST, Esplora and ZMQ under the
 [contracts precedence rule](README.md). The clauses below own each behavior.
 [Verification boundaries](#verification-boundaries) distinguish current coverage from unverified comparisons.
 
@@ -285,7 +285,7 @@ wallet interoperability remain unverified.
 
 ### `API-05`: Solo-mining generate path
 
-- Owner: `MiningControl::generate` (`crates/wire/src/mining/control.rs`) via `MiningCoordinator::generate` (`crates/node/src/mining.rs`), assembling each block through `MiningService::assemble_fresh`.
+- Owner: `MiningControl::generate` (`crates/wire/src/mining/control.rs`) via `MiningCoordinator::generate` (`crates/node/src/mining.rs`), with fresh assembly in `MiningService`.
 - Each block is a fresh candidate (no GBT cache).
 - `generateblock` validates the unsolved block first (`API-30`).
 - Both generate paths solve and then either submit through the chainstate owner or dry-validate through `Chainstate::validate_block` (`ARCH-07`).
@@ -364,6 +364,9 @@ wallet interoperability remain unverified.
 - Esplora transaction projections return 503 when their previous-output slots and scripts exceed 16 MiB.
 - Backend bulk response assembly stops at 16 MiB and returns 503 without sending a partial JSON array.
 - Backend bulk routes hold node-wide expensive-query admission through the HTTP response write.
+- `GET /esplora/block-template` keeps unauthenticated backend access and uses the same admission before template assembly.
+- Template requests retain their slot until the response write completes or fails.
+- Proof: `esplora::tests::backend_templates_share_expensive_admission_through_send` checks admission before template work and slot retention through successful and failed writes. `server::tests::listeners::expensive_query_saturation_preserves_shared_and_split_listener_service` checks refusal before provider calls and admission recovery on shared and split listeners.
 - History reads use bounded pages and cursors preserving public Esplora cursor semantics.
 - Cursors are the exact lowercase `txid` display text.
 - Malformed, noncanonical (including uppercase or prefixed), unknown, and missing cursors restart from the beginning.
@@ -423,10 +426,22 @@ wallet interoperability remain unverified.
 - The next template read captures membership and fee revisions together.
 - `getblocktemplate` never carries a coinbase budget.
 - Typed `BlockTemplateRequest.coinbase_budget` is `None` for every RPC request.
-- Only the typed `MiningControl` embedder (experimental SV2 regtest adapter in `tools/stratum-sv2`) sets it.
+- Ordinary node templates reserve 8,000 WU for the block header, transaction count, and external coinbase by default. The configured `block_reserved_weight` is clamped to 2,000 through 4,000,000 WU, as in Core v31.1 `ClampOptions`.
+- Ordinary node templates reserve at least 400 coinbase sigop cost. The actual local coinbase cost is used when it is larger than either reserve.
+- Before cache publication, the node validates each newly assembled or prepared candidate through the chainstate proposal path. Invalid candidates return a rejection and are not served. Validation does not commit the block, require solved PoW, or check a signet solution.
+- A generation change during validation retries assembly. Mining cache and mempool locks are not held during chainstate validation.
+- Joined ordinary and reusable budgeted requests share one validation result for a prepared candidate. A refusal reaches every joined request without cache publication. Proof: `joined_prepared_requests_share_validation_and_its_refusal` in `crates/node/src/mining/coordinator.rs` uses a validation barrier to check one validation and the shared result.
+- Shutdown and a validation panic release joined requests. A later request can retry a failed flight. Proof: `interrupted_validation_releases_joiners_without_publishing_failure` in the same module checks panic recovery, shutdown refusal, and released waiter accounting.
+- `CandidateContext.coinbase_reserve` states this policy. A complete local coinbase can use `CoinbaseReserve::EXACT`; production templates use the immutable node configuration.
+- Only the typed `MiningControl` embedder (experimental SV2 regtest adapter in `tools/stratum-sv2`) sets a coinbase budget.
 - A budgeted candidate leaves that room in the coinbase with a budget-qualified id.
 - The ordinary candidate is used when it already admits the budget.
 - The qualifier is not RPC contract: RPC callers never receive it, and long-poll waits compare generations only.
+
+Proof: `mining::template::tests::ordinary_templates_reserve_external_coinbase_weight` and `ordinary_templates_reserve_external_coinbase_sigops` in `crates/wire/src/mining/template.rs` check both sides of the exact reserve limits.
+`mining::tests::templates_reject_missing_inputs_without_mutating_chainstate` in `crates/node/src/mining.rs` checks ordinary and budgeted refusal against full coin rows, CoinStats, pool entries, priorities, and revisions.
+`validation_generation_change_retries_before_propagating_rejection` in `crates/node/src/mining/coordinator.rs` checks that obsolete validation cannot publish a candidate.
+`snapshot::tests::mining_resumes_after_snapshot_replaces_a_settled_tip` in `crates/node/src/snapshot.rs` checks template availability after snapshot activation.
 
 ### `API-12`: Mainnet template operational gates
 
@@ -626,9 +641,21 @@ wallet interoperability remain unverified.
 - Failure returns Core `-25` (`TestBlockValidity failed: {reason}`) where `{reason}` is the BIP22 `GetRejectReason` string (`API-19`).
 - This pre-check applies only to `Ordered` selection (`generateblock`).
 - An ordered candidate refused by the mining sigop preflight also returns this `-25` (`bad-blk-sigops`), not an operational `Failed`.
-- `generatetoaddress` (`Mempool`) matches Core `generateBlocks` and skips it.
+- `generatetoaddress` (`Mempool`) skips the ordered pre-check. Its fresh candidate passes the same assembly validation as a served template before solve.
+- Mempool assembly retains the applied tip and commit, membership sequence, and fee-priority revision captured before selection.
+- A revision change during assembly or solve discards that result. Submission checks the same generation under the chain transition lock and after closing mempool admission. That comparison is the submission generation boundary. Later fee-priority edits do not cancel the commit. A stale generation retries without committing. A committed block is never retried. Proof: `mining::tests::fresh_submission_rechecks_generation_under_transition_and_reopens_admission` in `crates/node/src/mining.rs` checks refusal after a competing commit, unchanged applied state, and exact acquisition and settlement of the admission gate. `fresh_submission_observes_fee_changes_while_waiting_for_admission` holds the pool write lock, changes fee priority after submission enters the gate-acquisition method, then checks refusal without changing the applied tip and with admission reopened. `fresh_submission_commits_after_fee_changes_past_generation_check` edits fee priority through the existing commit-only proof-of-work callback after the comparison and before durable commit. It checks the accepted block, exactly one durable commit, matching settlement, retained priority and reopened admission.
+- Read-only generation checks the same generation again after proposal validation and before returning a block.
+- A requested block has at most eight assembly attempts. Retries share its remaining nonce budget, including successful hashes discarded after a revision change.
 - The check calls `apply::validate_block` directly (`ApplyIntent::Propose` already skips hash-meets-target), not GBT `propose` (`API-18` vocabulary).
 - Shutdown and a closed-for-recovery chainstate stay `Unavailable`, not `TestBlockValidity`.
+
+Proof: `mining::tests::templates_reject_missing_inputs_without_mutating_chainstate` in `crates/node/src/mining.rs` checks fresh generation refusal without chain or pool changes.
+`fresh_mempool_validation_refuses_changed_membership_or_fee_revision` in `crates/node/src/mining/coordinator.rs` checks both revision changes after successful and failed validation.
+`generate_retries_changed_revisions_and_bounds_persistent_churn` checks fresh retry and the eight-attempt bound through `MiningCoordinator::generate`.
+`snapshot::tests::mining_resumes_after_snapshot_replaces_a_settled_tip` in `crates/node/src/snapshot.rs` checks generation and submission after snapshot activation.
+`mining::template::tests::solving_consumes_one_attempt_per_hash_and_preserves_exhaustion` in `crates/wire/src/mining/template.rs` checks first-attempt success, zero budget, exhaustion, and nonce wrap.
+`generateblock_validity_wraps_bip22_reason` and `generateblock_validity_keeps_shutdown_operational` in `crates/node/src/mining.rs` retain the ordered error distinction.
+
 ### `API-31`: `generateblock` multipath, ranged, and Expand errors
 
 - Owner: `generateblock_payout_script` in `crates/wire/src/handlers/util.rs`.
@@ -792,7 +819,7 @@ wallet interoperability remain unverified.
 - Address and scripthash summaries, UTXOs, and transaction histories (including summary/mempool and chain pages) reserve one of `esplora_max_queries` slots before capturing the chain view or querying indexes.
 - The positive limit defaults to 2 and is independent of connection and JSON-RPC blocking admission.
 - Exhaustion returns HTTP 503 `expensive Esplora query limit reached` without queuing or index/body work.
-- Script-query permits release after projection and generation checks. Backend bulk permits release when the HTTP response write completes or fails.
+- Script-query permits release after projection and generation checks. Backend bulk and template permits release when the HTTP response write completes or fails.
 - Cheap tip and status routes are exempt.
 - Per-query budgets and HTTP 422 script-limit errors remain unchanged.
 - Fixed-name active, rejected, and execution-latency metrics have no user-input labels.
@@ -875,6 +902,15 @@ wallet interoperability remain unverified.
 - `gettxoutsetinfo` accepts at most three parameters.
 - The measured call is `["muhash", null, false]`.
 - A fourth positional argument MUST return `InvalidParams`.
+
+### `API-38`: HTTP request-head framing
+
+- Owner: the bounded head reader in `crates/wire/src/server.rs`.
+- A carriage return in a request-head line MUST be followed immediately by LF.
+- A bare carriage return produces HTTP 400 before route selection.
+- The check applies to the request head. It does not modify body bytes.
+- Accepted field text retains UTF-8 and horizontal tab support. Header lines can end with LF.
+- Proof: `server::tests::bare_carriage_returns_in_request_heads_are_rejected` checks malformed request lines and header fields through the reader and HTTP response. `server::tests::request_head_validation_preserves_field_text_and_binary_body` checks accepted field text, LF header lines, partial reads, and unchanged binary body bytes.
 
 ## RPC differential testing and in-process embedding status
 

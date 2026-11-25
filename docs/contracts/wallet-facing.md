@@ -67,7 +67,7 @@ Wallet keys, coin selection, and signing stay in the external process.
 - All Esplora transaction projections use a separate 16 MiB budget for previous outputs. It covers input slots before duplicate removal and the script bytes of the referenced outputs.
 - Duplicate transaction rows reuse the first bounded serialization and keep their requested order.
 - Backend bulk response assembly retains at most 16 MiB and returns 503 before it exceeds that limit.
-- Each backend bulk HTTP request holds one node-wide expensive-query slot until the response write completes or fails.
+- Each backend bulk or template HTTP request holds one node-wide expensive-query slot until the response write completes or fails.
 - Transaction batches preserve request order and duplicate rows. They omit missing IDs.
 - Transactions already selected through the mempool or verified index queries may supply those outputs.
 - A decoded block may supply those outputs only when all conditions hold:
@@ -86,6 +86,8 @@ Wallet keys, coin selection, and signing stay in the external process.
   - `backend_mempool_get_keeps_captured_parents_within_a_page`
   - `backend_transaction_batches_share_duplicate_bodies_and_preserve_rows`
   - `backend_bulk_routes_share_expensive_admission`
+  - `backend_templates_share_expensive_admission_through_send`
+  - `server::tests::listeners::expensive_query_saturation_preserves_shared_and_split_listener_service`
   - `esplora::backend::pagination_tests::bulk_request_count_includes_duplicate_entries`
   - `esplora::backend::pagination_tests::bounded_json_reuses_rows_and_refuses_oversized_output`
   - `esplora::projection::tests::prevout_budget_includes_duplicate_input_slots_and_referenced_scripts`

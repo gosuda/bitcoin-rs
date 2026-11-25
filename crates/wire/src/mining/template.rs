@@ -26,12 +26,41 @@ pub struct CandidateContext {
     pub current_time: u32,
     pub locktime_cutoff: u32,
     pub staged_parent_mtp: u32,
+    pub coinbase_reserve: CoinbaseReserve,
     pub network: Network,
     pub csv_active: bool,
     pub segwit_active: bool,
     pub max_weight: u64,
     pub max_size: u64,
     pub max_sigops: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CoinbaseReserve {
+    pub weight: u64,
+    pub sigops: u64,
+}
+
+impl CoinbaseReserve {
+    pub const EXACT: Self = Self {
+        weight: 0,
+        sigops: 0,
+    };
+    pub const DEFAULT_WEIGHT: u64 = 8_000;
+
+    #[must_use]
+    pub fn external(weight: u64) -> Self {
+        Self {
+            weight: weight.clamp(2_000, bitcoin_rs_consensus::MAX_BLOCK_WEIGHT),
+            sigops: 400,
+        }
+    }
+}
+
+impl Default for CoinbaseReserve {
+    fn default() -> Self {
+        Self::external(Self::DEFAULT_WEIGHT)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -195,7 +224,14 @@ impl Candidate {
 }
 
 pub fn solve_block(block: &mut Block, max_tries: u64) -> Result<(), MiningError> {
-    for _ in 0..max_tries {
+    let mut remaining = max_tries;
+    solve_block_with_budget(block, &mut remaining)
+}
+
+pub fn solve_block_with_budget(block: &mut Block, remaining: &mut u64) -> Result<(), MiningError> {
+    let max_tries = *remaining;
+    while *remaining != 0 {
+        *remaining -= 1;
         let hash = Hash256::from(block.header.compute_hash());
         if compact_is_met_by(block.header.bits, hash) {
             return Ok(());
@@ -270,12 +306,6 @@ pub(crate) struct FixedReservation {
 }
 
 impl FixedReservation {
-    pub(crate) const ZERO: Self = Self {
-        weight: 0,
-        size: 0,
-        sigops: 0,
-    };
-
     pub(crate) fn checked_add(self, other: Self) -> Result<Self, MiningError> {
         Ok(Self {
             weight: checked_sum(self.weight, other.weight, "weight")?,
@@ -380,10 +410,21 @@ fn reserve(
             .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?,
         sigops: u64::from(transaction_sigop_cost(&reservation, &[], VerifyFlags::NONE)),
     };
-    let growth = budget
-        .map(|budget| coinbase_growth(&reservation, budget))
-        .transpose()?
-        .unwrap_or(FixedReservation::ZERO);
+    let growth = match budget {
+        Some(budget) => coinbase_growth(&reservation, budget)?,
+        None => {
+            let weight = context.coinbase_reserve.weight.saturating_sub(checked_sum(
+                fixed.weight,
+                4,
+                "weight",
+            )?);
+            FixedReservation {
+                weight,
+                size: weight.div_ceil(4),
+                sigops: context.coinbase_reserve.sigops.saturating_sub(fixed.sigops),
+            }
+        }
+    };
     Ok(Reservation {
         fixed,
         growth,
@@ -629,6 +670,42 @@ mod tests {
 
     const PAYOUT: &[u8] = &[0x51];
 
+    // API-30
+    #[test]
+    fn solving_consumes_one_attempt_per_hash_and_preserves_exhaustion() -> TestResult {
+        let mut block = Network::Regtest.genesis_block();
+        let nonce = block.header.nonce;
+        let mut remaining = 2;
+        solve_block_with_budget(&mut block, &mut remaining)?;
+        assert_eq!(remaining, 1);
+        assert_eq!(block.header.nonce, nonce);
+        solve_block_with_budget(&mut block, &mut remaining)?;
+        assert_eq!(remaining, 0);
+        assert_eq!(block.header.nonce, nonce);
+        assert!(matches!(
+            solve_block_with_budget(&mut block, &mut remaining),
+            Err(MiningError::Unsolved { tries: 0 })
+        ));
+        assert_eq!(block.header.nonce, nonce);
+
+        block.header.bits = CompactTarget::from_consensus(0);
+        block.header.nonce = u32::MAX;
+        remaining = 2;
+        assert!(matches!(
+            solve_block_with_budget(&mut block, &mut remaining),
+            Err(MiningError::Unsolved { tries: 2 })
+        ));
+        assert_eq!(remaining, 0);
+        assert_eq!(block.header.nonce, 1);
+        assert!(matches!(
+            solve_block_with_budget(&mut block, &mut remaining),
+            Err(MiningError::Unsolved { tries: 0 })
+        ));
+        assert_eq!(remaining, 0);
+        assert_eq!(block.header.nonce, 1);
+        Ok(())
+    }
+
     #[derive(Clone, Copy)]
     struct Limits {
         weight: u64,
@@ -657,6 +734,7 @@ mod tests {
             current_time: 2,
             locktime_cutoff: 1,
             staged_parent_mtp: 1,
+            coinbase_reserve: CoinbaseReserve::EXACT,
             network: Network::Regtest,
             csv_active: true,
             segwit_active,
@@ -699,6 +777,43 @@ mod tests {
             sigop_cost,
         ))?;
         Ok(pool)
+    }
+
+    // API-11
+    #[test]
+    fn ordinary_templates_reserve_external_coinbase_sigops() -> TestResult {
+        for (sigops, expected_count) in [(79_599, 1), (79_600, 1), (79_601, 0)] {
+            let candidate = assemble(
+                &CandidateContext {
+                    coinbase_reserve: CoinbaseReserve::default(),
+                    ..context(true, GENEROUS)
+                },
+                &pool_with_tx(sigops)?,
+                None,
+            )?;
+            assert_eq!(candidate.transactions.len(), expected_count);
+            assert!(used(&candidate)?.2 + 400 <= 80_000);
+        }
+        Ok(())
+    }
+
+    // API-11
+    #[test]
+    fn ordinary_templates_reserve_external_coinbase_weight() -> TestResult {
+        let pool = pool_with_tx(0)?;
+        assert_eq!(witnessed_tx(1).weight(), 448);
+        for (weight, expected_count) in [(8_447, 0), (8_448, 1), (8_449, 1)] {
+            let candidate = assemble(
+                &CandidateContext {
+                    coinbase_reserve: CoinbaseReserve::default(),
+                    ..context(true, Limits { weight, ..GENEROUS })
+                },
+                &pool,
+                None,
+            )?;
+            assert_eq!(candidate.transactions.len(), expected_count);
+        }
+        Ok(())
     }
 
     fn assemble(

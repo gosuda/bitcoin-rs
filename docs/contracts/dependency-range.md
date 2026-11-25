@@ -50,13 +50,15 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The `pool-sv2` feature enables these dependencies.
 - Cargo forbids `optional` dev-dependencies.
 - Cargo does not honor `cfg(feature)` in target dev tables.
-- Therefore, the default-feature maximum-lane graph never resolves the exception chain.
-- Only the `--all-features` minimal-lane graph resolves the chain.
-- The exact-version skips above apply in that lane.
+- Cargo resolves optional dependencies into the lockfile as if all workspace features were enabled. Its later compile pass selects the requested features, as documented by the [Cargo resolver](https://doc.rust-lang.org/cargo/reference/resolver.html#features).
+- The default-feature maximum compile does not build the Noise chain. The minimal all-features compile does.
+- Both lanes check bans with all features. The exact-version skips above therefore apply to both ban checks.
 - Only the `pool-sv2`-gated SV2 module and its tests use these dependencies.
 - Range-endpoint graphs are in scope.
 - `cargo deny check bans` runs after each DEP-01 resolve.
 - Missing cargo-deny is a failed prerequisite, not a skip.
+
+Proof: `scripts/check-dep-range.sh minimal` resolves the lower endpoint and checks all targets with all features. `scripts/check-dep-range.sh maximum` resolves the upper endpoint and checks default targets plus the explicit kernel build. Both execute `cargo deny check bans` using the all-features graph in `deny.toml` against their resolved lockfile. A checked-in lockfile alone does not establish either endpoint result.
 
 ### `DEP-03`: One JSON stack and one time stack
 - **Owner**: `deny.toml` `[bans]`.
@@ -93,10 +95,15 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The DEP-01 lanes run `check bans` only.
 
 ## Selected range prerequisites
+- `bytes` is bounded at `>=1.11.1, <2`. SurrealKV requires `bytes 1.11.1` or later.
+- `smallvec` is bounded at `>=1.15.2, <2`. `parking_lot_core 0.10.0` requires `smallvec 1.15.2` or later.
+- The root lock uses `lz4_flex 0.12.3` through SurrealKV. `deny.toml` `[bans].skip` exempts that exact version; `lz4_flex 0.13.1` through Fjall and `lsm-tree` remains unskipped. Neither version is a direct workspace dependency.
+- `windows-link 0.100.0` comes from `generator 0.8.12` through `windows-core 0.100.0`. `deny.toml` `[bans].skip` exempts `0.100.0`; `0.2.1` remains unskipped.
 - `bitcoin_hashes 1.2.0` requires `bitcoin-internals 0.6.0` directly and `bitcoin-internals 0.7.0` through `bitcoin-consensus-encoding 1.3`; only that exact-version split is approved, with `deny.toml` `[bans].skip` pinning `bitcoin-internals@0.6.0`.
 - `base64` is bounded to `>=0.23.1, <0.24` with defaults disabled and `std` (including `alloc`) enabled.
 - `simd-unsafe` remains disabled.
 - `secp256k1` is bounded to `>=0.33.1, <0.34` with `std`, `alloc`, `recovery`, `rand`, and `global-context` enabled. Bitcoin's exact `secp256k1 0.29.100` and `secp256k1-sys 0.10.1` reference line is an approved split, pinned in `deny.toml` `[bans].skip`; it approves no other version.
+- The root, fuzz, LDK, and SV2 template-provider lockfiles use the same `secp256k1 0.29.100` reference line. BIP324 key exchange uses its `Party` API.
 - The metrics exporter's `base64 0.22.1` is an approved exact-version duplicate, not approval for other versions.
 - `proptest` is bounded at `>=1.12, <1.13` and `proptest-state-machine` is pinned at `=0.9.0` in the root `Cargo.toml` `[workspace.dependencies]`.
 - Version `1.12` moves to the `rand_core 0.10` and `rand_xorshift 0.5` family, so the lock carries `rand_core@0.10.1` beside `rand_core@0.9.5` from the selected `rand 0.9` family.
@@ -108,7 +115,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 - The entry describes this `syn` pin only.
 - It does not approve other splits.
 - The minimal lane resolves `bitcoin` 0.32.9, which retains `bitcoin-internals` 0.3.0 beside 0.6.0 and 0.7.0; only that exact-version split is approved, with `deny.toml` `[bans].skip` pinning `bitcoin-internals@0.3.0`.
-- The minimal all-features lane resolves `object` 0.39.1 through `ar_archive_writer` in the USDT probe chain and `object` 0.40.0 through `backtrace` in minimized `tokio`; only that exact-version split is approved, with `deny.toml` `[bans].skip` pinning both versions.
+- The minimal all-features lane resolves `object` 0.39.1 through `ar_archive_writer` in the USDT probe chain and `object` 0.40.0 through `backtrace` in minimized `tokio`. `deny.toml` `[bans].skip` exempts only `0.39.1`; `0.40.0` remains the unskipped anchor.
 - The `secp256k1@0.28.2`, `secp256k1-sys@0.9.2`, and `bitcoin_hashes@0.13.1` exceptions in `deny.toml` `[bans]` are exact-version pins for the `noise_sv2 2.1.0` SV2 chain.
 - This policy matches the `syn` pin above, including their RustCrypto transport companions.
 - When the pinned SRI release family moves, update those exceptions to the exact resolved versions in the same change.
@@ -118,6 +125,7 @@ The committed `Cargo.lock` is one point inside that range, not the contract.
 
 Cargo manifests, lockfiles, cargo-deny, the workspace dependency-direction gate, and capability-compile fixtures exercise dependency and feature policy.
 Separate tool workspaces retain their own checks.
+The listed lockfile versions and dependency owners describe the checked-in graph. They do not establish a passing range endpoint. Each new minimum or maximum resolution requires the complete DEP-01 compile and bans result for that revision.
 Compilation does not establish runtime or interoperability behavior.
 
 ## Feature matrix

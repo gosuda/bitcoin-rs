@@ -39,12 +39,14 @@ pub(crate) fn respond<R>(
     request: Request<'_>,
     send: impl FnOnce(Response) -> R,
 ) -> R {
-    let bulk = surface == Surface::Backend
+    let backend_expensive = surface == Surface::Backend
         && match request {
-            Request::Get(_) => admission::is_backend_bulk_get(path),
+            Request::Get(_) => admission::is_backend_expensive_get(path),
             Request::Post(_) => admission::is_backend_bulk_post(path),
         };
-    let permit = if bulk || (matches!(request, Request::Get(_)) && admission::is_expensive(path)) {
+    let permit = if backend_expensive
+        || (matches!(request, Request::Get(_)) && admission::is_expensive(path))
+    {
         let Some(permit) = handler.context().esplora_admission.try_acquire() else {
             return send(crate::rest::service_unavailable(
                 "expensive Esplora query limit reached",
@@ -66,7 +68,7 @@ pub(crate) fn respond<R>(
             }
         }
     };
-    if !bulk {
+    if !backend_expensive {
         drop(permit);
     }
     send(response)
@@ -3185,6 +3187,86 @@ mod tests {
         assert_eq!(paged.status, 200);
         let values: Value = sonic_rs::from_slice(&paged.body).expect("mempool response json");
         assert_eq!(values[0]["txid"], json!(txid.to_string()));
+    }
+
+    // API-08, API-09, WF-02
+    #[test]
+    fn backend_templates_share_expensive_admission_through_send() {
+        use crate::mining::{
+            BlockTemplate, CandidateContext, CoinbaseReserve, FakeMiningControl, MiningRule,
+            assemble_candidate,
+        };
+
+        let mut context = Context::new().with_esplora_query_limit(std::num::NonZeroUsize::MIN);
+        context.chain.chain_network = bitcoin_rs_consensus::primitives::Network::Regtest;
+        let candidate = assemble_candidate(
+            &CandidateContext {
+                previous_block_hash: Hash256::default(),
+                height: 1,
+                version: 0x2000_0000,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                min_time: 1,
+                current_time: 1,
+                locktime_cutoff: 0,
+                staged_parent_mtp: 0,
+                network: context.chain.chain_network,
+                csv_active: true,
+                segwit_active: true,
+                max_weight: 4_000_000,
+                max_size: 4_000_000,
+                max_sigops: 80_000,
+                coinbase_reserve: CoinbaseReserve::EXACT,
+            },
+            &context.mempool.gateway.pool().read(),
+            &[0x51],
+        )
+        .expect("empty candidate");
+        let control = FakeMiningControl::with_template(
+            BlockTemplate {
+                candidate: Arc::new(candidate),
+                rules: vec![MiningRule::new("segwit")],
+                version_bits_available: Vec::new(),
+                version_bits_required: 0,
+                capabilities: Vec::new(),
+                mutable: Vec::new(),
+                submit_old: None,
+                signet: None,
+            },
+            FakeMiningControl::default().info.into_inner(),
+        );
+        let ctx = Arc::new(context.with_mining_control(control.clone()));
+        let handler = Handler::new(Arc::clone(&ctx));
+        let permit = ctx
+            .esplora_admission
+            .try_acquire()
+            .expect("reserve the only slot");
+        for path in ["/block-template", "/block-template/"] {
+            assert_eq!(backend_route(&handler, path, "").status, 503);
+        }
+        assert_eq!(control.template_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(route(&handler, "/block-template", "").status, 404);
+        drop(permit);
+
+        for result in [Ok(()), Err(std::io::ErrorKind::BrokenPipe)] {
+            let sent = super::respond(
+                &handler,
+                super::Surface::Backend,
+                "/block-template",
+                super::Request::Get(""),
+                |response| {
+                    assert_eq!(response.status, 200);
+                    assert!(ctx.esplora_admission.try_acquire().is_none());
+                    result
+                },
+            );
+            assert_eq!(sent, result);
+            let released = ctx
+                .esplora_admission
+                .try_acquire()
+                .expect("response write released the slot");
+            drop(released);
+        }
+        assert_eq!(control.template_calls.load(Ordering::Relaxed), 2);
     }
 
     // API-09, WF-02
