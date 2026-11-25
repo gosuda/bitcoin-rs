@@ -3,6 +3,12 @@
 # Linux-lane fixtures only: native Windows runs provision the pinned Core
 # through scripts/install-bitcoind.sh (it selects the win64 archive).
 set -euo pipefail
+# A relative PYTHON override with a slash would resolve against the checkout
+# after the cd below; anchor it to the caller's directory first. Bare names
+# keep PATH lookup.
+if [[ -n "${PYTHON:-}" && "${PYTHON}" == */* && "${PYTHON}" != /* ]]; then
+  PYTHON="$PWD/${PYTHON}"
+fi
 cd "$(dirname "$0")/.."
 
 mode="${1:-}"
