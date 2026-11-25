@@ -1,4 +1,4 @@
-"""Manual proofs-stage regression: uv run scripts/tests/proofs_crate_paths.py --verbose."""
+"""Manual proofs-stage regression: python3 scripts/tests/proofs_crate_paths.py --verbose."""
 
 import os
 import re
