@@ -3,8 +3,9 @@
 FROM rust:1.100.0-bookworm@sha256:75d26c23c24cc6ea1cdabf0714a6bff8fd7bf3248716043fd7ae86dac7f41b94 AS build
 WORKDIR /build
 COPY . .
+# The target cache is scoped to the builder above; rotate the id with the FROM pin.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/cargo-target \
+    --mount=type=cache,target=/cargo-target,id=sv2-template-provider-cargo-target-rust-1.100.0-bookworm \
     CARGO_TARGET_DIR=/cargo-target cargo build --release --locked --manifest-path tools/stratum-sv2/template-provider/Cargo.toml \
     && cp /cargo-target/release/bitcoin-rs-sv2-template-provider /template-provider
 
