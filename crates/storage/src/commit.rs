@@ -443,10 +443,10 @@ impl CommitAuthority {
         )?;
 
         for (height, hash, record) in &prefix.undo_rows {
-            batch.put(
+            batch.put_value(
                 ColumnFamily::UndoData,
                 &block_undo_key(*height, *hash),
-                record,
+                record.clone(),
             );
         }
 
