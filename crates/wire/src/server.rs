@@ -4310,10 +4310,12 @@ mod tests {
             for _ in 0..CONNECTIONS {
                 let admitted_by = Instant::now() + Duration::from_secs(5);
                 while connections.live_count() != 0 {
-                    assert!(
-                        Instant::now() < admitted_by,
-                        "the previous connection did not release its slot"
-                    );
+                    if Instant::now() >= admitted_by {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "the previous connection did not release its slot",
+                        ));
+                    }
                     thread::sleep(Duration::from_millis(1));
                 }
                 let mut client = TcpStream::connect(addr)?;
