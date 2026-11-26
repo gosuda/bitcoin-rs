@@ -265,10 +265,8 @@ impl WindowWorkspace {
             return Ok(());
         }
 
-        let is_bip30 = bitcoin_rs_consensus::bip30::is_bip30_exception(
-            height,
-            Hash256::from(block.block_hash()),
-        );
+        let hash = Hash256::from(block.block_hash());
+        let is_bip30 = bitcoin_rs_consensus::bip30::is_bip30_exception(height, hash);
         let mut created_owned = Vec::new();
         let mut spent_outpoints = Vec::new();
         let mut bip30_overwrites = Vec::new();
@@ -284,15 +282,15 @@ impl WindowWorkspace {
                 );
             }
 
-            let (created, live_outs) = collect_created_outputs(
+            let live_outs = collect_created_outputs(
                 tx,
                 txid,
                 height,
                 coinbase(tx),
                 self.max_script_size,
                 same_block_spent,
+                &mut created_owned,
             );
-            created_owned.extend(created);
             if !live_outs.is_empty() {
                 for out in &live_outs {
                     self.spent.remove(&OutPoint::new(txid, out.vout));
@@ -315,7 +313,7 @@ impl WindowWorkspace {
 
         let transition = BlockTransition {
             height,
-            hash: Hash256::from(block.block_hash()),
+            hash,
             prev_hash: block.header.prev_blockhash.into(),
             created: created_owned,
             spent_outpoints,
@@ -507,8 +505,8 @@ fn collect_created_outputs(
     coinbase: bool,
     max_script_size: usize,
     same_block_spent: &HashSet<OutPoint>,
-) -> (Vec<CreatedOwned>, Vec<LiveOut>) {
-    let mut created = Vec::new();
+    created: &mut Vec<CreatedOwned>,
+) -> Vec<LiveOut> {
     let mut live_outs = Vec::new();
     for (vout, txout) in (0u32..).zip(&tx.outputs) {
         let script = &txout.script_pubkey;
@@ -538,7 +536,7 @@ fn collect_created_outputs(
             spent: false,
         });
     }
-    (created, live_outs)
+    live_outs
 }
 
 fn record_bip30_overwrites(
@@ -790,7 +788,7 @@ impl OutputSource for WindowWorkspace {
                     outpoint: *outpoint,
                     txout: TxOut {
                         value: Amount::from_sat(out.value),
-                        script_pubkey: out.script_pubkey.clone().to_vec().into(),
+                        script_pubkey: out.script_pubkey.to_vec().into(),
                     },
                     coinbase: out.coinbase,
                     height: out.height,

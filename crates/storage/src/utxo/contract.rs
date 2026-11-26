@@ -510,9 +510,8 @@ impl BlockChangeInputs<'_, '_> {
             .is_some_and(|spends| spends.contains(&outpoint))
     }
 
-    fn is_unstorable(&self, txout: &TxOut) -> bool {
-        txout.script_pubkey.first() == Some(&0x6a)
-            || txout.script_pubkey.len() > self.max_script_size
+    fn is_unstorable(&self, script_pubkey: &[u8]) -> bool {
+        script_pubkey.first() == Some(&0x6a) || script_pubkey.len() > self.max_script_size
     }
 }
 
@@ -527,7 +526,7 @@ impl ChangeBuilder {
     fn with_capacity(adds: usize, removes: usize, height: u32) -> Self {
         Self {
             changes: BlockChanges::with_capacity(adds, removes),
-            undo: UndoBatch::empty(),
+            undo: UndoBatch::from_parts(Vec::with_capacity(removes), Vec::with_capacity(adds)),
             totals: BlockValueTotals::default(),
             height,
         }
@@ -551,13 +550,14 @@ impl ChangeBuilder {
             let same_block = inputs.contains(outpoint);
             let value = tx.output_value(vout_idx);
             self.account_output_value(coinbase, same_block, value.to_sat())?;
-            let txout = TxOut {
-                value,
-                script_pubkey: Script::from_bytes(tx.output_script(vout_idx).to_vec()),
-            };
-            if same_block || inputs.is_unstorable(&txout) {
+            let script_pubkey = tx.output_script(vout_idx);
+            if same_block || inputs.is_unstorable(script_pubkey) {
                 continue;
             }
+            let txout = TxOut {
+                value,
+                script_pubkey: Script::from_bytes(script_pubkey.to_vec()),
+            };
             self.stage_created(outpoint, txout, coinbase);
         }
         Ok(())
