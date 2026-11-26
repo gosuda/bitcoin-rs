@@ -401,7 +401,7 @@ impl<S: Read> Peer<S> {
         admit: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
     ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         let net_trace = self.net_trace.as_ref();
-        let counters = self.counters.clone();
+        let counters = self.counters.as_ref();
         self.recv
             .read_message(
                 &mut self.stream,
