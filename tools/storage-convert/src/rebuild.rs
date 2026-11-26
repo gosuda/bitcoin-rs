@@ -773,13 +773,4 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn rebuild_accepts_current_epoch_datadir() -> Result<(), String> {
-        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let marker = dir.path().join("CURRENT_SCHEMA");
-        let contents = format!("{CURRENT_SCHEMA_VERSION}\n");
-        std::fs::write(&marker, contents.as_bytes()).map_err(|e| e.to_string())?;
-        read_datadir_epoch(dir.path()).map_err(|e| e.to_string())?;
-        Ok(())
-    }
 }

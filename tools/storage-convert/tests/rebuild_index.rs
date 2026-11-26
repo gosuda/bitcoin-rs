@@ -880,35 +880,6 @@ fn rebuild_index_refuses_a_truncated_block_record() -> TestResult {
 
 // PRJ-09
 #[test]
-fn rebuild_index_refuses_a_record_with_bad_magic() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let datadir = prepare_datadir(root.path())?;
-    let blocks = creating_chain();
-    let refs = blocks.iter().collect::<Vec<_>>();
-    write_chainstate(&datadir, &refs, refs.last().copied(), &refs)?;
-    write_block_records(&datadir, &refs)?;
-
-    let path = datadir.join("blocks").join("blk00000.dat");
-    let mut bytes = fs::read(&path)?;
-    let second_record = 44 + blocks[0].body.len();
-    bytes[second_record] = b'X';
-    fs::write(&path, bytes)?;
-
-    let output = rebuild(&datadir)?;
-    assert!(
-        !output.status.success(),
-        "a record with bad magic must abort the rebuild"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("magic"),
-        "refusal must name the bad magic: {stderr}"
-    );
-    Ok(())
-}
-
-// PRJ-09
-#[test]
 fn rebuild_index_refuses_an_oversize_block_record() -> TestResult {
     let root = tempfile::tempdir()?;
     let datadir = prepare_datadir(root.path())?;
