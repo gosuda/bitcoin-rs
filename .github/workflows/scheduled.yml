@@ -19,6 +19,7 @@ env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
 jobs:
   dependency-range:
