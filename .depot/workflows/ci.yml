@@ -11,7 +11,7 @@ on:
 # A newer push supersedes its pull-request run; merge-queue, manual and push
 # runs are never substitutes for each other and stay outside the cancel group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -74,7 +74,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Lockfile, tests and clippy
         run: |
           changed_rc=0; bash scripts/ci-setup.sh changed '^(tools/stratum-sv2/template-provider/|crates/|Cargo\.(toml|lock)$)' || changed_rc=$?
@@ -100,7 +99,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: bash scripts/ci-setup.sh apt nextest corpus
       - name: Run lane
         run: |
