@@ -23,7 +23,7 @@ mod tx_decode;
 mod tx_render;
 pub mod zmq;
 
-pub use auth::Auth;
+pub use auth::Auth ;
 pub use manifest::MANIFEST_TOML;
 
 pub use error::RpcError;
