@@ -354,11 +354,9 @@ impl KvStore for RocksDbStore {
         } else {
             let mut indexed: Vec<(usize, &&[u8])> = keys.iter().enumerate().collect();
             indexed.sort_by_key(|(_, a)| *a);
-            let sorted_keys: Vec<&[u8]> = indexed.iter().map(|(_, k)| **k).collect();
-
             let results = self.db.batched_multi_get_cf_opt(
                 handle,
-                sorted_keys.iter().copied(),
+                indexed.iter().map(|(_, k)| **k),
                 true,
                 &read_options,
             );
