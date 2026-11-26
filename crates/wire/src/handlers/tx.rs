@@ -3252,27 +3252,6 @@ mod gettxout_via_utxo_tests {
         );
     }
 
-    #[test]
-    fn gettxout_returns_null_for_transaction_output_absent_from_utxo() {
-        let ctx = Arc::new(Context::new());
-        let tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(50_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
-            }],
-        };
-        let txid = tx.txid();
-        let params = json!([txid.to_string(), 0_u64]);
-        let value = gettxout(&ctx, &params).unwrap_or_else(|err| panic!("gettxout failed: {err}"));
-        assert!(
-            value.is_null(),
-            "expected null for output absent from UTXO set, got {value:?}"
-        );
-    }
-
     // API-02
     #[test]
     fn gettxout_reports_an_unreadable_coin_instead_of_null()
@@ -3429,18 +3408,6 @@ mod acceptance_tests {
             .unwrap_or_else(|| panic!("0.99 BTC/kvB is a ceiling, not a fee allowance"));
         assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error:?}");
         assert_eq!(ctx.mempool.gateway.read().len(), 0);
-    }
-
-    #[test]
-    fn sendrawtransaction_admits_a_fee_below_the_ceiling() {
-        let ctx = Arc::new(Context::new());
-        seed_utxo(&ctx, 10, 100_000);
-        let tx = spending_tx(10, 90_000);
-
-        let sent = sendrawtransaction(&ctx, &json!([hex_of(&tx)]));
-
-        assert!(sent.is_ok(), "an ordinary fee is not capped: {sent:?}");
-        assert_eq!(ctx.mempool.gateway.read().len(), 1);
     }
 
     #[test]

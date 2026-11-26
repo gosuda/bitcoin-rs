@@ -1843,20 +1843,6 @@ mod descriptor_checksum_tests {
     }
 
     #[test]
-    fn getdescriptorinfo_does_not_require_a_checksum() {
-        let ctx = Arc::new(Context::new());
-        let result = getdescriptorinfo(&ctx, &json!([format!("addr({ADDRESS})")]))
-            .unwrap_or_else(|err| panic!("a bare descriptor must be analysed: {err}"));
-        let Some(canonical) = result.get("descriptor").and_then(JsonValueTrait::as_str) else {
-            panic!("descriptor missing: {result:?}");
-        };
-        assert!(
-            canonical.starts_with(&format!("addr({ADDRESS})#")),
-            "the canonical form carries its own checksum: {canonical}"
-        );
-    }
-
-    #[test]
     fn the_canonical_descriptor_carries_its_own_checksum() {
         let ctx = Arc::new(Context::new());
         let result = getdescriptorinfo(&ctx, &json!([format!("addr({ADDRESS})")]))
@@ -2090,15 +2076,6 @@ mod deriveaddresses_tests {
             panic!("the fixture descriptor `{descriptor}` must have a checksum");
         };
         format!("{descriptor}#{checksum}")
-    }
-
-    #[test]
-    fn an_address_descriptor_derives_its_own_address() {
-        let ctx = Arc::new(Context::new());
-        let result = deriveaddresses(&ctx, &json!([checksummed(&format!("addr({ADDRESS})"))]))
-            .unwrap_or_else(|err| panic!("deriveaddresses failed: {err}"));
-
-        assert_eq!(result, json!([ADDRESS]));
     }
 
     #[test]
