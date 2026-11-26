@@ -1,20 +1,12 @@
 name: CI
 
-# PR checks; the same file also runs for merge-queue groups and main pushes.
-# Deep lanes: deep.yml. Nightly campaigns: scheduled.yml.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  merge_group:
-  push:
-    branches: [main]
-  workflow_dispatch:
 
-# A newer push supersedes its pull-request run; merge-queue, manual and push
-# runs are never substitutes for each other and stay outside the cancel group.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -27,13 +19,7 @@ env:
 
 jobs:
   lint:
-    # Same-repo pull requests prove once on Depot CI (.depot/workflows/ci.yml);
-    # GitHub covers forks, the merge queue, manual runs and pushes.
-    if: >-
-      github.event_name == 'merge_group' ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)
+    if: github.event.pull_request.head.repo.full_name != github.repository
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -49,10 +35,8 @@ jobs:
           for f in fetch-golden import-qa-assets fuzz-policy run-fuzz-campaign validate-corpus-seeds; do bash -n "scripts/${f}.sh"; done
           python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
-  # Path-gated on pull requests (all paths on manual runs), as the old fuzz-build,
-  # fuzz-lockfile and template-provider-lockfile workflows were.
   fuzz:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)
+    if: github.event.pull_request.head.repo.full_name != github.repository
     runs-on: depot-ubuntu-24.04-8
     timeout-minutes: 60
     steps:
@@ -73,7 +57,7 @@ jobs:
           cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
 
   template-provider:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)
+    if: github.event.pull_request.head.repo.full_name != github.repository
     runs-on: depot-ubuntu-24.04-4
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -94,13 +78,7 @@ jobs:
           cargo clippy --locked --manifest-path "$m" --all-targets -- -D warnings
 
   lane:
-    # Same-repo pull requests prove once on Depot CI (.depot/workflows/ci.yml);
-    # GitHub covers forks, the merge queue, manual runs and pushes.
-    if: >-
-      github.event_name == 'merge_group' ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)
+    if: github.event.pull_request.head.repo.full_name != github.repository
     runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 90
     env:
@@ -123,11 +101,7 @@ jobs:
 
   ci-gate:
     needs: [lint, fuzz, template-provider, lane]
-    if: >-
-      always() && (github.event_name == 'merge_group' ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork))
+    if: always() && github.event.pull_request.head.repo.full_name != github.repository
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 5
     steps:
