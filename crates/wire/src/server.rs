@@ -4286,8 +4286,16 @@ mod tests {
         )
     }
 
+    #[derive(Debug, thiserror::Error)]
+    enum TrackerExchangeError {
+        #[error("rpc socket: {0}")]
+        Io(#[from] io::Error),
+        #[error("the previous connection did not release its slot within {0:?}")]
+        SlotNotReleased(Duration),
+    }
+
     #[test]
-    fn closed_connections_leave_no_retained_tracker_entries() -> io::Result<()> {
+    fn closed_connections_leave_no_retained_tracker_entries() -> Result<(), TrackerExchangeError> {
         const CONNECTIONS: usize = 1_000;
         const MAX_CONNECTIONS: usize = 4;
         let server = accept_test_server()?;
@@ -4305,16 +4313,14 @@ mod tests {
             )
         });
 
-        let exchanges = (|| -> io::Result<()> {
+        let exchanges = (|| -> Result<(), TrackerExchangeError> {
+            const SLOT_RELEASE: Duration = Duration::from_secs(5);
             let request = json_rpc_head(None, 0);
             for _ in 0..CONNECTIONS {
-                let admitted_by = Instant::now() + Duration::from_secs(5);
+                let admitted_by = Instant::now() + SLOT_RELEASE;
                 while connections.live_count() != 0 {
                     if Instant::now() >= admitted_by {
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "the previous connection did not release its slot",
-                        ));
+                        return Err(TrackerExchangeError::SlotNotReleased(SLOT_RELEASE));
                     }
                     thread::sleep(Duration::from_millis(1));
                 }
