@@ -35,6 +35,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: bash scripts/ci-setup.sh apt msrv nightly deny
       - run: KEEP_LOCK=1 scripts/check-dep-range.sh ${{ matrix.range }}
 
@@ -50,6 +51,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - if: matrix.lane == 'native'
         run: bash scripts/ci-setup.sh apt
       - run: scripts/check-feature-matrix.sh ${{ matrix.lane }}
@@ -68,6 +70,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: bash scripts/ci-setup.sh apt msrv
       - name: Workspace default targets
         run: cargo check --locked --workspace --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
