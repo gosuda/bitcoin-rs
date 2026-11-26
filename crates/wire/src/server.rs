@@ -1038,17 +1038,15 @@ fn trim_header_value(value: &str) -> &str {
     })
 }
 
-fn read_headers(
-    reader: &mut impl BufRead,
-    mut header_bytes: usize,
-) -> io::Result<(
-    usize,
-    Option<usize>,
-    Option<String>,
-    bool,
-    Option<String>,
-    Option<String>,
-)> {
+struct ParsedHeaders {
+    content_length: Option<usize>,
+    authorization: Option<String>,
+    keep_alive: bool,
+    host: Option<String>,
+    origin: Option<String>,
+}
+
+fn read_headers(reader: &mut impl BufRead, mut header_bytes: usize) -> io::Result<ParsedHeaders> {
     let mut content_length = None;
     let mut content_length_text = None;
     let mut authorization = None;
@@ -1066,14 +1064,13 @@ fn read_headers(
         }
         header_bytes += read;
         if line == "\r\n" {
-            return Ok((
-                header_bytes,
+            return Ok(ParsedHeaders {
                 content_length,
                 authorization,
                 keep_alive,
                 host,
                 origin,
-            ));
+            });
         }
         header_count += 1;
         if header_count > MAX_HEADER_COUNT {
@@ -1183,10 +1180,9 @@ pub(crate) fn read_request_head(
     if method.is_empty() || !method.bytes().all(is_token_char) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request method").into());
     }
-    let (_, content_length, authorization, keep_alive, host, origin) =
-        read_headers(reader, request_line.len())?;
+    let headers = read_headers(reader, request_line.len())?;
 
-    let content_length = match (method, content_length) {
+    let content_length = match (method, headers.content_length) {
         ("POST", None) => {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidData, "missing content-length").into(),
@@ -1204,11 +1200,11 @@ pub(crate) fn read_request_head(
     Ok(Some(RequestHead {
         method: method.to_owned(),
         path: path.to_owned(),
-        authorization,
-        keep_alive,
+        authorization: headers.authorization,
+        keep_alive: headers.keep_alive,
         content_length,
-        host,
-        origin,
+        host: headers.host,
+        origin: headers.origin,
     }))
 }
 
@@ -1898,23 +1894,21 @@ fn render_response_head(head: &ResponseHead<'_>) -> String {
         methods,
         headers,
         expose,
-        allow_origin,
+        allow_origin: Some(allow_origin),
     } = &head.cors_policy
     {
-        if let Some(allow_origin) = allow_origin {
-            header.push_str("Access-Control-Allow-Origin: ");
-            header.push_str(allow_origin);
+        header.push_str("Access-Control-Allow-Origin: ");
+        header.push_str(allow_origin);
+        header.push_str("\r\n");
+        for (name, values) in [
+            ("Access-Control-Allow-Methods", *methods),
+            ("Access-Control-Allow-Headers", *headers),
+            ("Access-Control-Expose-Headers", *expose),
+        ] {
+            header.push_str(name);
+            header.push_str(": ");
+            header.push_str(&values.join(", "));
             header.push_str("\r\n");
-            for (name, values) in [
-                ("Access-Control-Allow-Methods", *methods),
-                ("Access-Control-Allow-Headers", *headers),
-                ("Access-Control-Expose-Headers", *expose),
-            ] {
-                header.push_str(name);
-                header.push_str(": ");
-                header.push_str(&values.join(", "));
-                header.push_str("\r\n");
-            }
         }
     }
     if head.status != 204 {
