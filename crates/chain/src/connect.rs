@@ -3154,15 +3154,15 @@ fn check_block_sigops(
 ) -> Result<(), ApplyError> {
     let mut view = BlockLocalUtxoView::new(resolved, image, height, 0);
     let mut cost = 0_u32;
+    let mut prevouts = Vec::new();
     for (index, txid) in txids.iter().enumerate() {
         let tx = image.tx(index);
-        let prevouts: Vec<_> = (0..tx.input_count())
-            .filter_map(|input_index| {
-                let previous_output = tx.input_outpoint(input_index);
-                view.lookup(&previous_output)
-                    .map(|output| (previous_output, output))
-            })
-            .collect();
+        prevouts.clear();
+        prevouts.extend((0..tx.input_count()).filter_map(|input_index| {
+            let previous_output = tx.input_outpoint(input_index);
+            view.lookup(&previous_output)
+                .map(|output| (previous_output, output))
+        }));
         cost = cost.saturating_add(bitcoin_rs_consensus::transaction_sigop_cost_view(
             tx.into(),
             &prevouts,
