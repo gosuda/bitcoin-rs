@@ -10,6 +10,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A newer push supersedes its pull-request run; merge-queue, manual and push
+# runs are never substitutes for each other and stay outside the cancel group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
