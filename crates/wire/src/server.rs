@@ -4308,6 +4308,14 @@ mod tests {
         let exchanges = (|| -> io::Result<()> {
             let request = json_rpc_head(None, 0);
             for _ in 0..CONNECTIONS {
+                let admitted_by = Instant::now() + Duration::from_secs(5);
+                while connections.live_count() != 0 {
+                    assert!(
+                        Instant::now() < admitted_by,
+                        "the previous connection did not release its slot"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
                 let mut client = TcpStream::connect(addr)?;
                 client.set_read_timeout(Some(Duration::from_secs(5)))?;
                 client.write_all(&request)?;
