@@ -36,7 +36,7 @@ job set.
 
 ## Pull-request verification
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs for pull requests
+[`.depot/workflows/ci.yml`](.depot/workflows/ci.yml) runs for pull requests
 against any base branch (including stacked PRs), on merge-group requests, and
 for pushes to `main`. PR green is fast feedback only: `fmt`, `deny`,
 `contracts`, `clippy`, and `test-crates` passed while `book`, `test-binary`,
@@ -95,22 +95,34 @@ The merge queue enforces the integration contract on the latest combined ref
   `test-workspace`, and kernel/native checks are skipped to keep feedback fast
   (<3 min).
 - **Merge-group green (`merge_group`)**: Pre-dev integration eligibility.
-  `deep-gate` in [`deep.yml`](.github/workflows/deep.yml) requires the
+  `deep-gate` in [`deep.yml`](.depot/workflows/deep.yml) requires the
   `tests` matrix (`test-binary`, `test-workspace`), `book`, and `kernel`
   (consensus kernel clippy with kernel-oracle parity, plus full-node
   kernel clippy); `ci-gate` keeps requiring the PR lane.
 - **Main green (`push`)**: Post-merge historical evidence. Pushes to `main`
   run the extended campaigns and reference verifications in
-  [`deep.yml`](.github/workflows/deep.yml).
+  [`deep.yml`](.depot/workflows/deep.yml).
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) publishes the `ci-gate`
+Depot CI owns same-repository pull requests, merge groups, main pushes,
+compatibility schedules, and manual validation runs. GitHub Actions runs
+the fork pull-request fallback in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). Both paths use only
+explicit `depot-ubuntu-24.04` runner sizes and keep the same validation
+commands. Their pull-request conditions do not overlap.
+
+GitHub Actions also owns Pages publication, which uses the `github-pages`
+environment, and the daily fuzz campaign, which publishes to the separate
+corpus repository with `FUZZ_CORPUS_TOKEN`. Both use Depot runners. Keep
+these publication permissions separate from read-only validation.
+
+[`.depot/workflows/ci.yml`](.depot/workflows/ci.yml) publishes the `ci-gate`
 aggregate job: it needs `lint`, `fuzz`, `template-provider`, and `lane`, fails
 unless `lint` and `lane` succeed, and accepts `fuzz` and `template-provider`
 as `success` or `skipped` because both are event-gated to pull requests and
 manual runs (on pull requests their jobs return early success when the
 touched paths do not match).
 
-[`.github/workflows/deep.yml`](.github/workflows/deep.yml) publishes the
+[`.depot/workflows/deep.yml`](.depot/workflows/deep.yml) publishes the
 `deep-gate` aggregate job: it needs `tests`, `book`, `kernel`, and `pinned`,
 requires the first three to succeed, and accepts `pinned` as `success` or
 `skipped` because it is event-gated.
@@ -122,14 +134,14 @@ its jobs cannot be required as pull-request checks.
 
 ## Post-merge CI lanes
 
-[`.github/workflows/deep.yml`](.github/workflows/deep.yml) runs kernel-enabled
+[`.depot/workflows/deep.yml`](.depot/workflows/deep.yml) runs kernel-enabled
 tests and the main-only verification lanes. It triggers on pushes to `main` and
 on manual dispatch. The lanes are bench smoke, native-script evidence, the
 kernel oracle, and Core differential. Bench smoke
 includes the witness-activation kernel regression and the SegWit-v0 kernel
 oracle.
 Pull-request-triggered checks are defined in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml). The `fuzz`
+[`.depot/workflows/ci.yml`](.depot/workflows/ci.yml). The `fuzz`
 and `template-provider` jobs start on every pull request and on manual
 dispatch; on pull requests each validation step is path-gated and also
 covers shared workspace and crate manifests, while manual dispatch runs
@@ -184,7 +196,7 @@ cargo install cargo-fuzz
 cargo +nightly fuzz run block_validate --target x86_64-unknown-linux-gnu -- -runs=10000
 ```
 
-[`ci.yml`](.github/workflows/ci.yml) compiles every fuzz
+[`ci.yml`](.depot/workflows/ci.yml) compiles every fuzz
 target on pull requests that touch `fuzz/**` or any `Cargo.toml`; the scheduled campaign is defined in
 [`.github/workflows/daily-fuzz.yml`](.github/workflows/daily-fuzz.yml). See
 [`fuzz/README.md`](fuzz/README.md) for local fuzzing, the
@@ -211,7 +223,7 @@ Each lane also runs `cargo deny check bans` against the mutated lockfile.
 Optional native storage backends are owned by the named feature matrix, not
 this script.
 CI runs these endpoints in the scheduled/manual
-[`scheduled.yml`](.github/workflows/scheduled.yml).
+[`scheduled.yml`](.depot/workflows/scheduled.yml).
 
 ### Bitcoin Core differential
 
@@ -237,7 +249,7 @@ scripts/check-feature-matrix.sh pure   # kernel-free and C++-engine-free crate r
 ```
 
 CI runs the matrix and the MSRV gate in the scheduled/manual
-[`scheduled.yml`](.github/workflows/scheduled.yml).
+[`scheduled.yml`](.depot/workflows/scheduled.yml).
 
 ## Architecture and contribution scope
 
