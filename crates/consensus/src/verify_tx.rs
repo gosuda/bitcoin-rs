@@ -175,7 +175,7 @@ pub fn verify_transaction_input_outpoints_view(tx: TxView<'_>) -> Result<(), Con
     if tx.is_coinbase() {
         return Ok(());
     }
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::with_capacity(tx.input_count());
     for input_index in 0..tx.input_count() {
         let outpoint = tx.input_outpoint(input_index);
         if outpoint.is_null() {
@@ -251,12 +251,13 @@ fn prepare_tx_checks(
     let mut input_value = 0u64;
     let mut prevouts = Vec::with_capacity(tx.input_count());
     for input_index in 0..tx.input_count() {
-        let prevout = lookup(input_index, &tx.input_outpoint(input_index))
-            .ok_or(ConsensusError::MissingPrevout { input_index })?;
+        let outpoint = tx.input_outpoint(input_index);
+        let prevout =
+            lookup(input_index, &outpoint).ok_or(ConsensusError::MissingPrevout { input_index })?;
         input_value = input_value
             .checked_add(prevout.value.to_sat())
             .ok_or(ConsensusError::OutputValueOverflow)?;
-        prevouts.push((tx.input_outpoint(input_index), prevout));
+        prevouts.push((outpoint, prevout));
     }
 
     Ok(Some(TxPrep {

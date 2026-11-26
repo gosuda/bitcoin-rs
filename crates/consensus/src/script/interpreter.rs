@@ -511,7 +511,7 @@ fn verify_script<'a>(
         }
         stack = redeem_stack;
         let redeem = match stack.pop() {
-            Ok(item) => item_bytes_owned(&item),
+            Ok(item) => item_bytes_owned(item),
             Err(_) => return Err(invalid(ScriptErrCode::InvalidStackOperation)),
         };
         eval::eval_script(
@@ -571,7 +571,8 @@ fn verify_witness_program<'a>(
     }
 
     let mut witness_stack = Stack::new();
-    let (witness_script, element_count): (Cow<'a, [u8]>, usize) = match program.len() {
+    let p2wpkh_code;
+    let (witness_script, element_count): (&[u8], usize) = match program.len() {
         32 => {
             let Some(script) = witness.last() else {
                 return Err(invalid(ScriptErrCode::WitnessProgramWitnessEmpty));
@@ -579,13 +580,14 @@ fn verify_witness_program<'a>(
             if Sha256::digest(script).as_slice() != program {
                 return Err(invalid(ScriptErrCode::WitnessProgramMismatch));
             }
-            (Cow::Borrowed(script), witness.len() - 1)
+            (script, witness.len() - 1)
         }
         20 => {
             if witness.len() != 2 {
                 return Err(invalid(ScriptErrCode::WitnessProgramMismatch));
             }
-            (Cow::Owned(p2wpkh_script_code(program)), witness.len())
+            p2wpkh_code = p2wpkh_script_code(program);
+            (&p2wpkh_code, witness.len())
         }
         _ => return Err(invalid(ScriptErrCode::WitnessProgramWrongLength)),
     };
@@ -602,7 +604,7 @@ fn verify_witness_program<'a>(
     let mut weight: Option<i64> = None;
     eval::eval_script(
         &mut witness_stack,
-        &witness_script,
+        witness_script,
         flags,
         checker,
         SigVersion::WitnessV0,
@@ -618,21 +620,21 @@ fn verify_witness_program<'a>(
     Ok(())
 }
 
-fn p2wpkh_script_code(program: &[u8]) -> Vec<u8> {
-    let mut script = Vec::with_capacity(5 + program.len());
-    script.push(crate::script::opcode::OP_DUP);
-    script.push(crate::script::opcode::OP_HASH160);
-    script.push(0x14);
-    script.extend_from_slice(program);
-    script.push(crate::script::opcode::OP_EQUALVERIFY);
-    script.push(crate::script::opcode::OP_CHECKSIG);
+fn p2wpkh_script_code(program: &[u8]) -> [u8; 25] {
+    let mut script = [0_u8; 25];
+    script[0] = crate::script::opcode::OP_DUP;
+    script[1] = crate::script::opcode::OP_HASH160;
+    script[2] = 0x14;
+    script[3..23].copy_from_slice(program);
+    script[23] = crate::script::opcode::OP_EQUALVERIFY;
+    script[24] = crate::script::opcode::OP_CHECKSIG;
     script
 }
 
-fn item_bytes_owned(item: &ScriptItem<'_>) -> Vec<u8> {
+fn item_bytes_owned(item: ScriptItem<'_>) -> Vec<u8> {
     match item {
-        ScriptItem::Num(value) => crate::script::push_int(*value),
-        ScriptItem::Bytes(bytes) => bytes.to_vec(),
+        ScriptItem::Num(value) => crate::script::push_int(value),
+        ScriptItem::Bytes(bytes) => bytes.into_vec(),
         ScriptItem::Borrowed(bytes) => bytes.to_vec(),
     }
 }
