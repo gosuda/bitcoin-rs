@@ -439,7 +439,7 @@ fn dispatch<'a>(
         OP_IF | OP_NOTIF => {
             let value = if f_exec {
                 let top = stack.pop().map_err(|_| invalid_stack())?;
-                let bytes = item_bytes(&top).into_owned();
+                let bytes = item_bytes(&top);
                 if sigversion == SigVersion::Tapscript {
                     if bytes.len() > 1 || (bytes.len() == 1 && bytes[0] != 1) {
                         return Err(ScriptError::Invalid {
@@ -480,8 +480,7 @@ fn dispatch<'a>(
         }
         OP_VERIFY => {
             let top = stack.pop().map_err(|_| invalid_stack())?;
-            let bytes = item_bytes(&top).into_owned();
-            if !cast_to_bool(&bytes) {
+            if !cast_to_bool(&item_bytes(&top)) {
                 stack.push(top).map_err(|_| ScriptError::Invalid {
                     code: ScriptErrCode::StackSize,
                 })?;
@@ -571,8 +570,7 @@ fn dispatch<'a>(
         }
         OP_IFDUP => {
             let top = stack.peek().map_err(|_| invalid_stack())?;
-            let bytes = item_bytes(top).into_owned();
-            if cast_to_bool(&bytes) {
+            if cast_to_bool(&item_bytes(top)) {
                 let copy = top.clone();
                 stack.push(copy).map_err(|_| ScriptError::Invalid {
                     code: ScriptErrCode::StackSize,
@@ -720,8 +718,7 @@ fn dispatch<'a>(
             push_bytes(stack, &script_num_serialize(result))?;
             if op == OP_NUMEQUALVERIFY {
                 let top = stack.peek().map_err(|_| invalid_stack())?;
-                let bytes = item_bytes(top).into_owned();
-                if cast_to_bool(&bytes) {
+                if cast_to_bool(&item_bytes(top)) {
                     stack.pop().map_err(|_| invalid_stack())?;
                 } else {
                     return Err(ScriptError::Invalid {
@@ -742,8 +739,7 @@ fn dispatch<'a>(
         }
         OP_RIPEMD160 | OP_SHA1 | OP_SHA256 | OP_HASH160 | OP_HASH256 => {
             let top = stack.pop().map_err(|_| invalid_stack())?;
-            let bytes = item_bytes(&top).into_owned();
-            let digest = hash_bytes(op, &bytes);
+            let digest = hash_bytes(op, &item_bytes(&top));
             push_bytes(stack, &digest)?;
         }
         OP_CODESEPARATOR => {
@@ -852,10 +848,10 @@ fn hash_bytes(op: u8, data: &[u8]) -> SmallVec<[u8; 32]> {
     }
 }
 
-fn script_code(byte_offset: Option<usize>, script: &[u8]) -> Vec<u8> {
+fn script_code(byte_offset: Option<usize>, script: &[u8]) -> &[u8] {
     match byte_offset {
-        None => script.to_vec(),
-        Some(start) => script.get(start..).unwrap_or_default().to_vec(),
+        None => script,
+        Some(start) => script.get(start..).unwrap_or_default(),
     }
 }
 
@@ -896,11 +892,11 @@ fn eval_checksig(
 ) -> Result<bool, ScriptError> {
     match sigversion {
         SigVersion::Base | SigVersion::WitnessV0 => {
-            let mut code = script_code(code_separator.byte_offset, script);
+            let mut code = Cow::Borrowed(script_code(code_separator.byte_offset, script));
             if sigversion == SigVersion::Base {
                 let needle = push_data(sig);
                 let (cleaned, found) = remove_all(&code, &needle);
-                code = cleaned;
+                code = Cow::Owned(cleaned);
                 if found > 0 && flags.contains(VerifyFlags::CONST_SCRIPTCODE) {
                     return Err(ScriptError::Invalid {
                         code: ScriptErrCode::SigFindAndDelete,
@@ -1009,16 +1005,15 @@ fn check_multisig<'a>(
         return Err(invalid_stack());
     }
 
-    let mut code = script_code(code_separator.byte_offset, script);
+    let mut code = Cow::Borrowed(script_code(code_separator.byte_offset, script));
     if sigversion == SigVersion::Base {
         for index in 0..sigs {
             let sig_item = stack
                 .peek_at(keys + 2 + index)
                 .map_err(|_| invalid_stack())?;
-            let sig = item_bytes(sig_item).into_owned();
-            let needle = push_data(&sig);
+            let needle = push_data(&item_bytes(sig_item));
             let (cleaned, found) = remove_all(&code, &needle);
-            code = cleaned;
+            code = Cow::Owned(cleaned);
             if found > 0 && flags.contains(VerifyFlags::CONST_SCRIPTCODE) {
                 return Err(ScriptError::Invalid {
                     code: ScriptErrCode::SigFindAndDelete,
@@ -1035,8 +1030,8 @@ fn check_multisig<'a>(
     while success && sigs_left > 0 {
         let sig_item = stack.peek_at(sig_depth).map_err(|_| invalid_stack())?;
         let key_item = stack.peek_at(key_depth).map_err(|_| invalid_stack())?;
-        let sig = item_bytes(sig_item).into_owned();
-        let pubkey = item_bytes(key_item).into_owned();
+        let sig = item_bytes(sig_item);
+        let pubkey = item_bytes(key_item);
         let ok = checker.check_ecdsa_signature(&sig, &pubkey, &code, sigversion, flags)?;
         if ok {
             sig_depth += 1;
