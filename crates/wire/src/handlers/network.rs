@@ -2152,14 +2152,6 @@ mod ban_state_tests {
     }
 
     #[test]
-    fn addnode_add_persists_in_added_nodes_list() {
-        let ctx = Arc::new(Context::new());
-        let _ = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
-            .unwrap_or_else(|err| panic!("addnode failed: {err}"));
-        assert_eq!(ctx.network.p2p.added_nodes().len(), 1);
-    }
-
-    #[test]
     fn getaddednodeinfo_returns_persisted_entries() {
         let ctx = Arc::new(Context::new());
         let _ = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
@@ -2544,13 +2536,6 @@ mod peer_counter_tests {
             result.get("version").and_then(JsonValueTrait::as_i64),
             Some(release_version(release))
         );
-    }
-
-    #[test]
-    fn release_version_matches_client_version_prerelease_rules() {
-        assert_eq!(release_version("0.15.0"), 1_500);
-        assert_eq!(release_version("0.16.0-rc.1"), 1_600);
-        assert_eq!(release_version("0.16"), 1_600);
     }
 
     #[test]

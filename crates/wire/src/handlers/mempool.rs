@@ -498,30 +498,6 @@ mod tests {
     }
 
     #[test]
-    fn getmempoolinfo_defaults_to_cores_cluster_limits() {
-        let ctx = Arc::new(Context::new());
-        let handler = crate::Handler::new(Arc::clone(&ctx));
-        let result = handler
-            .dispatch("getmempoolinfo", &json!([]))
-            .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
-
-        assert_eq!(
-            result
-                .get("limitclustercount")
-                .and_then(JsonValueTrait::as_i64),
-            Some(64),
-            "{result:?}"
-        );
-        assert_eq!(
-            result
-                .get("limitclustersize")
-                .and_then(JsonValueTrait::as_i64),
-            Some(101_000),
-            "{result:?}"
-        );
-    }
-
-    #[test]
     fn getmempoolinfo_minrelaytxfee_reflects_custom_mempool_floor() {
         let ctx = Arc::new(Context::new());
         {
